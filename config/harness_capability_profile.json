@@ -1997,9 +1997,61 @@
           "text": "Fixed-distance constraint motion is verified by anchor/body trajectory, constraint labels, and continuity checks."
         }
       ]
+    },
+    {
+      "id": "constraint_momentum_transfer",
+      "title": "Constrained Impulse Chain Transfer",
+      "pattern_type": "physics_constraint",
+      "stage_ids": [
+        "case_spec_compilation",
+        "physics_control",
+        "runtime_artifact_collection",
+        "physics_verification"
+      ],
+      "description": "Validate ordered contact-driven impulse and momentum transfer through a chain of constrained rigid bodies. Newton's cradle is only the smoke family.",
+      "prompt_moves": [
+        "Identify chain_objects, active driver, terminal receiver, adjacent contact chain, mass labels, and expected receiver response.",
+        "Keep passive chain members still before their causal contact.",
+        "Use contact events and constraint_trace evidence instead of visually keyframing the receiver."
+      ],
+      "runtime_contract": [
+        "trajectory",
+        "contact_events",
+        "constraint_trace",
+        "mass_labels",
+        "post_chain_velocity"
+      ],
+      "verifier_checks": [
+        "Chain has at least three bodies.",
+        "Passive chain members start below velocity epsilon.",
+        "Adjacent contacts exist and are ordered.",
+        "Terminal receiver speed exceeds the expected threshold.",
+        "Intermediate displacement and energy gain stay bounded."
+      ],
+      "failure_modes": [
+        "F1_missing_trajectory",
+        "F2_missing_contact_events",
+        "F3_invalid_initial_physics_state",
+        "F4_causality_violation",
+        "F5_passive_precontact_motion",
+        "F7_runtime_artifact_incomplete"
+      ],
+      "iteration_moves": [
+        "Export adjacent contact events before tuning restitution or visuals.",
+        "Check passive initial velocity and chain contact order before interpreting receiver motion.",
+        "Add negative cases for passive pre-chain motion, terminal no-response, and out-of-order contacts."
+      ],
+      "confidence": 0.9,
+      "evidence_count": 5,
+      "evidence": [
+        {
+          "source": "capabilities/constraint_momentum_transfer.json",
+          "text": "Constrained impulse-chain transfer verifies ordered adjacent contacts, receiver response, and bounded intermediate motion."
+        }
+      ]
     }
   ],
-  "capability_count": 25,
+  "capability_count": 26,
   "iteration_playbook": [
     {
       "input": "README/docs, tests, runtime code, and public config",

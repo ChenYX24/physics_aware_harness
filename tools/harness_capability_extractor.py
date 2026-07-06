@@ -39,6 +39,7 @@ PUBLIC_SOURCE_PATHS = [
     "capabilities/angular_damping_spin_decay.json",
     "capabilities/agent_rigidbody_action_coupling.json",
     "capabilities/constraint_distance_pendulum_motion.json",
+    "capabilities/constraint_momentum_transfer.json",
     "capabilities/capability_runtime_artifact_bridge.json",
     "capabilities/asset_intent_resolution.json",
     "capabilities/asset_runtime_binding_invocation.json",
@@ -63,6 +64,7 @@ PUBLIC_SOURCE_PATHS = [
     "harness/verification/domino_verifier.py",
     "harness/verification/falling_verifier.py",
     "harness/verification/constraint_verifier.py",
+    "harness/verification/impulse_chain_verifier.py",
     "tools/run_contract.py",
     "tools/draft_builder.py",
     "tools/dataset_protocol.py",
@@ -730,6 +732,53 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         ),
     ),
     CapabilitySpec(
+        capability_id="constraint_momentum_transfer",
+        title="Constrained Impulse Chain Transfer",
+        pattern_type="physics_constraint",
+        stage_ids=("case_spec_compilation", "physics_control", "runtime_artifact_collection", "physics_verification"),
+        keywords=(
+            "newton cradle",
+            "newton's cradle",
+            "impulse chain",
+            "momentum chain",
+            "constrained impulse",
+            "suspended ball chain",
+            "牛顿摆",
+            "冲量链",
+            "动量链",
+            "悬挂球",
+        ),
+        description="Validate ordered contact-driven impulse and momentum transfer through a chain of constrained rigid bodies.",
+        prompt_moves=(
+            "Represent the chain with stable chain_objects, active driver, receiver, adjacent contact graph, and mass labels.",
+            "Keep passive chain members still before causal contact.",
+            "Use contact events and constraint_trace evidence instead of keyframing terminal receiver motion.",
+        ),
+        runtime_contract=(
+            "Trajectory includes every chain body with velocity and position.",
+            "Contact events include adjacent chain edges in order.",
+            "constraint_trace records suspension or joint evidence for constrained bodies.",
+            "Mass labels and post-chain receiver velocity are exported.",
+        ),
+        verifier_checks=(
+            "Passive chain members start still.",
+            "Adjacent contacts are present and ordered.",
+            "Terminal receiver moves after the final contact.",
+            "Intermediate displacement and kinetic-energy gain remain bounded.",
+        ),
+        failure_modes=(
+            "A passive middle body has hidden initial velocity.",
+            "Receiver motion is keyframed without ordered contact propagation.",
+            "Contacts occur out of chain order.",
+            "Intermediate constrained bodies translate too far or energy gain is unexplained.",
+        ),
+        iteration_moves=(
+            "Fix chain_objects and expected_contact_chain before changing visuals.",
+            "Check passive initial velocities before tuning restitution.",
+            "Add negative cases for pre-chain motion, terminal no-response, and contact order violations.",
+        ),
+    ),
+    CapabilitySpec(
         capability_id="dataset_artifact_packaging",
         title="Verified Multi-View Dataset Packaging",
         pattern_type="FLOW",
@@ -1116,6 +1165,7 @@ def render_markdown_report(profile: dict[str, Any]) -> str:
     lines.append("| Domino chain | `sequential_contact_propagation` | First domino is actively triggered; downstream dominoes tip through ordered adjacent contacts |")
     lines.append("| Spin decay | `angular_damping_spin_decay` | Angular velocity and damping are explicit, and angular speed decays without unexplained gain |")
     lines.append("| Distance constraint / pendulum | `constraint_distance_pendulum_motion` | Anchor-body length stays within tolerance, motion is continuous, and constraint trace is exported |")
+    lines.append("| Constrained impulse chain | `constraint_momentum_transfer` | Adjacent contacts are ordered, passive chain members start still, and terminal receiver motion is contact-driven |")
     lines.extend(["", "## Iteration Playbook", ""])
     for phase in profile["iteration_playbook"]:
         lines.append(f"- **{phase['phase']}**: {phase['rule']}")

@@ -65,6 +65,10 @@ agent-facing docs should use:
   validator that checks anchor/body ids, `constraint_length_m`,
   `constraint_trace`, bounded length error, and continuous motion. Pendulum is
   only the smoke family.
+- `constraint_momentum_transfer`: a concrete constrained impulse-chain
+  validator that checks chain object ids, adjacent contact order, passive
+  pre-chain stillness, terminal receiver response, and bounded energy gain.
+  Newton's cradle is only the smoke family.
 
 This keeps the harness useful beyond billiards: the same contact-causality
 contract can verify pool, bowling, crate impacts, and other contact-driven scenes.
@@ -83,6 +87,8 @@ contract can verify pool, bowling, crate impacts, and other contact-driven scene
 The capability id should name the reusable invariant, not the visual example.
 For example, use `rigid_body_contact_causality` instead of a billiard compiler,
 and use `constraint_distance_pendulum_motion` instead of a pendulum template.
+Use `constraint_momentum_transfer` instead of a Newton's-cradle-specific
+compiler.
 
 ### Prompt / Case Capability Planning
 
@@ -350,6 +356,7 @@ Evidence:
 | Spin decay | `angular_damping_spin_decay` | Angular velocity and damping are explicit, and angular speed decays without unexplained gain |
 | Agent action coupling | `agent_rigidbody_action_coupling` | Target rigid bodies move after explicit action/contact or release/impulse evidence |
 | Distance constraint / pendulum | `constraint_distance_pendulum_motion` | Anchor-body length is preserved within tolerance, motion is continuous, and `constraint_trace` is exported |
+| Constrained impulse chain | `constraint_momentum_transfer` | Adjacent contacts are ordered, passive chain members start still, and terminal receiver motion is contact-driven |
 
 ## Iteration Playbook
 

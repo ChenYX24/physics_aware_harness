@@ -1,0 +1,28 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "three_body_impulse_transfer",
+  "capability_id": "constraint_momentum_transfer",
+  "prompt": "A short constrained impulse chain transfers an active impulse through one middle body to a final receiver.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "chain_objects": ["driver", "middle", "receiver"],
+    "active_object_id": "driver",
+    "receiver_object_id": "receiver",
+    "expected_contact_chain": [["driver", "middle"], ["middle", "receiver"]],
+    "expected_min_receiver_speed_m_s": 0.25,
+    "expected_max_intermediate_displacement_m": 0.07,
+    "expected_energy_ratio_max": 1.1
+  },
+  "objects": [
+    {"id": "driver", "role": "active_chain_driver", "shape": "sphere", "radius_m": 0.09, "mass_kg": 0.25, "restitution": 0.88, "initial_position_m": [0.0, 0.0, 0.8], "initial_velocity_m_s": [0.75, 0.0, 0.0]},
+    {"id": "middle", "role": "constrained_chain_body", "shape": "sphere", "radius_m": 0.09, "mass_kg": 0.25, "restitution": 0.88, "initial_position_m": [0.2, 0.0, 0.8], "initial_velocity_m_s": [0.0, 0.0, 0.0]},
+    {"id": "receiver", "role": "constrained_chain_body", "shape": "sphere", "radius_m": 0.09, "mass_kg": 0.25, "restitution": 0.88, "initial_position_m": [0.4, 0.0, 0.8], "initial_velocity_m_s": [0.0, 0.0, 0.0]}
+  ],
+  "active_objects": ["driver"],
+  "passive_objects": ["middle", "receiver"],
+  "required_assets": ["constrained rigid bodies", "sphere colliders", "constraint anchors"],
+  "required_signals": ["trajectory", "contact_events", "constraint_trace", "mass_labels"],
+  "verifier_expectation": {"status": "pass"},
+  "should_pass": true,
+  "notes": "Smaller positive impulse-chain case for regression."
+}

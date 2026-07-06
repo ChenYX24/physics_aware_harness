@@ -184,6 +184,7 @@ old `billiard_causality_compiler` id remains only as a compatibility alias.
 | `angular_damping_spin_decay` | Spinning rigid bodies must declare angular velocity and damping, then show monotonic spin decay in angular velocity and rotation trace evidence. |
 | `agent_rigidbody_action_coupling` | Agent or controller actions must be explicit action traces, and target rigid bodies may move only after action/contact or release/impulse evidence. |
 | `constraint_distance_pendulum_motion` | Distance/joint-constrained rigid bodies must preserve anchor-body length within tolerance and export constraint trace evidence. Pendulum is one smoke family. |
+| `constraint_momentum_transfer` | Constrained rigid-body chains must transfer impulse through ordered adjacent contacts; terminal receiver motion must be contact-driven. Newton's cradle is one smoke family. |
 
 `billiard_causality_compiler` is deprecated as a core abstraction. It remains in
 the repository only so old runs and scripts can still be interpreted. New agents

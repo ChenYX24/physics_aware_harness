@@ -30,12 +30,13 @@ python3.13 scripts/harness_list_capabilities.py
 |---|---|---|
 | Pipeline stages | `prompt_case_capability_planning`, `scene_spec_compilation`, `pipeline_stage_orchestration` | 把 prompt 变成可执行 case 和 stage graph。 |
 | Asset operations | `asset_intent_resolution`, `asset_runtime_binding_invocation` | 检索 top-k 资产、选择/降级、绑定 UE actor 和物理 metadata。 |
-| Physics constraints | `rigid_body_contact_causality`, `constraint_distance_pendulum_motion`, `explicit_physics_control_surface`, `physics_property_constraint_validation` | 约束运动、材质、质量、摩擦、恢复系数、重力、力场、时间步等。 |
+| Physics constraints | `rigid_body_contact_causality`, `constraint_distance_pendulum_motion`, `constraint_momentum_transfer`, `explicit_physics_control_surface`, `physics_property_constraint_validation` | 约束运动、材质、质量、摩擦、恢复系数、重力、力场、时间步等。 |
 | Runtime/signal bridge | `capability_runtime_artifact_bridge`, `canonical_signal_capture` | 把 UE/fallback 输出标准化成 trajectory/contact/camera/render evidence。 |
 | Verification/package | `physics_verifier_truth_gate`, `dataset_artifact_packaging` | 以 verifier 为真值门，并只打包 readiness-gated artifacts。 |
 
 `billiard_causality_compiler` 不再是主能力。它只是旧 run 的兼容 alias；台球、保龄球、箱体撞击、质量比碰撞都应该走 `rigid_body_contact_causality`。
 `constraint_distance_pendulum_motion` 同样不是“单摆模板”，而是距离/绳长/关节约束的通用 invariant；单摆只是 smoke case。
+`constraint_momentum_transfer` 也不是“牛顿摆模板”，而是受约束刚体链中的 ordered contact / impulse transfer invariant；牛顿摆只是 smoke case。
 
 ## Stage 1: Case Spec
 
@@ -159,6 +160,7 @@ Verifier 不检查“画面是否动了”，而检查 capability invariants：
 | `angular_damping_spin_decay` | angular velocity and damping must be explicit, and spin speed must decay without unexplained gain |
 | `agent_rigidbody_action_coupling` | target rigid bodies must remain still before explicit agent action trace and respond after contact/impulse evidence |
 | `constraint_distance_pendulum_motion` | constrained bodies must preserve anchor-body distance within tolerance and move continuously without teleporting |
+| `constraint_momentum_transfer` | constrained chain bodies must start still, adjacent contacts must be ordered, and terminal receiver response must follow final contact |
 | `asset_runtime_binding_invocation` | physics-critical assets must bind colliders, mass/material metadata, collision profile, and runtime actor ids |
 
 验证命令：

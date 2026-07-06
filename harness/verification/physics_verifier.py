@@ -12,6 +12,7 @@ from harness.verification.constraint_verifier import verify_constraint_motion
 from harness.verification.diagnosis import repair_suggestion
 from harness.verification.domino_verifier import verify_domino
 from harness.verification.falling_verifier import verify_falling
+from harness.verification.impulse_chain_verifier import verify_impulse_chain
 from harness.verification.mass_ratio_verifier import verify_mass_ratio
 from harness.verification.projectile_verifier import verify_projectile
 from harness.verification.ramp_verifier import verify_ramp
@@ -91,6 +92,8 @@ class PhysicsVerifier:
             failure_type, first_failure, evidence = verify_agent_action(case_spec, trajectory)
         elif capability_id == "constraint_distance_pendulum_motion":
             failure_type, first_failure, evidence = verify_constraint_motion(case_spec, trajectory)
+        elif capability_id == "constraint_momentum_transfer":
+            failure_type, first_failure, evidence = verify_impulse_chain(case_spec, trajectory)
         else:
             failure_type, first_failure, evidence = "F7_runtime_artifact_incomplete", {"object_id": capability_id, "frame": 0, "time": 0, "metric": "unsupported_capability", "value": capability_id}, []
         return verifier_report(

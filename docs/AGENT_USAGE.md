@@ -128,7 +128,9 @@ for post-contact velocity ordering, and `angular_damping_spin_decay` for angular
 velocity / damping / rotation-trace checks. Constraint prompts should use
 `constraint_distance_pendulum_motion`: the runtime must export anchor/body
 trajectory plus `constraint_trace`, and the verifier checks distance preservation
-and no teleporting body.
+and no teleporting body. Constrained impulse-chain prompts should use
+`constraint_momentum_transfer`: the runtime must export ordered adjacent contact
+events, mass labels, `constraint_trace`, and terminal receiver velocity.
 Agent-interaction prompts should use `agent_rigidbody_action_coupling`: the
 agent action must be an explicit `action_trace`, and target rigid-body motion
 must happen after action/contact or release/impulse evidence.

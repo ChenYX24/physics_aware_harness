@@ -101,6 +101,7 @@ assets/*.local.json
 | `angular_damping_spin_decay` | 当前分支已可用 | 自转刚体必须声明初始角速度和角阻尼，runtime 输出 angular velocity + rotation trace，verifier 检查单调衰减和无外力增益。 |
 | `agent_rigidbody_action_coupling` | 当前分支已可用 | agent/robot/character 动作必须写成 action trace；目标刚体只能在 action/contact 或 release/impulse 证据后运动。 |
 | `constraint_distance_pendulum_motion` | 当前分支已可用 | 距离/绳长/关节约束必须声明 anchor、constrained body、constraint length，并输出 constraint_trace；单摆只是 smoke family。 |
+| `constraint_momentum_transfer` | 当前分支已可用 | 受约束刚体链必须按相邻 contact 顺序传递冲量，末端 receiver 响应必须由 contact 链解释；牛顿摆只是 smoke family。 |
 
 注意：如果从 `main` 使用，`ramp_sliding_friction` 需要先合并当前 ramp 分支。
 
@@ -286,6 +287,7 @@ tests/test_harness_<family>_verifier.py
 | `ramp_sliding.template.json` | `--suite ramp` | 当前 ramp 分支可运行 | 斜面摩擦响应。 |
 | `projectile_motion.template.json` | `--suite projectile` | 当前分支可运行 | 上抛/抛体轨迹、apex/descent/landing contact。 |
 | `pendulum_contact.template.json` | `--suite pendulum` | 当前分支可运行 | 距离/关节约束、constraint_trace、长度保持和连续运动。 |
+| `constraint_momentum_transfer.template.json` | `--suite impulse_chain` | 当前分支可运行 | 受约束冲量链、相邻接触顺序、末端 receiver 响应。 |
 
 生成 case：
 
@@ -355,12 +357,12 @@ fallback 可以写 placeholder render artifact，但必须标记为非 UE。UE p
 
 ```bash
 python3.13 -m unittest discover -s tests -p 'test*.py'
-# 87 tests OK
+# 93 tests OK
 ```
 
 ```bash
 python3.13 scripts/harness_smoke.py --backend fallback
-# 14/14 expectation met
+# 16/16 expectation met
 ```
 
 ```bash
@@ -428,6 +430,12 @@ python3.13 scripts/harness_run_case_batch.py cases/generated/pendulum_seed54 --b
 # 10 cases: 7 positive pass, 3 negative caught, unexpected 0
 ```
 
+```bash
+python3.13 scripts/harness_generate_cases.py --suite impulse_chain --count 10 --seed 55 --out cases/generated/impulse_chain_seed55
+python3.13 scripts/harness_run_case_batch.py cases/generated/impulse_chain_seed55 --backend fallback
+# 10 cases: 7 positive pass, 3 negative caught, unexpected 0
+```
+
 静态资产解析：
 
 - 台球三角阵 case：8/8 physics-critical assets resolved。
@@ -461,7 +469,7 @@ TODO：
 | P1 | 角阻尼/自转衰减 | `angular_damping_spin_decay` | 当前分支已有 fallback/verifier；UE angular velocity / damping / inertia export TODO |
 | P1 | agent 推/抛刚体 | `agent_rigidbody_action_coupling` | 当前分支已有 fallback/verifier；UE action trace / skeletal controller / impulse export TODO |
 | P1 | 单摆/绳长/距离约束 | `constraint_distance_pendulum_motion` | 当前分支已有 fallback/verifier；UE PhysicsConstraint / Chaos joint trace TODO |
-| P1 | 牛顿摆 | `constraint_momentum_transfer` | TODO |
+| P1 | 牛顿摆/悬挂球链 | `constraint_momentum_transfer` | 当前分支已有 fallback/verifier；UE suspension constraint / contact impulse / receiver velocity TODO |
 | P1 | 弹簧弹射 | `spring_launch_motion` | TODO |
 | P1 | 绳子/蹦极弹性 | `elastic_rope_bungee` | TODO |
 | P1 | 玻璃/镜子/玻璃杯/木箱破碎 | `brittle_impact_fracture` family | TODO |

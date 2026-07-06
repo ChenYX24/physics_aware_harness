@@ -31,6 +31,8 @@ DEFAULT_CASES = [
     "cases/agent_action/negative_target_preaction_motion.json",
     "cases/constraint/pendulum_length_preserved.json",
     "cases/constraint/negative_constraint_length_drift.json",
+    "cases/impulse_chain/newton_cradle_five_ball_transfer.json",
+    "cases/impulse_chain/negative_terminal_no_response.json",
 ]
 
 

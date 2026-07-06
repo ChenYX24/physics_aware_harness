@@ -99,6 +99,12 @@ CAPABILITY_RULES: tuple[CapabilityRule, ...] = (
         terms=("pendulum", "swinging pendulum", "distance constraint", "fixed length", "constraint length", "joint constraint", "rope constraint", "hinge constraint", "单摆", "摆锤", "距离约束", "固定长度", "约束长度", "铰链约束", "绳长约束"),
         priority=78,
     ),
+    CapabilityRule(
+        capability_id="constraint_momentum_transfer",
+        case_family="constrained_impulse_chain",
+        terms=("newton cradle", "newton's cradle", "impulse chain", "constrained impulse", "momentum chain", "chain momentum transfer", "suspended ball chain", "constraint momentum transfer", "牛顿摆", "冲量链", "动量链", "悬挂球", "受约束动量传递"),
+        priority=88,
+    ),
 )
 
 
@@ -162,7 +168,7 @@ class CapabilityPlanner:
                 "fallback_runtime": "SIM_PROXY",
                 "dry_run_supported": True,
                 "requires_trajectory": True,
-                "requires_contact_events": primary["capability_id"] in {"rigid_body_contact_causality", "billiard_causality_compiler", "sequential_contact_propagation"},
+                "requires_contact_events": primary["capability_id"] in {"rigid_body_contact_causality", "billiard_causality_compiler", "sequential_contact_propagation", "constraint_momentum_transfer"},
             },
         }
 

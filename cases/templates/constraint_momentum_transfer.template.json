@@ -1,0 +1,32 @@
+{
+  "schema_version": "harness_case_template_v1",
+  "template_id": "constraint_momentum_transfer",
+  "capability_id": "constraint_momentum_transfer",
+  "description": "Parameterized template for constrained impulse-chain momentum transfer. Newton's cradle is a smoke family for ordered contact-driven transfer through constrained rigid bodies.",
+  "fallback_supported": true,
+  "parameter_ranges": {
+    "chain_body_count": {"type": "int", "min": 3, "max": 6},
+    "body_mass_kg": {"type": "float", "min": 0.12, "max": 0.8},
+    "initial_speed_m_s": {"type": "float", "min": 0.5, "max": 1.6},
+    "restitution": {"type": "float", "min": 0.72, "max": 0.98},
+    "spacing_m": {"type": "float", "min": 0.14, "max": 0.22}
+  },
+  "object_count_ranges": {
+    "active_chain_driver": {"min": 1, "max": 1},
+    "constrained_chain_body": {"min": 2, "max": 5}
+  },
+  "physics_critical_assets": ["constrained rigid bodies", "sphere colliders", "constraint anchors", "mass metadata"],
+  "visual_only_assets": ["suspension string visuals", "frame stand"],
+  "camera_policy": {"default": "side_static", "allowed": ["side_static", "front_static", "event_closeup"]},
+  "perturbation_policy": {"positive_ratio": 0.7, "vary": ["chain_body_count", "body_mass_kg", "initial_speed_m_s", "restitution"], "lock": ["seed"]},
+  "expected_invariants": [
+    "passive_chain_members_start_still",
+    "adjacent_contacts_are_ordered",
+    "terminal_receiver_moves_after_final_contact",
+    "intermediate_bodies_remain_displacement_bounded",
+    "energy_gain_stays_bounded"
+  ],
+  "negative_modes": ["passive_prechain_motion", "terminal_no_response", "contact_order_violation"],
+  "seed_policy": {"deterministic": true, "record_parameter_sample": true},
+  "expected_artifact_contract": ["trajectory", "contact_events", "constraint_trace", "mass_labels"]
+}

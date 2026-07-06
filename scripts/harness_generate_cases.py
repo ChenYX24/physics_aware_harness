@@ -23,7 +23,7 @@ TEMPLATE_SCHEMA_VERSION = "harness_case_template_v1"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate parameterized harness case specs from a template.")
     parser.add_argument("--template", help="Path to cases/templates/*.template.json")
-    parser.add_argument("--suite", choices=["billiards", "domino", "falling", "ramp", "projectile", "bounce", "rolling", "sliding", "wind", "mass_ratio", "spin", "agent_action", "pendulum", "basic_physics"], help="Named case suite shortcut.")
+    parser.add_argument("--suite", choices=["billiards", "domino", "falling", "ramp", "projectile", "bounce", "rolling", "sliding", "wind", "mass_ratio", "spin", "agent_action", "pendulum", "impulse_chain", "basic_physics"], help="Named case suite shortcut.")
     parser.add_argument("--num-cases", type=int, help="Number of case specs to generate.")
     parser.add_argument("--count", type=int, help="Alias for --num-cases.")
     parser.add_argument("--seed", type=int, default=0, help="Deterministic generation seed.")
@@ -100,6 +100,7 @@ def template_for_suite(suite: str | None) -> str | None:
         "spin": "cases/templates/angular_damping_spin.template.json",
         "agent_action": "cases/templates/agent_rigidbody_action.template.json",
         "pendulum": "cases/templates/pendulum_contact.template.json",
+        "impulse_chain": "cases/templates/constraint_momentum_transfer.template.json",
         "basic_physics": "cases/templates/falling_blocks.template.json",
     }[suite]
 
@@ -149,6 +150,8 @@ def generate_case(template: dict[str, Any], rng: random.Random, *, index: int, s
         return agent_action_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
     if template_id == "pendulum_contact":
         return pendulum_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
+    if template_id == "constraint_momentum_transfer":
+        return impulse_chain_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
     raise ValueError(f"unsupported runnable template: {template_id}")
 
 
@@ -825,6 +828,52 @@ def pendulum_case(template: dict[str, Any], params: dict[str, Any], *, index: in
     return add_m2_case_contract(case, template, params)
 
 
+def impulse_chain_case(template: dict[str, Any], params: dict[str, Any], *, index: int, seed: int, should_pass: bool, negative_mode: str | None) -> dict[str, Any]:
+    count = int(params["chain_body_count"])
+    spacing = float(params["spacing_m"])
+    mass = float(params["body_mass_kg"])
+    speed = float(params["initial_speed_m_s"])
+    restitution = float(params["restitution"])
+    chain = [f"chain_body_{idx}" for idx in range(count)]
+    receiver_speed = speed * max(0.25, restitution * 0.68)
+    expected = {
+        "coordinate_system": "z_up",
+        "chain_objects": chain,
+        "active_object_id": chain[0],
+        "receiver_object_id": chain[-1],
+        "expected_contact_chain": [[chain[idx], chain[idx + 1]] for idx in range(count - 1)],
+        "expected_min_receiver_speed_m_s": round(max(0.12, receiver_speed * 0.55), 4),
+        "expected_max_intermediate_displacement_m": round(max(0.035, spacing * 0.38), 4),
+        "expected_energy_ratio_max": 1.1,
+        "restitution": round(restitution, 4),
+    }
+    objects = []
+    for idx, object_id in enumerate(chain):
+        objects.append(
+            {
+                "id": object_id,
+                "role": "active_chain_driver" if idx == 0 else "constrained_chain_body",
+                "shape": "sphere",
+                "radius_m": round(spacing * 0.45, 4),
+                "mass_kg": mass,
+                "restitution": restitution,
+                "initial_position_m": [round(idx * spacing, 4), 0.0, 0.9],
+                "initial_velocity_m_s": [round(speed, 4), 0.0, 0.0] if idx == 0 else [0.0, 0.0, 0.0],
+            }
+        )
+    case = base_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
+    case.update(
+        {
+            "prompt": f"Generated constrained impulse-chain case with {count} bodies; the first body drives contact transfer to the terminal receiver.",
+            "expected_physics": expected,
+            "objects": objects,
+            "active_objects": [chain[0]],
+            "passive_objects": chain[1:],
+        }
+    )
+    return add_m2_case_contract(case, template, params)
+
+
 def collision_speeds(striker_mass: float, target_mass: float, initial_speed: float, restitution: float) -> tuple[float, float]:
     denominator = max(striker_mass + target_mass, 1e-9)
     striker_post = ((striker_mass - restitution * target_mass) / denominator) * initial_speed
@@ -923,6 +972,13 @@ def expected_event_for(case: dict[str, Any]) -> dict[str, Any]:
             "constrained_object_id": expected_physics.get("constrained_object_id"),
             "constraint_length_m": expected_physics.get("constraint_length_m"),
         }
+    if capability_id == "constraint_momentum_transfer":
+        return {
+            "type": "constrained_impulse_chain_transfer",
+            "chain_objects": expected_physics.get("chain_objects", []),
+            "receiver_object_id": expected_physics.get("receiver_object_id"),
+            "expected_contact_chain": expected_physics.get("expected_contact_chain", []),
+        }
     return {"type": "trajectory_event"}
 
 
@@ -953,6 +1009,8 @@ def required_signals_for(capability_id: str) -> list[str]:
         return ["trajectory", "action_trace", "contact_events", "object_roles", "post_action_velocity"]
     if capability_id == "constraint_distance_pendulum_motion":
         return ["trajectory", "constraint_trace", "constraint_parameter_labels", "object_roles"]
+    if capability_id == "constraint_momentum_transfer":
+        return ["trajectory", "contact_events", "constraint_trace", "mass_labels", "post_chain_velocity"]
     return ["trajectory"]
 
 
@@ -972,6 +1030,8 @@ def expected_failure_for(negative_mode: str | None) -> str:
     if negative_mode in {"missing_constraint_label"}:
         return "F3_invalid_initial_physics_state"
     if negative_mode in {"preaction_motion"}:
+        return "F5_passive_precontact_motion"
+    if negative_mode in {"passive_prechain_motion"}:
         return "F5_passive_precontact_motion"
     return "F4_causality_violation"
 

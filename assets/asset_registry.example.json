@@ -5,7 +5,7 @@
       "asset_id": "analytic_sphere_billiard_ball",
       "category": "physics_critical",
       "type": "static_mesh",
-      "tags": ["sphere", "ball", "billiard", "rolling_subject", "rolling_body", "friction_subject", "ramp_subject", "spinning_body", "spin_subject", "angular_damping_subject", "constrained_body", "pendulum_bob"],
+      "tags": ["sphere", "ball", "billiard", "rolling_subject", "rolling_body", "friction_subject", "ramp_subject", "spinning_body", "spin_subject", "angular_damping_subject", "constrained_body", "pendulum_bob", "active_chain_driver", "constrained_chain_body", "impulse_chain_body", "newton_cradle_ball"],
       "ue_path": "/Engine/BasicShapes/Sphere.Sphere",
       "collider": "sphere",
       "radius_m": 0.09,

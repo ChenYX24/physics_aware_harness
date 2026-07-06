@@ -48,6 +48,7 @@ Capability 必须包含：
 | `friction_demo_template` | `physics_property_constraint_validation` + `rolling_friction_ball` / `sliding_crate_friction` |
 | `scene_prompt_rewrite` | `prompt_case_capability_planning` + `scene_spec_compilation` |
 | `pendulum_template` 作为主能力 | `constraint_distance_pendulum_motion`，单摆/绳索/铰链作为 case family |
+| `newton_cradle_template` 作为主能力 | `constraint_momentum_transfer`，牛顿摆/悬挂球链作为 case family |
 
 ## 验证
 

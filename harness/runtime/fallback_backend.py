@@ -63,6 +63,8 @@ def trajectory_for_case(case_spec: dict[str, Any]) -> list[dict[str, Any]]:
         return agent_action_trajectory(case_id, case_spec)
     if capability_id == "constraint_distance_pendulum_motion":
         return constraint_trajectory(case_id, case_spec)
+    if capability_id == "constraint_momentum_transfer":
+        return impulse_chain_trajectory(case_id, case_spec)
     return []
 
 
@@ -610,6 +612,100 @@ def pendulum_position(anchor_pos: list[float], length: float, angle_rad: float) 
     return [round(anchor_pos[0] + math.sin(angle_rad) * length, 4), anchor_pos[1], round(anchor_pos[2] - math.cos(angle_rad) * length, 4)]
 
 
+def impulse_chain_trajectory(case_id: str, case_spec: dict[str, Any]) -> list[dict[str, Any]]:
+    negative_mode = str(case_spec.get("negative_mode") or "")
+    if not negative_mode and "prechain" in case_id:
+        negative_mode = "passive_prechain_motion"
+    if not negative_mode and "terminal_no_response" in case_id:
+        negative_mode = "terminal_no_response"
+    if not negative_mode and "order" in case_id:
+        negative_mode = "contact_order_violation"
+    object_specs = {str(obj.get("id")): obj for obj in case_spec.get("objects", []) if isinstance(obj, dict)}
+    expected = dict(case_spec.get("expected_physics") or {})
+    chain = [str(item) for item in expected.get("chain_objects") or []]
+    if not chain:
+        chain = [str(obj.get("id")) for obj in case_spec.get("objects", []) if str(obj.get("role") or "") in {"active_chain_driver", "constrained_chain_body"}]
+    if len(chain) < 3:
+        chain = [f"chain_body_{idx}" for idx in range(5)]
+    active_id = str(expected.get("active_object_id") or chain[0])
+    receiver_id = str(expected.get("receiver_object_id") or chain[-1])
+    initial_speed = abs(vec3((object_specs.get(active_id) or {}).get("initial_velocity_m_s") or [0.9, 0, 0])[0]) or 0.9
+    spacing = infer_chain_spacing(chain, object_specs)
+    base_positions = {
+        object_id: vec3((object_specs.get(object_id) or {}).get("initial_position_m") or [idx * spacing, 0.0, 0.9])
+        for idx, object_id in enumerate(chain)
+    }
+    max_frame = len(chain)
+    frames: list[dict[str, Any]] = []
+    for frame_id in range(max_frame):
+        states = {}
+        for idx, object_id in enumerate(chain):
+            position = list(base_positions[object_id])
+            velocity = [0.0, 0.0, 0.0]
+            if object_id == active_id and frame_id <= 1:
+                velocity = [round(initial_speed if frame_id == 0 else initial_speed * 0.12, 4), 0.0, 0.0]
+                position[0] = round(position[0] + spacing * 0.45 * frame_id, 4)
+            elif object_id == receiver_id and frame_id >= len(chain) - 1:
+                receiver_speed = 0.0 if negative_mode == "terminal_no_response" else round(initial_speed * 0.68, 4)
+                velocity = [receiver_speed, 0.0, 0.0]
+                position[0] = round(position[0] + (0.0 if negative_mode == "terminal_no_response" else spacing * 0.65), 4)
+            elif 0 < idx < len(chain) - 1 and frame_id >= idx + 1:
+                velocity = [round(initial_speed * 0.08, 4), 0.0, 0.0]
+                position[0] = round(position[0] + spacing * 0.06, 4)
+            states[object_id] = state(position, velocity)
+        if negative_mode == "passive_prechain_motion" and len(chain) > 2 and frame_id == 0:
+            states[chain[2]]["velocity_m_s"] = [round(initial_speed * 0.25, 4), 0.0, 0.0]
+        contacts = impulse_chain_contacts(chain, frame_id, negative_mode)
+        constraints = impulse_chain_constraints(chain, base_positions, states, spacing, frame_id)
+        frames.append(frame(frame_id, round(frame_id * 0.2, 4), states, contacts=contacts, constraints=constraints))
+    return frames
+
+
+def impulse_chain_contacts(chain: list[str], frame_id: int, negative_mode: str) -> list[dict[str, Any]]:
+    if frame_id == 0:
+        return []
+    if frame_id >= len(chain):
+        return []
+    edge_index = frame_id - 1
+    if negative_mode == "contact_order_violation" and frame_id == 1 and len(chain) >= 4:
+        edge_index = 2
+    elif negative_mode == "contact_order_violation" and frame_id == 3:
+        edge_index = 0
+    if edge_index < 0 or edge_index >= len(chain) - 1:
+        return []
+    return [contact(chain[edge_index], chain[edge_index + 1], frame_id, round(frame_id * 0.2, 4))]
+
+
+def impulse_chain_constraints(chain: list[str], base_positions: dict[str, list[float]], states: dict[str, Any], spacing: float, frame_id: int) -> list[dict[str, Any]]:
+    rows = []
+    for object_id in chain:
+        anchor_id = f"{object_id}_anchor"
+        base = base_positions[object_id]
+        anchor_position = [base[0], base[1], round(base[2] + spacing * 3.0, 4)]
+        body_position = vec3(states[object_id].get("position_m"))
+        rows.append(
+            {
+                "constraint_id": f"{object_id}_suspension",
+                "anchor_id": anchor_id,
+                "body_id": object_id,
+                "constraint_length_m": round(dist(anchor_position, base), 6),
+                "measured_distance_m": round(dist(anchor_position, body_position), 6),
+                "frame": frame_id,
+            }
+        )
+    return rows
+
+
+def infer_chain_spacing(chain: list[str], object_specs: dict[str, dict[str, Any]]) -> float:
+    if len(chain) >= 2:
+        first = vec3((object_specs.get(chain[0]) or {}).get("initial_position_m"))
+        second = vec3((object_specs.get(chain[1]) or {}).get("initial_position_m"))
+        spacing = abs(second[0] - first[0])
+        if spacing > 0.01:
+            return spacing
+    return 0.18
+
+
 def state(position: list[float], velocity: list[float], *, rotation: list[float] | None = None, angular_velocity: list[float] | None = None) -> dict[str, Any]:
     result: dict[str, Any] = {"position_m": position, "velocity_m_s": velocity, "rotation_deg": rotation or [0, 0, 0]}
     if angular_velocity is not None:
@@ -638,6 +734,10 @@ def vec3(value: Any) -> list[float]:
         return [0.0, 0.0, 0.0]
     padded = [*value, 0.0, 0.0, 0.0]
     return [float(padded[0]), float(padded[1]), float(padded[2])]
+
+
+def dist(a: list[float], b: list[float]) -> float:
+    return math.sqrt(sum((a[idx] - b[idx]) ** 2 for idx in range(3)))
 
 
 def frame(frame_id: int, time_s: float, objects: dict[str, Any], *, contacts: list[dict[str, Any]] | None = None, actions: list[dict[str, Any]] | None = None, constraints: list[dict[str, Any]] | None = None) -> dict[str, Any]:

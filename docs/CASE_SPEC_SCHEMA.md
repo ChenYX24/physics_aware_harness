@@ -42,5 +42,6 @@ Case spec 是可执行 contract，不是 prompt 模板。
 | `physics_property_constraint_validation` | mass/friction/restitution/damping/material ranges |
 | `agent_rigidbody_action_coupling` | `action_trace`, `action_actor_id`, `target_object_id`, `expected_contact_pair` |
 | `constraint_distance_pendulum_motion` | `anchor_object_id`, `constrained_object_id`, `constraint_length_m`, `constraint_tolerance_m`, `expected_max_step_displacement_m` |
+| `constraint_momentum_transfer` | `chain_objects`, `active_object_id`, `receiver_object_id`, `expected_contact_chain`, `expected_min_receiver_speed_m_s` |
 
 物理参数必须结构化放在 `expected_physics` 或 object 字段里；不要只写在 prompt 文本中。

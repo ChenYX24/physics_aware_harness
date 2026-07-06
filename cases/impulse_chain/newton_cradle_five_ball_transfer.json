@@ -1,0 +1,30 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "newton_cradle_five_ball_transfer",
+  "capability_id": "constraint_momentum_transfer",
+  "prompt": "A five-body constrained impulse chain transfers motion from the first suspended ball to the final receiver.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "chain_objects": ["ball_0", "ball_1", "ball_2", "ball_3", "ball_4"],
+    "active_object_id": "ball_0",
+    "receiver_object_id": "ball_4",
+    "expected_contact_chain": [["ball_0", "ball_1"], ["ball_1", "ball_2"], ["ball_2", "ball_3"], ["ball_3", "ball_4"]],
+    "expected_min_receiver_speed_m_s": 0.32,
+    "expected_max_intermediate_displacement_m": 0.06,
+    "expected_energy_ratio_max": 1.1
+  },
+  "objects": [
+    {"id": "ball_0", "role": "active_chain_driver", "shape": "sphere", "radius_m": 0.08, "mass_kg": 0.18, "restitution": 0.92, "initial_position_m": [0.0, 0.0, 0.9], "initial_velocity_m_s": [0.9, 0.0, 0.0]},
+    {"id": "ball_1", "role": "constrained_chain_body", "shape": "sphere", "radius_m": 0.08, "mass_kg": 0.18, "restitution": 0.92, "initial_position_m": [0.18, 0.0, 0.9], "initial_velocity_m_s": [0.0, 0.0, 0.0]},
+    {"id": "ball_2", "role": "constrained_chain_body", "shape": "sphere", "radius_m": 0.08, "mass_kg": 0.18, "restitution": 0.92, "initial_position_m": [0.36, 0.0, 0.9], "initial_velocity_m_s": [0.0, 0.0, 0.0]},
+    {"id": "ball_3", "role": "constrained_chain_body", "shape": "sphere", "radius_m": 0.08, "mass_kg": 0.18, "restitution": 0.92, "initial_position_m": [0.54, 0.0, 0.9], "initial_velocity_m_s": [0.0, 0.0, 0.0]},
+    {"id": "ball_4", "role": "constrained_chain_body", "shape": "sphere", "radius_m": 0.08, "mass_kg": 0.18, "restitution": 0.92, "initial_position_m": [0.72, 0.0, 0.9], "initial_velocity_m_s": [0.0, 0.0, 0.0]}
+  ],
+  "active_objects": ["ball_0"],
+  "passive_objects": ["ball_1", "ball_2", "ball_3", "ball_4"],
+  "required_assets": ["constrained rigid bodies", "sphere colliders", "constraint anchors"],
+  "required_signals": ["trajectory", "contact_events", "constraint_trace", "mass_labels"],
+  "verifier_expectation": {"status": "pass"},
+  "should_pass": true,
+  "notes": "Newton's cradle is a smoke family for generic constrained impulse-chain transfer."
+}

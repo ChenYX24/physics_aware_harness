@@ -1,0 +1,66 @@
+{
+  "schema_version": "harness_capability_v1",
+  "id": "constraint_momentum_transfer",
+  "capability_type": "physics_constraint",
+  "stage_ids": [
+    "case_spec_compilation",
+    "physics_control",
+    "runtime_artifact_collection",
+    "physics_verification"
+  ],
+  "description": "Validate constrained impulse-chain momentum transfer across adjacent rigid bodies. Newton's cradle is only the smoke family; the reusable invariant is ordered contact-driven transfer through constrained bodies.",
+  "physical_assumptions": [
+    "A chain of constrained rigid bodies has stable object ids and positive mass labels.",
+    "Only the active driver may start with non-zero velocity or impulse.",
+    "Passive chain members remain still before their causal contact.",
+    "Adjacent contact events propagate in chain order.",
+    "The terminal receiver should move after the final chain contact.",
+    "Intermediate constrained bodies should not translate beyond the declared displacement envelope."
+  ],
+  "required_signals": [
+    "trajectory",
+    "contact_events",
+    "constraint_trace",
+    "mass_labels",
+    "object_roles",
+    "post_chain_velocity"
+  ],
+  "required_assets": [
+    "constrained rigid bodies",
+    "sphere or equivalent colliders",
+    "constraint anchors",
+    "support or suspension visual"
+  ],
+  "verifier_rules": [
+    "Chain has at least three bodies.",
+    "Passive chain members have near-zero initial velocity.",
+    "Expected adjacent contact edges exist and are ordered.",
+    "Terminal receiver post-chain speed exceeds the expected threshold.",
+    "Intermediate displacement remains below the expected envelope.",
+    "Kinetic energy does not exceed the allowed chain energy ratio."
+  ],
+  "failure_taxonomy": [
+    "F1_missing_trajectory",
+    "F2_missing_contact_events",
+    "F3_invalid_initial_physics_state",
+    "F4_causality_violation",
+    "F5_passive_precontact_motion",
+    "F7_runtime_artifact_incomplete"
+  ],
+  "repair_suggestions": [
+    "Declare expected_physics.chain_objects and expected_contact_chain.",
+    "Remove hidden velocity from passive chain members.",
+    "Export adjacent contact events in frame order.",
+    "Check mass labels, restitution, and solver substeps before tuning visuals.",
+    "Use constraint_trace for suspension or chain constraints instead of relying on visual strings."
+  ],
+  "smoke_cases": [
+    "cases/impulse_chain/newton_cradle_five_ball_transfer.json",
+    "cases/impulse_chain/three_body_impulse_transfer.json"
+  ],
+  "regression_cases": [
+    "cases/impulse_chain/negative_passive_prechain_motion.json",
+    "cases/impulse_chain/negative_terminal_no_response.json",
+    "cases/impulse_chain/negative_contact_order_violation.json"
+  ]
+}

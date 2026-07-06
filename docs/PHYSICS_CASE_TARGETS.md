@@ -23,5 +23,6 @@
 | `mass_ratio_collision` | momentum transfer | 已支持 `mass_ratio_momentum_transfer` capability + fallback trajectory + mass-ratio velocity/energy verifier；新增 dynamic template | 接真实 UE mass labels / contact impulse / post-collision velocity export |
 | `angular_damping_spin` | rotational damping | 已支持 `angular_damping_spin_decay` capability + fallback angular velocity trace + spin-decay verifier；新增 dynamic template | 接真实 UE angular velocity / angular damping / inertia export |
 | `agent_push_box` / `agent_throw_ball` | agent-to-rigidbody | 已支持 `agent_rigidbody_action_coupling` capability + fallback action trace + causality verifier；新增 dynamic template | 接真实 UE agent action trace / skeletal controller / impulse export |
+| `newton_cradle` | constrained impulse / momentum transfer | 已支持 `constraint_momentum_transfer` capability + fallback trajectory + ordered contact-chain verifier；牛顿摆只是 smoke family | 接真实 UE suspension/constraint trace、contact impulse 和末端 receiver velocity |
 | `fixed_camera_comparison` | multi-view alignment | 依赖 UE render pass | 接 camera trajectory/timebase verifier |
 | `engine_state_timeline` | runtime state alignment | 依赖 UE instrumentation | 接 engine states / Chaos trace |
