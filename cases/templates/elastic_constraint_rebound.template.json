@@ -1,0 +1,32 @@
+{
+  "schema_version": "harness_case_template_v1",
+  "template_id": "elastic_constraint_rebound",
+  "capability_id": "elastic_constraint_rebound",
+  "description": "Parameterized template for elastic tether or bungee-style constrained rebound. Bungee is a smoke family for generic elastic-constraint verification.",
+  "fallback_supported": true,
+  "parameter_ranges": {
+    "rest_length_m": {"type": "float", "min": 0.8, "max": 1.6},
+    "max_extension_m": {"type": "float", "min": 0.25, "max": 0.65},
+    "constraint_stiffness_n_m": {"type": "float", "min": 25.0, "max": 120.0},
+    "damping_ratio": {"type": "float", "min": 0.08, "max": 0.42},
+    "payload_mass_kg": {"type": "float", "min": 0.35, "max": 1.4}
+  },
+  "object_count_ranges": {
+    "elastic_constraint_anchor": {"min": 1, "max": 1},
+    "elastic_constrained_body": {"min": 1, "max": 1},
+    "elastic_tether_constraint": {"min": 1, "max": 1}
+  },
+  "physics_critical_assets": ["elastic constraint anchor", "elastic constrained rigid body", "elastic tether constraint"],
+  "visual_only_assets": ["rope/bungee cord visual"],
+  "camera_policy": {"default": "side_static", "allowed": ["side_static", "front_static", "event_closeup", "tracking_subject"]},
+  "perturbation_policy": {"positive_ratio": 0.7, "vary": ["rest_length_m", "max_extension_m", "constraint_stiffness_n_m", "damping_ratio", "payload_mass_kg"], "lock": ["seed"]},
+  "expected_invariants": [
+    "constraint_trace_exists",
+    "extension_stays_below_max",
+    "minimum_stretch_is_reached",
+    "post_stretch_rebound_toward_anchor"
+  ],
+  "negative_modes": ["missing_constraint_trace", "overstretch", "no_rebound"],
+  "seed_policy": {"deterministic": true, "record_parameter_sample": true},
+  "expected_artifact_contract": ["trajectory", "constraint_trace", "elastic_constraint_labels"]
+}

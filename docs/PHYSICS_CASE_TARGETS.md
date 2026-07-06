@@ -25,5 +25,6 @@
 | `agent_push_box` / `agent_throw_ball` | agent-to-rigidbody | 已支持 `agent_rigidbody_action_coupling` capability + fallback action trace + causality verifier；新增 dynamic template | 接真实 UE agent action trace / skeletal controller / impulse export |
 | `newton_cradle` | constrained impulse / momentum transfer | 已支持 `constraint_momentum_transfer` capability + fallback trajectory + ordered contact-chain verifier；牛顿摆只是 smoke family | 接真实 UE suspension/constraint trace、contact impulse 和末端 receiver velocity |
 | `spring_launch_motion` | elastic stored energy / release causality | 已支持 `elastic_energy_launch` capability + fallback trajectory + spring_events + energy-envelope verifier；弹簧发射只是 smoke family | 接真实 UE spring/release event、stored energy label、payload velocity export |
+| `elastic_rope_bungee` | elastic tether / rebound constraint | 已支持 `elastic_constraint_rebound` capability + fallback trajectory + constraint_trace + max-extension/rebound verifier；蹦极只是 smoke family | 接真实 UE elastic PhysicsConstraint、extension trace、rebound velocity export |
 | `fixed_camera_comparison` | multi-view alignment | 依赖 UE render pass | 接 camera trajectory/timebase verifier |
 | `engine_state_timeline` | runtime state alignment | 依赖 UE instrumentation | 接 engine states / Chaos trace |

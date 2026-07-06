@@ -162,6 +162,7 @@ Verifier 不检查“画面是否动了”，而检查 capability invariants：
 | `constraint_distance_pendulum_motion` | constrained bodies must preserve anchor-body distance within tolerance and move continuously without teleporting |
 | `constraint_momentum_transfer` | constrained chain bodies must start still, adjacent contacts must be ordered, and terminal receiver response must follow final contact |
 | `elastic_energy_launch` | launched body must start still, release event must exist, and post-release speed/energy must match the stored elastic-energy envelope |
+| `elastic_constraint_rebound` | elastic tether must export constraint trace, stay within max extension, and rebound toward the anchor after peak stretch |
 | `asset_runtime_binding_invocation` | physics-critical assets must bind colliders, mass/material metadata, collision profile, and runtime actor ids |
 
 验证命令：

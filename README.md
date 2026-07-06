@@ -186,6 +186,7 @@ old `billiard_causality_compiler` id remains only as a compatibility alias.
 | `constraint_distance_pendulum_motion` | Distance/joint-constrained rigid bodies must preserve anchor-body length within tolerance and export constraint trace evidence. Pendulum is one smoke family. |
 | `constraint_momentum_transfer` | Constrained rigid-body chains must transfer impulse through ordered adjacent contacts; terminal receiver motion must be contact-driven. Newton's cradle is one smoke family. |
 | `elastic_energy_launch` | Elastic stored-energy release must declare spring/compression/mass labels, export release events, and keep post-release kinetic response inside the stored-energy envelope. Spring launch is one smoke family. |
+| `elastic_constraint_rebound` | Elastic tether or bungee-style constraints must export rest length, extension trace, max-stretch bounds, and rebound velocity toward the anchor. Bungee is one smoke family. |
 
 `billiard_causality_compiler` is deprecated as a core abstraction. It remains in
 the repository only so old runs and scripts can still be interpreted. New agents

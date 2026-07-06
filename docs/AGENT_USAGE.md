@@ -138,6 +138,9 @@ Elastic launch prompts should use `elastic_energy_launch`: spring/catapult-like
 examples are smoke families, while the reusable invariant is stored energy,
 explicit release event, still payload before release, and bounded post-release
 kinetic response.
+Elastic rope or bungee prompts should use `elastic_constraint_rebound`: bungee is
+only a smoke family, while the reusable invariant is rest length, bounded
+extension, constraint trace, and rebound velocity toward the anchor.
 
 ## Generic Contact Causality Rule
 

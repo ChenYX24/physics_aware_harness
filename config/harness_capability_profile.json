@@ -138,7 +138,7 @@
             "passive",
             "target balls"
           ],
-          "source": "docs/AGENT_USAGE.md:149",
+          "source": "docs/AGENT_USAGE.md:152",
           "text": "The old billiards failure was caused by passive target balls receiving hidden"
         },
         {
@@ -179,7 +179,7 @@
           "text": "| `billiard_causality_compiler` 作为主能力 | `rigid_body_contact_causality`，台球/保龄球/箱体撞击作为 case family |"
         }
       ],
-      "evidence_count": 384,
+      "evidence_count": 388,
       "failure_modes": [
         "Passive bodies move before contact because of initial velocity leakage.",
         "Passive bodies move before contact because colliders overlap at t=0.",
@@ -255,7 +255,7 @@
             "collision",
             "physics-critical"
           ],
-          "source": "docs/PHYSICS_AWARE_HARNESS.md:165",
+          "source": "docs/PHYSICS_AWARE_HARNESS.md:166",
           "text": "| `asset_runtime_binding_invocation` | physics-critical assets must bind colliders, mass/material metadata, collision profile, and runtime actor ids |"
         },
         {
@@ -352,7 +352,7 @@
             "runtime actor",
             "runtime_binding"
           ],
-          "source": "docs/PHYSICS_AWARE_HARNESS.md:165",
+          "source": "docs/PHYSICS_AWARE_HARNESS.md:166",
           "text": "| `asset_runtime_binding_invocation` | physics-critical assets must bind colliders, mass/material metadata, collision profile, and runtime actor ids |"
         },
         {
@@ -370,7 +370,7 @@
             "collision_profile",
             "mass"
           ],
-          "source": "harness/assets/asset_intent.py:84",
+          "source": "harness/assets/asset_intent.py:89",
           "text": "required = [\"collider\", \"mass\", \"rigid_body\", \"collision_profile\"] if physics_critical else [\"visual_proxy\"]"
         },
         {
@@ -415,7 +415,7 @@
           "text": "\"Runtime actor creation must use the selected asset, collider, material, transform, and collision profile.\""
         }
       ],
-      "evidence_count": 135,
+      "evidence_count": 136,
       "failure_modes": [
         "Selected asset exists visually but has no usable collider metadata.",
         "Proxy fallback is silently used in a production run.",
@@ -475,7 +475,7 @@
             "gravity",
             "ground"
           ],
-          "source": "tests/test_capability_closed_loop.py:50",
+          "source": "tests/test_capability_closed_loop.py:51",
           "text": "plan = self.planner.plan(\"Falling blocks under gravity collide with the ground.\")"
         },
         {
@@ -624,7 +624,7 @@
             "domino",
             "sequential contact"
           ],
-          "source": "tests/test_capability_closed_loop.py:54",
+          "source": "tests/test_capability_closed_loop.py:55",
           "text": "plan = self.planner.plan(\"A domino chain reaction tips each block through sequential contact.\")"
         },
         {
@@ -773,7 +773,7 @@
           "text": "\"Friction/restitution/material changes produce expected monotonic response in generated sweeps.\","
         }
       ],
-      "evidence_count": 351,
+      "evidence_count": 352,
       "failure_modes": [
         "Implicit physics looks plausible once but cannot be reproduced.",
         "LLM changes multiple physical variables during a sensitivity test.",
@@ -887,7 +887,7 @@
           "text": "- `scene_capture` RGB/depth/segmentation multi-view path is the stable data path."
         }
       ],
-      "evidence_count": 462,
+      "evidence_count": 469,
       "failure_modes": [
         "A video exists but has no trajectory or contacts.",
         "Depth/normal proxies are mistaken for native GBuffer.",
@@ -999,7 +999,7 @@
           "text": "\"description\": \"Package only verifier-gated runtime artifacts into dataset-ready sample layouts with lineage, hashes, signal availability, and failure visibility.\","
         }
       ],
-      "evidence_count": 215,
+      "evidence_count": 216,
       "failure_modes": [
         "Rendered output is accepted despite failed physics evidence.",
         "Schema passes but runtime behavior diverges.",
@@ -1042,7 +1042,7 @@
             "debug_preview",
             "ue_output"
           ],
-          "source": "harness/verification/physics_verifier.py:115",
+          "source": "harness/verification/physics_verifier.py:118",
           "text": "for name in (\"fallback_output\", \"ue_output\", \"debug_preview\"):"
         },
         {
@@ -1145,7 +1145,7 @@
           "matched_terms": [
             "regression"
           ],
-          "source": "README.md:197",
+          "source": "README.md:198",
           "text": "The old billiards failure mode is still preserved as a regression: plausible"
         },
         {
@@ -1490,7 +1490,7 @@
             "pendulum",
             "rope constraint"
           ],
-          "source": "tests/test_capability_closed_loop.py:58",
+          "source": "tests/test_capability_closed_loop.py:59",
           "text": "plan = self.planner.plan(\"A pendulum swings while preserving a fixed length rope constraint.\")"
         },
         {
@@ -1611,7 +1611,7 @@
             "newton's cradle",
             "suspended ball chain"
           ],
-          "source": "tests/test_capability_closed_loop.py:62",
+          "source": "tests/test_capability_closed_loop.py:63",
           "text": "plan = self.planner.plan(\"A Newton's cradle transfers impulse through a suspended ball chain.\")"
         },
         {
@@ -1709,7 +1709,7 @@
             "elastic energy",
             "spring launch"
           ],
-          "source": "tests/test_capability_closed_loop.py:66",
+          "source": "tests/test_capability_closed_loop.py:67",
           "text": "plan = self.planner.plan(\"A compressed spring launches a payload from elastic energy.\")"
         },
         {
@@ -1757,7 +1757,7 @@
           "text": "\"spring_events\","
         }
       ],
-      "evidence_count": 32,
+      "evidence_count": 33,
       "failure_modes": [
         "Payload is keyframed without a spring release event.",
         "Payload does not respond after release.",
@@ -1792,6 +1792,121 @@
         "Release event exists and references known launcher/payload ids.",
         "Payload moves after release above the minimum speed threshold.",
         "Kinetic energy after release does not exceed the stored elastic energy envelope."
+      ]
+    },
+    {
+      "confidence": 0.95,
+      "description": "Validate elastic tether or bungee-style constrained motion using rest length, bounded extension, constraint trace, and rebound velocity toward the anchor.",
+      "evidence": [
+        {
+          "matched_terms": [
+            "bungee",
+            "elastic constraint",
+            "elastic rope",
+            "elastic tether",
+            "rope rebound",
+            "stretchy rope",
+            "tether rebound",
+            "弹力绳",
+            "弹性约束",
+            "弹性绳",
+            "拉伸回弹",
+            "绳子回弹",
+            "蹦极"
+          ],
+          "source": "tools/capability_planner.py:117",
+          "text": "terms=(\"bungee\", \"elastic rope\", \"elastic tether\", \"stretchy rope\", \"rope rebound\", \"tether rebound\", \"elastic constraint\", \"蹦极\", \"弹性绳\", \"弹力绳\", \"弹性约束\", \"绳子回弹\", \"拉伸回弹\"),"
+        },
+        {
+          "matched_terms": [
+            "bungee",
+            "弹性绳",
+            "蹦极"
+          ],
+          "source": "docs/CAPABILITY_AUTHORING.md:53",
+          "text": "| `bungee_template` 作为主能力 | `elastic_constraint_rebound`，蹦极/弹性绳作为 case family |"
+        },
+        {
+          "matched_terms": [
+            "bungee",
+            "elastic tether"
+          ],
+          "source": "README.md:189",
+          "text": "| `elastic_constraint_rebound` | Elastic tether or bungee-style constraints must export rest length, extension trace, max-stretch bounds, and rebound velocity toward the anchor. Bungee is one smoke family. |"
+        },
+        {
+          "matched_terms": [
+            "bungee",
+            "elastic rope"
+          ],
+          "source": "docs/AGENT_USAGE.md:141",
+          "text": "Elastic rope or bungee prompts should use `elastic_constraint_rebound`: bungee is"
+        },
+        {
+          "matched_terms": [
+            "elastic tether",
+            "tether rebound"
+          ],
+          "source": "docs/HARNESS_ARCHITECTURE.md:68",
+          "text": "- physical property constraints: restitution, rolling/sliding friction, wind/force field, mass-ratio momentum, angular damping spin decay, agent action to rigid-body coupling, fixed-distance/joint constraint motion, con…"
+        },
+        {
+          "matched_terms": [
+            "max_extension"
+          ],
+          "source": "harness/verification/elastic_constraint_verifier.py:21",
+          "text": "return \"F3_invalid_initial_physics_state\", failure(\"elastic_constraint\", 0, 0, \"max_extension_m\", expected.get(\"max_extension_m\")), evidence"
+        },
+        {
+          "matched_terms": [
+            "constraint_trace"
+          ],
+          "source": "harness/verification/elastic_constraint_verifier.py:54",
+          "text": "return \"F7_runtime_artifact_incomplete\", failure(\"elastic_constraint\", 0, 0, \"constraint_trace_present\", False), evidence"
+        },
+        {
+          "matched_terms": [
+            "max_extension"
+          ],
+          "source": "harness/verification/elastic_constraint_verifier.py:66",
+          "text": "detail = failure(body_id, frame_id(max_sample[\"frame\"]), frame_time(max_sample[\"frame\"]), \"max_extension_reached_m\", round(float(max_sample[\"extension\"]), 6))"
+        }
+      ],
+      "evidence_count": 47,
+      "failure_modes": [
+        "Visual bungee motion exists but no constraint_trace is exported.",
+        "The constrained body stretches beyond the declared extension limit.",
+        "The body reaches maximum stretch but does not rebound toward the anchor."
+      ],
+      "id": "elastic_constraint_rebound",
+      "iteration_moves": [
+        "Fix rest_length_m, max_extension_m, stiffness, and damping before tuning visuals.",
+        "Inspect constraint_trace.json around maximum extension.",
+        "Add negative cases for missing trace, overstretch, and no rebound."
+      ],
+      "pattern_type": "physics_constraint",
+      "prompt_moves": [
+        "Represent the tether as a physics constraint with rest_length, max_extension, stiffness, and damping labels.",
+        "Use visual rope/cord assets only after the elastic constraint exists in the physics graph.",
+        "Require post-stretch rebound toward the anchor rather than keyframed upward motion."
+      ],
+      "runtime_contract": [
+        "Trajectory includes anchor and constrained body positions and velocities.",
+        "constraint_trace records constraint_type=elastic_tether, rest_length_m, measured_distance_m, and extension_m.",
+        "Runtime exports enough post-peak samples to measure rebound velocity toward the anchor."
+      ],
+      "stage_ids": [
+        "case_spec_compilation",
+        "physics_control",
+        "runtime_artifact_collection",
+        "physics_verification"
+      ],
+      "title": "Elastic Constraint Rebound",
+      "verifier_checks": [
+        "Rest length, max extension, and stiffness are positive.",
+        "Constraint trace exists and references known anchor/body ids.",
+        "Measured extension never exceeds max_extension_m.",
+        "After maximum stretch, velocity toward the anchor exceeds the expected threshold."
       ]
     },
     {
@@ -1908,7 +2023,7 @@
             "failure",
             "失败"
           ],
-          "source": "docs/PHYSICS_AWARE_HARNESS.md:188",
+          "source": "docs/PHYSICS_AWARE_HARNESS.md:189",
           "text": "每个失败必须归因到 failure type，例如："
         },
         {
@@ -1916,7 +2031,7 @@
             "failed",
             "failure"
           ],
-          "source": "harness/verification/physics_verifier.py:44",
+          "source": "harness/verification/physics_verifier.py:45",
           "text": "\"value\": str(ue_backend_report.get(\"failure_message\") or \"UE backend failed\"),"
         },
         {
@@ -1954,7 +2069,7 @@
           "matched_terms": [
             "failure"
           ],
-          "source": "README.md:197",
+          "source": "README.md:198",
           "text": "The old billiards failure mode is still preserved as a regression: plausible"
         },
         {
@@ -1965,7 +2080,7 @@
           "text": "\"failure_taxonomy\": ["
         }
       ],
-      "evidence_count": 276,
+      "evidence_count": 288,
       "failure_modes": [
         "Agent adds a template instead of fixing the control surface.",
         "Multiple stages change at once and root cause becomes untraceable.",
@@ -2657,7 +2772,7 @@
       ]
     }
   ],
-  "capability_count": 30,
+  "capability_count": 31,
   "contact_causality_reference_workflow": [
     {
       "contract": "Create active driver bodies and passive receiver bodies with stable ids.",

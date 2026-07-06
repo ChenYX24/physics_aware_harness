@@ -11,6 +11,7 @@ from harness.verification.bounce_verifier import verify_bounce
 from harness.verification.constraint_verifier import verify_constraint_motion
 from harness.verification.diagnosis import repair_suggestion
 from harness.verification.domino_verifier import verify_domino
+from harness.verification.elastic_constraint_verifier import verify_elastic_constraint
 from harness.verification.elastic_launch_verifier import verify_elastic_launch
 from harness.verification.falling_verifier import verify_falling
 from harness.verification.impulse_chain_verifier import verify_impulse_chain
@@ -97,6 +98,8 @@ class PhysicsVerifier:
             failure_type, first_failure, evidence = verify_impulse_chain(case_spec, trajectory)
         elif capability_id == "elastic_energy_launch":
             failure_type, first_failure, evidence = verify_elastic_launch(case_spec, trajectory)
+        elif capability_id == "elastic_constraint_rebound":
+            failure_type, first_failure, evidence = verify_elastic_constraint(case_spec, trajectory)
         else:
             failure_type, first_failure, evidence = "F7_runtime_artifact_incomplete", {"object_id": capability_id, "frame": 0, "time": 0, "metric": "unsupported_capability", "value": capability_id}, []
         return verifier_report(

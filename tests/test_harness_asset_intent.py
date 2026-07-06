@@ -73,6 +73,14 @@ class HarnessAssetIntentTests(unittest.TestCase):
         self.assertTrue(payload.physics_critical)
         self.assertIn("collision_profile", launcher.required_properties)
 
+    def test_elastic_constraint_roles_are_physics_critical(self) -> None:
+        anchor = intent_from_object({"id": "anchor", "role": "elastic_constraint_anchor", "shape": "fixed_point"})
+        payload = intent_from_object({"id": "payload", "role": "elastic_constrained_body", "shape": "sphere"})
+        tether = intent_from_object({"id": "tether", "role": "elastic_tether_constraint", "shape": "constraint"})
+        self.assertTrue(anchor.physics_critical)
+        self.assertTrue(payload.physics_critical)
+        self.assertTrue(tether.physics_critical)
+
     def test_example_registry_resolves_core_static_scene_assets(self) -> None:
         case_spec = {
             "case_id": "asset_smoke",
@@ -93,14 +101,17 @@ class HarnessAssetIntentTests(unittest.TestCase):
                 {"id": "chain_receiver", "role": "constrained_chain_body", "shape": "sphere"},
                 {"id": "spring", "role": "elastic_launcher", "shape": "spring_proxy"},
                 {"id": "spring_payload", "role": "launched_body", "shape": "sphere"},
+                {"id": "elastic_anchor", "role": "elastic_constraint_anchor", "shape": "fixed_point"},
+                {"id": "elastic_payload", "role": "elastic_constrained_body", "shape": "sphere"},
+                {"id": "elastic_tether", "role": "elastic_tether_constraint", "shape": "constraint"},
             ],
         }
         result = resolve_asset_intents(case_spec, top_k=2)
         self.assertEqual(result["case_id"], "asset_smoke")
         self.assertEqual(result["capability_id"], "asset_intent_resolution")
         self.assertEqual(result["invocation_contract"]["next_capability_id"], "asset_runtime_binding_invocation")
-        self.assertEqual(result["physics_critical_count"], 16)
-        self.assertEqual(len(result["assets"]), 16)
+        self.assertEqual(result["physics_critical_count"], 19)
+        self.assertEqual(len(result["assets"]), 19)
         self.assertTrue(all(row["selected_asset"] for row in result["assets"]))
         self.assertTrue(all(row["runtime_binding_requirements"] for row in result["assets"]))
 

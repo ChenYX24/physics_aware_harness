@@ -111,6 +111,12 @@ CAPABILITY_RULES: tuple[CapabilityRule, ...] = (
         terms=("spring launch", "spring launcher", "compressed spring", "elastic launch", "elastic energy", "catapult", "弹簧", "弹簧发射", "压缩弹簧", "弹射", "弹性势能"),
         priority=87,
     ),
+    CapabilityRule(
+        capability_id="elastic_constraint_rebound",
+        case_family="elastic_constraint_rebound",
+        terms=("bungee", "elastic rope", "elastic tether", "stretchy rope", "rope rebound", "tether rebound", "elastic constraint", "蹦极", "弹性绳", "弹力绳", "弹性约束", "绳子回弹", "拉伸回弹"),
+        priority=86,
+    ),
 )
 
 

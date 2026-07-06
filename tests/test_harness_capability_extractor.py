@@ -36,6 +36,7 @@ class HarnessCapabilityExtractorTests(unittest.TestCase):
             self.assertIn("asset_intent_resolution", capabilities)
             self.assertIn("asset_runtime_binding_invocation", capabilities)
             self.assertIn("elastic_energy_launch", capabilities)
+            self.assertIn("elastic_constraint_rebound", capabilities)
 
     def test_public_profile_suppresses_private_sources(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

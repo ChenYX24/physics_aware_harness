@@ -39,6 +39,7 @@ class CapabilityClosedLoopTests(unittest.TestCase):
         self.assertTrue(self.planner.profile.has("constraint_distance_pendulum_motion"))
         self.assertTrue(self.planner.profile.has("constraint_momentum_transfer"))
         self.assertTrue(self.planner.profile.has("elastic_energy_launch"))
+        self.assertTrue(self.planner.profile.has("elastic_constraint_rebound"))
 
     def test_billiards_prompt_maps_to_generic_contact_causality(self) -> None:
         plan = self.planner.plan("A pool table with a cue ball hitting passive target balls.")
@@ -65,6 +66,10 @@ class CapabilityClosedLoopTests(unittest.TestCase):
     def test_spring_prompt_maps_to_elastic_energy_launch(self) -> None:
         plan = self.planner.plan("A compressed spring launches a payload from elastic energy.")
         self.assertEqual(plan["primary_capability_id"], "elastic_energy_launch")
+
+    def test_bungee_prompt_maps_to_elastic_constraint_rebound(self) -> None:
+        plan = self.planner.plan("A bungee payload stretches an elastic rope and rebounds.")
+        self.assertEqual(plan["primary_capability_id"], "elastic_constraint_rebound")
 
     def test_verifier_rejects_passive_target_pre_contact_velocity(self) -> None:
         plan = self.planner.plan("billiards cue ball hits passive target")

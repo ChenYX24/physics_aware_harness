@@ -103,6 +103,7 @@ assets/*.local.json
 | `constraint_distance_pendulum_motion` | 当前分支已可用 | 距离/绳长/关节约束必须声明 anchor、constrained body、constraint length，并输出 constraint_trace；单摆只是 smoke family。 |
 | `constraint_momentum_transfer` | 当前分支已可用 | 受约束刚体链必须按相邻 contact 顺序传递冲量，末端 receiver 响应必须由 contact 链解释；牛顿摆只是 smoke family。 |
 | `elastic_energy_launch` | 当前分支已可用 | 弹性势能释放必须声明 spring/compression/mass，输出 release event；payload 初始静止，释放后速度/能量响应必须在 stored-energy envelope 内。 |
+| `elastic_constraint_rebound` | 当前分支已可用 | 弹性绳/蹦极约束必须声明 rest length、max extension、stiffness，并输出 constraint_trace；达到最大拉伸后必须朝 anchor 回弹。 |
 
 注意：如果从 `main` 使用，`ramp_sliding_friction` 需要先合并当前 ramp 分支。
 
@@ -472,8 +473,7 @@ TODO：
 | P1 | 弹簧/弹射/弹性势能发射 | `elastic_energy_launch` | 当前分支已有 fallback/verifier；UE spring/release event / energy label export TODO |
 | P1 | 单摆/绳长/距离约束 | `constraint_distance_pendulum_motion` | 当前分支已有 fallback/verifier；UE PhysicsConstraint / Chaos joint trace TODO |
 | P1 | 牛顿摆/悬挂球链 | `constraint_momentum_transfer` | 当前分支已有 fallback/verifier；UE suspension constraint / contact impulse / receiver velocity TODO |
-| P1 | 弹簧弹射 | `spring_launch_motion` | TODO |
-| P1 | 绳子/蹦极弹性 | `elastic_rope_bungee` | TODO |
+| P1 | 绳子/蹦极弹性 | `elastic_constraint_rebound` | 当前分支已有 fallback/verifier；UE elastic PhysicsConstraint / extension trace / rebound velocity TODO |
 | P1 | 玻璃/镜子/玻璃杯/木箱破碎 | `brittle_impact_fracture` family | TODO |
 | P2 | 风吹纸片/气球 | `force_field_wind_drift` | 当前分支已有 fallback/verifier；UE force field / wind volume TODO |
 | P2 | 磁吸/排斥 | `magnetic_force_field` | TODO |

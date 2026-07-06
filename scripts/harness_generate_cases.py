@@ -23,7 +23,7 @@ TEMPLATE_SCHEMA_VERSION = "harness_case_template_v1"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate parameterized harness case specs from a template.")
     parser.add_argument("--template", help="Path to cases/templates/*.template.json")
-    parser.add_argument("--suite", choices=["billiards", "domino", "falling", "ramp", "projectile", "bounce", "rolling", "sliding", "wind", "mass_ratio", "spin", "agent_action", "pendulum", "impulse_chain", "elastic_launch", "basic_physics"], help="Named case suite shortcut.")
+    parser.add_argument("--suite", choices=["billiards", "domino", "falling", "ramp", "projectile", "bounce", "rolling", "sliding", "wind", "mass_ratio", "spin", "agent_action", "pendulum", "impulse_chain", "elastic_launch", "elastic_constraint", "basic_physics"], help="Named case suite shortcut.")
     parser.add_argument("--num-cases", type=int, help="Number of case specs to generate.")
     parser.add_argument("--count", type=int, help="Alias for --num-cases.")
     parser.add_argument("--seed", type=int, default=0, help="Deterministic generation seed.")
@@ -102,6 +102,7 @@ def template_for_suite(suite: str | None) -> str | None:
         "pendulum": "cases/templates/pendulum_contact.template.json",
         "impulse_chain": "cases/templates/constraint_momentum_transfer.template.json",
         "elastic_launch": "cases/templates/elastic_energy_launch.template.json",
+        "elastic_constraint": "cases/templates/elastic_constraint_rebound.template.json",
         "basic_physics": "cases/templates/falling_blocks.template.json",
     }[suite]
 
@@ -155,6 +156,8 @@ def generate_case(template: dict[str, Any], rng: random.Random, *, index: int, s
         return impulse_chain_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
     if template_id == "elastic_energy_launch":
         return elastic_launch_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
+    if template_id == "elastic_constraint_rebound":
+        return elastic_constraint_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
     raise ValueError(f"unsupported runnable template: {template_id}")
 
 
@@ -938,6 +941,58 @@ def elastic_launch_case(template: dict[str, Any], params: dict[str, Any], *, ind
     return add_m2_case_contract(case, template, params)
 
 
+def elastic_constraint_case(template: dict[str, Any], params: dict[str, Any], *, index: int, seed: int, should_pass: bool, negative_mode: str | None) -> dict[str, Any]:
+    rest_length = float(params["rest_length_m"])
+    max_extension = float(params["max_extension_m"])
+    stiffness = float(params["constraint_stiffness_n_m"])
+    damping = float(params["damping_ratio"])
+    mass = float(params["payload_mass_kg"])
+    anchor_z = round(rest_length + 0.8, 4)
+    payload_z = round(anchor_z - rest_length + 0.12, 4)
+    expected = {
+        "coordinate_system": "z_up",
+        "anchor_object_id": "anchor",
+        "constrained_object_id": "payload",
+        "rest_length_m": round(rest_length, 4),
+        "max_extension_m": round(max_extension, 4),
+        "expected_min_extension_m": round(max(0.08, max_extension * 0.55), 4),
+        "expected_min_rebound_speed_m_s": round(max(0.12, stiffness * max_extension / max(mass, 1e-6) * 0.004), 4),
+        "constraint_stiffness_n_m": round(stiffness, 4),
+        "damping_ratio": round(damping, 4),
+        "payload_mass_kg": round(mass, 4),
+    }
+    objects = [
+        {
+            "id": "anchor",
+            "role": "elastic_constraint_anchor",
+            "shape": "fixed_point",
+            "initial_position_m": [0.0, 0.0, anchor_z],
+            "initial_velocity_m_s": [0.0, 0.0, 0.0],
+            "kinematic": True,
+        },
+        {
+            "id": "payload",
+            "role": "elastic_constrained_body",
+            "shape": "sphere",
+            "radius_m": 0.12,
+            "mass_kg": mass,
+            "initial_position_m": [0.0, 0.0, payload_z],
+            "initial_velocity_m_s": [0.0, 0.0, 0.0],
+        },
+    ]
+    case = base_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
+    case.update(
+        {
+            "prompt": f"Generated elastic-constraint case: a payload stretches an elastic tether by up to {max_extension:.2f} m and rebounds toward the anchor.",
+            "expected_physics": expected,
+            "objects": objects,
+            "active_objects": [],
+            "passive_objects": ["payload"],
+        }
+    )
+    return add_m2_case_contract(case, template, params)
+
+
 def collision_speeds(striker_mass: float, target_mass: float, initial_speed: float, restitution: float) -> tuple[float, float]:
     denominator = max(striker_mass + target_mass, 1e-9)
     striker_post = ((striker_mass - restitution * target_mass) / denominator) * initial_speed
@@ -1051,6 +1106,14 @@ def expected_event_for(case: dict[str, Any]) -> dict[str, Any]:
             "release_frame": expected_physics.get("release_frame"),
             "stored_energy_j": expected_physics.get("stored_energy_j"),
         }
+    if capability_id == "elastic_constraint_rebound":
+        return {
+            "type": "elastic_constraint_rebound",
+            "anchor_object_id": expected_physics.get("anchor_object_id"),
+            "constrained_object_id": expected_physics.get("constrained_object_id"),
+            "rest_length_m": expected_physics.get("rest_length_m"),
+            "max_extension_m": expected_physics.get("max_extension_m"),
+        }
     return {"type": "trajectory_event"}
 
 
@@ -1085,6 +1148,8 @@ def required_signals_for(capability_id: str) -> list[str]:
         return ["trajectory", "contact_events", "constraint_trace", "mass_labels", "post_chain_velocity"]
     if capability_id == "elastic_energy_launch":
         return ["trajectory", "spring_events", "energy_labels", "post_release_velocity"]
+    if capability_id == "elastic_constraint_rebound":
+        return ["trajectory", "constraint_trace", "elastic_constraint_labels", "post_stretch_velocity"]
     return ["trajectory"]
 
 
@@ -1108,6 +1173,8 @@ def expected_failure_for(negative_mode: str | None) -> str:
     if negative_mode in {"passive_prechain_motion"}:
         return "F5_passive_precontact_motion"
     if negative_mode in {"missing_release_event"}:
+        return "F7_runtime_artifact_incomplete"
+    if negative_mode in {"missing_constraint_trace"}:
         return "F7_runtime_artifact_incomplete"
     return "F4_causality_violation"
 

@@ -35,6 +35,8 @@ DEFAULT_CASES = [
     "cases/impulse_chain/negative_terminal_no_response.json",
     "cases/elastic_launch/spring_launch_forward_arc.json",
     "cases/elastic_launch/negative_missing_release_event.json",
+    "cases/elastic_constraint/bungee_rebound.json",
+    "cases/elastic_constraint/negative_overstretch.json",
 ]
 
 

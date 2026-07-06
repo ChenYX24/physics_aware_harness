@@ -1,0 +1,28 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "elastic_rope_rebound",
+  "capability_id": "elastic_constraint_rebound",
+  "prompt": "A rigid body stretches an elastic rope below its rest length limit and rebounds back toward the anchor.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "anchor_object_id": "anchor",
+    "constrained_object_id": "payload",
+    "rest_length_m": 0.9,
+    "max_extension_m": 0.36,
+    "expected_min_extension_m": 0.18,
+    "expected_min_rebound_speed_m_s": 0.16,
+    "constraint_stiffness_n_m": 72.0,
+    "damping_ratio": 0.18
+  },
+  "objects": [
+    {"id": "anchor", "role": "elastic_constraint_anchor", "shape": "fixed_point", "initial_position_m": [0.0, 0.0, 1.7], "initial_velocity_m_s": [0.0, 0.0, 0.0], "kinematic": true},
+    {"id": "payload", "role": "elastic_constrained_body", "shape": "sphere", "radius_m": 0.1, "mass_kg": 0.55, "initial_position_m": [0.0, 0.0, 0.92], "initial_velocity_m_s": [0.0, 0.0, 0.0]}
+  ],
+  "active_objects": [],
+  "passive_objects": ["payload"],
+  "required_assets": ["elastic constraint anchor", "elastic constrained rigid body", "elastic tether constraint"],
+  "required_signals": ["trajectory", "constraint_trace", "elastic_constraint_labels"],
+  "verifier_expectation": {"status": "pass"},
+  "should_pass": true,
+  "notes": "Positive elastic rope case for generic elastic_constraint_rebound."
+}

@@ -31,6 +31,7 @@ class HarnessCapabilitySchemaTests(unittest.TestCase):
         self.assertIn("constraint_distance_pendulum_motion", ids)
         self.assertIn("constraint_momentum_transfer", ids)
         self.assertIn("elastic_energy_launch", ids)
+        self.assertIn("elastic_constraint_rebound", ids)
         alias = next(item for item in capabilities if item.id == "billiard_causality_compiler")
         self.assertEqual(alias.capability_type, "compatibility_alias")
         self.assertEqual(alias.deprecated_by, "rigid_body_contact_causality")
@@ -38,6 +39,8 @@ class HarnessCapabilitySchemaTests(unittest.TestCase):
         self.assertEqual(contact.capability_type, "physics_constraint")
         elastic = next(item for item in capabilities if item.id == "elastic_energy_launch")
         self.assertEqual(elastic.capability_type, "physics_constraint")
+        elastic_constraint = next(item for item in capabilities if item.id == "elastic_constraint_rebound")
+        self.assertEqual(elastic_constraint.capability_type, "physics_constraint")
 
 
 if __name__ == "__main__":

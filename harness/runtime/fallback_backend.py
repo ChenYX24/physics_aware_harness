@@ -67,6 +67,8 @@ def trajectory_for_case(case_spec: dict[str, Any]) -> list[dict[str, Any]]:
         return impulse_chain_trajectory(case_id, case_spec)
     if capability_id == "elastic_energy_launch":
         return elastic_launch_trajectory(case_id, case_spec)
+    if capability_id == "elastic_constraint_rebound":
+        return elastic_constraint_trajectory(case_id, case_spec)
     return []
 
 
@@ -771,6 +773,66 @@ def elastic_launch_trajectory(case_id: str, case_spec: dict[str, Any]) -> list[d
         frame(0, 0.0, initial, contacts=[contact(payload_id, launcher_id, 0, 0.0)]),
         frame(1, 0.2, release, spring_events=spring_events),
         frame(2, 0.4, final),
+    ]
+
+
+def elastic_constraint_trajectory(case_id: str, case_spec: dict[str, Any]) -> list[dict[str, Any]]:
+    negative_mode = str(case_spec.get("negative_mode") or "")
+    if not negative_mode and "missing_constraint" in case_id:
+        negative_mode = "missing_constraint_trace"
+    if not negative_mode and "overstretch" in case_id:
+        negative_mode = "overstretch"
+    if not negative_mode and "no_rebound" in case_id:
+        negative_mode = "no_rebound"
+    object_specs = {str(obj.get("id")): obj for obj in case_spec.get("objects", []) if isinstance(obj, dict)}
+    expected = dict(case_spec.get("expected_physics") or {})
+    anchor_id = str(expected.get("anchor_object_id") or next((oid for oid, obj in object_specs.items() if str(obj.get("role") or "") == "elastic_constraint_anchor"), "anchor"))
+    body_id = str(expected.get("constrained_object_id") or next((oid for oid, obj in object_specs.items() if str(obj.get("role") or "") == "elastic_constrained_body"), "payload"))
+    anchor_spec = object_specs.get(anchor_id) or {"initial_position_m": [0.0, 0.0, 2.0]}
+    body_spec = object_specs.get(body_id) or {"initial_position_m": [0.0, 0.0, 1.0]}
+    anchor_pos = vec3(anchor_spec.get("initial_position_m") or [0.0, 0.0, 2.0])
+    body_pos = vec3(body_spec.get("initial_position_m") or [0.0, 0.0, anchor_pos[2] - 1.0])
+    rest_length = float(expected.get("rest_length_m") or max(0.5, abs(anchor_pos[2] - body_pos[2])))
+    max_extension = float(expected.get("max_extension_m") or max(0.25, rest_length * 0.35))
+    peak_extension = max(float(expected.get("expected_min_extension_m") or max_extension * 0.65), max_extension * 0.82)
+    if negative_mode == "overstretch":
+        peak_extension = max_extension * 1.35
+    initial_distance = abs(anchor_pos[2] - body_pos[2])
+    fall_z = anchor_pos[2] - rest_length - peak_extension * 0.6
+    peak_z = anchor_pos[2] - rest_length - peak_extension
+    rebound_z = anchor_pos[2] - rest_length - peak_extension * (0.42 if negative_mode != "no_rebound" else 0.9)
+    rebound_vz = 0.85 if negative_mode != "no_rebound" else -0.05
+
+    def states(payload_z: float, payload_vz: float) -> dict[str, Any]:
+        return {
+            anchor_id: state(anchor_pos, [0.0, 0.0, 0.0]),
+            body_id: state([body_pos[0], body_pos[1], round(payload_z, 4)], [0.0, 0.0, round(payload_vz, 4)]),
+        }
+
+    def constraint_for(frame_id: int, time_s: float, payload_z: float) -> list[dict[str, Any]]:
+        if negative_mode == "missing_constraint_trace":
+            return []
+        distance = abs(anchor_pos[2] - payload_z)
+        extension = max(0.0, distance - rest_length)
+        return [
+            {
+                "constraint_id": "elastic_tether",
+                "constraint_type": "elastic_tether",
+                "anchor_id": anchor_id,
+                "body_id": body_id,
+                "rest_length_m": round(rest_length, 6),
+                "measured_distance_m": round(distance, 6),
+                "extension_m": round(extension, 6),
+                "frame": frame_id,
+                "time_s": time_s,
+            }
+        ]
+
+    return [
+        frame(0, 0.0, states(body_pos[2], 0.0), constraints=constraint_for(0, 0.0, body_pos[2])),
+        frame(1, 0.2, states(fall_z, -1.25), constraints=constraint_for(1, 0.2, fall_z)),
+        frame(2, 0.4, states(peak_z, -0.15), constraints=constraint_for(2, 0.4, peak_z)),
+        frame(3, 0.6, states(rebound_z, rebound_vz), constraints=constraint_for(3, 0.6, rebound_z)),
     ]
 
 

@@ -1,0 +1,59 @@
+{
+  "schema_version": "harness_capability_v1",
+  "id": "elastic_constraint_rebound",
+  "capability_type": "physics_constraint",
+  "stage_ids": [
+    "case_spec_compilation",
+    "physics_control",
+    "runtime_artifact_collection",
+    "physics_verification"
+  ],
+  "description": "Validate elastic tether, rope, or bungee-style constrained motion using rest length, bounded extension, constraint trace, and rebound velocity toward the anchor. Bungee is only the smoke family.",
+  "physical_assumptions": [
+    "The elastic constraint has a structured rest length, maximum extension, stiffness, and damping label.",
+    "The constrained body may stretch the tether under gravity or impulse but must not exceed the declared extension limit.",
+    "After peak extension, the constrained body must rebound toward the anchor.",
+    "The elastic tether is a physics constraint; visual rope/cord assets are optional helpers."
+  ],
+  "required_signals": [
+    "trajectory",
+    "constraint_trace",
+    "elastic_constraint_labels",
+    "object_roles",
+    "post_stretch_velocity"
+  ],
+  "required_assets": [
+    "elastic constraint anchor",
+    "elastic constrained rigid body",
+    "elastic tether constraint",
+    "optional rope visual"
+  ],
+  "verifier_rules": [
+    "Rest length, max extension, and stiffness are positive.",
+    "Constraint trace exists and references anchor/body ids.",
+    "Measured extension never exceeds max_extension_m.",
+    "The body stretches at least expected_min_extension_m.",
+    "After maximum stretch, velocity toward the anchor exceeds expected_min_rebound_speed_m_s."
+  ],
+  "failure_taxonomy": [
+    "F1_missing_trajectory",
+    "F3_invalid_initial_physics_state",
+    "F4_causality_violation",
+    "F7_runtime_artifact_incomplete"
+  ],
+  "repair_suggestions": [
+    "Declare expected_physics.rest_length_m, max_extension_m, and constraint_stiffness_n_m.",
+    "Export constraint_trace entries with constraint_type=elastic_tether.",
+    "Reduce impulse/drop height or increase max_extension_m if overstretch occurs.",
+    "Add rebound velocity toward the anchor after peak stretch."
+  ],
+  "smoke_cases": [
+    "cases/elastic_constraint/bungee_rebound.json",
+    "cases/elastic_constraint/elastic_rope_rebound.json"
+  ],
+  "regression_cases": [
+    "cases/elastic_constraint/negative_missing_constraint_trace.json",
+    "cases/elastic_constraint/negative_overstretch.json",
+    "cases/elastic_constraint/negative_no_rebound.json"
+  ]
+}

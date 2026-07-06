@@ -65,7 +65,7 @@ Agent 可以：
 - generic rigid-body contact causality
 - rigid body gravity/collision
 - sequential contact propagation
-- physical property constraints: restitution, rolling/sliding friction, wind/force field, mass-ratio momentum, angular damping spin decay, agent action to rigid-body coupling, fixed-distance/joint constraint motion, constrained impulse-chain transfer
+- physical property constraints: restitution, rolling/sliding friction, wind/force field, mass-ratio momentum, angular damping spin decay, agent action to rigid-body coupling, fixed-distance/joint constraint motion, constrained impulse-chain transfer, elastic energy launch, elastic tether rebound
 - asset intent resolution
 - asset runtime binding invocation
 - scene spec compilation
