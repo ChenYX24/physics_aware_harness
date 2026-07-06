@@ -33,6 +33,7 @@ class CapabilityClosedLoopTests(unittest.TestCase):
         self.assertTrue(self.planner.profile.has("canonical_signal_capture"))
         self.assertTrue(self.planner.profile.has("dataset_artifact_packaging"))
         self.assertTrue(self.planner.profile.has("force_field_wind_drift"))
+        self.assertTrue(self.planner.profile.has("mass_ratio_momentum_transfer"))
 
     def test_billiards_prompt_maps_to_generic_contact_causality(self) -> None:
         plan = self.planner.plan("A pool table with a cue ball hitting passive target balls.")

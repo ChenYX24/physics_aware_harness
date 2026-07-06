@@ -1,0 +1,50 @@
+{
+  "schema_version": "harness_case_template_v1",
+  "template_id": "mass_ratio_collision",
+  "capability_id": "mass_ratio_momentum_transfer",
+  "fallback_supported": true,
+  "parameter_ranges": {
+    "striker_mass_kg": {"type": "float", "min": 0.2, "max": 3.0},
+    "target_mass_kg": {"type": "float", "min": 0.2, "max": 3.0},
+    "initial_speed_m_s": {"type": "float", "min": 0.6, "max": 2.0},
+    "restitution": {"type": "float", "min": 0.35, "max": 0.9}
+  },
+  "object_count_ranges": {
+    "active_striker": {"min": 1, "max": 1},
+    "passive_target": {"min": 1, "max": 1},
+    "support": {"min": 1, "max": 1}
+  },
+  "physics_critical_assets": [
+    "rigid_body_actor",
+    "mass_metadata",
+    "collider",
+    "support_surface"
+  ],
+  "visual_only_assets": [
+    "mass_label_overlay"
+  ],
+  "camera_policy": {
+    "default": "side_static",
+    "allowed": ["side_static", "top_down", "tracking_subject"]
+  },
+  "perturbation_policy": {
+    "positive_ratio": 0.7,
+    "negative_modes": ["missing_mass_label", "wrong_velocity_order", "momentum_gain"]
+  },
+  "expected_invariants": [
+    "passive body starts with zero velocity",
+    "active-passive contact exists",
+    "post-collision velocity direction follows collision axis",
+    "velocity ordering follows mass ratio",
+    "kinetic energy gain stays bounded"
+  ],
+  "negative_modes": [
+    "missing_mass_label",
+    "wrong_velocity_order",
+    "momentum_gain"
+  ],
+  "seed_policy": {
+    "deterministic": true,
+    "sample_parameters_from_seed": true
+  }
+}

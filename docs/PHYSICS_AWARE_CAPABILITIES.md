@@ -50,6 +50,10 @@ agent-facing docs should use:
 - `force_field_wind_drift`: a concrete force-field validator that checks explicit
   wind vector labels, drift direction, bounded displacement, and altitude
   envelope. The balloon is only the smoke family.
+- `mass_ratio_momentum_transfer`: a concrete momentum-transfer validator that
+  checks mass labels, contact evidence, post-collision velocity ordering, and
+  restitution-bounded energy gain. The two-body collision is only the smoke
+  family.
 
 This keeps the harness useful beyond billiards: the same contact-causality
 contract can verify pool, bowling, crate impacts, and other contact-driven scenes.

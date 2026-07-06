@@ -1,0 +1,47 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "light_striker_heavy_target",
+  "capability_id": "mass_ratio_momentum_transfer",
+  "prompt": "A light active striker collides with a heavier passive target. The heavy target should move only modestly while the light striker slows or rebounds.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "collision_axis": "+x",
+    "collision_graph": [["striker", "target"]],
+    "restitution": 0.8,
+    "expected_velocity_order": "target_slower_than_initial",
+    "expected_target_speed_min_m_s": 0.15,
+    "expected_target_speed_max_m_s": 0.65,
+    "expected_striker_speed_abs_max_m_s": 0.8,
+    "expected_energy_ratio_max": 1.05
+  },
+  "objects": [
+    {
+      "id": "striker",
+      "role": "active_striker",
+      "shape": "sphere",
+      "radius_m": 0.12,
+      "mass_kg": 0.5,
+      "restitution": 0.8,
+      "initial_position_m": [-0.5, 0.0, 0.12],
+      "initial_velocity_m_s": [1.2, 0.0, 0.0]
+    },
+    {
+      "id": "target",
+      "role": "passive_target",
+      "shape": "sphere",
+      "radius_m": 0.12,
+      "mass_kg": 2.0,
+      "restitution": 0.8,
+      "initial_position_m": [0.0, 0.0, 0.12],
+      "initial_velocity_m_s": [0.0, 0.0, 0.0]
+    },
+    {"id": "floor", "role": "support", "shape": "box", "initial_position_m": [0.0, 0.0, 0.0]}
+  ],
+  "active_objects": ["striker"],
+  "passive_objects": ["target"],
+  "required_assets": ["rigid_body_actor", "mass_metadata", "collider", "support_surface"],
+  "required_signals": ["trajectory", "contact_events", "mass_labels", "post_collision_velocity"],
+  "verifier_expectation": {"status": "pass"},
+  "should_pass": true,
+  "notes": "Golden positive light-to-heavy momentum transfer case."
+}

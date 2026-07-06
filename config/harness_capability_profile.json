@@ -1792,9 +1792,62 @@
           "text": "Wind or force-field driven drift requires explicit wind vector labels and trajectory displacement evidence."
         }
       ]
+    },
+    {
+      "id": "mass_ratio_momentum_transfer",
+      "title": "Mass Ratio Momentum Transfer",
+      "pattern_type": "physics_constraint",
+      "stage_ids": [
+        "physics_control",
+        "runtime_artifact_collection",
+        "physics_verification"
+      ],
+      "description": "Validate one-dimensional rigid-body momentum transfer across a contact event using explicit mass ratio, restitution, and post-collision velocity evidence. The two-body collision is only a smoke family.",
+      "prompt_moves": [
+        "The moving active body transfers momentum to a passive receiver through runtime contact.",
+        "Both bodies must declare positive mass values before runtime.",
+        "Post-collision velocity ordering should match the declared mass ratio and restitution envelope."
+      ],
+      "runtime_contract": [
+        "trajectory",
+        "contact_events",
+        "object_roles",
+        "mass_labels",
+        "initial_velocity",
+        "post_collision_velocity"
+      ],
+      "verifier_checks": [
+        "Active and passive bodies declare positive mass.",
+        "Passive body initial velocity is near zero.",
+        "Expected active-passive contact is recorded.",
+        "Post-contact target velocity is in the declared direction and bounded range.",
+        "Velocity ordering follows heavy-to-light or light-to-heavy mass ratio expectations.",
+        "Kinetic energy does not exceed the allowed energy-gain ratio."
+      ],
+      "failure_modes": [
+        "F1_missing_trajectory",
+        "F2_missing_contact_events",
+        "F3_invalid_initial_physics_state",
+        "F4_causality_violation",
+        "F5_passive_precontact_motion",
+        "F7_runtime_artifact_incomplete"
+      ],
+      "iteration_moves": [
+        "Declare mass_kg on both colliding bodies.",
+        "Remove hidden initial velocity from passive receivers.",
+        "Use restitution and mass ratio to derive expected velocity bounds instead of hard-coded target motion."
+      ],
+      "confidence": 0.9,
+      "evidence_count": 5,
+      "evidence": [
+        {
+          "source": "capabilities/mass_ratio_momentum_transfer.json",
+          "text": "Mass-ratio momentum transfer requires mass labels, contact events, post-collision velocity evidence, and an energy-gain bound."
+        }
+      ]
     }
   ],
-  "capability_count": 21,
+  "capability_count": 22,
   "iteration_playbook": [
     {
       "input": "README/docs, tests, runtime code, and public config",

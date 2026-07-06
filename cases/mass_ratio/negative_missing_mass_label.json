@@ -1,0 +1,47 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "negative_missing_mass_label",
+  "capability_id": "mass_ratio_momentum_transfer",
+  "prompt": "A contact collision is requested, but the passive target has no mass label, so mass-ratio transfer cannot be verified.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "collision_axis": "+x",
+    "collision_graph": [["striker", "target"]],
+    "restitution": 0.8,
+    "expected_velocity_order": "target_faster_than_striker",
+    "expected_target_speed_min_m_s": 1.2,
+    "expected_target_speed_max_m_s": 2.1,
+    "expected_striker_speed_abs_max_m_s": 1.0,
+    "expected_energy_ratio_max": 1.05
+  },
+  "objects": [
+    {
+      "id": "striker",
+      "role": "active_striker",
+      "shape": "sphere",
+      "radius_m": 0.12,
+      "mass_kg": 2.0,
+      "restitution": 0.8,
+      "initial_position_m": [-0.5, 0.0, 0.12],
+      "initial_velocity_m_s": [1.2, 0.0, 0.0]
+    },
+    {
+      "id": "target",
+      "role": "passive_target",
+      "shape": "sphere",
+      "radius_m": 0.12,
+      "restitution": 0.8,
+      "initial_position_m": [0.0, 0.0, 0.12],
+      "initial_velocity_m_s": [0.0, 0.0, 0.0]
+    },
+    {"id": "floor", "role": "support", "shape": "box", "initial_position_m": [0.0, 0.0, 0.0]}
+  ],
+  "active_objects": ["striker"],
+  "passive_objects": ["target"],
+  "required_assets": ["rigid_body_actor", "mass_metadata", "collider", "support_surface"],
+  "required_signals": ["trajectory", "contact_events", "mass_labels", "post_collision_velocity"],
+  "verifier_expectation": {"status": "fail", "failure_type": "F3_invalid_initial_physics_state"},
+  "should_pass": false,
+  "negative_mode": "missing_mass_label",
+  "notes": "Regression: missing mass metadata must fail before velocity ordering."
+}

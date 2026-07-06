@@ -97,6 +97,7 @@ assets/*.local.json
 | `rolling_friction_ball` | 当前分支已可用 | 物体必须有初始水平速度、保持 support contact、速度衰减，滚动距离符合 friction-bounded envelope。 |
 | `sliding_crate_friction` | 当前分支已可用 | 箱体/刚体滑动必须保持 support contact、按动摩擦减速并停在距离范围内；低于静摩擦阈值时必须基本不动。 |
 | `force_field_wind_drift` | 当前分支已可用 | 风场/力场驱动的轻物体必须声明 wind vector，轨迹漂移方向和距离要符合 wind-aligned envelope，海拔保持在范围内。 |
+| `mass_ratio_momentum_transfer` | 当前分支已可用 | 接触碰撞必须声明质量标签；碰撞后速度顺序要符合质量比和 restitution envelope，并拒绝无解释能量增益。 |
 
 注意：如果从 `main` 使用，`ramp_sliding_friction` 需要先合并当前 ramp 分支。
 
@@ -350,7 +351,7 @@ fallback 可以写 placeholder render artifact，但必须标记为非 UE。UE p
 
 ```bash
 python3.13 -m unittest discover -s tests -p 'test*.py'
-# 67 tests OK
+# 71 tests OK
 ```
 
 ```bash
@@ -399,6 +400,12 @@ python3.13 scripts/harness_run_case_batch.py cases/generated/wind_seed50 --backe
 # 10 cases: 7 positive pass, 3 negative caught, unexpected 0
 ```
 
+```bash
+python3.13 scripts/harness_generate_cases.py --suite mass_ratio --count 10 --seed 51 --out cases/generated/mass_ratio_seed51
+python3.13 scripts/harness_run_case_batch.py cases/generated/mass_ratio_seed51 --backend fallback
+# 10 cases: 7 positive pass, 3 negative caught, unexpected 0
+```
+
 静态资产解析：
 
 - 台球三角阵 case：8/8 physics-critical assets resolved。
@@ -428,6 +435,7 @@ TODO：
 | P1 | 皮球/刚体反弹 | `bounce_restitution_ball` | 当前分支已有 fallback/verifier；UE restitution material/contact TODO |
 | P1 | 滚动摩擦/停距 | `rolling_friction_ball` | 当前分支已有 fallback/verifier；UE rolling friction material/contact TODO |
 | P1 | 滑动箱体/静摩擦阈值 | `sliding_crate_friction` | 当前分支已有 fallback/verifier；UE static/dynamic friction material/contact TODO |
+| P1 | 质量比碰撞/动量传递 | `mass_ratio_momentum_transfer` | 当前分支已有 fallback/verifier；UE mass metadata/contact impulse TODO |
 | P1 | 牛顿摆 | `constraint_momentum_transfer` | TODO |
 | P1 | 弹簧弹射 | `spring_launch_motion` | TODO |
 | P1 | 绳子/蹦极弹性 | `elastic_rope_bungee` | TODO |

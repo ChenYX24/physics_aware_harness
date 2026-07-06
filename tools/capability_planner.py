@@ -75,6 +75,12 @@ CAPABILITY_RULES: tuple[CapabilityRule, ...] = (
         terms=("wind", "wind field", "wind drift", "balloon", "light body drift", "force field", "air drag", "gust", "风", "风场", "气球", "漂移", "风吹", "轻物体"),
         priority=80,
     ),
+    CapabilityRule(
+        capability_id="mass_ratio_momentum_transfer",
+        case_family="mass_ratio_collision",
+        terms=("mass ratio", "momentum transfer", "heavy striker", "light target", "light striker", "heavy target", "collision mass", "动量传递", "质量比", "重物撞轻物", "轻物撞重物", "碰撞后速度"),
+        priority=106,
+    ),
 )
 
 

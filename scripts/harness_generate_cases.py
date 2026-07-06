@@ -23,7 +23,7 @@ TEMPLATE_SCHEMA_VERSION = "harness_case_template_v1"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate parameterized harness case specs from a template.")
     parser.add_argument("--template", help="Path to cases/templates/*.template.json")
-    parser.add_argument("--suite", choices=["billiards", "domino", "falling", "ramp", "projectile", "bounce", "rolling", "sliding", "wind", "basic_physics"], help="Named case suite shortcut.")
+    parser.add_argument("--suite", choices=["billiards", "domino", "falling", "ramp", "projectile", "bounce", "rolling", "sliding", "wind", "mass_ratio", "basic_physics"], help="Named case suite shortcut.")
     parser.add_argument("--num-cases", type=int, help="Number of case specs to generate.")
     parser.add_argument("--count", type=int, help="Alias for --num-cases.")
     parser.add_argument("--seed", type=int, default=0, help="Deterministic generation seed.")
@@ -96,6 +96,7 @@ def template_for_suite(suite: str | None) -> str | None:
         "rolling": "cases/templates/rolling_friction.template.json",
         "sliding": "cases/templates/sliding_crate_friction.template.json",
         "wind": "cases/templates/wind_balloon_drift.template.json",
+        "mass_ratio": "cases/templates/mass_ratio_collision.template.json",
         "basic_physics": "cases/templates/falling_blocks.template.json",
     }[suite]
 
@@ -137,6 +138,8 @@ def generate_case(template: dict[str, Any], rng: random.Random, *, index: int, s
         return sliding_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
     if template_id == "wind_balloon_drift":
         return wind_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
+    if template_id == "mass_ratio_collision":
+        return mass_ratio_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
     raise ValueError(f"unsupported runnable template: {template_id}")
 
 
@@ -578,6 +581,78 @@ def wind_case(template: dict[str, Any], params: dict[str, Any], *, index: int, s
     return add_m2_case_contract(case, template, params)
 
 
+def mass_ratio_case(template: dict[str, Any], params: dict[str, Any], *, index: int, seed: int, should_pass: bool, negative_mode: str | None) -> dict[str, Any]:
+    striker_mass = float(params["striker_mass_kg"])
+    target_mass = float(params["target_mass_kg"])
+    speed = float(params["initial_speed_m_s"])
+    restitution = float(params["restitution"])
+    v1_post, v2_post = collision_speeds(striker_mass, target_mass, speed, restitution)
+    if striker_mass >= target_mass:
+        order = "target_faster_than_striker"
+    else:
+        order = "target_slower_than_initial"
+    target_min = max(0.03, abs(v2_post) * 0.55)
+    target_max = max(target_min + 0.05, abs(v2_post) * 1.45 + 0.04)
+    striker_abs_max = max(0.05, abs(v1_post) * 1.55 + 0.05)
+    expected = {
+        "coordinate_system": "z_up",
+        "collision_axis": "+x",
+        "collision_graph": [["striker", "target"]],
+        "striker_mass_kg": striker_mass,
+        "target_mass_kg": target_mass,
+        "initial_speed_m_s": speed,
+        "restitution": restitution,
+        "expected_velocity_order": order,
+        "expected_target_speed_min_m_s": round(target_min, 4),
+        "expected_target_speed_max_m_s": round(target_max, 4),
+        "expected_striker_speed_abs_max_m_s": round(striker_abs_max, 4),
+        "expected_energy_ratio_max": 1.05,
+    }
+    objects = [
+        {
+            "id": "striker",
+            "role": "active_striker",
+            "shape": "sphere",
+            "radius_m": 0.12,
+            "mass_kg": striker_mass,
+            "restitution": restitution,
+            "initial_position_m": [-0.5, 0.0, 0.12],
+            "initial_velocity_m_s": [speed, 0.0, 0.0],
+        },
+        {
+            "id": "target",
+            "role": "passive_target",
+            "shape": "sphere",
+            "radius_m": 0.12,
+            "mass_kg": target_mass,
+            "restitution": restitution,
+            "initial_position_m": [0.0, 0.0, 0.12],
+            "initial_velocity_m_s": [0.0, 0.0, 0.0],
+        },
+        {"id": "floor", "role": "support", "shape": "box", "initial_position_m": [0.0, 0.0, 0.0]},
+    ]
+    if negative_mode == "missing_mass_label":
+        objects[1].pop("mass_kg", None)
+    case = base_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
+    case.update(
+        {
+            "prompt": f"Generated mass-ratio collision: active mass={striker_mass:.2f} kg hits passive mass={target_mass:.2f} kg at {speed:.2f} m/s.",
+            "expected_physics": expected,
+            "objects": objects,
+            "active_objects": ["striker"],
+            "passive_objects": ["target"],
+        }
+    )
+    return add_m2_case_contract(case, template, params)
+
+
+def collision_speeds(striker_mass: float, target_mass: float, initial_speed: float, restitution: float) -> tuple[float, float]:
+    denominator = max(striker_mass + target_mass, 1e-9)
+    striker_post = ((striker_mass - restitution * target_mass) / denominator) * initial_speed
+    target_post = (((1.0 + restitution) * striker_mass) / denominator) * initial_speed
+    return round(striker_post, 4), round(target_post, 4)
+
+
 def add_m2_case_contract(case: dict[str, Any], template: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
     expected_physics = dict(case.get("expected_physics") or {})
     camera_policy = dict(template.get("camera_policy") or {})
@@ -649,6 +724,8 @@ def expected_event_for(case: dict[str, Any]) -> dict[str, Any]:
         return {"type": "friction_bounded_slide_or_static_hold", "support": expected_physics.get("support", "floor"), "mode": expected_physics.get("mode", "sliding_stop")}
     if capability_id == "force_field_wind_drift":
         return {"type": "force_field_wind_drift", "wind_vector_m_s": expected_physics.get("wind_vector_m_s")}
+    if capability_id == "mass_ratio_momentum_transfer":
+        return {"type": "mass_ratio_momentum_transfer", "collision_graph": expected_physics.get("collision_graph", []), "expected_velocity_order": expected_physics.get("expected_velocity_order")}
     return {"type": "trajectory_event"}
 
 
@@ -671,6 +748,8 @@ def required_signals_for(capability_id: str) -> list[str]:
         return ["trajectory", "contact_events", "initial_velocity", "material_friction_label", "applied_force_label"]
     if capability_id == "force_field_wind_drift":
         return ["trajectory", "wind_vector_label", "force_field_label"]
+    if capability_id == "mass_ratio_momentum_transfer":
+        return ["trajectory", "contact_events", "mass_labels", "post_collision_velocity"]
     return ["trajectory"]
 
 
@@ -680,6 +759,8 @@ def expected_failure_for(negative_mode: str | None) -> str:
     if negative_mode in {"missing_contact"}:
         return "F2_missing_contact_events"
     if negative_mode in {"missing_wind_label"}:
+        return "F3_invalid_initial_physics_state"
+    if negative_mode in {"missing_mass_label"}:
         return "F3_invalid_initial_physics_state"
     return "F4_causality_violation"
 

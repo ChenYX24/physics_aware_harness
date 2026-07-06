@@ -55,6 +55,8 @@ def trajectory_for_case(case_spec: dict[str, Any]) -> list[dict[str, Any]]:
         return sliding_trajectory(case_id, case_spec)
     if capability_id == "force_field_wind_drift":
         return wind_trajectory(case_id, case_spec)
+    if capability_id == "mass_ratio_momentum_transfer":
+        return mass_ratio_trajectory(case_id, case_spec)
     return []
 
 
@@ -363,6 +365,57 @@ def wind_trajectory(case_id: str, case_spec: dict[str, Any]) -> list[dict[str, A
     mid = {body_id: state([round(p0[0] + unit[0] * drift * 0.55, 4), round(p0[1] + unit[1] * drift * 0.55, 4), round(z_mid, 4)], [round(unit[0] * abs(drift), 4), round(unit[1] * abs(drift), 4), 0.05])}
     final = {body_id: state([round(p0[0] + unit[0] * drift, 4), round(p0[1] + unit[1] * drift, 4), round(z_end, 4)], [round(unit[0] * abs(drift) * 0.35, 4), round(unit[1] * abs(drift) * 0.35, 4), 0.0])}
     return [frame(0, 0.0, initial), frame(1, 0.4, mid), frame(2, 0.8, final)]
+
+
+def mass_ratio_trajectory(case_id: str, case_spec: dict[str, Any]) -> list[dict[str, Any]]:
+    negative_mode = str(case_spec.get("negative_mode") or "")
+    if not negative_mode and "wrong_velocity_order" in case_id:
+        negative_mode = "wrong_velocity_order"
+    if not negative_mode and "momentum_gain" in case_id:
+        negative_mode = "momentum_gain"
+    object_specs = {str(obj.get("id")): obj for obj in case_spec.get("objects", []) if isinstance(obj, dict)}
+    active_id = str((case_spec.get("active_objects") or ["striker"])[0])
+    passive_id = str((case_spec.get("passive_objects") or ["target"])[0])
+    active_spec = object_specs.get(active_id) or {"initial_position_m": [-0.5, 0.0, 0.12], "initial_velocity_m_s": [1.0, 0.0, 0.0], "mass_kg": 1.0}
+    passive_spec = object_specs.get(passive_id) or {"initial_position_m": [0.0, 0.0, 0.12], "initial_velocity_m_s": [0.0, 0.0, 0.0], "mass_kg": 1.0}
+    p_active = vec3(active_spec.get("initial_position_m") or [-0.5, 0.0, 0.12])
+    p_passive = vec3(passive_spec.get("initial_position_m") or [0.0, 0.0, 0.12])
+    v_active = vec3(active_spec.get("initial_velocity_m_s") or [1.0, 0.0, 0.0])
+    m_active = float(active_spec.get("mass_kg") or 1.0)
+    m_passive = float(passive_spec.get("mass_kg") or 1.0)
+    restitution = float((case_spec.get("expected_physics") or {}).get("restitution") or active_spec.get("restitution") or 0.6)
+    u = v_active[0]
+    denominator = max(m_active + m_passive, 1e-9)
+    v1_post = ((m_active - restitution * m_passive) / denominator) * u
+    v2_post = (((1.0 + restitution) * m_active) / denominator) * u
+    if negative_mode == "wrong_velocity_order":
+        v1_post = max(0.65 * abs(u), 0.55)
+        v2_post = max(0.25 * abs(u), 0.25)
+    elif negative_mode == "momentum_gain":
+        v1_post = min(float((case_spec.get("expected_physics") or {}).get("expected_striker_speed_abs_max_m_s") or abs(u)), abs(u) * 0.78)
+        v2_post = min(float((case_spec.get("expected_physics") or {}).get("expected_target_speed_max_m_s") or abs(u) * 2.0), abs(u) * 1.65)
+    initial = {
+        active_id: state(p_active, v_active),
+        passive_id: state(p_passive, vec3(passive_spec.get("initial_velocity_m_s") or [0.0, 0.0, 0.0])),
+    }
+    pre = {
+        active_id: state(midpoint(p_active, p_passive, 0.7), [round(u * 0.9, 4), 0.0, 0.0]),
+        passive_id: state(p_passive, [0.0, 0.0, 0.0]),
+    }
+    post = {
+        active_id: state([round(p_passive[0] - 0.03 + v1_post * 0.08, 4), p_active[1], p_active[2]], [round(v1_post, 4), 0.0, 0.0]),
+        passive_id: state([round(p_passive[0] + 0.04 + v2_post * 0.08, 4), p_passive[1], p_passive[2]], [round(v2_post, 4), 0.0, 0.0]),
+    }
+    final = {
+        active_id: state([round(vec3(post[active_id].get("position_m"))[0] + v1_post * 0.18, 4), p_active[1], p_active[2]], [round(v1_post * 0.75, 4), 0.0, 0.0]),
+        passive_id: state([round(vec3(post[passive_id].get("position_m"))[0] + v2_post * 0.18, 4), p_passive[1], p_passive[2]], [round(v2_post * 0.85, 4), 0.0, 0.0]),
+    }
+    return [
+        frame(0, 0.0, initial),
+        frame(1, 0.2, pre),
+        frame(2, 0.4, post, contacts=[contact(active_id, passive_id, 2, 0.4)]),
+        frame(3, 0.6, final),
+    ]
 
 
 def state(position: list[float], velocity: list[float], *, rotation: list[float] | None = None) -> dict[str, Any]:

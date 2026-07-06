@@ -1,0 +1,63 @@
+{
+  "schema_version": "harness_capability_v1",
+  "id": "mass_ratio_momentum_transfer",
+  "capability_type": "physics_constraint",
+  "stage_ids": [
+    "physics_control",
+    "runtime_artifact_collection",
+    "physics_verification"
+  ],
+  "description": "Validate one-dimensional rigid-body momentum transfer across a contact event using explicit mass ratio, restitution, and post-collision velocity evidence. The two-body collision is only a smoke family.",
+  "physical_assumptions": [
+    "The moving active body transfers momentum to a passive receiver through runtime contact.",
+    "Both bodies must declare positive mass values before runtime.",
+    "Passive receivers must start still and move only after contact.",
+    "Post-collision velocity ordering should match the declared mass ratio and restitution envelope.",
+    "Total kinetic energy should not grow beyond the restitution-bounded proxy envelope."
+  ],
+  "required_signals": [
+    "trajectory",
+    "contact_events",
+    "object_roles",
+    "mass_labels",
+    "initial_velocity",
+    "post_collision_velocity"
+  ],
+  "required_assets": [
+    "rigid body actors",
+    "colliders",
+    "physics materials",
+    "mass metadata"
+  ],
+  "verifier_rules": [
+    "Active and passive bodies declare positive mass.",
+    "Passive body initial velocity is near zero.",
+    "Expected active-passive contact is recorded.",
+    "Post-contact target velocity is in the declared direction and bounded range.",
+    "Velocity ordering follows heavy-to-light or light-to-heavy mass ratio expectations.",
+    "Kinetic energy does not exceed the allowed energy-gain ratio."
+  ],
+  "failure_taxonomy": [
+    "F1_missing_trajectory",
+    "F2_missing_contact_events",
+    "F3_invalid_initial_physics_state",
+    "F4_causality_violation",
+    "F5_passive_precontact_motion",
+    "F7_runtime_artifact_incomplete"
+  ],
+  "repair_suggestions": [
+    "Declare mass_kg on both colliding bodies.",
+    "Remove hidden initial velocity from passive receivers.",
+    "Export the active-passive contact event before checking post-collision velocities.",
+    "Use restitution and mass ratio to derive expected velocity bounds instead of hard-coded target motion."
+  ],
+  "smoke_cases": [
+    "cases/mass_ratio/heavy_striker_light_target.json",
+    "cases/mass_ratio/light_striker_heavy_target.json"
+  ],
+  "regression_cases": [
+    "cases/mass_ratio/negative_missing_mass_label.json",
+    "cases/mass_ratio/negative_wrong_velocity_order.json",
+    "cases/mass_ratio/negative_momentum_gain.json"
+  ]
+}

@@ -35,6 +35,7 @@ PUBLIC_SOURCE_PATHS = [
     "capabilities/rolling_friction_ball.json",
     "capabilities/sliding_crate_friction.json",
     "capabilities/force_field_wind_drift.json",
+    "capabilities/mass_ratio_momentum_transfer.json",
     "capabilities/capability_runtime_artifact_bridge.json",
     "capabilities/asset_intent_resolution.json",
     "capabilities/asset_runtime_binding_invocation.json",
