@@ -5,7 +5,7 @@
       "asset_id": "analytic_sphere_billiard_ball",
       "category": "physics_critical",
       "type": "static_mesh",
-      "tags": ["sphere", "ball", "billiard", "rolling_subject", "ramp_subject"],
+      "tags": ["sphere", "ball", "billiard", "rolling_subject", "rolling_body", "friction_subject", "ramp_subject"],
       "ue_path": "/Engine/BasicShapes/Sphere.Sphere",
       "collider": "sphere",
       "radius_m": 0.09,

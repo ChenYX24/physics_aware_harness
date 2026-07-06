@@ -28,6 +28,8 @@ PHYSICS_CRITICAL_ROLES = {
     "bouncing_body",
     "restitution_subject",
     "bounce_subject",
+    "rolling_body",
+    "friction_subject",
 }
 
 

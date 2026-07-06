@@ -1,0 +1,28 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "negative_no_deceleration",
+  "capability_id": "rolling_friction_ball",
+  "prompt": "A rigid ball rolls on a frictional floor but the runtime trace incorrectly shows almost no deceleration.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "gravity_m_s2": 9.81,
+    "initial_speed_m_s": 1.5,
+    "friction_dynamic": 0.35,
+    "expected_min_roll_distance_m": 0.22,
+    "expected_max_roll_distance_m": 0.95,
+    "expected_final_speed_max_m_s": 0.45,
+    "support": "floor"
+  },
+  "objects": [
+    {"id": "rolling_ball", "role": "rolling_body", "shape": "sphere", "radius_m": 0.12, "mass_kg": 0.45, "friction_dynamic": 0.35, "initial_position_m": [0.0, 0.0, 0.12], "initial_velocity_m_s": [1.5, 0.0, 0.0]},
+    {"id": "floor", "role": "support", "shape": "box", "friction_dynamic": 0.35, "initial_position_m": [0.0, 0.0, 0.0]}
+  ],
+  "active_objects": ["rolling_ball"],
+  "passive_objects": [],
+  "required_assets": ["rolling rigid body", "support collider", "friction physics material"],
+  "required_signals": ["trajectory", "contact_events", "initial_velocity", "material_friction_label"],
+  "verifier_expectation": {"status": "fail", "failure_type": "F4_causality_violation"},
+  "should_pass": false,
+  "negative_mode": "no_deceleration",
+  "notes": "Negative case: friction-labeled roll keeps too much speed or travels too far."
+}

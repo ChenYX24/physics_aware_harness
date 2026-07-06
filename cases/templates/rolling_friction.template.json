@@ -1,0 +1,30 @@
+{
+  "schema_version": "harness_case_template_v1",
+  "template_id": "rolling_friction",
+  "capability_id": "rolling_friction_ball",
+  "description": "Runnable template for friction-controlled rolling on a flat support surface.",
+  "fallback_supported": true,
+  "parameter_ranges": {
+    "initial_speed_m_s": {"type": "float", "min": 0.8, "max": 3.0},
+    "friction_dynamic": {"type": "float", "min": 0.08, "max": 0.65},
+    "ball_mass_kg": {"type": "float", "min": 0.15, "max": 2.0},
+    "gravity_m_s2": {"type": "float", "min": 9.81, "max": 9.81}
+  },
+  "object_count_ranges": {
+    "rolling_body": {"min": 1, "max": 1},
+    "support": {"min": 1, "max": 1}
+  },
+  "physics_critical_assets": ["rolling rigid body", "support collider", "friction physics material"],
+  "visual_only_assets": ["distance guide material"],
+  "camera_policy": {"default": "side_static", "allowed": ["side_static", "tracking_subject", "top_down"]},
+  "perturbation_policy": {"positive_ratio": 0.7, "vary": ["initial_speed_m_s", "friction_dynamic", "ball_mass_kg"], "lock": ["seed", "gravity_m_s2"]},
+  "expected_invariants": [
+    "initial_horizontal_velocity_required",
+    "support_contact_required",
+    "velocity_decay_required",
+    "friction_bounded_roll_distance"
+  ],
+  "negative_modes": ["no_deceleration", "excessive_friction_stop", "missing_contact"],
+  "seed_policy": {"deterministic": true, "record_parameter_sample": true},
+  "expected_artifact_contract": ["trajectory", "contact_events", "initial_velocity", "material_friction_label"]
+}

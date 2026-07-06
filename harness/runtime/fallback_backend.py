@@ -49,6 +49,8 @@ def trajectory_for_case(case_spec: dict[str, Any]) -> list[dict[str, Any]]:
         return projectile_trajectory(case_id, case_spec)
     if capability_id == "bounce_restitution_ball":
         return bounce_trajectory(case_id, case_spec)
+    if capability_id == "rolling_friction_ball":
+        return rolling_trajectory(case_id, case_spec)
     return []
 
 
@@ -253,6 +255,39 @@ def bounce_trajectory(case_id: str, case_spec: dict[str, Any]) -> list[dict[str,
     ]
 
 
+def rolling_trajectory(case_id: str, case_spec: dict[str, Any]) -> list[dict[str, Any]]:
+    negative_mode = str(case_spec.get("negative_mode") or "")
+    if not negative_mode and "no_deceleration" in case_id:
+        negative_mode = "no_deceleration"
+    if not negative_mode and "excessive_friction" in case_id:
+        negative_mode = "excessive_friction_stop"
+    object_specs = {str(obj.get("id")): obj for obj in case_spec.get("objects", []) if isinstance(obj, dict)}
+    body_id = next((oid for oid, obj in object_specs.items() if str(obj.get("role") or "") in {"rolling_body", "friction_subject", "rolling_subject"}), "rolling_ball")
+    support_id = next((oid for oid, obj in object_specs.items() if str(obj.get("role") or "") in {"support", "ground", "floor"}), "floor")
+    body_spec = object_specs.get(body_id) or {"initial_position_m": [0.0, 0.0, 0.12], "initial_velocity_m_s": [1.2, 0.0, 0.0]}
+    support_state = state(vec3((object_specs.get(support_id) or {}).get("initial_position_m") or [0.0, 0.0, 0.0]), [0, 0, 0])
+    p0 = vec3(body_spec.get("initial_position_m") or [0.0, 0.0, 0.12])
+    v0 = vec3(body_spec.get("initial_velocity_m_s") or [1.2, 0.0, 0.0])
+    expected = dict(case_spec.get("expected_physics") or {})
+    travel = float(expected.get("fallback_roll_distance_m") or midpoint_value(float(expected.get("expected_min_roll_distance_m") or 0.15), float(expected.get("expected_max_roll_distance_m") or 0.9)))
+    final_speed = min(abs(v0[0]) * 0.25, float(expected.get("expected_final_speed_max_m_s") or abs(v0[0]) * 0.4))
+    if negative_mode == "no_deceleration":
+        travel = float(expected.get("expected_max_roll_distance_m") or travel) + 0.35
+        final_speed = max(abs(v0[0]) * 0.92, float(expected.get("expected_final_speed_max_m_s") or 0.0) + 0.3)
+    elif negative_mode == "excessive_friction_stop":
+        travel = max(0.0, float(expected.get("expected_min_roll_distance_m") or travel) * 0.2)
+        final_speed = 0.0
+    initial = {support_id: support_state, body_id: state(p0, v0)}
+    mid = {support_id: support_state, body_id: state([round(p0[0] + travel * 0.65, 4), p0[1], p0[2]], [round(max(final_speed, abs(v0[0]) * 0.45), 4), 0.0, 0.0])}
+    final = {support_id: support_state, body_id: state([round(p0[0] + travel, 4), p0[1], p0[2]], [round(final_speed, 4), 0.0, 0.0])}
+    contacts = [] if negative_mode == "missing_contact" else [contact(body_id, support_id, 0, 0.0), contact(body_id, support_id, 1, 0.3), contact(body_id, support_id, 2, 0.6)]
+    return [
+        frame(0, 0.0, initial, contacts=contacts[:1]),
+        frame(1, 0.3, mid, contacts=contacts[1:2]),
+        frame(2, 0.6, final, contacts=contacts[2:]),
+    ]
+
+
 def state(position: list[float], velocity: list[float], *, rotation: list[float] | None = None) -> dict[str, Any]:
     return {"position_m": position, "velocity_m_s": velocity, "rotation_deg": rotation or [0, 0, 0]}
 
@@ -267,6 +302,10 @@ def clone_states(states: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]
 
 def midpoint(a: list[float], b: list[float], fraction: float) -> list[float]:
     return [round(a[idx] + (b[idx] - a[idx]) * fraction, 4) for idx in range(3)]
+
+
+def midpoint_value(a: float, b: float) -> float:
+    return round(a + (b - a) * 0.5, 4)
 
 
 def vec3(value: Any) -> list[float]:

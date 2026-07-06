@@ -1,0 +1,28 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "negative_missing_contact",
+  "capability_id": "rolling_friction_ball",
+  "prompt": "A rigid ball rolls across a floor, but the runtime artifact omits support contact evidence.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "gravity_m_s2": 9.81,
+    "initial_speed_m_s": 1.4,
+    "friction_dynamic": 0.3,
+    "expected_min_roll_distance_m": 0.25,
+    "expected_max_roll_distance_m": 1.05,
+    "expected_final_speed_max_m_s": 0.45,
+    "support": "floor"
+  },
+  "objects": [
+    {"id": "rolling_ball", "role": "rolling_body", "shape": "sphere", "radius_m": 0.12, "mass_kg": 0.45, "friction_dynamic": 0.3, "initial_position_m": [0.0, 0.0, 0.12], "initial_velocity_m_s": [1.4, 0.0, 0.0]},
+    {"id": "floor", "role": "support", "shape": "box", "friction_dynamic": 0.3, "initial_position_m": [0.0, 0.0, 0.0]}
+  ],
+  "active_objects": ["rolling_ball"],
+  "passive_objects": [],
+  "required_assets": ["rolling rigid body", "support collider", "friction physics material"],
+  "required_signals": ["trajectory", "contact_events", "initial_velocity", "material_friction_label"],
+  "verifier_expectation": {"status": "fail", "failure_type": "F2_missing_contact_events"},
+  "should_pass": false,
+  "negative_mode": "missing_contact",
+  "notes": "Negative case: rolling motion without support contact evidence is rejected."
+}

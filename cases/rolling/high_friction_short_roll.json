@@ -1,0 +1,27 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "high_friction_short_roll",
+  "capability_id": "rolling_friction_ball",
+  "prompt": "A rigid ball rolls on a high-friction floor and stops after a short distance.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "gravity_m_s2": 9.81,
+    "initial_speed_m_s": 1.2,
+    "friction_dynamic": 0.58,
+    "expected_min_roll_distance_m": 0.08,
+    "expected_max_roll_distance_m": 0.42,
+    "expected_final_speed_max_m_s": 0.28,
+    "support": "floor"
+  },
+  "objects": [
+    {"id": "rolling_ball", "role": "rolling_body", "shape": "sphere", "radius_m": 0.12, "mass_kg": 0.5, "friction_dynamic": 0.58, "initial_position_m": [0.0, 0.0, 0.12], "initial_velocity_m_s": [1.2, 0.0, 0.0]},
+    {"id": "floor", "role": "support", "shape": "box", "friction_dynamic": 0.58, "initial_position_m": [0.0, 0.0, 0.0]}
+  ],
+  "active_objects": ["rolling_ball"],
+  "passive_objects": [],
+  "required_assets": ["rolling rigid body", "support collider", "friction physics material"],
+  "required_signals": ["trajectory", "contact_events", "initial_velocity", "material_friction_label"],
+  "verifier_expectation": {"status": "pass"},
+  "should_pass": true,
+  "notes": "Positive high-friction rolling case: short distance and low final speed."
+}

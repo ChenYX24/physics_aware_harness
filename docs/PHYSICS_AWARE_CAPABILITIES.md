@@ -31,6 +31,9 @@ agent-facing docs should use:
 - `bounce_restitution_ball`: a concrete restitution validator that checks descent,
   support contact, rebound height, and energy-envelope violations. It is a
   reusable restitution invariant; the ball drop is only the smoke family.
+- `rolling_friction_ball`: a concrete rolling-friction validator that checks
+  support contact, speed decay, and friction-bounded travel distance. The rolling
+  ball is only the smoke family.
 
 This keeps the harness useful beyond billiards: the same contact-causality
 contract can verify pool, bowling, crate impacts, and other contact-driven scenes.

@@ -17,6 +17,7 @@ class HarnessCapabilitySchemaTests(unittest.TestCase):
         self.assertIn("physics_property_constraint_validation", ids)
         self.assertIn("asset_runtime_binding_invocation", ids)
         self.assertIn("bounce_restitution_ball", ids)
+        self.assertIn("rolling_friction_ball", ids)
 
 
 if __name__ == "__main__":

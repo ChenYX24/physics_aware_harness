@@ -1,0 +1,52 @@
+{
+  "schema_version": "harness_capability_v1",
+  "id": "rolling_friction_ball",
+  "description": "Validate friction-controlled rolling motion on a flat support surface. The smoke family uses a ball with initial horizontal velocity, but the invariant applies to any rolling rigid body with contact friction.",
+  "physical_assumptions": [
+    "The rolling body starts with a declared horizontal velocity.",
+    "The rolling body remains in contact with a support surface.",
+    "Dynamic or rolling friction should reduce speed over time.",
+    "Travel distance should stay inside the expected friction response envelope."
+  ],
+  "required_signals": [
+    "trajectory",
+    "contact_events",
+    "initial_velocity",
+    "material_friction_label",
+    "support_contact"
+  ],
+  "required_assets": [
+    "rolling rigid body",
+    "support collider",
+    "physics material with friction"
+  ],
+  "verifier_rules": [
+    "Initial horizontal velocity is non-zero.",
+    "Support contact exists during rolling.",
+    "Horizontal speed decays by the expected amount.",
+    "Forward displacement is within the friction-bounded distance range.",
+    "Rolling body does not reverse direction without an external impulse."
+  ],
+  "failure_taxonomy": [
+    "F1_missing_trajectory",
+    "F2_missing_contact_events",
+    "F3_invalid_initial_physics_state",
+    "F4_causality_violation",
+    "F7_runtime_artifact_incomplete"
+  ],
+  "repair_suggestions": [
+    "Declare initial horizontal velocity and support surface contact.",
+    "Bind friction material metadata to the rolling body and surface.",
+    "Tune friction or solver substeps only after trajectory/contact evidence exists.",
+    "Use an external force capability if motion accelerates or reverses."
+  ],
+  "smoke_cases": [
+    "cases/rolling/medium_friction_roll.json",
+    "cases/rolling/high_friction_short_roll.json"
+  ],
+  "regression_cases": [
+    "cases/rolling/negative_no_deceleration.json",
+    "cases/rolling/negative_excessive_friction_stop.json",
+    "cases/rolling/negative_missing_contact.json"
+  ]
+}

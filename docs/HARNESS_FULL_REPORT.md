@@ -94,6 +94,7 @@ assets/*.local.json
 | `ramp_sliding_friction` | 当前 ramp 分支已可用 | 物体沿斜面下滑，z 下降，位移符合 friction-aware 范围。 |
 | `projectile_gravity_motion` | 当前分支已可用 | 抛体必须上升到 apex、随后下降、向前位移并产生落地 contact。 |
 | `bounce_restitution_ball` | 当前分支已可用 | 物体必须先下降、产生 support contact，再按 restitution 约束反弹高度，拒绝无接触反弹和能量增益。 |
+| `rolling_friction_ball` | 当前分支已可用 | 物体必须有初始水平速度、保持 support contact、速度衰减，滚动距离符合 friction-bounded envelope。 |
 
 注意：如果从 `main` 使用，`ramp_sliding_friction` 需要先合并当前 ramp 分支。
 
@@ -378,6 +379,12 @@ python3.13 scripts/harness_run_case_batch.py cases/generated/bounce_seed47 --bac
 # 10 cases: 7 positive pass, 3 negative caught, unexpected 0
 ```
 
+```bash
+python3.13 scripts/harness_generate_cases.py --suite rolling --count 10 --seed 48 --out cases/generated/rolling_seed48
+python3.13 scripts/harness_run_case_batch.py cases/generated/rolling_seed48 --backend fallback
+# 10 cases: 7 positive pass, 3 negative caught, unexpected 0
+```
+
 静态资产解析：
 
 - 台球三角阵 case：8/8 physics-critical assets resolved。
@@ -405,6 +412,7 @@ TODO：
 | P0 | 掉落/上抛/抛体 | `projectile_gravity_motion` | 当前分支已有 fallback/verifier；UE TODO |
 | P0 | 斜面滚动/下滑/上滚 | `ramp_sliding_friction` | ramp 分支已有 fallback/verifier；UE TODO |
 | P1 | 皮球/刚体反弹 | `bounce_restitution_ball` | 当前分支已有 fallback/verifier；UE restitution material/contact TODO |
+| P1 | 滚动摩擦/停距 | `rolling_friction_ball` | 当前分支已有 fallback/verifier；UE rolling friction material/contact TODO |
 | P1 | 牛顿摆 | `constraint_momentum_transfer` | TODO |
 | P1 | 弹簧弹射 | `spring_launch_motion` | TODO |
 | P1 | 绳子/蹦极弹性 | `elastic_rope_bungee` | TODO |

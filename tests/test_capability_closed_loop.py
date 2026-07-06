@@ -25,6 +25,7 @@ class CapabilityClosedLoopTests(unittest.TestCase):
         self.assertTrue(self.planner.profile.has("rigid_body_gravity_collision"))
         self.assertTrue(self.planner.profile.has("sequential_contact_propagation"))
         self.assertTrue(self.planner.profile.has("bounce_restitution_ball"))
+        self.assertTrue(self.planner.profile.has("rolling_friction_ball"))
 
     def test_billiards_prompt_maps_to_generic_contact_causality(self) -> None:
         plan = self.planner.plan("A pool table with a cue ball hitting passive target balls.")

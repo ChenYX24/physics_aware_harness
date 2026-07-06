@@ -1671,9 +1671,60 @@
         "Post-contact rebound height is not too low for restitution.",
         "Post-contact rebound height does not exceed the allowed energy envelope."
       ]
+    },
+    {
+      "confidence": 0.95,
+      "description": "Validate friction-controlled rolling motion on a flat support surface. The smoke family uses a ball with initial horizontal velocity, but the invariant applies to any rolling rigid body with contact friction.",
+      "evidence": [
+        {
+          "matched_terms": [
+            "rolling",
+            "friction",
+            "contact"
+          ],
+          "source": "capabilities/rolling_friction_ball.json:4",
+          "text": "Validate friction-controlled rolling motion on a flat support surface."
+        }
+      ],
+      "evidence_count": 1,
+      "failure_modes": [
+        "F1_missing_trajectory",
+        "F2_missing_contact_events",
+        "F3_invalid_initial_physics_state",
+        "F4_causality_violation",
+        "F7_runtime_artifact_incomplete"
+      ],
+      "id": "rolling_friction_ball",
+      "iteration_moves": [
+        "Inspect support contact events before interpreting rolling distance.",
+        "Compare initial and final horizontal speed against friction labels.",
+        "Reject too-long travel or too-short travel before tuning material properties."
+      ],
+      "pattern_type": "physics_property_capability",
+      "prompt_moves": [
+        "Identify rolling body, support surface, initial horizontal velocity, friction, and expected distance envelope."
+      ],
+      "runtime_contract": [
+        "Rolling body starts with declared horizontal velocity.",
+        "Support contact is exported during rolling.",
+        "Horizontal speed decays and travel distance remains friction-bounded."
+      ],
+      "stage_ids": [
+        "case_spec_compilation",
+        "physics_control",
+        "runtime_artifact_collection",
+        "physics_verification"
+      ],
+      "title": "Rolling Friction Validation",
+      "verifier_checks": [
+        "Initial horizontal velocity is non-zero.",
+        "Support contact exists during rolling.",
+        "Horizontal speed decays.",
+        "Forward displacement is within the expected friction response envelope."
+      ]
     }
   ],
-  "capability_count": 15,
+  "capability_count": 16,
   "iteration_playbook": [
     {
       "input": "README/docs, tests, runtime code, and public config",

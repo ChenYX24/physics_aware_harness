@@ -172,6 +172,7 @@ old `billiard_causality_compiler` id remains only as a compatibility alias.
 | `ramp_sliding_friction` | Rolling/sliding bodies on an inclined plane must respond to gravity and friction. |
 | `projectile_gravity_motion` | Thrown bodies must show launch, apex/descent, forward displacement, and landing/contact evidence. |
 | `bounce_restitution_ball` | Bouncing rigid bodies must descend, contact support, and rebound within a restitution-bounded height envelope. |
+| `rolling_friction_ball` | Rolling rigid bodies must maintain support contact, slow down, and travel within a friction-bounded distance envelope. |
 
 The billiards cases include the old failure mode that produced plausible-looking
 videos by giving passive balls hidden velocity. The verifier rejects that:

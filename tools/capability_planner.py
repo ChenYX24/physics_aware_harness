@@ -57,6 +57,12 @@ CAPABILITY_RULES: tuple[CapabilityRule, ...] = (
         terms=("bounce", "bouncing", "rebound", "restitution", "drop and bounce", "弹跳", "反弹", "恢复系数", "落地反弹", "皮球反弹"),
         priority=83,
     ),
+    CapabilityRule(
+        capability_id="rolling_friction_ball",
+        case_family="rolling_friction",
+        terms=("rolling friction", "rolls on a floor", "rolling distance", "roll and stop", "frictional rolling", "滚动摩擦", "滚动距离", "滚动停止", "地面滚动", "球滚动"),
+        priority=82,
+    ),
 )
 
 
