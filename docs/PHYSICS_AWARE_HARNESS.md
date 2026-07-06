@@ -126,7 +126,31 @@ python3.13 scripts/harness_build_static_scene.py \
 - 初始状态是否有重叠或支撑穿透；
 - camera plan 是否存在。
 
-`runtime_actor_placement_compilation` 是下一层 contract：它应读取 `scene_layout.json` 和 asset resolution，在 UE 中创建 actor、设置 transform、collider、mass、material、collision profile 和 camera rig。当前已有 capability contract；真实 UE actor placement 实现仍需要继续接 runner。
+`runtime_actor_placement_compilation` 是下一层 runtime preflight：它读取 `scene_layout.json` 和 asset resolution，生成 UE/runner 可消费的 actor bindings、camera bindings 和 physics graph bindings。当前 compiler 已可用；下一步是让真实 UE runner 直接消费 `runtime_actor_placement.json` 来创建 actor、设置 transform、collider、mass、material、collision profile 和 camera rig。
+
+入口：
+
+```bash
+python3.13 scripts/harness_compile_actor_placement.py \
+  cases/bowling/bowling_pin_chain_contact.json \
+  --output-dir runs/actor_placement/bowling_pin_chain_contact
+```
+
+输出：
+
+- `asset_resolution.json`
+- `scene_layout.json`
+- `static_scene_report.json`
+- `runtime_actor_placement.json`
+- `runtime_actor_placement_report.json`
+
+当前已能检查：
+
+- 每个 physics-critical object 是否有 runtime actor binding；
+- runtime actor id 是否唯一稳定；
+- selected UE asset 或 analytic proxy 是否明确；
+- collider / mass / collision profile 是否满足 runtime 绑定；
+- collision graph 和 camera bindings 是否可被 runtime 读取。
 
 ## Stage 4: Runtime Backend
 

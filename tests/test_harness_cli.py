@@ -144,6 +144,7 @@ class HarnessCliTests(unittest.TestCase):
             "harness_run_case_batch.py",
             "harness_verify_batch.py",
             "harness_build_static_scene.py",
+            "harness_compile_actor_placement.py",
         ):
             with self.subTest(script=script):
                 result = subprocess.run([sys.executable, str(ROOT / "scripts" / script), "--help"], cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

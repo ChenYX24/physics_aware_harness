@@ -85,6 +85,14 @@ python3.13 scripts/harness_build_static_scene.py \
   --output-dir runs/static_scene/low_speed_single_contact
 ```
 
+Compile deterministic runtime actor bindings before UE execution:
+
+```bash
+python3.13 scripts/harness_compile_actor_placement.py \
+  cases/bowling/bowling_pin_chain_contact.json \
+  --output-dir runs/actor_placement/bowling_pin_chain_contact
+```
+
 Run a batch:
 
 ```bash
