@@ -23,7 +23,7 @@ TEMPLATE_SCHEMA_VERSION = "harness_case_template_v1"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate parameterized harness case specs from a template.")
     parser.add_argument("--template", help="Path to cases/templates/*.template.json")
-    parser.add_argument("--suite", choices=["billiards", "domino", "falling", "ramp", "projectile", "bounce", "rolling", "sliding", "wind", "mass_ratio", "basic_physics"], help="Named case suite shortcut.")
+    parser.add_argument("--suite", choices=["billiards", "domino", "falling", "ramp", "projectile", "bounce", "rolling", "sliding", "wind", "mass_ratio", "spin", "basic_physics"], help="Named case suite shortcut.")
     parser.add_argument("--num-cases", type=int, help="Number of case specs to generate.")
     parser.add_argument("--count", type=int, help="Alias for --num-cases.")
     parser.add_argument("--seed", type=int, default=0, help="Deterministic generation seed.")
@@ -97,6 +97,7 @@ def template_for_suite(suite: str | None) -> str | None:
         "sliding": "cases/templates/sliding_crate_friction.template.json",
         "wind": "cases/templates/wind_balloon_drift.template.json",
         "mass_ratio": "cases/templates/mass_ratio_collision.template.json",
+        "spin": "cases/templates/angular_damping_spin.template.json",
         "basic_physics": "cases/templates/falling_blocks.template.json",
     }[suite]
 
@@ -140,6 +141,8 @@ def generate_case(template: dict[str, Any], rng: random.Random, *, index: int, s
         return wind_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
     if template_id == "mass_ratio_collision":
         return mass_ratio_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
+    if template_id == "angular_damping_spin":
+        return spin_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
     raise ValueError(f"unsupported runnable template: {template_id}")
 
 
@@ -646,6 +649,55 @@ def mass_ratio_case(template: dict[str, Any], params: dict[str, Any], *, index: 
     return add_m2_case_contract(case, template, params)
 
 
+def spin_case(template: dict[str, Any], params: dict[str, Any], *, index: int, seed: int, should_pass: bool, negative_mode: str | None) -> dict[str, Any]:
+    initial_speed = float(params["initial_angular_speed_deg_s"])
+    damping = float(params["angular_damping"])
+    duration = float(params["spin_duration_s"])
+    final_speed = initial_speed * math.exp(-damping * duration)
+    speed_drop = initial_speed - final_speed
+    rotation_delta = (initial_speed - final_speed) / max(damping, 1e-6)
+    expected = {
+        "coordinate_system": "z_up",
+        "spin_axis": "z",
+        "initial_angular_speed_deg_s": round(initial_speed, 4),
+        "angular_damping": round(damping, 4),
+        "spin_duration_s": round(duration, 4),
+        "expected_final_angular_speed_max_deg_s": round(final_speed * 1.25 + 15.0, 4),
+        "expected_min_angular_speed_drop_deg_s": round(max(10.0, speed_drop * 0.55), 4),
+        "expected_min_rotation_delta_deg": round(max(30.0, rotation_delta * 0.45), 4),
+    }
+    objects = [
+        {
+            "id": "spinner",
+            "role": "spinning_body",
+            "shape": "sphere",
+            "radius_m": 0.16,
+            "mass_kg": params["body_mass_kg"],
+            "angular_damping": damping,
+            "initial_position_m": [0.0, 0.0, 0.2],
+            "initial_velocity_m_s": [0.0, 0.0, 0.0],
+            "initial_rotation_deg": [0.0, 0.0, 0.0],
+            "initial_angular_velocity_deg_s": [0.0, 0.0, round(initial_speed, 4)],
+        }
+    ]
+    if negative_mode == "missing_angular_velocity_label":
+        expected.pop("initial_angular_speed_deg_s", None)
+        expected.pop("angular_damping", None)
+        objects[0].pop("initial_angular_velocity_deg_s", None)
+        objects[0].pop("angular_damping", None)
+    case = base_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
+    case.update(
+        {
+            "prompt": f"Generated angular-damping case: a rigid body spins at {initial_speed:.1f} deg/s with damping {damping:.2f}.",
+            "expected_physics": expected,
+            "objects": objects,
+            "active_objects": ["spinner"],
+            "passive_objects": [],
+        }
+    )
+    return add_m2_case_contract(case, template, params)
+
+
 def collision_speeds(striker_mass: float, target_mass: float, initial_speed: float, restitution: float) -> tuple[float, float]:
     denominator = max(striker_mass + target_mass, 1e-9)
     striker_post = ((striker_mass - restitution * target_mass) / denominator) * initial_speed
@@ -664,6 +716,7 @@ def add_m2_case_contract(case: dict[str, Any], template: dict[str, Any], params:
             "position_m": obj.get("initial_position_m", [0.0, 0.0, 0.0]),
             "velocity_m_s": obj.get("initial_velocity_m_s", [0.0, 0.0, 0.0]),
             "rotation_deg": obj.get("initial_rotation_deg", obj.get("initial_rotation", [0.0, 0.0, 0.0])),
+            "angular_velocity_deg_s": obj.get("initial_angular_velocity_deg_s", [0.0, 0.0, 0.0]),
         }
     case.update(
         {
@@ -726,6 +779,8 @@ def expected_event_for(case: dict[str, Any]) -> dict[str, Any]:
         return {"type": "force_field_wind_drift", "wind_vector_m_s": expected_physics.get("wind_vector_m_s")}
     if capability_id == "mass_ratio_momentum_transfer":
         return {"type": "mass_ratio_momentum_transfer", "collision_graph": expected_physics.get("collision_graph", []), "expected_velocity_order": expected_physics.get("expected_velocity_order")}
+    if capability_id == "angular_damping_spin_decay":
+        return {"type": "angular_damping_spin_decay", "spin_axis": expected_physics.get("spin_axis", "z")}
     return {"type": "trajectory_event"}
 
 
@@ -750,6 +805,8 @@ def required_signals_for(capability_id: str) -> list[str]:
         return ["trajectory", "wind_vector_label", "force_field_label"]
     if capability_id == "mass_ratio_momentum_transfer":
         return ["trajectory", "contact_events", "mass_labels", "post_collision_velocity"]
+    if capability_id == "angular_damping_spin_decay":
+        return ["trajectory", "rotation_trace", "angular_velocity", "angular_damping_label"]
     return ["trajectory"]
 
 
@@ -761,6 +818,8 @@ def expected_failure_for(negative_mode: str | None) -> str:
     if negative_mode in {"missing_wind_label"}:
         return "F3_invalid_initial_physics_state"
     if negative_mode in {"missing_mass_label"}:
+        return "F3_invalid_initial_physics_state"
+    if negative_mode in {"missing_angular_velocity_label"}:
         return "F3_invalid_initial_physics_state"
     return "F4_causality_violation"
 

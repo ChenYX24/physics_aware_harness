@@ -1845,9 +1845,59 @@
           "text": "Mass-ratio momentum transfer requires mass labels, contact events, post-collision velocity evidence, and an energy-gain bound."
         }
       ]
+    },
+    {
+      "id": "angular_damping_spin_decay",
+      "title": "Angular Damping Spin Decay",
+      "pattern_type": "physics_constraint",
+      "stage_ids": [
+        "physics_control",
+        "runtime_artifact_collection",
+        "physics_verification"
+      ],
+      "description": "Validate rotational damping for spinning rigid bodies using explicit angular velocity, angular damping labels, rotation trace, and monotonic spin-decay evidence. The spinning sphere is only a smoke family.",
+      "prompt_moves": [
+        "Spin is a structured angular-velocity control, not a visual-only rotation animation.",
+        "Declare initial angular velocity, angular damping, and spin axis before runtime.",
+        "Use rotation trace and angular_velocity evidence to validate decay instead of trusting rendered motion blur."
+      ],
+      "runtime_contract": [
+        "trajectory",
+        "rotation_trace",
+        "angular_velocity",
+        "angular_damping_label",
+        "object_roles"
+      ],
+      "verifier_checks": [
+        "Initial angular velocity and angular damping labels are present.",
+        "Trajectory contains angular_velocity_deg_s for the spinning body.",
+        "Angular speed decays by at least the expected amount.",
+        "Final angular speed stays below the expected upper bound.",
+        "Angular speed does not increase without an external torque label.",
+        "Rotation delta is large enough to prove the body actually spun."
+      ],
+      "failure_modes": [
+        "F1_missing_trajectory",
+        "F3_invalid_initial_physics_state",
+        "F4_causality_violation",
+        "F7_runtime_artifact_incomplete"
+      ],
+      "iteration_moves": [
+        "Move spin controls into initial_angular_velocity_deg_s and expected_physics.angular_damping.",
+        "Bind spinning bodies as physics-critical rigid bodies with inertia/damping metadata.",
+        "Use negative cases for missing labels, no decay, and unexplained angular speed gain."
+      ],
+      "confidence": 0.9,
+      "evidence_count": 5,
+      "evidence": [
+        {
+          "source": "capabilities/angular_damping_spin_decay.json",
+          "text": "Angular damping requires explicit angular velocity labels, rotation trace, and monotonic spin-decay evidence."
+        }
+      ]
     }
   ],
-  "capability_count": 22,
+  "capability_count": 23,
   "iteration_playbook": [
     {
       "input": "README/docs, tests, runtime code, and public config",
@@ -1891,12 +1941,12 @@
     {
       "step": 1,
       "name": "Compile object graph",
-      "contract": "Create active driver bodies and passive receiver bodies with stable ids."
+      "contract": "Create active driver or impactor bodies and passive receiver bodies with stable ids."
     },
     {
       "step": 2,
       "name": "Bind physical assets",
-      "contract": "Use colliders, mass, rigid body, material, and no-overlap semantics for every physics-critical object."
+      "contract": "Use colliders, mass, rigid body, material, collision profile, and no-overlap semantics for every physics-critical object."
     },
     {
       "step": 3,

@@ -1,0 +1,34 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "negative_missing_angular_velocity_label",
+  "capability_id": "angular_damping_spin_decay",
+  "prompt": "A body rotates visually, but the case spec does not declare initial angular velocity or damping labels.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "spin_axis": "z",
+    "spin_duration_s": 1.0,
+    "expected_final_angular_speed_max_deg_s": 260.0,
+    "expected_min_angular_speed_drop_deg_s": 350.0,
+    "expected_min_rotation_delta_deg": 250.0
+  },
+  "objects": [
+    {
+      "id": "spinner",
+      "role": "spinning_body",
+      "shape": "sphere",
+      "radius_m": 0.16,
+      "mass_kg": 0.8,
+      "initial_position_m": [0.0, 0.0, 0.2],
+      "initial_velocity_m_s": [0.0, 0.0, 0.0],
+      "initial_rotation_deg": [0.0, 0.0, 0.0]
+    }
+  ],
+  "active_objects": ["spinner"],
+  "passive_objects": [],
+  "required_assets": ["spinning_rigid_body", "angular_damping_metadata", "collider"],
+  "required_signals": ["trajectory", "rotation_trace", "angular_velocity", "angular_damping_label"],
+  "verifier_expectation": {"status": "fail", "failure_type": "F3_invalid_initial_physics_state"},
+  "should_pass": false,
+  "negative_mode": "missing_angular_velocity_label",
+  "notes": "Regression: visible rotation without structured angular velocity control is invalid."
+}

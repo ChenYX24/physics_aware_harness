@@ -121,6 +121,12 @@ capabilities. For a contact/collision prompt, the agent should expect:
 - `physics_verifier_truth_gate`: machine-readable pass/fail and diagnosis.
 - `dataset_artifact_packaging`: readiness-gated dataset package.
 
+Physical-property prompts should map to reusable constraint capabilities, not
+object templates. Examples: `rolling_friction_ball` for rolling stop distance,
+`sliding_crate_friction` for static/dynamic friction, `mass_ratio_momentum_transfer`
+for post-contact velocity ordering, and `angular_damping_spin_decay` for angular
+velocity / damping / rotation-trace checks.
+
 ## Generic Contact Causality Rule
 
 Do not use `billiard_causality_compiler` for new work. It is a deprecated alias

@@ -150,9 +150,12 @@ Verifier 不检查“画面是否动了”，而检查 capability invariants：
 
 | Capability | Invariant |
 |---|---|
-| billiards | passive targets must not move before runtime contact |
-| domino | chain activation must follow predecessor contact order |
-| falling | object must descend under gravity and reach support/contact |
+| `rigid_body_contact_causality` | passive rigid bodies must not move before runtime contact evidence |
+| `sequential_contact_propagation` | chain activation must follow predecessor contact order |
+| `rigid_body_gravity_collision` | object must descend under gravity and reach support/contact |
+| `physics_property_constraint_validation` | mass/friction/restitution/damping/gravity controls must be typed, bounded, and echoed by runtime artifacts |
+| `angular_damping_spin_decay` | angular velocity and damping must be explicit, and spin speed must decay without unexplained gain |
+| `asset_runtime_binding_invocation` | physics-critical assets must bind colliders, mass/material metadata, collision profile, and runtime actor ids |
 
 验证命令：
 

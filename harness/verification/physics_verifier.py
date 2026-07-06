@@ -15,6 +15,7 @@ from harness.verification.projectile_verifier import verify_projectile
 from harness.verification.ramp_verifier import verify_ramp
 from harness.verification.rolling_verifier import verify_rolling
 from harness.verification.sliding_verifier import verify_sliding
+from harness.verification.spin_verifier import verify_spin
 from harness.verification.wind_verifier import verify_wind
 
 
@@ -82,6 +83,8 @@ class PhysicsVerifier:
             failure_type, first_failure, evidence = verify_wind(case_spec, trajectory)
         elif capability_id == "mass_ratio_momentum_transfer":
             failure_type, first_failure, evidence = verify_mass_ratio(case_spec, trajectory)
+        elif capability_id == "angular_damping_spin_decay":
+            failure_type, first_failure, evidence = verify_spin(case_spec, trajectory)
         else:
             failure_type, first_failure, evidence = "F7_runtime_artifact_incomplete", {"object_id": capability_id, "frame": 0, "time": 0, "metric": "unsupported_capability", "value": capability_id}, []
         return verifier_report(

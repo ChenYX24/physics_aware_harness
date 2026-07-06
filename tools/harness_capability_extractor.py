@@ -36,6 +36,7 @@ PUBLIC_SOURCE_PATHS = [
     "capabilities/sliding_crate_friction.json",
     "capabilities/force_field_wind_drift.json",
     "capabilities/mass_ratio_momentum_transfer.json",
+    "capabilities/angular_damping_spin_decay.json",
     "capabilities/capability_runtime_artifact_bridge.json",
     "capabilities/asset_intent_resolution.json",
     "capabilities/asset_runtime_binding_invocation.json",
@@ -588,6 +589,51 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         ),
     ),
     CapabilitySpec(
+        capability_id="angular_damping_spin_decay",
+        title="Angular Damping Spin Decay",
+        pattern_type="physics_constraint",
+        stage_ids=("physics_control", "runtime_artifact_collection", "physics_verification"),
+        keywords=(
+            "angular damping",
+            "angular velocity",
+            "rotation trace",
+            "spin decay",
+            "spinning body",
+            "rotational damping",
+            "角阻尼",
+            "角速度",
+            "旋转衰减",
+            "自转",
+        ),
+        description="Validate rotational damping for spinning rigid bodies using explicit angular velocity, angular damping labels, rotation trace, and monotonic spin-decay evidence.",
+        prompt_moves=(
+            "Represent spin as angular velocity and damping controls, not visual-only rotation.",
+            "Declare spin axis, initial angular velocity, angular damping, and expected decay envelope.",
+            "Use seed/template generation to sweep damping and initial spin without changing object identity.",
+        ),
+        runtime_contract=(
+            "Trajectory includes angular_velocity_deg_s and rotation_deg for the spinning body.",
+            "Case spec includes expected_physics.initial_angular_speed_deg_s and expected_physics.angular_damping.",
+            "Runtime does not allow angular speed gain without an explicit external torque label.",
+        ),
+        verifier_checks=(
+            "Initial angular velocity and angular damping labels exist.",
+            "Angular speed decays by the declared minimum amount.",
+            "Final angular speed stays below the expected upper bound.",
+            "Rotation delta proves the body actually spun.",
+        ),
+        failure_modes=(
+            "Spin is only a visual rotation and no angular_velocity trace exists.",
+            "Angular damping is declared but speed does not decay.",
+            "Angular speed increases without external torque.",
+        ),
+        iteration_moves=(
+            "Move spin controls into initial_angular_velocity_deg_s and expected_physics.angular_damping.",
+            "Bind spinning bodies as physics-critical assets with inertia/damping metadata.",
+            "Add negative cases for missing labels, no decay, and unexplained spin gain.",
+        ),
+    ),
+    CapabilitySpec(
         capability_id="dataset_artifact_packaging",
         title="Verified Multi-View Dataset Packaging",
         pattern_type="FLOW",
@@ -972,6 +1018,7 @@ def render_markdown_report(profile: dict[str, Any]) -> str:
     lines.append("| Contact causality, including billiards | `rigid_body_contact_causality` | Active bodies move first; passive bodies move only after contact propagation |")
     lines.append("| Falling blocks | `rigid_body_gravity_collision` | Gravity/collision are enabled, z decreases, and support contact is recorded |")
     lines.append("| Domino chain | `sequential_contact_propagation` | First domino is actively triggered; downstream dominoes tip through ordered adjacent contacts |")
+    lines.append("| Spin decay | `angular_damping_spin_decay` | Angular velocity and damping are explicit, and angular speed decays without unexplained gain |")
     lines.extend(["", "## Iteration Playbook", ""])
     for phase in profile["iteration_playbook"]:
         lines.append(f"- **{phase['phase']}**: {phase['rule']}")

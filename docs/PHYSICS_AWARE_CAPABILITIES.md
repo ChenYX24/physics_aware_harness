@@ -54,6 +54,9 @@ agent-facing docs should use:
   checks mass labels, contact evidence, post-collision velocity ordering, and
   restitution-bounded energy gain. The two-body collision is only the smoke
   family.
+- `angular_damping_spin_decay`: a concrete rotational-damping validator that
+  checks angular velocity labels, angular damping, spin speed decay, and
+  rotation trace evidence. The spinning sphere is only the smoke family.
 
 This keeps the harness useful beyond billiards: the same contact-causality
 contract can verify pool, bowling, crate impacts, and other contact-driven scenes.
@@ -318,12 +321,12 @@ Evidence:
 
 ## Rigid-Body Contact Reference Workflow
 
-1. **Compile object graph**: Create one active cue/driver body and a passive target rack with stable ids.
-2. **Bind physical assets**: Use sphere or sphere-like colliders with explicit radius/diameter semantics and no t=0 overlap.
-3. **Set physics controls**: Driver velocity or impulse encodes requested speed; target initial velocities are zero.
-4. **Execute runtime**: Runtime, not the LLM, produces target motion through contact events.
-5. **Verify causality**: Reject if passive targets move above threshold before first active contact.
-6. **Iterate controls**: Tune speed, restitution, friction, spacing, and solver substeps only after causality passes.
+1. **Compile object graph**: Create active driver/impactor bodies and passive receiver bodies with stable ids.
+2. **Bind physical assets**: Use colliders, mass, rigid body, material, collision profile, and no-overlap semantics for every physics-critical object.
+3. **Set physics controls**: Driver velocity or impulse encodes requested action; passive bodies start below velocity epsilon.
+4. **Execute runtime**: Runtime, not the LLM, produces passive motion through contact events.
+5. **Verify causality**: Reject if passive bodies move above threshold before first causal contact.
+6. **Iterate controls**: Tune speed, restitution, friction, spacing, mass ratio, and solver substeps only after causality passes.
 
 ## Closed-Loop Demo Cases
 
@@ -332,6 +335,7 @@ Evidence:
 | Contact causality, including billiards | `rigid_body_contact_causality` | Active bodies move first; passive bodies move only after contact propagation |
 | Falling blocks | `rigid_body_gravity_collision` | Gravity/collision are enabled, z decreases, and support contact is recorded |
 | Domino chain | `sequential_contact_propagation` | First domino is actively triggered; downstream dominoes tip through ordered adjacent contacts |
+| Spin decay | `angular_damping_spin_decay` | Angular velocity and damping are explicit, and angular speed decays without unexplained gain |
 
 ## Iteration Playbook
 

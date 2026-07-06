@@ -1,0 +1,38 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "negative_spin_gain",
+  "capability_id": "angular_damping_spin_decay",
+  "prompt": "A spinning body has positive damping but its angular speed increases without an external torque label.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "spin_axis": "z",
+    "initial_angular_speed_deg_s": 540.0,
+    "angular_damping": 0.8,
+    "spin_duration_s": 1.0,
+    "expected_final_angular_speed_max_deg_s": 330.0,
+    "expected_min_angular_speed_drop_deg_s": 220.0,
+    "expected_min_rotation_delta_deg": 260.0
+  },
+  "objects": [
+    {
+      "id": "spinner",
+      "role": "spinning_body",
+      "shape": "sphere",
+      "radius_m": 0.16,
+      "mass_kg": 0.8,
+      "angular_damping": 0.8,
+      "initial_position_m": [0.0, 0.0, 0.2],
+      "initial_velocity_m_s": [0.0, 0.0, 0.0],
+      "initial_rotation_deg": [0.0, 0.0, 0.0],
+      "initial_angular_velocity_deg_s": [0.0, 0.0, 540.0]
+    }
+  ],
+  "active_objects": ["spinner"],
+  "passive_objects": [],
+  "required_assets": ["spinning_rigid_body", "angular_damping_metadata", "collider"],
+  "required_signals": ["trajectory", "rotation_trace", "angular_velocity", "angular_damping_label"],
+  "verifier_expectation": {"status": "fail", "failure_type": "F4_causality_violation"},
+  "should_pass": false,
+  "negative_mode": "spin_gain",
+  "notes": "Regression: spin speed gain must require an external torque label."
+}

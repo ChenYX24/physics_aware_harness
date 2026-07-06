@@ -1,0 +1,60 @@
+{
+  "schema_version": "harness_capability_v1",
+  "id": "angular_damping_spin_decay",
+  "capability_type": "physics_constraint",
+  "stage_ids": [
+    "physics_control",
+    "runtime_artifact_collection",
+    "physics_verification"
+  ],
+  "description": "Validate rotational damping for spinning rigid bodies using explicit angular velocity, angular damping labels, rotation trace, and monotonic spin-decay evidence.",
+  "physical_assumptions": [
+    "Spin is a rigid-body angular velocity state, not a visual-only rotation animation.",
+    "The spinning object must declare initial angular velocity and angular damping.",
+    "Angular speed should decay over time when damping is positive.",
+    "The object should accumulate observable rotation while spin decays.",
+    "Angular speed gain requires an explicit external torque or it is a failure."
+  ],
+  "required_signals": [
+    "trajectory",
+    "rotation_trace",
+    "angular_velocity",
+    "angular_damping_label",
+    "object_roles"
+  ],
+  "required_assets": [
+    "spinning rigid body",
+    "collider",
+    "mass or inertia metadata",
+    "angular damping runtime control"
+  ],
+  "verifier_rules": [
+    "Initial angular velocity and angular damping labels are present.",
+    "Trajectory contains angular_velocity_deg_s for the spinning body.",
+    "Angular speed decreases by at least the expected amount.",
+    "Final angular speed stays below the expected upper bound.",
+    "Angular speed does not increase without an external torque label.",
+    "Rotation delta is large enough to prove the body actually spun."
+  ],
+  "failure_taxonomy": [
+    "F1_missing_trajectory",
+    "F3_invalid_initial_physics_state",
+    "F4_causality_violation",
+    "F7_runtime_artifact_incomplete"
+  ],
+  "repair_suggestions": [
+    "Move initial angular velocity into `initial_angular_velocity_deg_s` and expected_physics labels.",
+    "Set angular damping as structured physics control rather than prompt prose.",
+    "Export angular_velocity_deg_s and rotation_deg in the runtime trajectory.",
+    "Add an external torque label before allowing spin speed to increase."
+  ],
+  "smoke_cases": [
+    "cases/spin/high_damping_spin_decay.json",
+    "cases/spin/low_damping_spin_decay.json"
+  ],
+  "regression_cases": [
+    "cases/spin/negative_no_spin_decay.json",
+    "cases/spin/negative_spin_gain.json",
+    "cases/spin/negative_missing_angular_velocity_label.json"
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "schema_version": "harness_case_template_v1",
+  "template_id": "angular_damping_spin",
+  "capability_id": "angular_damping_spin_decay",
+  "fallback_supported": true,
+  "parameter_ranges": {
+    "initial_angular_speed_deg_s": {"type": "float", "min": 240.0, "max": 900.0},
+    "angular_damping": {"type": "float", "min": 0.2, "max": 1.6},
+    "body_mass_kg": {"type": "float", "min": 0.2, "max": 2.0},
+    "spin_duration_s": {"type": "float", "min": 0.8, "max": 1.4}
+  },
+  "object_count_ranges": {
+    "spinning_body": {"min": 1, "max": 1},
+    "support": {"min": 0, "max": 1}
+  },
+  "physics_critical_assets": [
+    "spinning_rigid_body",
+    "angular_damping_metadata",
+    "collider"
+  ],
+  "visual_only_assets": [
+    "spin_axis_indicator"
+  ],
+  "camera_policy": {
+    "default": "side_static",
+    "allowed": ["side_static", "top_down", "tracking_subject"]
+  },
+  "perturbation_policy": {
+    "positive_ratio": 0.7,
+    "negative_modes": ["no_spin_decay", "spin_gain", "missing_angular_velocity_label"]
+  },
+  "expected_invariants": [
+    "initial angular velocity is explicit",
+    "angular damping is explicit",
+    "angular speed decays over time",
+    "rotation trace shows non-trivial spin",
+    "spin speed cannot increase without external torque"
+  ],
+  "negative_modes": [
+    "no_spin_decay",
+    "spin_gain",
+    "missing_angular_velocity_label"
+  ],
+  "seed_policy": {
+    "deterministic": true,
+    "sample_parameters_from_seed": true
+  }
+}

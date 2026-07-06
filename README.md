@@ -181,6 +181,7 @@ old `billiard_causality_compiler` id remains only as a compatibility alias.
 | `sliding_crate_friction` | Sliding rigid bodies must maintain support contact, decelerate within stop-distance bounds, or stay still below static-friction threshold. |
 | `force_field_wind_drift` | Wind/force-field driven light bodies must declare an explicit wind vector and drift along it within bounded displacement and altitude ranges. |
 | `mass_ratio_momentum_transfer` | Contact-driven rigid bodies must declare mass labels and produce post-collision velocity ordering consistent with mass ratio and restitution. |
+| `angular_damping_spin_decay` | Spinning rigid bodies must declare angular velocity and damping, then show monotonic spin decay in angular velocity and rotation trace evidence. |
 
 `billiard_causality_compiler` is deprecated as a core abstraction. It remains in
 the repository only so old runs and scripts can still be interpreted. New agents

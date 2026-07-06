@@ -37,6 +37,9 @@ PHYSICS_CRITICAL_ROLES = {
     "balloon",
     "light_body",
     "force_field",
+    "spinning_body",
+    "spin_subject",
+    "angular_damping_subject",
 }
 
 

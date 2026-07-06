@@ -57,6 +57,8 @@ def trajectory_for_case(case_spec: dict[str, Any]) -> list[dict[str, Any]]:
         return wind_trajectory(case_id, case_spec)
     if capability_id == "mass_ratio_momentum_transfer":
         return mass_ratio_trajectory(case_id, case_spec)
+    if capability_id == "angular_damping_spin_decay":
+        return spin_trajectory(case_id, case_spec)
     return []
 
 
@@ -418,8 +420,68 @@ def mass_ratio_trajectory(case_id: str, case_spec: dict[str, Any]) -> list[dict[
     ]
 
 
-def state(position: list[float], velocity: list[float], *, rotation: list[float] | None = None) -> dict[str, Any]:
-    return {"position_m": position, "velocity_m_s": velocity, "rotation_deg": rotation or [0, 0, 0]}
+def spin_trajectory(case_id: str, case_spec: dict[str, Any]) -> list[dict[str, Any]]:
+    negative_mode = str(case_spec.get("negative_mode") or "")
+    if not negative_mode and "no_spin_decay" in case_id:
+        negative_mode = "no_spin_decay"
+    if not negative_mode and "spin_gain" in case_id:
+        negative_mode = "spin_gain"
+    object_specs = {str(obj.get("id")): obj for obj in case_spec.get("objects", []) if isinstance(obj, dict)}
+    subject_id = next((oid for oid, obj in object_specs.items() if str(obj.get("role") or "") in {"spinning_body", "spin_subject", "angular_damping_subject"}), "spinner")
+    subject = object_specs.get(subject_id) or {
+        "initial_position_m": [0.0, 0.0, 0.2],
+        "initial_velocity_m_s": [0.0, 0.0, 0.0],
+        "initial_rotation_deg": [0.0, 0.0, 0.0],
+        "initial_angular_velocity_deg_s": [0.0, 0.0, 360.0],
+    }
+    expected = dict(case_spec.get("expected_physics") or {})
+    p0 = vec3(subject.get("initial_position_m") or [0.0, 0.0, 0.2])
+    v0 = vec3(subject.get("initial_velocity_m_s") or [0.0, 0.0, 0.0])
+    initial_rotation = vec3(subject.get("initial_rotation_deg") or [0.0, 0.0, 0.0])
+    initial_angular_velocity = vec3(subject.get("initial_angular_velocity_deg_s") or [0.0, 0.0, expected.get("initial_angular_speed_deg_s") or 360.0])
+    w0 = abs(float(expected.get("initial_angular_speed_deg_s") or initial_angular_velocity[2] or 360.0))
+    damping = max(float(expected.get("angular_damping") or subject.get("angular_damping") or 0.5), 0.0)
+    duration = max(float(expected.get("spin_duration_s") or 1.0), 0.2)
+    sample_times = [0.0, round(duration / 3.0, 4), round(2.0 * duration / 3.0, 4), round(duration, 4)]
+    if negative_mode == "no_spin_decay":
+        speeds = [w0, w0 * 0.98, w0 * 0.95, w0 * 0.93]
+    elif negative_mode == "spin_gain":
+        speeds = [w0, w0 * 1.1, w0 * 1.2, w0 * 1.3]
+    else:
+        speeds = [w0 * math.exp(-damping * t) for t in sample_times]
+    frames: list[dict[str, Any]] = []
+    rotation_z = initial_rotation[2]
+    previous_time = sample_times[0]
+    previous_speed = speeds[0]
+    for frame_id, (time_s, speed) in enumerate(zip(sample_times, speeds)):
+        if frame_id > 0:
+            dt = time_s - previous_time
+            rotation_z += (previous_speed + speed) * 0.5 * dt
+        angular_velocity = [0.0, 0.0, round(speed, 4)]
+        frames.append(
+            frame(
+                frame_id,
+                time_s,
+                {
+                    subject_id: state(
+                        p0,
+                        v0,
+                        rotation=[initial_rotation[0], initial_rotation[1], round(rotation_z, 4)],
+                        angular_velocity=angular_velocity,
+                    )
+                },
+            )
+        )
+        previous_time = time_s
+        previous_speed = speed
+    return frames
+
+
+def state(position: list[float], velocity: list[float], *, rotation: list[float] | None = None, angular_velocity: list[float] | None = None) -> dict[str, Any]:
+    result: dict[str, Any] = {"position_m": position, "velocity_m_s": velocity, "rotation_deg": rotation or [0, 0, 0]}
+    if angular_velocity is not None:
+        result["angular_velocity_deg_s"] = angular_velocity
+    return result
 
 
 def state_from_spec(obj: dict[str, Any]) -> dict[str, Any]:

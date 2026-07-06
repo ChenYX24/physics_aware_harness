@@ -21,7 +21,7 @@
 | `sliding_crate_friction` | sliding friction | 已支持 capability + fallback trajectory + stop-distance/static-threshold verifier；新增 dynamic template | 接真实 UE static/dynamic friction material/contact/export |
 | `wind_balloon_drift` | force field wind | 已支持 `force_field_wind_drift` capability + fallback trajectory + wind-vector drift verifier；新增 dynamic template | 接真实 UE force field / wind volume / trajectory export |
 | `mass_ratio_collision` | momentum transfer | 已支持 `mass_ratio_momentum_transfer` capability + fallback trajectory + mass-ratio velocity/energy verifier；新增 dynamic template | 接真实 UE mass labels / contact impulse / post-collision velocity export |
-| `angular_damping_spin` | rotational damping | 未实现 | 加 spin decay trace |
+| `angular_damping_spin` | rotational damping | 已支持 `angular_damping_spin_decay` capability + fallback angular velocity trace + spin-decay verifier；新增 dynamic template | 接真实 UE angular velocity / angular damping / inertia export |
 | `agent_push_box` / `agent_throw_ball` | agent-to-rigidbody | 未实现 | 需要 action trace + skeletal/rigid body coupling |
 | `fixed_camera_comparison` | multi-view alignment | 依赖 UE render pass | 接 camera trajectory/timebase verifier |
 | `engine_state_timeline` | runtime state alignment | 依赖 UE instrumentation | 接 engine states / Chaos trace |

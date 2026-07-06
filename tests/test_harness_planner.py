@@ -19,6 +19,8 @@ class HarnessPlannerTests(unittest.TestCase):
         self.assertEqual(planner.plan("a sliding crate slows down due to sliding friction")["primary_capability_id"], "sliding_crate_friction")
         self.assertEqual(planner.plan("a balloon drifts in a steady wind field")["primary_capability_id"], "force_field_wind_drift")
         self.assertEqual(planner.plan("a heavy striker transfers momentum to a light target in a mass ratio collision")["primary_capability_id"], "mass_ratio_momentum_transfer")
+        self.assertEqual(planner.plan("a crate impact transfers momentum to a lighter target")["primary_capability_id"], "mass_ratio_momentum_transfer")
+        self.assertEqual(planner.plan("a spinning body slows down because of angular damping")["primary_capability_id"], "angular_damping_spin_decay")
 
     def test_planner_returns_layered_harness_capabilities(self) -> None:
         plan = CapabilityPlanner().plan("a bowling ball hits passive pins through contact")

@@ -1,0 +1,37 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "high_damping_spin_decay",
+  "capability_id": "angular_damping_spin_decay",
+  "prompt": "A spinning rigid body starts with a high angular velocity and strong angular damping. Its angular speed should decay clearly while the rotation trace shows visible spin.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "spin_axis": "z",
+    "initial_angular_speed_deg_s": 720.0,
+    "angular_damping": 1.2,
+    "spin_duration_s": 1.0,
+    "expected_final_angular_speed_max_deg_s": 260.0,
+    "expected_min_angular_speed_drop_deg_s": 350.0,
+    "expected_min_rotation_delta_deg": 250.0
+  },
+  "objects": [
+    {
+      "id": "spinner",
+      "role": "spinning_body",
+      "shape": "sphere",
+      "radius_m": 0.16,
+      "mass_kg": 0.8,
+      "angular_damping": 1.2,
+      "initial_position_m": [0.0, 0.0, 0.2],
+      "initial_velocity_m_s": [0.0, 0.0, 0.0],
+      "initial_rotation_deg": [0.0, 0.0, 0.0],
+      "initial_angular_velocity_deg_s": [0.0, 0.0, 720.0]
+    }
+  ],
+  "active_objects": ["spinner"],
+  "passive_objects": [],
+  "required_assets": ["spinning_rigid_body", "angular_damping_metadata", "collider"],
+  "required_signals": ["trajectory", "rotation_trace", "angular_velocity", "angular_damping_label"],
+  "verifier_expectation": {"status": "pass"},
+  "should_pass": true,
+  "notes": "Golden positive high angular damping spin-decay case."
+}

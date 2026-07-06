@@ -26,6 +26,7 @@ class HarnessCapabilitySchemaTests(unittest.TestCase):
         self.assertIn("sliding_crate_friction", ids)
         self.assertIn("force_field_wind_drift", ids)
         self.assertIn("mass_ratio_momentum_transfer", ids)
+        self.assertIn("angular_damping_spin_decay", ids)
         alias = next(item for item in capabilities if item.id == "billiard_causality_compiler")
         self.assertEqual(alias.capability_type, "compatibility_alias")
         self.assertEqual(alias.deprecated_by, "rigid_body_contact_causality")

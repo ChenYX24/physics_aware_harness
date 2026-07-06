@@ -25,6 +25,8 @@ DEFAULT_CASES = [
     "cases/falling/falling_block_on_floor.json",
     "cases/falling/stacked_blocks_contact.json",
     "cases/falling/negative_floating_block.json",
+    "cases/spin/high_damping_spin_decay.json",
+    "cases/spin/negative_spin_gain.json",
 ]
 
 

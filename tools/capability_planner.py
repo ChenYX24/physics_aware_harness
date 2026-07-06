@@ -78,8 +78,14 @@ CAPABILITY_RULES: tuple[CapabilityRule, ...] = (
     CapabilityRule(
         capability_id="mass_ratio_momentum_transfer",
         case_family="mass_ratio_collision",
-        terms=("mass ratio", "momentum transfer", "heavy striker", "light target", "light striker", "heavy target", "collision mass", "动量传递", "质量比", "重物撞轻物", "轻物撞重物", "碰撞后速度"),
+        terms=("mass ratio", "momentum transfer", "heavy striker", "light target", "lighter target", "light striker", "heavy target", "heavier target", "collision mass", "mass-dependent collision", "动量传递", "质量比", "重物撞轻物", "轻物撞重物", "更轻目标", "更重目标", "碰撞后速度"),
         priority=106,
+    ),
+    CapabilityRule(
+        capability_id="angular_damping_spin_decay",
+        case_family="angular_damping_spin",
+        terms=("angular damping", "spin decay", "spinning body", "angular velocity", "rotational damping", "spin slows", "spin down", "角阻尼", "角速度", "旋转衰减", "自转", "旋转变慢"),
+        priority=79,
     ),
 )
 
