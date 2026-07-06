@@ -47,14 +47,33 @@ Key iteration moves:
 Evidence:
 - `tools/capability_verifier.py:202`: "F1_scene_parsing_failure": "repair prompt expansion and object roles before execution",
 - `README.md:16`: -> asset intent resolution
-- `README.md:164`: | `scene_spec_compilation` | Builds runtime scene contracts from capability/case/assets. |
+- `README.md:172`: | `scene_spec_compilation` | Builds runtime scene contracts from capability/case/assets. |
+
+### Static Scene Placement Preflight
+
+- id: `static_scene_placement`
+- pattern: `FLOW`
+- stages: `asset_resolution, static_scene_layout, camera_planning, preflight_validation`
+- confidence: `0.95` from `96` matched lines
+
+Compile case objects and asset selections into a pre-runtime static layout with object nodes, support relations, overlap checks, physics graph membership, and camera coverage.
+
+Key iteration moves:
+- Run scripts/harness_build_static_scene.py on the case before runtime.
+- Adjust case object positions or support surfaces if static_scene_report.json fails.
+- Update asset registry physics metadata before retrying UE actor placement.
+
+Evidence:
+- `docs/CAPABILITY_SYSTEM.md:18`: | Static scene preflight | `static_scene_placement` | case spec, asset resolution | `scene_layout.json`, object nodes, support relations, non-overlap report, camera plan |
+- `harness/verification/static_scene_verifier.py:36`: return fail_report(case_id, "F3_invalid_initial_physics_state", "initial_overlap_pair", overlap_pairs[0], checks)
+- `README.md:173`: | `static_scene_placement` | Validates object ids, transforms, support relations, non-overlap, camera coverage, and physics graph membership before runtime. |
 
 ### Generic Rigid-Body Contact Causality
 
 - id: `rigid_body_contact_causality`
 - pattern: `FLOW`
 - stages: `capability_planning, case_spec_compilation, scene_spec_compilation, runtime_artifact_collection, physics_verification`
-- confidence: `0.95` from `398` matched lines
+- confidence: `0.95` from `424` matched lines
 
 Compile active-to-passive rigid-body contact scenes into causal simulation programs where passive bodies move only after runtime contact evidence exists.
 
@@ -66,14 +85,14 @@ Key iteration moves:
 Evidence:
 - `tools/capability_planner.py:27`: terms=("billiard", "billiards", "pool", "cue ball", "cue_ball", "bowling", "pins", "rigid-body impact", "rigid body impact", "crate impact", "mass ratio collision", "台球", "白球", "目标球", "保龄球", "球瓶", "刚体碰撞", "ball collisio…
 - `tools/capability_closed_loop.py:18`: "prompt": "Create a billiards / pool scene where one cue ball hits a compact rack of passive target balls. Targets must stay still until contact.",
-- `README.md:176`: | `rigid_body_contact_causality` | Active bodies may move; passive rigid bodies must remain still until runtime contact evidence. Billiards/pool is one case family. |
+- `README.md:184`: | `rigid_body_contact_causality` | Active bodies may move; passive rigid bodies must remain still until runtime contact evidence. Billiards/pool is one case family. |
 
 ### Asset Intent Resolution
 
 - id: `asset_intent_resolution`
 - pattern: `HOW`
 - stages: `asset_intent_resolution, asset_retrieval`
-- confidence: `0.95` from `295` matched lines
+- confidence: `0.95` from `390` matched lines
 
 Classify object-level asset needs into typed intents and retrieve top-k candidates before runtime binding.
 
@@ -92,7 +111,7 @@ Evidence:
 - id: `asset_runtime_binding_invocation`
 - pattern: `HOW`
 - stages: `asset_runtime_binding, runtime_actor_binding, preflight_validation`
-- confidence: `0.95` from `145` matched lines
+- confidence: `0.95` from `197` matched lines
 
 Bind selected real assets or analytic proxies into runtime actors while preserving collider, mass, material, and collision-profile metadata.
 
@@ -103,7 +122,7 @@ Key iteration moves:
 
 Evidence:
 - `docs/CAPABILITY_SYSTEM.md:29`: | `asset_runtime_binding_invocation` | 把 selected asset 或 analytic proxy 绑定到 runtime actor。 | object_id, runtime_actor_id, collider, mass, material, collision_profile, proxy flag |
-- `docs/PHYSICS_AWARE_HARNESS.md:167`: | `asset_runtime_binding_invocation` | physics-critical assets must bind colliders, mass/material metadata, collision profile, and runtime actor ids |
+- `docs/PHYSICS_AWARE_HARNESS.md:197`: | `asset_runtime_binding_invocation` | physics-critical assets must bind colliders, mass/material metadata, collision profile, and runtime actor ids |
 - `docs/CAPABILITY_AUTHORING.md:36`: - 资产能力要区分 retrieval 和 invocation：`asset_intent_resolution` 找候选，`asset_runtime_binding_invocation` 负责把 selected asset/proxy 绑定到 runtime actor。
 
 ### Rigid Body Gravity Collision
@@ -111,7 +130,7 @@ Evidence:
 - id: `rigid_body_gravity_collision`
 - pattern: `FLOW`
 - stages: `planner, physics_control, runtime, verifier`
-- confidence: `0.95` from `167` matched lines
+- confidence: `0.95` from `174` matched lines
 
 Compile falling or stacking prompts into gravity-driven rigid-body traces where objects descend under gravity and collide with a support surface instead of being visually animated.
 
@@ -149,7 +168,7 @@ Evidence:
 - id: `explicit_physics_control_surface`
 - pattern: `HOW`
 - stages: `planner, physics_control, benchmark`
-- confidence: `0.95` from `367` matched lines
+- confidence: `0.95` from `393` matched lines
 
 Represent gravity, material, rigid-body, constraint, force, time, agent, and render-physics bridge controls as typed fields that can be replayed and swept.
 
@@ -159,7 +178,7 @@ Key iteration moves:
 - Compare reproduction variance and verifier pass rate.
 
 Evidence:
-- `README.md:166`: | `physics_property_constraint_validation` | Checks mass, friction, restitution, damping, gravity, material, and parameter-sweep constraints. |
+- `README.md:174`: | `physics_property_constraint_validation` | Checks mass, friction, restitution, damping, gravity, material, and parameter-sweep constraints. |
 - `capabilities/physics_property_constraint_validation.json:4`: "description": "Validate physical property ranges and parameter sensitivity for mass, friction, restitution, damping, gravity, material density, fracture threshold, buoyancy, and force-field controls.",
 - `docs/CAPABILITY_SYSTEM.md:38`: | `physics_property_constraint_validation` | 检查 mass、friction、restitution、damping、gravity、material density、fracture threshold 等字段范围和 sensitivity 方向。 |
 
@@ -168,7 +187,7 @@ Evidence:
 - id: `canonical_signal_capture`
 - pattern: `FLOW`
 - stages: `runtime, signals, dataset`
-- confidence: `0.95` from `499` matched lines
+- confidence: `0.95` from `505` matched lines
 
 Capture video and aligned evidence streams on one timebase: RGB, trajectory, contacts, camera path, depth proxy, normal proxy, audio, engine states, and semantic labels.
 
@@ -179,7 +198,7 @@ Key iteration moves:
 
 Evidence:
 - `capabilities/canonical_signal_capture.json:10`: "description": "Collect RGB, depth, segmentation, trajectory, contact events, camera trajectory, and engine-state labels on a single deterministic timebase.",
-- `README.md:169`: | `canonical_signal_capture` | Keeps trajectory, contacts, camera paths, RGB/depth/segmentation, and render metadata on one timebase. |
+- `README.md:177`: | `canonical_signal_capture` | Keeps trajectory, contacts, camera paths, RGB/depth/segmentation, and render metadata on one timebase. |
 - `docs/HARNESS_ARCHITECTURE.md:108`: 输出同步多视角 RGB/depth/segmentation，以及 trajectory/contact/camera timeline。
 
 ### Verifier As Runtime Truth Gate
@@ -187,7 +206,7 @@ Evidence:
 - id: `physics_verifier_truth_gate`
 - pattern: `HOW`
 - stages: `verifier, dataset`
-- confidence: `0.95` from `222` matched lines
+- confidence: `0.95` from `229` matched lines
 
 Use verifier output, not UI preview or successful rendering, as the final readiness decision for reference-ready samples.
 
@@ -235,7 +254,7 @@ Key iteration moves:
 - Cluster failures before changing planner or schema.
 
 Evidence:
-- `README.md:200`: The old billiards failure mode is still preserved as a regression: plausible
+- `README.md:208`: The old billiards failure mode is still preserved as a regression: plausible
 - `README.md:36`: | `tests/` | Regression tests for CLI, capabilities, verifier, render sync, artifacts. |
 - `README.md:76`: --seed 42 \
 
@@ -256,7 +275,7 @@ Key iteration moves:
 Evidence:
 - `tools/capability_planner.py:93`: terms=("angular damping", "spin decay", "spinning body", "angular velocity", "rotational damping", "spin slows", "spin down", "角阻尼", "角速度", "旋转衰减", "自转", "旋转变慢"),
 - `capabilities/angular_damping_spin_decay.json:10`: "description": "Validate rotational damping for spinning rigid bodies using explicit angular velocity, angular damping labels, rotation trace, and monotonic spin-decay evidence.",
-- `README.md:186`: | `angular_damping_spin_decay` | Spinning rigid bodies must declare angular velocity and damping, then show monotonic spin decay in angular velocity and rotation trace evidence. |
+- `README.md:194`: | `angular_damping_spin_decay` | Spinning rigid bodies must declare angular velocity and damping, then show monotonic spin decay in angular velocity and rotation trace evidence. |
 
 ### Agent Action To Rigid-Body Coupling
 
@@ -274,7 +293,7 @@ Key iteration moves:
 
 Evidence:
 - `tools/capability_planner.py:99`: terms=("agent pushes", "agent push", "robot pushes", "robot push", "character pushes", "character throws", "agent throws", "agent throw", "robot throws", "action trace", "agent-to-rigidbody", "agent rigid body", "推箱子",…
-- `README.md:187`: | `agent_rigidbody_action_coupling` | Agent or controller actions must be explicit action traces, and target rigid bodies may move only after action/contact or release/impulse evidence. |
+- `README.md:195`: | `agent_rigidbody_action_coupling` | Agent or controller actions must be explicit action traces, and target rigid bodies may move only after action/contact or release/impulse evidence. |
 - `capabilities/agent_rigidbody_action_coupling.json:11`: "description": "Validate that agent or controller actions cause rigid-body motion through an explicit action trace, contact/impulse evidence, and post-action trajectory response. Pushing a box or throwing a ball are smo…
 
 ### Distance Constraint Motion Validation
@@ -339,7 +358,7 @@ Evidence:
 - id: `elastic_constraint_rebound`
 - pattern: `physics_constraint`
 - stages: `case_spec_compilation, physics_control, runtime_artifact_collection, physics_verification`
-- confidence: `0.95` from `48` matched lines
+- confidence: `0.95` from `49` matched lines
 
 Validate elastic tether or bungee-style constrained motion using rest length, bounded extension, constraint trace, and rebound velocity toward the anchor.
 
@@ -358,7 +377,7 @@ Evidence:
 - id: `brittle_impact_fracture`
 - pattern: `physics_constraint`
 - stages: `case_spec_compilation, physics_control, runtime_artifact_collection, physics_verification`
-- confidence: `0.95` from `148` matched lines
+- confidence: `0.95` from `149` matched lines
 
 Validate brittle/destructible fracture as a contact-energy threshold invariant with explicit fracture events and fragment evidence.
 
@@ -369,7 +388,7 @@ Key iteration moves:
 
 Evidence:
 - `tools/capability_planner.py:87`: terms=("brittle", "fracture", "shatter", "breakable", "destructible", "glass break", "glass shatter", "mirror breaks", "wood crate breaks", "crate breaks", "破碎", "碎裂", "断裂", "玻璃碎", "镜子碎", "玻璃杯碎", "木箱破碎", "可破坏"),
-- `README.md:192`: | `brittle_impact_fracture` | Brittle/destructible bodies must declare fracture threshold, contact impact energy, fracture events, and fragment evidence. Glass panels, mirrors, cups, and crates are case families. |
+- `README.md:200`: | `brittle_impact_fracture` | Brittle/destructible bodies must declare fracture threshold, contact impact energy, fracture events, and fragment evidence. Glass panels, mirrors, cups, and crates are case families. |
 - `capabilities/brittle_impact_fracture.json:4`: "description": "Validate brittle or destructible rigid-body fracture as a contact-energy threshold invariant rather than a glass-specific visual template.",
 
 ### Verified Multi-View Dataset Packaging
@@ -377,7 +396,7 @@ Evidence:
 - id: `dataset_artifact_packaging`
 - pattern: `FLOW`
 - stages: `dataset, signals, verifier`
-- confidence: `0.95` from `126` matched lines
+- confidence: `0.95` from `132` matched lines
 
 Package only readiness-gated runs into a dataset layout with video, synchronized signals, physics labels, asset metadata, and hashes.
 
@@ -387,7 +406,7 @@ Key iteration moves:
 - Use benchmark taxonomy to grow cases systematically.
 
 Evidence:
-- `README.md:147`: - `scene_capture` RGB/depth/segmentation multi-view path is the stable data path.
+- `README.md:155`: - `scene_capture` RGB/depth/segmentation multi-view path is the stable data path.
 - `capabilities/canonical_signal_capture.json:30`: "Every planned view has RGB/depth/segmentation metadata or a hard failure.",
 - `docs/HARNESS_ARCHITECTURE.md:166`: 真实 UE 后续还必须补 `camera_trajectory.json`、视频/frame sequence、depth/normal/audio/pass manifest。
 
@@ -396,7 +415,7 @@ Evidence:
 - id: `failure_driven_refinement_loop`
 - pattern: `BRIDGE`
 - stages: `planner, runtime, verifier, benchmark`
-- confidence: `0.95` from `304` matched lines
+- confidence: `0.95` from `329` matched lines
 
 Use structured failure evidence to decide the next minimal change: prompt expansion, asset binding, scene layout, physics controls, runtime settings, or verifier thresholds.
 
@@ -406,7 +425,7 @@ Key iteration moves:
 - Rerun tests and a small prompt suite before publishing.
 
 Evidence:
-- `docs/PHYSICS_AWARE_HARNESS.md:190`: 每个失败必须归因到 failure type，例如：
+- `docs/PHYSICS_AWARE_HARNESS.md:220`: 每个失败必须归因到 failure type，例如：
 - `harness/verification/physics_verifier.py:46`: "value": str(ue_backend_report.get("failure_message") or "UE backend failed"),
 - `tools/capability_runtime_adapter.py:318`: lines.append(f"- `{failure.get('failure_type')}`: {failure.get('reason')}")
 
@@ -598,23 +617,6 @@ Key iteration moves:
 
 Evidence:
 - `capabilities/sliding_crate_friction.json`: Validate flat-surface sliding friction and static-friction threshold behavior. The smoke family uses a crate, but the invariant applies to any sliding rigid body with a support contact and friction material.
-
-### Static Scene Placement
-
-- id: `static_scene_placement`
-- pattern: `pipeline_stage`
-- stages: `static_scene_layout, camera_planning, preflight_validation`
-- confidence: `0.75` from `1` matched lines
-
-Build executable object-level scene layouts before simulation, including support surfaces, non-overlap placement, scale, orientation, camera coverage, and physics graph membership.
-
-Key iteration moves:
-- Generate scene_layout.json before runtime execution.
-- Bind missing physics metadata or mark an analytic proxy.
-- Adjust object positions, scales, and support surfaces.
-
-Evidence:
-- `capabilities/static_scene_placement.json`: Build executable object-level scene layouts before simulation, including support surfaces, non-overlap placement, scale, orientation, camera coverage, and physics graph membership.
 
 ## Rigid-Body Contact Reference Workflow
 

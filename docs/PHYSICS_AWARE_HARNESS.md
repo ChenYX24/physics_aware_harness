@@ -98,7 +98,37 @@ resolver 输出必须能驱动下一阶段调用，而不是只给 UI 展示：
 - 每个 object 的 `runtime_binding_requirements`
 - physics-critical count / visual-only count
 
-## Stage 3: Runtime Backend
+## Stage 3: Static Scene Placement
+
+静态场景摆放是 runtime 前的 preflight，不是 UI 预览。它把 case spec 和 asset resolution 编译成：
+
+- `scene_layout.json`
+- object nodes
+- support relations
+- initial overlap checks
+- physics graph membership
+- camera plan
+- `static_scene_report.json`
+
+入口：
+
+```bash
+python3.13 scripts/harness_build_static_scene.py \
+  cases/billiards/low_speed_single_contact.json \
+  --output-dir runs/static_scene/low_speed_single_contact
+```
+
+当前会检查：
+
+- object id 是否唯一；
+- physics-critical object 是否有 selected asset 或 analytic proxy fallback；
+- collider / mass / material / collision profile 是否可用于 runtime binding；
+- 初始状态是否有重叠或支撑穿透；
+- camera plan 是否存在。
+
+UE actor placement compiler 仍是下一阶段工作：它应读取 `scene_layout.json`，在 UE 中创建 actor、设置 transform、collider、mass、material、collision profile 和 camera rig。
+
+## Stage 4: Runtime Backend
 
 支持两个 backend：
 
@@ -119,7 +149,7 @@ python3.13 scripts/harness_run_case.py cases/billiards/low_speed_single_contact.
 python3.13 scripts/harness_run_case_batch.py cases/generated/billiards_seed42 --backend fallback
 ```
 
-## Stage 4: Artifact Collection
+## Stage 5: Artifact Collection
 
 每个 run 应写出统一 artifact：
 

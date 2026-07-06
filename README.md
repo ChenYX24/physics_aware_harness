@@ -77,6 +77,14 @@ python3.13 scripts/harness_generate_cases.py \
   --out cases/generated/billiards_seed42
 ```
 
+Build and verify a static scene layout before runtime:
+
+```bash
+python3.13 scripts/harness_build_static_scene.py \
+  cases/billiards/low_speed_single_contact.json \
+  --output-dir runs/static_scene/low_speed_single_contact
+```
+
 Run a batch:
 
 ```bash

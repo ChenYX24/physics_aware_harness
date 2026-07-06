@@ -78,8 +78,8 @@ assets/*.local.json
 | `pipeline_stage_orchestration` | 已可用 | 将 capability planning、case spec、scene layout、asset binding、runtime、verifier、diagnosis、dataset packaging 作为显式阶段，不允许 silent fallback。 |
 | `asset_intent_resolution` | 已可用 | 区分 physics-critical、visual-only、skeletal/animation、blueprint/logic、scene/map 等资产意图，并检索候选资产。 |
 | `asset_runtime_binding_invocation` | 已可用 | 记录 top-k candidates、selected asset、proxy fallback reason，并要求 runtime actor binding 对齐 object id。 |
-| `static_scene_placement` | 新增 contract | 在 runtime 前检查 object id、transform、support relation、non-overlap、camera coverage 和 physics graph membership。 |
-| `scene_spec_compilation` | 部分可用 | 定义 scene spec contract；完整 placement solver 仍是 TODO。 |
+| `static_scene_placement` | 已可用 | 从 case spec + asset resolution 生成 `scene_layout.json`，并检查 object id、support relation、non-overlap、camera coverage 和 physics graph membership。 |
+| `scene_spec_compilation` | 部分可用 | 定义 scene spec contract；UE actor placement compiler 仍是 TODO。 |
 | `physics_property_constraint_validation` | 新增 contract | 检查 mass、friction、restitution、damping、gravity、material、parameter sweep 的结构化范围和方向性响应。 |
 | `capability_runtime_artifact_bridge` | 已可用 | 把 runtime artifact 标准化为 verifier 输入。 |
 
@@ -241,22 +241,30 @@ python3.13 scripts/import_adp_asset_index.py \
   - 定义可执行 scene spec contract。
 - `capabilities/asset_intent_resolution.json`
   - 定义资产解析 contract。
+- `harness/core/scene_layout.py`
+  - 定义 object node、bounds、support surface、analytic proxy physics metadata。
+- `harness/planning/static_scene_builder.py`
+  - 从 case spec 和 asset resolution 生成 object-level layout。
+- `harness/verification/static_scene_verifier.py`
+  - 检查 non-overlap、support relation、collider/mass/material/collision profile、camera plan。
+- `scripts/harness_build_static_scene.py`
+  - 生成 `asset_resolution.json`、`scene_layout.json`、`static_scene_report.json`。
 
 当前验证结果：
 
 - `six_ball_triangle_low_speed`：8 个 physics-critical object，8/8 resolved。
 - `ramp_roll_low_friction`：2 个 physics-critical object，2/2 resolved。
+- `low_speed_single_contact`：static scene layout pass。
+- `falling_block_on_floor`：static scene layout pass。
+- 人工重叠 negative case：`F3_invalid_initial_physics_state` 被抓到。
+- 缺 asset binding negative case：`F2_asset_missing` 被抓到。
 
 仍然缺：
 
-1. `harness/core/scene_layout.py`
-   - ObjectNode、SurfaceNode、ConstraintNode、FieldNode、CameraRig。
-2. `harness/planning/static_scene_builder.py`
-   - 从 case spec 和 asset resolution 生成 object-level layout。
-3. `harness/verification/static_scene_verifier.py`
-   - non-overlap、support contact、collider/mass/material required、camera coverage、passive initial velocity rules。
-4. `scene_layout.json` artifact。
-5. UE actor placement compiler。
+1. UE actor placement compiler。
+   - 读取 `scene_layout.json`。
+   - 在 UE 中创建 actor、设置 transform、collider、mass、material、collision profile。
+   - 生成 camera rig / light rig，并把 runtime actor id 回写 artifact。
 
 ## 8. 动态物理 case 系统
 
@@ -491,11 +499,10 @@ TODO：
 
 推荐下一步顺序：
 
-1. 提交当前 ramp 和 static asset resolver 改动。
-2. 做 `static_scene_builder` 和 `static_scene_verifier`。
-3. 做 `bounce_restitution_ball`。
-4. 做 `static_scene_builder + static_scene_verifier`。
-5. 回到 UE，让 billiards/ramp/falling/projectile 通过真实 trajectory/contact verifier。
+1. 提交 `static_scene_builder + static_scene_verifier`。
+2. 做 `magnetic_force_field` 或 bowling chain case family。
+3. 回到 UE actor placement compiler，让 `scene_layout.json` 驱动真实 actor 生成。
+4. 让 billiards/ramp/falling/projectile/fracture 通过真实 trajectory/contact verifier。
 
 ## 14. 其他人如何扩展/优化 harness
 
@@ -548,5 +555,5 @@ git diff --check
 - fallback backend 是 deterministic toy/proxy，只适合 verifier 开发，不是 ground-truth physics。
 - UE SceneCapture multi-view RGB/depth/segmentation 是当前稳定 data path；highres viewport 只作为 debug。
 - 一些 UE rigid-body trajectory 还需要 runtime stepping 修复，才能让真实物理 trace 通过 verifier。
-- 静态场景摆放目前有 asset intent/resolution，但还没有完整 placement solver。
+- 静态场景摆放已有 builder/verifier；UE actor placement compiler 仍未接入。
 - 流体类 case 暂缓，等真实 fluid backend 或可靠 proxy 方案。

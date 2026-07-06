@@ -22,7 +22,7 @@
           "matched_terms": [
             "scene_spec"
           ],
-          "source": "README.md:164",
+          "source": "README.md:172",
           "text": "| `scene_spec_compilation` | Builds runtime scene contracts from capability/case/assets. |"
         },
         {
@@ -96,6 +96,111 @@
     },
     {
       "confidence": 0.95,
+      "description": "Compile case objects and asset selections into a pre-runtime static layout with object nodes, support relations, overlap checks, physics graph membership, and camera coverage.",
+      "evidence": [
+        {
+          "matched_terms": [
+            "scene_layout",
+            "static_scene_placement",
+            "support relation"
+          ],
+          "source": "docs/CAPABILITY_SYSTEM.md:18",
+          "text": "| Static scene preflight | `static_scene_placement` | case spec, asset resolution | `scene_layout.json`, object nodes, support relations, non-overlap report, camera plan |"
+        },
+        {
+          "matched_terms": [
+            "initial_overlap_pair",
+            "overlap_pairs"
+          ],
+          "source": "harness/verification/static_scene_verifier.py:36",
+          "text": "return fail_report(case_id, \"F3_invalid_initial_physics_state\", \"initial_overlap_pair\", overlap_pairs[0], checks)"
+        },
+        {
+          "matched_terms": [
+            "static_scene_placement",
+            "support relation"
+          ],
+          "source": "README.md:173",
+          "text": "| `static_scene_placement` | Validates object ids, transforms, support relations, non-overlap, camera coverage, and physics graph membership before runtime. |"
+        },
+        {
+          "matched_terms": [
+            "object_nodes",
+            "scene_layout"
+          ],
+          "source": "harness/verification/static_scene_verifier.py:20",
+          "text": "nodes = scene_layout.get(\"object_nodes\") if isinstance(scene_layout.get(\"object_nodes\"), list) else []"
+        },
+        {
+          "matched_terms": [
+            "scene_layout",
+            "support_relations"
+          ],
+          "source": "harness/verification/static_scene_verifier.py:24",
+          "text": "\"support_relation_count\": len(scene_layout.get(\"support_relations\") or []),"
+        },
+        {
+          "matched_terms": [
+            "overlap_pairs",
+            "scene_layout"
+          ],
+          "source": "harness/verification/static_scene_verifier.py:25",
+          "text": "\"overlap_pair_count\": len(scene_layout.get(\"overlap_pairs\") or []),"
+        },
+        {
+          "matched_terms": [
+            "camera_plan",
+            "scene_layout"
+          ],
+          "source": "harness/verification/static_scene_verifier.py:26",
+          "text": "\"camera_count\": len(((scene_layout.get(\"camera_plan\") or {}).get(\"views\") or [])),"
+        },
+        {
+          "matched_terms": [
+            "missing_physics_asset_binding"
+          ],
+          "source": "harness/verification/static_scene_verifier.py:33",
+          "text": "return fail_report(case_id, \"F2_asset_missing\", \"missing_physics_asset_binding\", missing_asset, checks)"
+        }
+      ],
+      "evidence_count": 96,
+      "failure_modes": [
+        "F2_asset_missing when physics-critical assets cannot be bound or proxied.",
+        "F3_invalid_initial_physics_state when objects overlap or penetrate support surfaces.",
+        "F7_runtime_artifact_incomplete when no camera plan exists."
+      ],
+      "id": "static_scene_placement",
+      "iteration_moves": [
+        "Run scripts/harness_build_static_scene.py on the case before runtime.",
+        "Adjust case object positions or support surfaces if static_scene_report.json fails.",
+        "Update asset registry physics metadata before retrying UE actor placement."
+      ],
+      "pattern_type": "FLOW",
+      "prompt_moves": [
+        "Ask for support surfaces, object positions, scale, camera intent, and which objects are physics-critical.",
+        "Separate static placement constraints from dynamic runtime behavior.",
+        "Require stable object ids that can become runtime actor ids."
+      ],
+      "runtime_contract": [
+        "Write asset_resolution.json, scene_layout.json, and static_scene_report.json before runtime execution.",
+        "Each physics-critical object must have selected asset metadata or an explicit analytic proxy fallback.",
+        "scene_layout.json must include object_nodes, support_relations, overlap_pairs, physics_graph, and camera_plan."
+      ],
+      "stage_ids": [
+        "asset_resolution",
+        "static_scene_layout",
+        "camera_planning",
+        "preflight_validation"
+      ],
+      "title": "Static Scene Placement Preflight",
+      "verifier_checks": [
+        "Object ids are unique.",
+        "Physics-critical objects have collider, mass, material, and collision profile.",
+        "Initial overlaps, support penetration, and missing camera plans fail before runtime."
+      ]
+    },
+    {
+      "confidence": 0.95,
       "description": "Compile active-to-passive rigid-body contact scenes into causal simulation programs where passive bodies move only after runtime contact evidence exists.",
       "evidence": [
         {
@@ -129,7 +234,7 @@
             "passive",
             "pool"
           ],
-          "source": "README.md:176",
+          "source": "README.md:184",
           "text": "| `rigid_body_contact_causality` | Active bodies may move; passive rigid bodies must remain still until runtime contact evidence. Billiards/pool is one case family. |"
         },
         {
@@ -179,7 +284,7 @@
           "text": "| `billiard_causality_compiler` 作为主能力 | `rigid_body_contact_causality`，台球/保龄球/箱体撞击作为 case family |"
         }
       ],
-      "evidence_count": 398,
+      "evidence_count": 424,
       "failure_modes": [
         "Passive bodies move before contact because of initial velocity leakage.",
         "Passive bodies move before contact because colliders overlap at t=0.",
@@ -268,8 +373,19 @@
             "collision",
             "physics-critical"
           ],
-          "source": "docs/PHYSICS_AWARE_HARNESS.md:167",
+          "source": "docs/PHYSICS_AWARE_HARNESS.md:197",
           "text": "| `asset_runtime_binding_invocation` | physics-critical assets must bind colliders, mass/material metadata, collision profile, and runtime actor ids |"
+        },
+        {
+          "matched_terms": [
+            "Asset",
+            "asset",
+            "collider",
+            "collision",
+            "physics-critical"
+          ],
+          "source": "harness/verification/static_scene_verifier.py:131",
+          "text": "return [\"Resolve physics-critical assets or mark analytic proxies with collider, mass, material, and collision profile.\"]"
         },
         {
           "matched_terms": [
@@ -278,7 +394,7 @@
             "physics-critical",
             "visual-only"
           ],
-          "source": "README.md:162",
+          "source": "README.md:170",
           "text": "| `asset_intent_resolution` | Classifies physics-critical vs visual-only assets. |"
         },
         {
@@ -300,19 +416,9 @@
           ],
           "source": "capabilities/asset_runtime_binding_invocation.json:9",
           "text": "\"Runtime actor creation must use the selected asset, collider, material, transform, and collision profile.\""
-        },
-        {
-          "matched_terms": [
-            "Asset",
-            "asset",
-            "collider",
-            "collision"
-          ],
-          "source": "docs/CAPABILITY_SYSTEM.md:29",
-          "text": "| `asset_runtime_binding_invocation` | 把 selected asset 或 analytic proxy 绑定到 runtime actor。 | object_id, runtime_actor_id, collider, mass, material, collision_profile, proxy flag |"
         }
       ],
-      "evidence_count": 295,
+      "evidence_count": 390,
       "failure_modes": [
         "Asset retrieval returns many visual candidates but no physics-critical option.",
         "The agent treats a texture/material as a collider-bearing object.",
@@ -370,7 +476,7 @@
             "runtime actor",
             "runtime_binding"
           ],
-          "source": "docs/PHYSICS_AWARE_HARNESS.md:167",
+          "source": "docs/PHYSICS_AWARE_HARNESS.md:197",
           "text": "| `asset_runtime_binding_invocation` | physics-critical assets must bind colliders, mass/material metadata, collision profile, and runtime actor ids |"
         },
         {
@@ -402,10 +508,19 @@
         },
         {
           "matched_terms": [
+            "collider",
+            "collision_profile",
+            "mass"
+          ],
+          "source": "harness/verification/static_scene_verifier.py:63",
+          "text": "for key in (\"collider\", \"mass_kg\", \"collision_profile\"):"
+        },
+        {
+          "matched_terms": [
             "runtime actor",
             "runtime_binding"
           ],
-          "source": "README.md:163",
+          "source": "README.md:171",
           "text": "| `asset_runtime_binding_invocation` | Resolves top-k asset candidates and binds selected real assets or analytic proxies into runtime actors. |"
         },
         {
@@ -415,17 +530,9 @@
           ],
           "source": "capabilities/asset_intent_resolution.json:6",
           "text": "\"Physics-critical assets require collider, mass, rigid body, and collision profile.\","
-        },
-        {
-          "matched_terms": [
-            "analytic proxy",
-            "asset registry"
-          ],
-          "source": "capabilities/asset_intent_resolution.json:17",
-          "text": "\"asset registry or analytic proxy\""
         }
       ],
-      "evidence_count": 145,
+      "evidence_count": 197,
       "failure_modes": [
         "Selected asset exists visually but has no usable collider metadata.",
         "Proxy fallback is silently used in a production run.",
@@ -544,7 +651,7 @@
           "text": "\"Falling bodies have gravity and collision enabled.\","
         }
       ],
-      "evidence_count": 167,
+      "evidence_count": 174,
       "failure_modes": [
         "Object is moved downward by visual keyframes without physics evidence.",
         "Gravity or collision is disabled on a falling body.",
@@ -710,7 +817,7 @@
             "parameter",
             "restitution"
           ],
-          "source": "README.md:166",
+          "source": "README.md:174",
           "text": "| `physics_property_constraint_validation` | Checks mass, friction, restitution, damping, gravity, material, and parameter-sweep constraints. |"
         },
         {
@@ -763,7 +870,7 @@
             "mass",
             "restitution"
           ],
-          "source": "docs/PHYSICS_AWARE_HARNESS.md:159",
+          "source": "docs/PHYSICS_AWARE_HARNESS.md:189",
           "text": "| `physics_property_constraint_validation` | mass/friction/restitution/damping/gravity controls must be typed, bounded, and echoed by runtime artifacts |"
         },
         {
@@ -772,7 +879,7 @@
             "material",
             "physics_control"
           ],
-          "source": "README.md:167",
+          "source": "README.md:175",
           "text": "| `explicit_physics_control_surface` | Represents gravity/material/rigid-body/constraint/force/time controls as typed replayable fields. |"
         },
         {
@@ -785,7 +892,7 @@
           "text": "\"Check mass labels, restitution, and solver substeps before tuning visuals.\","
         }
       ],
-      "evidence_count": 367,
+      "evidence_count": 393,
       "failure_modes": [
         "Implicit physics looks plausible once but cannot be reproduced.",
         "LLM changes multiple physical variables during a sensitivity test.",
@@ -843,7 +950,7 @@
             "timebase",
             "trajectory"
           ],
-          "source": "README.md:169",
+          "source": "README.md:177",
           "text": "| `canonical_signal_capture` | Keeps trajectory, contacts, camera paths, RGB/depth/segmentation, and render metadata on one timebase. |"
         },
         {
@@ -897,11 +1004,11 @@
             "RGB",
             "depth"
           ],
-          "source": "README.md:124",
+          "source": "README.md:132",
           "text": "--render-passes rgb,depth,segmentation \\"
         }
       ],
-      "evidence_count": 499,
+      "evidence_count": 505,
       "failure_modes": [
         "A video exists but has no trajectory or contacts.",
         "Depth/normal proxies are mistaken for native GBuffer.",
@@ -986,7 +1093,7 @@
             "readiness",
             "run_readiness"
           ],
-          "source": "README.md:142",
+          "source": "README.md:150",
           "text": "run_readiness.json"
         },
         {
@@ -994,7 +1101,7 @@
             "readiness",
             "verifier"
           ],
-          "source": "README.md:170",
+          "source": "README.md:178",
           "text": "| `physics_verifier_truth_gate` | Makes verifier evidence the readiness source of truth instead of UI preview or render success. |"
         },
         {
@@ -1013,7 +1120,7 @@
           "text": "\"description\": \"Package only verifier-gated runtime artifacts into dataset-ready sample layouts with lineage, hashes, signal availability, and failure visibility.\","
         }
       ],
-      "evidence_count": 222,
+      "evidence_count": 229,
       "failure_modes": [
         "Rendered output is accepted despite failed physics evidence.",
         "Schema passes but runtime behavior diverges.",
@@ -1159,7 +1266,7 @@
           "matched_terms": [
             "regression"
           ],
-          "source": "README.md:200",
+          "source": "README.md:208",
           "text": "The old billiards failure mode is still preserved as a regression: plausible"
         },
         {
@@ -1187,7 +1294,7 @@
           "matched_terms": [
             "seed"
           ],
-          "source": "README.md:84",
+          "source": "README.md:92",
           "text": "cases/generated/billiards_seed42 \\"
         },
         {
@@ -1282,7 +1389,7 @@
             "rotation trace",
             "spin decay"
           ],
-          "source": "README.md:186",
+          "source": "README.md:194",
           "text": "| `angular_damping_spin_decay` | Spinning rigid bodies must declare angular velocity and damping, then show monotonic spin decay in angular velocity and rotation trace evidence. |"
         },
         {
@@ -1384,7 +1491,7 @@
           "matched_terms": [
             "action trace"
           ],
-          "source": "README.md:187",
+          "source": "README.md:195",
           "text": "| `agent_rigidbody_action_coupling` | Agent or controller actions must be explicit action traces, and target rigid bodies may move only after action/contact or release/impulse evidence. |"
         },
         {
@@ -1544,7 +1651,7 @@
           "matched_terms": [
             "pendulum"
           ],
-          "source": "README.md:188",
+          "source": "README.md:196",
           "text": "| `constraint_distance_pendulum_motion` | Distance/joint-constrained rigid bodies must preserve anchor-body length within tolerance and export constraint trace evidence. Pendulum is one smoke family. |"
         }
       ],
@@ -1642,7 +1749,7 @@
           "matched_terms": [
             "newton's cradle"
           ],
-          "source": "README.md:189",
+          "source": "README.md:197",
           "text": "| `constraint_momentum_transfer` | Constrained rigid-body chains must transfer impulse through ordered adjacent contacts; terminal receiver motion must be contact-driven. Newton's cradle is one smoke family. |"
         },
         {
@@ -1759,7 +1866,7 @@
           "matched_terms": [
             "spring launch"
           ],
-          "source": "README.md:190",
+          "source": "README.md:198",
           "text": "| `elastic_energy_launch` | Elastic stored-energy release must declare spring/compression/mass labels, export release events, and keep post-release kinetic response inside the stored-energy envelope. Spring launch is on…"
         },
         {
@@ -1860,7 +1967,7 @@
             "bungee",
             "elastic tether"
           ],
-          "source": "README.md:191",
+          "source": "README.md:199",
           "text": "| `elastic_constraint_rebound` | Elastic tether or bungee-style constraints must export rest length, extension trace, max-stretch bounds, and rebound velocity toward the anchor. Bungee is one smoke family. |"
         },
         {
@@ -1894,7 +2001,7 @@
           "text": "return \"F7_runtime_artifact_incomplete\", failure(\"elastic_constraint\", 0, 0, \"constraint_trace_present\", False), evidence"
         }
       ],
-      "evidence_count": 48,
+      "evidence_count": 49,
       "failure_modes": [
         "Visual bungee motion exists but no constraint_trace is exported.",
         "The constrained body stretches beyond the declared extension limit.",
@@ -1958,7 +2065,7 @@
             "fracture",
             "glass"
           ],
-          "source": "README.md:192",
+          "source": "README.md:200",
           "text": "| `brittle_impact_fracture` | Brittle/destructible bodies must declare fracture threshold, contact impact energy, fracture events, and fragment evidence. Glass panels, mirrors, cups, and crates are case families. |"
         },
         {
@@ -2021,7 +2128,7 @@
           "text": "detail = failure(brittle_id, fracture_frame, float(fracture.get(\"time_s\") or 0.0), \"impact_energy_j\", round(event_energy, 6))"
         }
       ],
-      "evidence_count": 148,
+      "evidence_count": 149,
       "failure_modes": [
         "Fracture is rendered before contact.",
         "Fracture event appears below threshold energy.",
@@ -2069,7 +2176,7 @@
             "depth",
             "multi-view"
           ],
-          "source": "README.md:147",
+          "source": "README.md:155",
           "text": "- `scene_capture` RGB/depth/segmentation multi-view path is the stable data path."
         },
         {
@@ -2094,7 +2201,7 @@
             "RGB",
             "depth"
           ],
-          "source": "README.md:124",
+          "source": "README.md:132",
           "text": "--render-passes rgb,depth,segmentation \\"
         },
         {
@@ -2102,7 +2209,7 @@
             "RGB",
             "depth"
           ],
-          "source": "README.md:137",
+          "source": "README.md:145",
           "text": "views/<camera_id>/{rgb.mp4,depth.exr,segmentation.png,meta.json}"
         },
         {
@@ -2110,7 +2217,7 @@
             "RGB",
             "depth"
           ],
-          "source": "README.md:169",
+          "source": "README.md:177",
           "text": "| `canonical_signal_capture` | Keeps trajectory, contacts, camera paths, RGB/depth/segmentation, and render metadata on one timebase. |"
         },
         {
@@ -2129,7 +2236,7 @@
           "text": "\"description\": \"Package only verifier-gated runtime artifacts into dataset-ready sample layouts with lineage, hashes, signal availability, and failure visibility.\","
         }
       ],
-      "evidence_count": 126,
+      "evidence_count": 132,
       "failure_modes": [
         "A debug run is silently included as training data.",
         "Dataset docs overclaim native signal quality.",
@@ -2173,7 +2280,7 @@
             "failure",
             "失败"
           ],
-          "source": "docs/PHYSICS_AWARE_HARNESS.md:190",
+          "source": "docs/PHYSICS_AWARE_HARNESS.md:220",
           "text": "每个失败必须归因到 failure type，例如："
         },
         {
@@ -2212,14 +2319,14 @@
           "matched_terms": [
             "failure"
           ],
-          "source": "README.md:161",
+          "source": "README.md:169",
           "text": "| `prompt_case_capability_planning` | Maps prompt/task intent into capability layers, case family, required signals, and failure taxonomy. |"
         },
         {
           "matched_terms": [
             "failure"
           ],
-          "source": "README.md:200",
+          "source": "README.md:208",
           "text": "The old billiards failure mode is still preserved as a regression: plausible"
         },
         {
@@ -2230,7 +2337,7 @@
           "text": "\"failure_taxonomy\": ["
         }
       ],
-      "evidence_count": 304,
+      "evidence_count": 329,
       "failure_modes": [
         "Agent adds a template instead of fixing the control surface.",
         "Multiple stages change at once and root cause becomes untraceable.",
@@ -2295,35 +2402,35 @@
           "matched_terms": [
             "BRIDGE"
           ],
-          "source": "README.md:168",
+          "source": "README.md:176",
           "text": "| `capability_runtime_artifact_bridge` | Adapts runtime artifacts into verifier inputs. |"
         },
         {
           "matched_terms": [
             "lineage"
           ],
-          "source": "README.md:171",
+          "source": "README.md:179",
           "text": "| `dataset_artifact_packaging` | Packages only readiness-gated artifacts with lineage, hashes, and signal availability. |"
         },
         {
           "matched_terms": [
             "HOW"
           ],
-          "source": "README.md:180",
+          "source": "README.md:188",
           "text": "| `projectile_gravity_motion` | Thrown bodies must show launch, apex/descent, forward displacement, and landing/contact evidence. |"
         },
         {
           "matched_terms": [
             "HOW"
           ],
-          "source": "README.md:186",
+          "source": "README.md:194",
           "text": "| `angular_damping_spin_decay` | Spinning rigid bodies must declare angular velocity and damping, then show monotonic spin decay in angular velocity and rotation trace evidence. |"
         },
         {
           "matched_terms": [
             "WHAT"
           ],
-          "source": "README.md:197",
+          "source": "README.md:205",
           "text": "`mass_ratio_momentum_transfer`, or `brittle_impact_fracture` depending on what"
         }
       ],
@@ -2868,57 +2975,6 @@
         "Sliding body with initial velocity decelerates and stops within distance range.",
         "Static-threshold case remains below displacement and speed thresholds.",
         "Sliding body does not accelerate or reverse without declared external force."
-      ]
-    },
-    {
-      "confidence": 0.75,
-      "description": "Build executable object-level scene layouts before simulation, including support surfaces, non-overlap placement, scale, orientation, camera coverage, and physics graph membership.",
-      "evidence": [
-        {
-          "matched_terms": [
-            "static_scene_placement"
-          ],
-          "source": "capabilities/static_scene_placement.json",
-          "text": "Build executable object-level scene layouts before simulation, including support surfaces, non-overlap placement, scale, orientation, camera coverage, and physics graph membership."
-        }
-      ],
-      "evidence_count": 1,
-      "failure_modes": [
-        "F1_scene_parsing_failure",
-        "F2_asset_missing",
-        "F3_invalid_initial_physics_state",
-        "F7_runtime_artifact_incomplete"
-      ],
-      "id": "static_scene_placement",
-      "iteration_moves": [
-        "Generate scene_layout.json before runtime execution.",
-        "Bind missing physics metadata or mark an analytic proxy.",
-        "Adjust object positions, scales, and support surfaces."
-      ],
-      "pattern_type": "pipeline_stage",
-      "prompt_moves": [
-        "Generate scene_layout.json before runtime execution.",
-        "Bind missing physics metadata or mark an analytic proxy.",
-        "Adjust object positions, scales, and support surfaces."
-      ],
-      "runtime_contract": [
-        "A physical simulation starts from a valid static scene state.",
-        "Physics-critical objects require stable ids, roles, transforms, colliders, mass/material metadata, and collision profiles.",
-        "Initial overlap and unsupported placement should be caught before runtime.",
-        "Camera and lighting plans are evidence requirements, not decorative UI settings."
-      ],
-      "stage_ids": [
-        "static_scene_layout",
-        "camera_planning",
-        "preflight_validation"
-      ],
-      "title": "Static Scene Placement",
-      "verifier_checks": [
-        "Objects have unique ids and roles.",
-        "Physics-critical assets have collider, mass/material, and collision profile.",
-        "Initial transforms avoid invalid overlap unless the case is a negative overlap test.",
-        "Support/contact-at-rest relationships are explicit.",
-        "Required camera views cover the event region."
       ]
     }
   ],

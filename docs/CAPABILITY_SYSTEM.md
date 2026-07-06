@@ -15,7 +15,7 @@
 |---|---|---|---|
 | Prompt/task -> case intent | `prompt_case_capability_planning` | prompt, capability profile | capability plan, case family, required signals |
 | Case/assets -> executable scene | `scene_spec_compilation` | case spec, asset resolution | scene spec, collision graph, camera/render requirements |
-| Static scene preflight | `static_scene_placement` | scene layout, object transforms | non-overlap/support/camera coverage report |
+| Static scene preflight | `static_scene_placement` | case spec, asset resolution | `scene_layout.json`, object nodes, support relations, non-overlap report, camera plan |
 | Runtime artifact bridge | `capability_runtime_artifact_bridge` | UE/fallback outputs | normalized trajectory/contact/render artifacts |
 | Signal synchronization | `canonical_signal_capture` | RGB/depth/segmentation/trajectory/contact/camera | aligned signal manifest |
 | Dataset packaging | `dataset_artifact_packaging` | verifier-gated run directory | dataset-ready manifest/package |
@@ -95,6 +95,7 @@ prompt/task
 
 ```bash
 python3.13 scripts/harness_list_capabilities.py --json
+python3.13 scripts/harness_build_static_scene.py cases/billiards/low_speed_single_contact.json --output-dir runs/static_scene/low_speed_single_contact
 python3.13 scripts/harness_generate_cases.py --suite fracture --count 10 --seed 58 --out cases/generated/fracture_seed58
 python3.13 scripts/harness_run_case_batch.py cases/generated/fracture_seed58 --backend fallback
 ```
