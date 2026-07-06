@@ -1,0 +1,57 @@
+{
+  "schema_version": "harness_capability_v1",
+  "id": "magnetic_force_field",
+  "capability_type": "physics_constraint",
+  "stage_ids": [
+    "physics_control",
+    "runtime_artifact_collection",
+    "physics_verification"
+  ],
+  "description": "Validate explicit magnetic attraction or repulsion fields using source-relative radial trajectory evidence. Magnet examples are smoke families, not templates.",
+  "physical_assumptions": [
+    "Magnetic motion must be caused by a structured magnetic field label, not by hidden animation.",
+    "A magnetic source and magnetized body must have stable object ids.",
+    "Attraction decreases radial distance to the source; repulsion increases radial distance from the source.",
+    "The radial displacement must stay within the declared expected range."
+  ],
+  "required_signals": [
+    "trajectory",
+    "magnetic_field_label",
+    "force_field_label",
+    "object_roles",
+    "source_relative_distance"
+  ],
+  "required_assets": [
+    "magnetic source or analytic field proxy",
+    "magnetized rigid body collider",
+    "force-field runtime control"
+  ],
+  "verifier_rules": [
+    "Expected magnetic mode is attract or repel.",
+    "Magnetic strength is non-zero.",
+    "Magnetized subject trajectory has at least two frames.",
+    "Attract mode moves radially toward the source.",
+    "Repel mode moves radially away from the source.",
+    "Radial displacement stays within expected bounds."
+  ],
+  "failure_taxonomy": [
+    "F1_missing_trajectory",
+    "F3_invalid_initial_physics_state",
+    "F4_causality_violation",
+    "F7_runtime_artifact_incomplete"
+  ],
+  "repair_suggestions": [
+    "Write `expected_physics.magnetic_mode`, `source_object_id`, `magnetic_subject_id`, and `magnetic_strength` before runtime.",
+    "Bind the magnetic source and subject as physics-critical objects or analytic proxies.",
+    "Export trajectory frames with source-relative positions.",
+    "Use negative cases for missing magnetic labels, no magnetic motion, and wrong radial direction."
+  ],
+  "smoke_cases": [
+    "cases/magnetic/attract_magnetic_body.json",
+    "cases/magnetic/repel_magnetic_body.json"
+  ],
+  "regression_cases": [
+    "cases/magnetic/negative_wrong_magnetic_direction.json",
+    "cases/magnetic/negative_missing_magnetic_label.json"
+  ]
+}

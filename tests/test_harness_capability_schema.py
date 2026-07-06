@@ -24,6 +24,7 @@ class HarnessCapabilitySchemaTests(unittest.TestCase):
         self.assertIn("rolling_friction_ball", ids)
         self.assertIn("sliding_crate_friction", ids)
         self.assertIn("force_field_wind_drift", ids)
+        self.assertIn("magnetic_force_field", ids)
         self.assertIn("mass_ratio_momentum_transfer", ids)
         self.assertIn("angular_damping_spin_decay", ids)
         self.assertIn("agent_rigidbody_action_coupling", ids)
@@ -44,6 +45,8 @@ class HarnessCapabilitySchemaTests(unittest.TestCase):
         self.assertEqual(elastic_constraint.capability_type, "physics_constraint")
         fracture = next(item for item in capabilities if item.id == "brittle_impact_fracture")
         self.assertEqual(fracture.capability_type, "physics_constraint")
+        magnetic = next(item for item in capabilities if item.id == "magnetic_force_field")
+        self.assertEqual(magnetic.capability_type, "physics_constraint")
 
 
 if __name__ == "__main__":

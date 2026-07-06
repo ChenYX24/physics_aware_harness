@@ -96,6 +96,7 @@ assets/*.local.json
 | `rolling_friction_ball` | 当前分支已可用 | 物体必须有初始水平速度、保持 support contact、速度衰减，滚动距离符合 friction-bounded envelope。 |
 | `sliding_crate_friction` | 当前分支已可用 | 箱体/刚体滑动必须保持 support contact、按动摩擦减速并停在距离范围内；低于静摩擦阈值时必须基本不动。 |
 | `force_field_wind_drift` | 当前分支已可用 | 风场/力场驱动的轻物体必须声明 wind vector，轨迹漂移方向和距离要符合 wind-aligned envelope，海拔保持在范围内。 |
+| `magnetic_force_field` | 当前分支已可用 | 磁吸/排斥必须声明 source、subject、mode、strength；trajectory 必须按 source-relative radial direction 响应。 |
 | `mass_ratio_momentum_transfer` | 当前分支已可用 | 接触碰撞必须声明质量标签；碰撞后速度顺序要符合质量比和 restitution envelope，并拒绝无解释能量增益。 |
 | `angular_damping_spin_decay` | 当前分支已可用 | 自转刚体必须声明初始角速度和角阻尼，runtime 输出 angular velocity + rotation trace，verifier 检查单调衰减和无外力增益。 |
 | `agent_rigidbody_action_coupling` | 当前分支已可用 | agent/robot/character 动作必须写成 action trace；目标刚体只能在 action/contact 或 release/impulse 证据后运动。 |
@@ -300,6 +301,7 @@ tests/test_harness_<family>_verifier.py
 | `rolling_friction.template.json` | `--suite rolling` | 当前分支可运行 | 滚动摩擦、停距、速度衰减。 |
 | `sliding_crate_friction.template.json` | `--suite sliding` | 当前分支可运行 | 滑动摩擦和静摩擦阈值。 |
 | `wind_balloon_drift.template.json` | `--suite wind` | 当前分支可运行 | 风场/力场方向漂移。 |
+| `magnetic_force_field.template.json` | `--suite magnetic` | 当前分支可运行 | 磁吸/排斥径向响应。 |
 | `mass_ratio_collision.template.json` | `--suite mass_ratio` | 当前分支可运行 | 质量比碰撞和动量传递。 |
 | `angular_damping_spin.template.json` | `--suite spin` | 当前分支可运行 | 角阻尼和旋转衰减。 |
 | `agent_rigidbody_action.template.json` | `--suite agent_action` | 当前分支可运行 | agent action trace 到刚体响应。 |
@@ -427,6 +429,12 @@ python3.13 scripts/harness_run_case_batch.py cases/generated/wind_seed50 --backe
 ```
 
 ```bash
+python3.13 scripts/harness_generate_cases.py --suite magnetic --count 10 --seed 59 --out cases/generated/magnetic_seed59
+python3.13 scripts/harness_run_case_batch.py cases/generated/magnetic_seed59 --backend fallback
+# 10 cases: 7 positive pass, 3 negative caught, unexpected 0
+```
+
+```bash
 python3.13 scripts/harness_generate_cases.py --suite mass_ratio --count 10 --seed 51 --out cases/generated/mass_ratio_seed51
 python3.13 scripts/harness_run_case_batch.py cases/generated/mass_ratio_seed51 --backend fallback
 # 10 cases: 7 positive pass, 3 negative caught, unexpected 0
@@ -494,15 +502,15 @@ TODO：
 | P1 | 绳子/蹦极弹性 | `elastic_constraint_rebound` | 当前分支已有 fallback/verifier；UE elastic PhysicsConstraint / extension trace / rebound velocity TODO |
 | P1 | 玻璃/镜子/玻璃杯/木箱破碎 | `brittle_impact_fracture` | fallback/verifier 已有；UE Chaos/destructible fracture event、impact energy、fragment export TODO |
 | P2 | 风吹纸片/气球 | `force_field_wind_drift` | 当前分支已有 fallback/verifier；UE force field / wind volume TODO |
-| P2 | 磁吸/排斥 | `magnetic_force_field` | TODO |
+| P2 | 磁吸/排斥 | `magnetic_force_field` | fallback/verifier 已有；UE magnetic field / radial force volume TODO |
 | P3 | 浮力/水流/搅拌流体 | fluid capability family | 暂缓，等待 fluid backend |
 
 推荐下一步顺序：
 
-1. 提交 `static_scene_builder + static_scene_verifier`。
-2. 做 `magnetic_force_field` 或 bowling chain case family。
+1. 提交 `magnetic_force_field`。
+2. 做 bowling chain case family 或 `UE actor placement compiler`。
 3. 回到 UE actor placement compiler，让 `scene_layout.json` 驱动真实 actor 生成。
-4. 让 billiards/ramp/falling/projectile/fracture 通过真实 trajectory/contact verifier。
+4. 让 billiards/ramp/falling/projectile/fracture/magnetic 通过真实 trajectory/contact verifier。
 
 ## 14. 其他人如何扩展/优化 harness
 

@@ -76,6 +76,12 @@ CAPABILITY_RULES: tuple[CapabilityRule, ...] = (
         priority=80,
     ),
     CapabilityRule(
+        capability_id="magnetic_force_field",
+        case_family="magnetic_force_field",
+        terms=("magnetic", "magnet", "magnetic force", "magnetic field", "attract", "repel", "magnetic attraction", "magnetic repulsion", "磁", "磁场", "磁吸", "吸引", "排斥", "相斥"),
+        priority=89,
+    ),
+    CapabilityRule(
         capability_id="mass_ratio_momentum_transfer",
         case_family="mass_ratio_collision",
         terms=("mass ratio", "momentum transfer", "heavy striker", "light target", "lighter target", "light striker", "heavy target", "heavier target", "collision mass", "mass-dependent collision", "动量传递", "质量比", "重物撞轻物", "轻物撞重物", "更轻目标", "更重目标", "碰撞后速度"),

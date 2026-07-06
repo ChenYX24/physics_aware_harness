@@ -20,6 +20,7 @@
 | `rolling_friction_ball` | rolling friction | 已支持 capability + fallback trajectory + friction-bounded verifier；新增 dynamic template | 接真实 UE rolling friction material/contact/export |
 | `sliding_crate_friction` | sliding friction | 已支持 capability + fallback trajectory + stop-distance/static-threshold verifier；新增 dynamic template | 接真实 UE static/dynamic friction material/contact/export |
 | `wind_balloon_drift` | force field wind | 已支持 `force_field_wind_drift` capability + fallback trajectory + wind-vector drift verifier；新增 dynamic template | 接真实 UE force field / wind volume / trajectory export |
+| `magnetic_attract_repel` | magnetic force field | 已支持 `magnetic_force_field` capability + fallback trajectory + radial attract/repel verifier；新增 dynamic template | 接真实 UE magnetic force volume / source-relative trajectory export |
 | `mass_ratio_collision` | momentum transfer | 已支持 `mass_ratio_momentum_transfer` capability + fallback trajectory + mass-ratio velocity/energy verifier；新增 dynamic template | 接真实 UE mass labels / contact impulse / post-collision velocity export |
 | `angular_damping_spin` | rotational damping | 已支持 `angular_damping_spin_decay` capability + fallback angular velocity trace + spin-decay verifier；新增 dynamic template | 接真实 UE angular velocity / angular damping / inertia export |
 | `agent_push_box` / `agent_throw_ball` | agent-to-rigidbody | 已支持 `agent_rigidbody_action_coupling` capability + fallback action trace + causality verifier；新增 dynamic template | 接真实 UE agent action trace / skeletal controller / impulse export |

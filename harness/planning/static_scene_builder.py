@@ -104,6 +104,13 @@ def support_id_for_node(node: dict[str, Any], expected: dict[str, Any], support_
 
 def support_relation(node: dict[str, Any], support_node: dict[str, Any] | None) -> dict[str, Any]:
     if support_node is None:
+        if allows_above_support(str(node.get("role"))):
+            return {
+                "object_id": node["object_id"],
+                "support_id": None,
+                "status": "free_body_allowed",
+                "vertical_gap_m": None,
+            }
         return {
             "object_id": node["object_id"],
             "support_id": None,

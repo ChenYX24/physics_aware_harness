@@ -1,0 +1,47 @@
+{
+  "schema_version": "harness_case_template_v1",
+  "template_id": "magnetic_force_field",
+  "capability_id": "magnetic_force_field",
+  "fallback_supported": true,
+  "parameter_ranges": {
+    "magnetic_strength": {"type": "float", "min": 0.5, "max": 2.4},
+    "initial_distance_m": {"type": "float", "min": 0.55, "max": 1.4},
+    "body_mass_kg": {"type": "float", "min": 0.08, "max": 0.45},
+    "radial_response_scale": {"type": "float", "min": 0.18, "max": 0.55}
+  },
+  "object_count_ranges": {
+    "magnetic_source": {"min": 1, "max": 1},
+    "magnetic_subject": {"min": 1, "max": 1}
+  },
+  "physics_critical_assets": [
+    "magnetic_source",
+    "magnetized_body"
+  ],
+  "visual_only_assets": [
+    "field_direction_indicator"
+  ],
+  "camera_policy": {
+    "default": "top_down",
+    "allowed": ["top_down", "side_static", "tracking_subject"]
+  },
+  "perturbation_policy": {
+    "positive_ratio": 0.7,
+    "negative_modes": ["wrong_direction", "no_magnetic_motion", "missing_magnetic_label"]
+  },
+  "expected_invariants": [
+    "magnetic mode is explicit",
+    "magnetic strength is non-zero",
+    "attract moves radially inward",
+    "repel moves radially outward",
+    "radial displacement is bounded"
+  ],
+  "negative_modes": [
+    "wrong_direction",
+    "no_magnetic_motion",
+    "missing_magnetic_label"
+  ],
+  "seed_policy": {
+    "deterministic": true,
+    "sample_parameters_from_seed": true
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "attract_magnetic_body",
+  "capability_id": "magnetic_force_field",
+  "prompt": "A magnetized steel ball is attracted toward a fixed magnetic source. The motion must be caused by a declared magnetic field, not a hidden animation.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "magnetic_mode": "attract",
+    "source_object_id": "magnet_source",
+    "magnetic_subject_id": "steel_ball",
+    "magnetic_strength": 1.2,
+    "expected_min_radial_displacement_m": 0.2,
+    "expected_max_radial_displacement_m": 0.75,
+    "fallback_radial_displacement_m": 0.45
+  },
+  "objects": [
+    {"id": "magnet_source", "role": "magnetic_source", "shape": "fixed_point", "initial_position_m": [0.0, 0.0, 0.25]},
+    {"id": "steel_ball", "role": "magnetized_body", "shape": "sphere", "radius_m": 0.08, "mass_kg": 0.2, "initial_position_m": [1.0, 0.0, 0.25], "initial_velocity_m_s": [0.0, 0.0, 0.0]}
+  ],
+  "active_objects": [],
+  "passive_objects": ["steel_ball"],
+  "required_assets": ["magnetic_source", "magnetized_body"],
+  "required_signals": ["trajectory", "magnetic_field_label", "force_field_label"],
+  "verifier_expectation": {"status": "pass"},
+  "should_pass": true,
+  "notes": "The ball should move radially inward toward the magnetic source."
+}

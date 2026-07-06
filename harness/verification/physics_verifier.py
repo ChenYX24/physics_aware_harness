@@ -17,6 +17,7 @@ from harness.verification.elastic_launch_verifier import verify_elastic_launch
 from harness.verification.falling_verifier import verify_falling
 from harness.verification.impulse_chain_verifier import verify_impulse_chain
 from harness.verification.mass_ratio_verifier import verify_mass_ratio
+from harness.verification.magnetic_verifier import verify_magnetic
 from harness.verification.projectile_verifier import verify_projectile
 from harness.verification.ramp_verifier import verify_ramp
 from harness.verification.rolling_verifier import verify_rolling
@@ -87,6 +88,8 @@ class PhysicsVerifier:
             failure_type, first_failure, evidence = verify_sliding(case_spec, trajectory)
         elif capability_id == "force_field_wind_drift":
             failure_type, first_failure, evidence = verify_wind(case_spec, trajectory)
+        elif capability_id == "magnetic_force_field":
+            failure_type, first_failure, evidence = verify_magnetic(case_spec, trajectory)
         elif capability_id == "mass_ratio_momentum_transfer":
             failure_type, first_failure, evidence = verify_mass_ratio(case_spec, trajectory)
         elif capability_id == "angular_damping_spin_decay":

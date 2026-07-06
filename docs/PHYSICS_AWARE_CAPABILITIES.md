@@ -24,7 +24,7 @@ This report is generated from project memory, docs, tests, and runtime code. It 
 | `pipeline_stage_capabilities` | `prompt_case_capability_planning`, `scene_spec_compilation`, `static_scene_placement`, `pipeline_stage_orchestration`, `capability_runtime_artifact_bridge`, `canonical_signal_capture`, `dataset_artifact_packaging` |
 | `asset_operation_capabilities` | `asset_intent_resolution`, `asset_runtime_binding_invocation` |
 | `physical_property_constraint_capabilities` | `explicit_physics_control_surface`, `physics_property_constraint_validation` |
-| `physics_behavior_capabilities` | `rigid_body_contact_causality`, `rigid_body_gravity_collision`, `sequential_contact_propagation`, `ramp_sliding_friction`, `projectile_gravity_motion`, `bounce_restitution_ball`, `rolling_friction_ball`, `sliding_crate_friction`, `force_field_wind_drift`, `mass_ratio_momentum_transfer`, `angular_damping_spin_decay`, `agent_rigidbody_action_coupling`, `constraint_distance_pendulum_motion`, `constraint_momentum_transfer`, `elastic_energy_launch`, `elastic_constraint_rebound`, `brittle_impact_fracture` |
+| `physics_behavior_capabilities` | `rigid_body_contact_causality`, `rigid_body_gravity_collision`, `sequential_contact_propagation`, `ramp_sliding_friction`, `projectile_gravity_motion`, `bounce_restitution_ball`, `rolling_friction_ball`, `sliding_crate_friction`, `force_field_wind_drift`, `magnetic_force_field`, `mass_ratio_momentum_transfer`, `angular_damping_spin_decay`, `agent_rigidbody_action_coupling`, `constraint_distance_pendulum_motion`, `constraint_momentum_transfer`, `elastic_energy_launch`, `elastic_constraint_rebound`, `brittle_impact_fracture` |
 | `verification_capabilities` | `physics_verifier_truth_gate` |
 | `deprecated_aliases` | `billiard_causality_compiler` -> `rigid_body_contact_causality` |
 
@@ -73,7 +73,7 @@ Evidence:
 - id: `rigid_body_contact_causality`
 - pattern: `FLOW`
 - stages: `capability_planning, case_spec_compilation, scene_spec_compilation, runtime_artifact_collection, physics_verification`
-- confidence: `0.95` from `424` matched lines
+- confidence: `0.95` from `489` matched lines
 
 Compile active-to-passive rigid-body contact scenes into causal simulation programs where passive bodies move only after runtime contact evidence exists.
 
@@ -84,15 +84,34 @@ Key iteration moves:
 
 Evidence:
 - `tools/capability_planner.py:27`: terms=("billiard", "billiards", "pool", "cue ball", "cue_ball", "bowling", "pins", "rigid-body impact", "rigid body impact", "crate impact", "mass ratio collision", "台球", "白球", "目标球", "保龄球", "球瓶", "刚体碰撞", "ball collisio…
+- `scripts/harness_generate_cases.py:249`: "prompt": f"Generated billiards collision with one cue ball and {target_count} passive target balls.",
 - `tools/capability_closed_loop.py:18`: "prompt": "Create a billiards / pool scene where one cue ball hits a compact rack of passive target balls. Targets must stay still until contact.",
-- `README.md:184`: | `rigid_body_contact_causality` | Active bodies may move; passive rigid bodies must remain still until runtime contact evidence. Billiards/pool is one case family. |
+
+### Magnetic Attract/Repel Force Field
+
+- id: `magnetic_force_field`
+- pattern: `physics_constraint`
+- stages: `case_spec_compilation, physics_control, runtime_artifact_collection, physics_verification`
+- confidence: `0.95` from `64` matched lines
+
+Validate magnetic attraction or repulsion using explicit source/subject/mode/strength labels and source-relative radial trajectory evidence.
+
+Key iteration moves:
+- Run magnetic golden and negative cases before tuning visuals.
+- Inspect radial distance evidence in verifier_report.json.
+- Fix magnetic labels and runtime force direction before changing assets.
+
+Evidence:
+- `docs/CAPABILITY_SYSTEM.md:56`: | `magnetic_force_field` | 磁吸/排斥必须声明 source、subject、mode、strength，并按径向距离变化验证。 | 磁吸球、磁排斥体 |
+- `capabilities/magnetic_force_field.json:44`: "Write `expected_physics.magnetic_mode`, `source_object_id`, `magnetic_subject_id`, and `magnetic_strength` before runtime.",
+- `cases/magnetic/attract_magnetic_body.json:22`: "required_assets": ["magnetic_source", "magnetized_body"],
 
 ### Asset Intent Resolution
 
 - id: `asset_intent_resolution`
 - pattern: `HOW`
 - stages: `asset_intent_resolution, asset_retrieval`
-- confidence: `0.95` from `390` matched lines
+- confidence: `0.95` from `424` matched lines
 
 Classify object-level asset needs into typed intents and retrieve top-k candidates before runtime binding.
 
@@ -111,7 +130,7 @@ Evidence:
 - id: `asset_runtime_binding_invocation`
 - pattern: `HOW`
 - stages: `asset_runtime_binding, runtime_actor_binding, preflight_validation`
-- confidence: `0.95` from `197` matched lines
+- confidence: `0.95` from `261` matched lines
 
 Bind selected real assets or analytic proxies into runtime actors while preserving collider, mass, material, and collision-profile metadata.
 
@@ -130,7 +149,7 @@ Evidence:
 - id: `rigid_body_gravity_collision`
 - pattern: `FLOW`
 - stages: `planner, physics_control, runtime, verifier`
-- confidence: `0.95` from `174` matched lines
+- confidence: `0.95` from `210` matched lines
 
 Compile falling or stacking prompts into gravity-driven rigid-body traces where objects descend under gravity and collide with a support surface instead of being visually animated.
 
@@ -149,7 +168,7 @@ Evidence:
 - id: `sequential_contact_propagation`
 - pattern: `FLOW`
 - stages: `planner, physics_control, runtime, verifier`
-- confidence: `0.95` from `84` matched lines
+- confidence: `0.95` from `97` matched lines
 
 Compile domino or chain-reaction prompts into ordered contact propagation where only the first body is actively triggered and later bodies move after upstream contact.
 
@@ -161,14 +180,14 @@ Key iteration moves:
 Evidence:
 - `tools/capability_planner.py:39`: terms=("domino", "dominoes", "chain reaction", "sequential contact", "contact propagation", "多米诺", "连锁反应", "链式碰撞", "依次倒下"),
 - `tools/capability_closed_loop.py:26`: "prompt": "Create a domino chain reaction. The first domino is actively triggered and the later dominoes tip only through sequential contact propagation.",
-- `capabilities/sequential_contact_propagation.json:4`: "description": "Compile domino or chain-reaction prompts into ordered contact propagation where only the first object is actively triggered.",
+- `scripts/harness_generate_cases.py:270`: "prompt": f"Generated domino chain with {count} dominoes and sequential contact propagation.",
 
 ### Explicit Physics Control Surface
 
 - id: `explicit_physics_control_surface`
 - pattern: `HOW`
 - stages: `planner, physics_control, benchmark`
-- confidence: `0.95` from `393` matched lines
+- confidence: `0.95` from `555` matched lines
 
 Represent gravity, material, rigid-body, constraint, force, time, agent, and render-physics bridge controls as typed fields that can be replayed and swept.
 
@@ -187,7 +206,7 @@ Evidence:
 - id: `canonical_signal_capture`
 - pattern: `FLOW`
 - stages: `runtime, signals, dataset`
-- confidence: `0.95` from `505` matched lines
+- confidence: `0.95` from `548` matched lines
 
 Capture video and aligned evidence streams on one timebase: RGB, trajectory, contacts, camera path, depth proxy, normal proxy, audio, engine states, and semantic labels.
 
@@ -206,7 +225,7 @@ Evidence:
 - id: `physics_verifier_truth_gate`
 - pattern: `HOW`
 - stages: `verifier, dataset`
-- confidence: `0.95` from `229` matched lines
+- confidence: `0.95` from `238` matched lines
 
 Use verifier output, not UI preview or successful rendering, as the final readiness decision for reference-ready samples.
 
@@ -235,7 +254,7 @@ Key iteration moves:
 - Use capability_diagnosis.md to decide whether the issue is planning, runtime, evidence, or verifier.
 
 Evidence:
-- `harness/verification/physics_verifier.py:121`: for name in ("fallback_output", "ue_output", "debug_preview"):
+- `harness/verification/physics_verifier.py:124`: for name in ("fallback_output", "ue_output", "debug_preview"):
 - `tests/test_capability_runtime_adapter.py:8`: from tools.capability_runtime_adapter import CapabilityRuntimeAdapter, resolve_runtime_output_dir, verify_capability_run
 - `tests/test_capability_runtime_adapter.py:12`: def test_resolves_ue_output_before_debug_preview(self) -> None:
 
@@ -244,7 +263,7 @@ Evidence:
 - id: `trajectory_benchmark_iteration`
 - pattern: `FLOW`
 - stages: `benchmark, runtime, verifier`
-- confidence: `0.95` from `64` matched lines
+- confidence: `0.95` from `130` matched lines
 
 Evaluate real runtime trajectories across seed sweeps and variants instead of dry control signals or mixed-backend stability numbers.
 
@@ -254,7 +273,7 @@ Key iteration moves:
 - Cluster failures before changing planner or schema.
 
 Evidence:
-- `README.md:208`: The old billiards failure mode is still preserved as a regression: plausible
+- `README.md:209`: The old billiards failure mode is still preserved as a regression: plausible
 - `README.md:36`: | `tests/` | Regression tests for CLI, capabilities, verifier, render sync, artifacts. |
 - `README.md:76`: --seed 42 \
 
@@ -273,9 +292,9 @@ Key iteration moves:
 - Add negative cases for missing labels, no decay, and unexplained spin gain.
 
 Evidence:
-- `tools/capability_planner.py:93`: terms=("angular damping", "spin decay", "spinning body", "angular velocity", "rotational damping", "spin slows", "spin down", "角阻尼", "角速度", "旋转衰减", "自转", "旋转变慢"),
+- `tools/capability_planner.py:99`: terms=("angular damping", "spin decay", "spinning body", "angular velocity", "rotational damping", "spin slows", "spin down", "角阻尼", "角速度", "旋转衰减", "自转", "旋转变慢"),
 - `capabilities/angular_damping_spin_decay.json:10`: "description": "Validate rotational damping for spinning rigid bodies using explicit angular velocity, angular damping labels, rotation trace, and monotonic spin-decay evidence.",
-- `README.md:194`: | `angular_damping_spin_decay` | Spinning rigid bodies must declare angular velocity and damping, then show monotonic spin decay in angular velocity and rotation trace evidence. |
+- `README.md:195`: | `angular_damping_spin_decay` | Spinning rigid bodies must declare angular velocity and damping, then show monotonic spin decay in angular velocity and rotation trace evidence. |
 
 ### Agent Action To Rigid-Body Coupling
 
@@ -292,8 +311,8 @@ Key iteration moves:
 - Use negative cases for pre-action motion, missing action trace, and no post-action response.
 
 Evidence:
-- `tools/capability_planner.py:99`: terms=("agent pushes", "agent push", "robot pushes", "robot push", "character pushes", "character throws", "agent throws", "agent throw", "robot throws", "action trace", "agent-to-rigidbody", "agent rigid body", "推箱子",…
-- `README.md:195`: | `agent_rigidbody_action_coupling` | Agent or controller actions must be explicit action traces, and target rigid bodies may move only after action/contact or release/impulse evidence. |
+- `tools/capability_planner.py:105`: terms=("agent pushes", "agent push", "robot pushes", "robot push", "character pushes", "character throws", "agent throws", "agent throw", "robot throws", "action trace", "agent-to-rigidbody", "agent rigid body", "推箱子",…
+- `README.md:196`: | `agent_rigidbody_action_coupling` | Agent or controller actions must be explicit action traces, and target rigid bodies may move only after action/contact or release/impulse evidence. |
 - `capabilities/agent_rigidbody_action_coupling.json:11`: "description": "Validate that agent or controller actions cause rigid-body motion through an explicit action trace, contact/impulse evidence, and post-action trajectory response. Pushing a box or throwing a ball are smo…
 
 ### Distance Constraint Motion Validation
@@ -301,7 +320,7 @@ Evidence:
 - id: `constraint_distance_pendulum_motion`
 - pattern: `physics_constraint`
 - stages: `case_spec_compilation, physics_control, runtime_artifact_collection, physics_verification`
-- confidence: `0.95` from `34` matched lines
+- confidence: `0.95` from `42` matched lines
 
 Validate fixed-distance or joint-constrained rigid-body motion using anchor/body trajectory, constraint length labels, constraint trace, and continuity checks.
 
@@ -311,7 +330,7 @@ Key iteration moves:
 - Add negative cases for missing constraint label, length drift, and teleporting body.
 
 Evidence:
-- `tools/capability_planner.py:105`: terms=("pendulum", "swinging pendulum", "distance constraint", "fixed length", "constraint length", "joint constraint", "rope constraint", "hinge constraint", "单摆", "摆锤", "距离约束", "固定长度", "约束长度", "铰链约束", "绳长约束"),
+- `tools/capability_planner.py:111`: terms=("pendulum", "swinging pendulum", "distance constraint", "fixed length", "constraint length", "joint constraint", "rope constraint", "hinge constraint", "单摆", "摆锤", "距离约束", "固定长度", "约束长度", "铰链约束", "绳长约束"),
 - `capabilities/constraint_distance_pendulum_motion.json:10`: "description": "Validate fixed-distance constraint motion such as pendulums using anchor/body trajectory, constraint length labels, and continuity checks. A pendulum bob is only the smoke family.",
 - `tests/test_capability_closed_loop.py:60`: plan = self.planner.plan("A pendulum swings while preserving a fixed length rope constraint.")
 
@@ -320,7 +339,7 @@ Evidence:
 - id: `constraint_momentum_transfer`
 - pattern: `physics_constraint`
 - stages: `case_spec_compilation, physics_control, runtime_artifact_collection, physics_verification`
-- confidence: `0.9` from `11` matched lines
+- confidence: `0.95` from `12` matched lines
 
 Validate ordered contact-driven impulse and momentum transfer through a chain of constrained rigid bodies.
 
@@ -330,7 +349,7 @@ Key iteration moves:
 - Add negative cases for pre-chain motion, terminal no-response, and contact order violations.
 
 Evidence:
-- `tools/capability_planner.py:111`: terms=("newton cradle", "newton's cradle", "impulse chain", "constrained impulse", "momentum chain", "chain momentum transfer", "suspended ball chain", "constraint momentum transfer", "牛顿摆", "冲量链", "动量链", "悬挂球", "受约束动量传…
+- `tools/capability_planner.py:117`: terms=("newton cradle", "newton's cradle", "impulse chain", "constrained impulse", "momentum chain", "chain momentum transfer", "suspended ball chain", "constraint momentum transfer", "牛顿摆", "冲量链", "动量链", "悬挂球", "受约束动量传…
 - `capabilities/constraint_momentum_transfer.json:11`: "description": "Validate constrained impulse-chain momentum transfer across adjacent rigid bodies. Newton's cradle is only the smoke family; the reusable invariant is ordered contact-driven transfer through constrained…
 - `docs/CAPABILITY_AUTHORING.md:51`: | `newton_cradle_template` 作为主能力 | `constraint_momentum_transfer`，牛顿摆/悬挂球链作为 case family |
 
@@ -339,7 +358,7 @@ Evidence:
 - id: `elastic_energy_launch`
 - pattern: `physics_constraint`
 - stages: `case_spec_compilation, physics_control, runtime_artifact_collection, physics_verification`
-- confidence: `0.95` from `34` matched lines
+- confidence: `0.95` from `40` matched lines
 
 Validate stored elastic energy release into launched rigid-body motion using explicit release events, spring parameters, payload mass, and bounded kinetic-energy response.
 
@@ -349,16 +368,16 @@ Key iteration moves:
 - Add negative cases for missing release, no launch response, and energy gain.
 
 Evidence:
-- `tools/capability_planner.py:117`: terms=("spring launch", "spring launcher", "compressed spring", "elastic launch", "elastic energy", "catapult", "弹簧", "弹簧发射", "压缩弹簧", "弹射", "弹性势能"),
-- `docs/CAPABILITY_SYSTEM.md:60`: | `elastic_energy_launch` | stored elastic energy 通过 release event 转成 bounded kinetic response。 | 弹簧发射、弹射器 |
-- `tests/test_capability_closed_loop.py:68`: plan = self.planner.plan("A compressed spring launches a payload from elastic energy.")
+- `tools/capability_planner.py:123`: terms=("spring launch", "spring launcher", "compressed spring", "elastic launch", "elastic energy", "catapult", "弹簧", "弹簧发射", "压缩弹簧", "弹射", "弹性势能"),
+- `docs/CAPABILITY_SYSTEM.md:61`: | `elastic_energy_launch` | stored elastic energy 通过 release event 转成 bounded kinetic response。 | 弹簧发射、弹射器 |
+- `scripts/harness_generate_cases.py:987`: "prompt": f"Generated elastic launch case: a compressed spring releases {stored_energy:.2f} J into a payload at {launch_angle:.1f} degrees.",
 
 ### Elastic Constraint Rebound
 
 - id: `elastic_constraint_rebound`
 - pattern: `physics_constraint`
 - stages: `case_spec_compilation, physics_control, runtime_artifact_collection, physics_verification`
-- confidence: `0.95` from `49` matched lines
+- confidence: `0.95` from `59` matched lines
 
 Validate elastic tether or bungee-style constrained motion using rest length, bounded extension, constraint trace, and rebound velocity toward the anchor.
 
@@ -368,16 +387,16 @@ Key iteration moves:
 - Add negative cases for missing trace, overstretch, and no rebound.
 
 Evidence:
-- `tools/capability_planner.py:123`: terms=("bungee", "elastic rope", "elastic tether", "stretchy rope", "rope rebound", "tether rebound", "elastic constraint", "蹦极", "弹性绳", "弹力绳", "弹性约束", "绳子回弹", "拉伸回弹"),
+- `tools/capability_planner.py:129`: terms=("bungee", "elastic rope", "elastic tether", "stretchy rope", "rope rebound", "tether rebound", "elastic constraint", "蹦极", "弹性绳", "弹力绳", "弹性约束", "绳子回弹", "拉伸回弹"),
 - `docs/CAPABILITY_AUTHORING.md:53`: | `bungee_template` 作为主能力 | `elastic_constraint_rebound`，蹦极/弹性绳作为 case family |
-- `docs/CAPABILITY_SYSTEM.md:61`: | `elastic_constraint_rebound` | 弹性约束必须记录 extension，并在峰值后朝 anchor 回弹。 | 蹦极、弹力绳 |
+- `docs/CAPABILITY_SYSTEM.md:62`: | `elastic_constraint_rebound` | 弹性约束必须记录 extension，并在峰值后朝 anchor 回弹。 | 蹦极、弹力绳 |
 
 ### Brittle Impact Fracture
 
 - id: `brittle_impact_fracture`
 - pattern: `physics_constraint`
 - stages: `case_spec_compilation, physics_control, runtime_artifact_collection, physics_verification`
-- confidence: `0.95` from `149` matched lines
+- confidence: `0.95` from `175` matched lines
 
 Validate brittle/destructible fracture as a contact-energy threshold invariant with explicit fracture events and fragment evidence.
 
@@ -387,8 +406,8 @@ Key iteration moves:
 - Use negative cases for missing event, pre-contact fracture, below-threshold fracture, and too few fragments.
 
 Evidence:
-- `tools/capability_planner.py:87`: terms=("brittle", "fracture", "shatter", "breakable", "destructible", "glass break", "glass shatter", "mirror breaks", "wood crate breaks", "crate breaks", "破碎", "碎裂", "断裂", "玻璃碎", "镜子碎", "玻璃杯碎", "木箱破碎", "可破坏"),
-- `README.md:200`: | `brittle_impact_fracture` | Brittle/destructible bodies must declare fracture threshold, contact impact energy, fracture events, and fragment evidence. Glass panels, mirrors, cups, and crates are case families. |
+- `tools/capability_planner.py:93`: terms=("brittle", "fracture", "shatter", "breakable", "destructible", "glass break", "glass shatter", "mirror breaks", "wood crate breaks", "crate breaks", "破碎", "碎裂", "断裂", "玻璃碎", "镜子碎", "玻璃杯碎", "木箱破碎", "可破坏"),
+- `README.md:201`: | `brittle_impact_fracture` | Brittle/destructible bodies must declare fracture threshold, contact impact energy, fracture events, and fragment evidence. Glass panels, mirrors, cups, and crates are case families. |
 - `capabilities/brittle_impact_fracture.json:4`: "description": "Validate brittle or destructible rigid-body fracture as a contact-energy threshold invariant rather than a glass-specific visual template.",
 
 ### Verified Multi-View Dataset Packaging
@@ -415,7 +434,7 @@ Evidence:
 - id: `failure_driven_refinement_loop`
 - pattern: `BRIDGE`
 - stages: `planner, runtime, verifier, benchmark`
-- confidence: `0.95` from `329` matched lines
+- confidence: `0.95` from `358` matched lines
 
 Use structured failure evidence to decide the next minimal change: prompt expansion, asset binding, scene layout, physics controls, runtime settings, or verifier thresholds.
 
@@ -426,7 +445,7 @@ Key iteration moves:
 
 Evidence:
 - `docs/PHYSICS_AWARE_HARNESS.md:220`: 每个失败必须归因到 failure type，例如：
-- `harness/verification/physics_verifier.py:46`: "value": str(ue_backend_report.get("failure_message") or "UE backend failed"),
+- `harness/verification/physics_verifier.py:47`: "value": str(ue_backend_report.get("failure_message") or "UE backend failed"),
 - `tools/capability_runtime_adapter.py:318`: lines.append(f"- `{failure.get('failure_type')}`: {failure.get('reason')}")
 
 ### Lineage-Based Harness Capability Extraction

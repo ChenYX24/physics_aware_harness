@@ -20,6 +20,11 @@ DYNAMIC_ABOVE_SUPPORT_ROLES = {
     "wind_subject",
     "balloon",
     "light_body",
+    "magnetized_body",
+    "magnetic_body",
+    "magnetic_subject",
+    "magnetic_source",
+    "magnet_source",
 }
 
 

@@ -41,6 +41,13 @@ class HarnessAssetIntentTests(unittest.TestCase):
         self.assertTrue(subject.physics_critical)
         self.assertIn("collision_profile", subject.required_properties)
 
+    def test_magnetic_roles_are_physics_critical(self) -> None:
+        source = intent_from_object({"id": "magnet", "role": "magnetic_source", "shape": "fixed_point"})
+        subject = intent_from_object({"id": "steel_ball", "role": "magnetized_body", "shape": "sphere"})
+        self.assertTrue(source.physics_critical)
+        self.assertTrue(subject.physics_critical)
+        self.assertIn("rigid_body", subject.required_properties)
+
     def test_spinning_body_role_is_physics_critical(self) -> None:
         subject = intent_from_object({"id": "spinner", "role": "spinning_body", "shape": "sphere"})
         self.assertTrue(subject.physics_critical)
@@ -100,6 +107,8 @@ class HarnessAssetIntentTests(unittest.TestCase):
                 {"id": "rolling_ball", "role": "rolling_body", "shape": "sphere"},
                 {"id": "sliding_crate", "role": "sliding_body", "shape": "box"},
                 {"id": "wind_body", "role": "wind_drift_body", "shape": "sphere"},
+                {"id": "magnet", "role": "magnetic_source", "shape": "fixed_point"},
+                {"id": "steel_ball", "role": "magnetized_body", "shape": "sphere"},
                 {"id": "spinner", "role": "spinning_body", "shape": "sphere"},
                 {"id": "agent", "role": "active_agent", "shape": "capsule"},
                 {"id": "payload", "role": "action_coupled_body", "shape": "box"},
@@ -121,8 +130,8 @@ class HarnessAssetIntentTests(unittest.TestCase):
         self.assertEqual(result["case_id"], "asset_smoke")
         self.assertEqual(result["capability_id"], "asset_intent_resolution")
         self.assertEqual(result["invocation_contract"]["next_capability_id"], "asset_runtime_binding_invocation")
-        self.assertEqual(result["physics_critical_count"], 22)
-        self.assertEqual(len(result["assets"]), 22)
+        self.assertEqual(result["physics_critical_count"], 24)
+        self.assertEqual(len(result["assets"]), 24)
         self.assertTrue(all(row["selected_asset"] for row in result["assets"]))
         self.assertTrue(all(row["runtime_binding_requirements"] for row in result["assets"]))
 

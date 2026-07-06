@@ -53,6 +53,7 @@ Physics-critical asset 必须有 collider、mass、rigid body、collision profil
 | `rolling_friction_ball` | support contact 下滚动距离和速度衰减受摩擦约束。 | 球滚停距 |
 | `sliding_crate_friction` | 滑动/静摩擦阈值决定是否移动和停距。 | 箱体滑动、推不动 |
 | `force_field_wind_drift` | 漂移方向/距离要和显式风向/力场一致。 | 气球、纸片、轻物体 |
+| `magnetic_force_field` | 磁吸/排斥必须声明 source、subject、mode、strength，并按径向距离变化验证。 | 磁吸球、磁排斥体 |
 | `angular_damping_spin_decay` | angular velocity 必须随 damping 衰减，不能无外力增益。 | 陀螺、自转球 |
 | `agent_rigidbody_action_coupling` | 目标刚体只能在 action/contact/release evidence 后响应。 | 机器人推箱、角色抛球 |
 | `constraint_distance_pendulum_motion` | 约束体必须保持 anchor-body 距离并连续运动。 | 单摆、绳索、铰链 |

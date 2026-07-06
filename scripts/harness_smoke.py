@@ -39,6 +39,8 @@ DEFAULT_CASES = [
     "cases/elastic_constraint/negative_overstretch.json",
     "cases/fracture/glass_panel_impact_fracture.json",
     "cases/fracture/negative_below_threshold_fracture.json",
+    "cases/magnetic/attract_magnetic_body.json",
+    "cases/magnetic/negative_wrong_magnetic_direction.json",
 ]
 
 

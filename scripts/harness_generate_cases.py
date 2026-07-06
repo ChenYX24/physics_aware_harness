@@ -23,7 +23,7 @@ TEMPLATE_SCHEMA_VERSION = "harness_case_template_v1"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate parameterized harness case specs from a template.")
     parser.add_argument("--template", help="Path to cases/templates/*.template.json")
-    parser.add_argument("--suite", choices=["billiards", "domino", "falling", "ramp", "projectile", "bounce", "rolling", "sliding", "wind", "mass_ratio", "spin", "agent_action", "pendulum", "impulse_chain", "elastic_launch", "elastic_constraint", "fracture", "basic_physics"], help="Named case suite shortcut.")
+    parser.add_argument("--suite", choices=["billiards", "domino", "falling", "ramp", "projectile", "bounce", "rolling", "sliding", "wind", "magnetic", "mass_ratio", "spin", "agent_action", "pendulum", "impulse_chain", "elastic_launch", "elastic_constraint", "fracture", "basic_physics"], help="Named case suite shortcut.")
     parser.add_argument("--num-cases", type=int, help="Number of case specs to generate.")
     parser.add_argument("--count", type=int, help="Alias for --num-cases.")
     parser.add_argument("--seed", type=int, default=0, help="Deterministic generation seed.")
@@ -96,6 +96,7 @@ def template_for_suite(suite: str | None) -> str | None:
         "rolling": "cases/templates/rolling_friction.template.json",
         "sliding": "cases/templates/sliding_crate_friction.template.json",
         "wind": "cases/templates/wind_balloon_drift.template.json",
+        "magnetic": "cases/templates/magnetic_force_field.template.json",
         "mass_ratio": "cases/templates/mass_ratio_collision.template.json",
         "spin": "cases/templates/angular_damping_spin.template.json",
         "agent_action": "cases/templates/agent_rigidbody_action.template.json",
@@ -145,6 +146,8 @@ def generate_case(template: dict[str, Any], rng: random.Random, *, index: int, s
         return sliding_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
     if template_id == "wind_balloon_drift":
         return wind_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
+    if template_id == "magnetic_force_field":
+        return magnetic_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
     if template_id == "mass_ratio_collision":
         return mass_ratio_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
     if template_id == "angular_damping_spin":
@@ -597,6 +600,53 @@ def wind_case(template: dict[str, Any], params: dict[str, Any], *, index: int, s
             "objects": objects,
             "active_objects": [],
             "passive_objects": ["wind_body"],
+        }
+    )
+    return add_m2_case_contract(case, template, params)
+
+
+def magnetic_case(template: dict[str, Any], params: dict[str, Any], *, index: int, seed: int, should_pass: bool, negative_mode: str | None) -> dict[str, Any]:
+    strength = float(params["magnetic_strength"])
+    initial_distance = float(params["initial_distance_m"])
+    mass = float(params["body_mass_kg"])
+    response_scale = float(params["radial_response_scale"])
+    mode = "attract" if index % 2 == 0 else "repel"
+    radial_displacement = max(0.08, min(initial_distance * 0.6, strength * response_scale / max(mass, 0.05) * 0.06))
+    expected = {
+        "coordinate_system": "z_up",
+        "magnetic_mode": mode,
+        "source_object_id": "magnet_source",
+        "magnetic_subject_id": "magnetic_body",
+        "magnetic_strength": strength,
+        "initial_distance_m": initial_distance,
+        "body_mass_kg": mass,
+        "expected_min_radial_displacement_m": round(max(0.03, radial_displacement * 0.45), 4),
+        "expected_max_radial_displacement_m": round(max(0.12, radial_displacement * 1.75), 4),
+        "fallback_radial_displacement_m": round(radial_displacement, 4),
+    }
+    if negative_mode == "missing_magnetic_label":
+        expected.pop("magnetic_mode", None)
+        expected.pop("magnetic_strength", None)
+    objects = [
+        {"id": "magnet_source", "role": "magnetic_source", "shape": "fixed_point", "initial_position_m": [0.0, 0.0, 0.25]},
+        {
+            "id": "magnetic_body",
+            "role": "magnetized_body",
+            "shape": "sphere",
+            "radius_m": 0.08,
+            "mass_kg": mass,
+            "initial_position_m": [round(initial_distance, 4), 0.0, 0.25],
+            "initial_velocity_m_s": [0.0, 0.0, 0.0],
+        },
+    ]
+    case = base_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
+    case.update(
+        {
+            "prompt": f"Generated magnetic-force case: a magnetized body should {mode} relative to a source under strength {strength:.2f}.",
+            "expected_physics": expected,
+            "objects": objects,
+            "active_objects": [],
+            "passive_objects": ["magnetic_body"],
         }
     )
     return add_m2_case_contract(case, template, params)
@@ -1127,6 +1177,13 @@ def expected_event_for(case: dict[str, Any]) -> dict[str, Any]:
         return {"type": "friction_bounded_slide_or_static_hold", "support": expected_physics.get("support", "floor"), "mode": expected_physics.get("mode", "sliding_stop")}
     if capability_id == "force_field_wind_drift":
         return {"type": "force_field_wind_drift", "wind_vector_m_s": expected_physics.get("wind_vector_m_s")}
+    if capability_id == "magnetic_force_field":
+        return {
+            "type": "magnetic_force_field",
+            "magnetic_mode": expected_physics.get("magnetic_mode"),
+            "source_object_id": expected_physics.get("source_object_id"),
+            "magnetic_subject_id": expected_physics.get("magnetic_subject_id"),
+        }
     if capability_id == "mass_ratio_momentum_transfer":
         return {"type": "mass_ratio_momentum_transfer", "collision_graph": expected_physics.get("collision_graph", []), "expected_velocity_order": expected_physics.get("expected_velocity_order")}
     if capability_id == "angular_damping_spin_decay":
@@ -1199,6 +1256,8 @@ def required_signals_for(capability_id: str) -> list[str]:
         return ["trajectory", "contact_events", "initial_velocity", "material_friction_label", "applied_force_label"]
     if capability_id == "force_field_wind_drift":
         return ["trajectory", "wind_vector_label", "force_field_label"]
+    if capability_id == "magnetic_force_field":
+        return ["trajectory", "magnetic_field_label", "force_field_label", "source_relative_distance"]
     if capability_id == "mass_ratio_momentum_transfer":
         return ["trajectory", "contact_events", "mass_labels", "post_collision_velocity"]
     if capability_id == "angular_damping_spin_decay":
@@ -1224,6 +1283,8 @@ def expected_failure_for(negative_mode: str | None) -> str:
     if negative_mode in {"missing_contact"}:
         return "F2_missing_contact_events"
     if negative_mode in {"missing_wind_label"}:
+        return "F3_invalid_initial_physics_state"
+    if negative_mode in {"missing_magnetic_label"}:
         return "F3_invalid_initial_physics_state"
     if negative_mode in {"missing_mass_label"}:
         return "F3_invalid_initial_physics_state"

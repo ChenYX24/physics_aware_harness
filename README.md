@@ -190,6 +190,7 @@ agent-facing compiler capability.
 | `rolling_friction_ball` | Rolling rigid bodies must maintain support contact, slow down, and travel within a friction-bounded distance envelope. |
 | `sliding_crate_friction` | Sliding rigid bodies must maintain support contact, decelerate within stop-distance bounds, or stay still below static-friction threshold. |
 | `force_field_wind_drift` | Wind/force-field driven light bodies must declare an explicit wind vector and drift along it within bounded displacement and altitude ranges. |
+| `magnetic_force_field` | Magnetic attraction/repulsion must declare source, subject, mode, and strength; trajectory must move radially toward or away from the source as specified. |
 | `mass_ratio_momentum_transfer` | Contact-driven rigid bodies must declare mass labels and produce post-collision velocity ordering consistent with mass ratio and restitution. |
 | `angular_damping_spin_decay` | Spinning rigid bodies must declare angular velocity and damping, then show monotonic spin decay in angular velocity and rotation trace evidence. |
 | `agent_rigidbody_action_coupling` | Agent or controller actions must be explicit action traces, and target rigid bodies may move only after action/contact or release/impulse evidence. |

@@ -55,6 +55,8 @@ def trajectory_for_case(case_spec: dict[str, Any]) -> list[dict[str, Any]]:
         return sliding_trajectory(case_id, case_spec)
     if capability_id == "force_field_wind_drift":
         return wind_trajectory(case_id, case_spec)
+    if capability_id == "magnetic_force_field":
+        return magnetic_trajectory(case_id, case_spec)
     if capability_id == "mass_ratio_momentum_transfer":
         return mass_ratio_trajectory(case_id, case_spec)
     if capability_id == "angular_damping_spin_decay":
@@ -378,6 +380,46 @@ def wind_trajectory(case_id: str, case_spec: dict[str, Any]) -> list[dict[str, A
     initial = {body_id: state(p0, v0)}
     mid = {body_id: state([round(p0[0] + unit[0] * drift * 0.55, 4), round(p0[1] + unit[1] * drift * 0.55, 4), round(z_mid, 4)], [round(unit[0] * abs(drift), 4), round(unit[1] * abs(drift), 4), 0.05])}
     final = {body_id: state([round(p0[0] + unit[0] * drift, 4), round(p0[1] + unit[1] * drift, 4), round(z_end, 4)], [round(unit[0] * abs(drift) * 0.35, 4), round(unit[1] * abs(drift) * 0.35, 4), 0.0])}
+    return [frame(0, 0.0, initial), frame(1, 0.4, mid), frame(2, 0.8, final)]
+
+
+def magnetic_trajectory(case_id: str, case_spec: dict[str, Any]) -> list[dict[str, Any]]:
+    negative_mode = str(case_spec.get("negative_mode") or "")
+    if not negative_mode and "wrong_direction" in case_id:
+        negative_mode = "wrong_direction"
+    if not negative_mode and "no_magnetic_motion" in case_id:
+        negative_mode = "no_magnetic_motion"
+    object_specs = {str(obj.get("id")): obj for obj in case_spec.get("objects", []) if isinstance(obj, dict)}
+    expected = dict(case_spec.get("expected_physics") or {})
+    source_id = str(expected.get("source_object_id") or next((oid for oid, obj in object_specs.items() if str(obj.get("role") or "") in {"magnetic_source", "magnet_source"}), "magnet_source"))
+    body_id = str(expected.get("magnetic_subject_id") or next((oid for oid, obj in object_specs.items() if str(obj.get("role") or "") in {"magnetized_body", "magnetic_body", "magnetic_subject"}), "magnetic_body"))
+    source_spec = object_specs.get(source_id) or {"initial_position_m": [0.0, 0.0, 0.2]}
+    body_spec = object_specs.get(body_id) or {"initial_position_m": [1.0, 0.0, 0.2], "initial_velocity_m_s": [0.0, 0.0, 0.0]}
+    source_pos = vec3(expected.get("field_center_m") or source_spec.get("initial_position_m") or [0.0, 0.0, 0.2])
+    p0 = vec3(body_spec.get("initial_position_m") or [1.0, 0.0, source_pos[2]])
+    v0 = vec3(body_spec.get("initial_velocity_m_s") or [0.0, 0.0, 0.0])
+    mode = str(expected.get("magnetic_mode") or "attract").casefold()
+    direction = [p0[0] - source_pos[0], p0[1] - source_pos[1], 0.0]
+    distance = math.sqrt(direction[0] * direction[0] + direction[1] * direction[1])
+    unit = [1.0, 0.0] if distance <= 1e-9 else [direction[0] / distance, direction[1] / distance]
+    displacement = float(expected.get("fallback_radial_displacement_m") or midpoint_value(float(expected.get("expected_min_radial_displacement_m") or 0.15), float(expected.get("expected_max_radial_displacement_m") or 0.55)))
+    sign = -1.0 if mode == "attract" else 1.0
+    if negative_mode == "wrong_direction":
+        sign *= -1.0
+    elif negative_mode == "no_magnetic_motion":
+        displacement = max(0.01, float(expected.get("expected_min_radial_displacement_m") or 0.2) * 0.15)
+    mid_distance = sign * displacement * 0.55
+    final_distance = sign * displacement
+    source_state = state(source_pos, [0.0, 0.0, 0.0])
+    initial = {source_id: source_state, body_id: state(p0, v0)}
+    mid = {
+        source_id: source_state,
+        body_id: state([round(p0[0] + unit[0] * mid_distance, 4), round(p0[1] + unit[1] * mid_distance, 4), p0[2]], [round(unit[0] * sign * abs(displacement), 4), round(unit[1] * sign * abs(displacement), 4), 0.0]),
+    }
+    final = {
+        source_id: source_state,
+        body_id: state([round(p0[0] + unit[0] * final_distance, 4), round(p0[1] + unit[1] * final_distance, 4), p0[2]], [round(unit[0] * sign * abs(displacement) * 0.35, 4), round(unit[1] * sign * abs(displacement) * 0.35, 4), 0.0]),
+    }
     return [frame(0, 0.0, initial), frame(1, 0.4, mid), frame(2, 0.8, final)]
 
 

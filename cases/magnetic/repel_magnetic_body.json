@@ -1,0 +1,27 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "repel_magnetic_body",
+  "capability_id": "magnetic_force_field",
+  "prompt": "A magnetized body is repelled away from a fixed magnetic source. The trajectory should move radially outward under a declared magnetic field.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "magnetic_mode": "repel",
+    "source_object_id": "magnet_source",
+    "magnetic_subject_id": "magnetic_puck",
+    "magnetic_strength": 1.0,
+    "expected_min_radial_displacement_m": 0.18,
+    "expected_max_radial_displacement_m": 0.7,
+    "fallback_radial_displacement_m": 0.38
+  },
+  "objects": [
+    {"id": "magnet_source", "role": "magnetic_source", "shape": "fixed_point", "initial_position_m": [0.0, 0.0, 0.18]},
+    {"id": "magnetic_puck", "role": "magnetized_body", "shape": "sphere", "radius_m": 0.09, "mass_kg": 0.25, "initial_position_m": [0.7, 0.0, 0.18], "initial_velocity_m_s": [0.0, 0.0, 0.0]}
+  ],
+  "active_objects": [],
+  "passive_objects": ["magnetic_puck"],
+  "required_assets": ["magnetic_source", "magnetized_body"],
+  "required_signals": ["trajectory", "magnetic_field_label", "force_field_label"],
+  "verifier_expectation": {"status": "pass"},
+  "should_pass": true,
+  "notes": "The body should move radially outward from the magnetic source."
+}
