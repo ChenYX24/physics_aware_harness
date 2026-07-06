@@ -23,7 +23,7 @@ TEMPLATE_SCHEMA_VERSION = "harness_case_template_v1"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate parameterized harness case specs from a template.")
     parser.add_argument("--template", help="Path to cases/templates/*.template.json")
-    parser.add_argument("--suite", choices=["billiards", "domino", "falling", "basic_physics"], help="Named case suite shortcut.")
+    parser.add_argument("--suite", choices=["billiards", "domino", "falling", "ramp", "basic_physics"], help="Named case suite shortcut.")
     parser.add_argument("--num-cases", type=int, help="Number of case specs to generate.")
     parser.add_argument("--count", type=int, help="Alias for --num-cases.")
     parser.add_argument("--seed", type=int, default=0, help="Deterministic generation seed.")
@@ -90,6 +90,7 @@ def template_for_suite(suite: str | None) -> str | None:
         "billiards": "cases/templates/billiards_collision.template.json",
         "domino": "cases/templates/domino_chain.template.json",
         "falling": "cases/templates/falling_blocks.template.json",
+        "ramp": "cases/templates/ramp_sliding.template.json",
         "basic_physics": "cases/templates/falling_blocks.template.json",
     }[suite]
 
@@ -119,6 +120,8 @@ def generate_case(template: dict[str, Any], rng: random.Random, *, index: int, s
         return domino_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
     if template_id == "falling_blocks":
         return falling_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
+    if template_id == "ramp_sliding":
+        return ramp_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
     raise ValueError(f"unsupported runnable template: {template_id}")
 
 
@@ -261,6 +264,61 @@ def falling_case(template: dict[str, Any], params: dict[str, Any], *, index: int
     return add_m2_case_contract(case, template, params)
 
 
+def ramp_case(template: dict[str, Any], params: dict[str, Any], *, index: int, seed: int, should_pass: bool, negative_mode: str | None) -> dict[str, Any]:
+    slope_angle = float(params["slope_angle_deg"])
+    friction = float(params["friction_dynamic"])
+    travel = ramp_expected_travel(slope_angle, friction)
+    min_travel = max(0.04, travel * 0.7)
+    max_travel = max(min_travel + 0.02, travel * 1.35)
+    objects = [
+        {
+            "id": "ramp_subject",
+            "role": "rolling_subject",
+            "shape": "sphere",
+            "radius_m": 0.12,
+            "mass_kg": params["subject_mass_kg"],
+            "friction_dynamic": friction,
+            "initial_position_m": [0.0, 0.0, 0.85],
+            "initial_velocity_m_s": [0.0, 0.0, 0.0],
+        },
+        {
+            "id": "ramp",
+            "role": "ramp",
+            "shape": "inclined_plane",
+            "friction_dynamic": friction,
+            "slope_angle_deg": slope_angle,
+            "initial_position_m": [0.6, 0.0, 0.4],
+            "initial_rotation_deg": [0.0, round(-slope_angle, 4), 0.0],
+        },
+    ]
+    case = base_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
+    case.update(
+        {
+            "prompt": f"Generated ramp case: a passive rigid body starts at rest and rolls/slides downhill on a {slope_angle:.1f} degree ramp.",
+            "expected_physics": {
+                "coordinate_system": "z_up",
+                "downhill_axis": "+x",
+                "slope_angle_deg": slope_angle,
+                "friction_dynamic": friction,
+                "expected_min_downhill_displacement_m": round(min_travel, 4),
+                "expected_max_downhill_displacement_m": round(max_travel, 4),
+                "fallback_downhill_displacement_m": round(travel, 4),
+                "contact_surface": "ramp",
+            },
+            "objects": objects,
+            "active_objects": [],
+            "passive_objects": ["ramp_subject"],
+        }
+    )
+    return add_m2_case_contract(case, template, params)
+
+
+def ramp_expected_travel(slope_angle_deg: float, friction_dynamic: float) -> float:
+    slope_factor = max(0.05, math.sin(math.radians(slope_angle_deg)))
+    friction_factor = max(0.08, 1.0 - friction_dynamic)
+    return round(1.6 * slope_factor * friction_factor, 4)
+
+
 def add_m2_case_contract(case: dict[str, Any], template: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
     expected_physics = dict(case.get("expected_physics") or {})
     camera_policy = dict(template.get("camera_policy") or {})
@@ -320,6 +378,8 @@ def expected_event_for(case: dict[str, Any]) -> dict[str, Any]:
         return {"type": "ordered_contact_chain", "ordered_chain": expected_physics.get("ordered_chain", [])}
     if capability_id == "rigid_body_gravity_collision":
         return {"type": "gravity_support_contact", "support": expected_physics.get("support", "floor")}
+    if capability_id == "ramp_sliding_friction":
+        return {"type": "friction_sensitive_downhill_motion", "contact_surface": expected_physics.get("contact_surface", "ramp")}
     return {"type": "trajectory_event"}
 
 
@@ -330,6 +390,8 @@ def required_signals_for(capability_id: str) -> list[str]:
         return ["trajectory", "contact_events", "rotation"]
     if capability_id == "rigid_body_gravity_collision":
         return ["trajectory", "contact_events", "gravity_label"]
+    if capability_id == "ramp_sliding_friction":
+        return ["trajectory", "contact_events", "ramp_angle_label", "material_friction_label"]
     return ["trajectory"]
 
 

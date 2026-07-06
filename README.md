@@ -35,6 +35,9 @@ Main paths:
 | `docs/` | Agent usage, UE setup, schemas, authoring notes. |
 | `tests/` | Regression tests for CLI, capabilities, verifier, render sync, artifacts. |
 
+For the complete design, setup, asset import, tool usage, and extension guide,
+see [`docs/HARNESS_FULL_REPORT.md`](docs/HARNESS_FULL_REPORT.md).
+
 Not included in the public main path:
 
 - old Studio frontend/API;

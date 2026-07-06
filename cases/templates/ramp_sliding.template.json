@@ -2,8 +2,8 @@
   "schema_version": "harness_case_template_v1",
   "template_id": "ramp_sliding",
   "capability_id": "ramp_sliding_friction",
-  "description": "Contract-only template for a body rolling or sliding down a ramp. Runtime/verifier support is not implemented yet.",
-  "fallback_supported": false,
+  "description": "Runnable template for a body rolling or sliding down a ramp with friction-sensitive downhill motion.",
+  "fallback_supported": true,
   "parameter_ranges": {
     "slope_angle_deg": {"type": "float", "min": 8.0, "max": 35.0},
     "friction_dynamic": {"type": "float", "min": 0.05, "max": 0.65},
@@ -16,7 +16,7 @@
   "physics_critical_assets": ["rolling/sliding rigid body", "ramp collider"],
   "visual_only_assets": ["ramp material"],
   "camera_policy": {"default": "side_static", "allowed": ["side_static", "tracking_subject"]},
-  "perturbation_policy": {"positive_ratio": 1.0, "vary": ["slope_angle_deg", "friction_dynamic"], "lock": ["seed"]},
+  "perturbation_policy": {"positive_ratio": 0.7, "vary": ["slope_angle_deg", "friction_dynamic"], "lock": ["seed"]},
   "expected_invariants": [
     "downhill_displacement_positive",
     "friction_changes_travel_distance",

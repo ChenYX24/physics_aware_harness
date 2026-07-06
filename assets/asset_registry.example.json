@@ -5,6 +5,7 @@
       "asset_id": "analytic_sphere_billiard_ball",
       "category": "physics_critical",
       "type": "static_mesh",
+      "tags": ["sphere", "ball", "billiard", "rolling_subject", "ramp_subject"],
       "ue_path": "/Engine/BasicShapes/Sphere.Sphere",
       "collider": "sphere",
       "radius_m": 0.09,
@@ -21,6 +22,7 @@
       "asset_id": "analytic_low_friction_table",
       "category": "physics_critical",
       "type": "static_mesh",
+      "tags": ["table", "support", "floor", "box", "cube"],
       "ue_path": "/Engine/BasicShapes/Cube.Cube",
       "collider": "box",
       "mass_kg": 100.0,
@@ -30,6 +32,37 @@
         "restitution": 0.15
       },
       "collision_profile": "BlockAll",
+      "proxy": true
+    },
+    {
+      "asset_id": "analytic_ramp_collider",
+      "category": "physics_critical",
+      "type": "static_mesh",
+      "tags": ["ramp", "slope", "inclined_plane", "slope_surface"],
+      "ue_path": "/Engine/BasicShapes/Cube.Cube",
+      "collider": "box",
+      "material": {
+        "static_friction": 0.5,
+        "dynamic_friction": 0.35,
+        "restitution": 0.1
+      },
+      "collision_profile": "BlockAll",
+      "proxy": true
+    },
+    {
+      "asset_id": "analytic_crate_box",
+      "category": "physics_critical",
+      "type": "static_mesh",
+      "tags": ["box", "crate", "sliding_subject", "falling_body", "stack_block"],
+      "ue_path": "/Engine/BasicShapes/Cube.Cube",
+      "collider": "box",
+      "mass_kg": 1.0,
+      "material": {
+        "static_friction": 0.55,
+        "dynamic_friction": 0.4,
+        "restitution": 0.2
+      },
+      "collision_profile": "PhysicsActor",
       "proxy": true
     }
   ]

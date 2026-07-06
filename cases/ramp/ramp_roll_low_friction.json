@@ -1,0 +1,27 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "ramp_roll_low_friction",
+  "capability_id": "ramp_sliding_friction",
+  "prompt": "A passive ball starts at rest near the top of a low-friction inclined ramp and rolls downhill under gravity.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "downhill_axis": "+x",
+    "slope_angle_deg": 25.0,
+    "friction_dynamic": 0.1,
+    "expected_min_downhill_displacement_m": 0.42,
+    "expected_max_downhill_displacement_m": 0.85,
+    "fallback_downhill_displacement_m": 0.61,
+    "contact_surface": "ramp"
+  },
+  "objects": [
+    {"id": "ramp_subject", "role": "rolling_subject", "shape": "sphere", "radius_m": 0.12, "mass_kg": 0.5, "friction_dynamic": 0.1, "initial_position_m": [0.0, 0.0, 0.85], "initial_velocity_m_s": [0.0, 0.0, 0.0]},
+    {"id": "ramp", "role": "ramp", "shape": "inclined_plane", "friction_dynamic": 0.1, "slope_angle_deg": 25.0, "initial_position_m": [0.6, 0.0, 0.4], "initial_rotation_deg": [0.0, -25.0, 0.0]}
+  ],
+  "active_objects": [],
+  "passive_objects": ["ramp_subject"],
+  "required_assets": ["rolling rigid body", "ramp collider", "friction material"],
+  "required_signals": ["trajectory", "contact_events", "ramp_angle_label", "material_friction_label"],
+  "verifier_expectation": {"status": "pass"},
+  "should_pass": true,
+  "notes": "Positive ramp case: low friction should produce clear downhill +x displacement and z drop."
+}

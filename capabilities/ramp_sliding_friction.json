@@ -1,0 +1,48 @@
+{
+  "schema_version": "harness_capability_v1",
+  "id": "ramp_sliding_friction",
+  "description": "Compile inclined-plane prompts into deterministic ramp rolling/sliding cases with friction-sensitive downhill motion evidence.",
+  "physical_assumptions": [
+    "The harness coordinate system is z-up.",
+    "The ramp downhill axis is +x unless a case explicitly overrides it.",
+    "A passive subject starts at rest and should only accelerate downhill under gravity and ramp contact.",
+    "Higher dynamic friction should reduce travel distance under the same slope angle and duration."
+  ],
+  "required_signals": [
+    "trajectory",
+    "contact_events",
+    "ramp_angle_label",
+    "material_friction_label"
+  ],
+  "required_assets": [
+    "rigid body subject",
+    "ramp collider",
+    "physics material with friction"
+  ],
+  "verifier_rules": [
+    "Subject trajectory must move downhill along +x.",
+    "Subject z should decrease while traveling along the ramp.",
+    "Subject must have ramp contact evidence.",
+    "Travel distance must fall inside the friction-aware expected range."
+  ],
+  "failure_taxonomy": [
+    "F1_missing_trajectory",
+    "F2_missing_contact_events",
+    "F4_causality_violation",
+    "F7_runtime_artifact_incomplete"
+  ],
+  "repair_suggestions": [
+    "Ensure the ramp collider is physics-critical and participates in contact events.",
+    "Check the downhill axis and coordinate system labels.",
+    "Bind dynamic friction to the subject/ramp physics material.",
+    "Do not keyframe uphill motion without an explicit force."
+  ],
+  "smoke_cases": [
+    "cases/ramp/ramp_roll_low_friction.json",
+    "cases/ramp/ramp_slide_high_friction_short_travel.json"
+  ],
+  "regression_cases": [
+    "cases/ramp/negative_uphill_without_force.json",
+    "cases/ramp/negative_no_friction_sensitivity.json"
+  ]
+}

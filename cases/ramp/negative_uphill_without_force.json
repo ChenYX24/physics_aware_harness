@@ -1,0 +1,28 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "negative_uphill_without_force",
+  "capability_id": "ramp_sliding_friction",
+  "prompt": "Invalid ramp case: a passive object starts at rest but moves uphill without any force or actuator.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "downhill_axis": "+x",
+    "slope_angle_deg": 22.0,
+    "friction_dynamic": 0.2,
+    "expected_min_downhill_displacement_m": 0.3,
+    "expected_max_downhill_displacement_m": 0.8,
+    "fallback_downhill_displacement_m": 0.45,
+    "contact_surface": "ramp"
+  },
+  "objects": [
+    {"id": "ramp_subject", "role": "rolling_subject", "shape": "sphere", "radius_m": 0.12, "mass_kg": 0.5, "friction_dynamic": 0.2, "initial_position_m": [0.0, 0.0, 0.85], "initial_velocity_m_s": [0.0, 0.0, 0.0]},
+    {"id": "ramp", "role": "ramp", "shape": "inclined_plane", "friction_dynamic": 0.2, "slope_angle_deg": 22.0, "initial_position_m": [0.6, 0.0, 0.4], "initial_rotation_deg": [0.0, -22.0, 0.0]}
+  ],
+  "active_objects": [],
+  "passive_objects": ["ramp_subject"],
+  "required_assets": ["rolling rigid body", "ramp collider", "friction material"],
+  "required_signals": ["trajectory", "contact_events", "ramp_angle_label", "material_friction_label"],
+  "verifier_expectation": {"status": "fail", "failure_type": "F4_causality_violation"},
+  "should_pass": false,
+  "negative_mode": "uphill_without_force",
+  "notes": "Regression case: verifier should reject uphill motion without an explicit force."
+}

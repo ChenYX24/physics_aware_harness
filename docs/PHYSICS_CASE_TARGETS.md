@@ -13,7 +13,7 @@
 | `collision_billiard_break` | rigid body collision / causality | 已支持 capability + verifier；本轮新增 dynamic template | 接真实 UE contact/trajectory |
 | `collision_domino_chain` | chain collision | 已支持 capability + verifier；本轮新增 dynamic template | 接真实 UE rotation/contact order |
 | `falling_stack_boxes` | gravity/contact | 已支持 capability + verifier；本轮新增 dynamic template | 支持多 block stack 和 penetration metric |
-| `ramp_roll_gravity` | inclined plane | 本轮新增 template contract，不跑 runtime | 实现 ramp trajectory + friction verifier |
+| `ramp_roll_gravity` | inclined plane | 已支持 capability + fallback trajectory + friction-aware verifier；新增 dynamic template | 接真实 UE ramp collider/contact 和 friction material |
 | `pendulum_constraint` | constraint motion | 本轮新增 template contract，不跑 runtime | 接 constraint trace / distance preservation metric |
 | `bounce_restitution_ball` | restitution | 未实现 | 加 bounce height / energy stability invariant |
 | `rolling_friction_ball` | rolling friction | 未实现 | 加 rolling distance vs friction response |

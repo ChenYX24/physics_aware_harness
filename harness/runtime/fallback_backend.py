@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import math
 
 from harness.core.case_spec import CaseSpec
 from harness.runtime.artifact_collector import write_runtime_artifacts
@@ -42,6 +43,8 @@ def trajectory_for_case(case_spec: dict[str, Any]) -> list[dict[str, Any]]:
         return domino_trajectory(case_id, case_spec)
     if capability_id == "rigid_body_gravity_collision":
         return falling_trajectory(case_id, case_spec)
+    if capability_id == "ramp_sliding_friction":
+        return ramp_trajectory(case_id, case_spec)
     return []
 
 
@@ -139,6 +142,40 @@ def falling_trajectory(case_id: str, case_spec: dict[str, Any]) -> list[dict[str
         if negative_mode != "missing_contact":
             contacts.append(contact(oid, floor_id, 2, 0.4))
     return [frame(0, 0.0, initial), frame(1, 0.2, mid), frame(2, 0.4, final, contacts=contacts)]
+
+
+def ramp_trajectory(case_id: str, case_spec: dict[str, Any]) -> list[dict[str, Any]]:
+    negative_mode = str(case_spec.get("negative_mode") or "")
+    if not negative_mode and "uphill" in case_id:
+        negative_mode = "uphill_without_force"
+    object_specs = {str(obj.get("id")): obj for obj in case_spec.get("objects", []) if isinstance(obj, dict)}
+    subject_id = next((oid for oid, obj in object_specs.items() if str(obj.get("role") or "") in {"rolling_subject", "sliding_subject", "ramp_subject"}), "ramp_subject")
+    ramp_id = next((oid for oid, obj in object_specs.items() if str(obj.get("role") or "") in {"ramp", "slope_surface"}), "ramp")
+    subject_spec = object_specs.get(subject_id) or {"initial_position_m": [0.0, 0.0, 0.8]}
+    ramp_state = state(vec3((object_specs.get(ramp_id) or {}).get("initial_position_m") or [0.6, 0.0, 0.35]), [0, 0, 0], rotation=vec3((object_specs.get(ramp_id) or {}).get("initial_rotation_deg") or [0, 0, 0]))
+    p0 = vec3(subject_spec.get("initial_position_m") or [0.0, 0.0, 0.8])
+    expected = dict(case_spec.get("expected_physics") or {})
+    travel = float(expected.get("fallback_downhill_displacement_m") or expected.get("expected_min_downhill_displacement_m") or 0.35)
+    if negative_mode == "uphill_without_force":
+        travel = -abs(travel)
+    elif negative_mode == "no_friction_sensitivity":
+        travel = max(0.01, float(expected.get("expected_min_downhill_displacement_m", 0.2)) * 0.25)
+    slope_angle_rad = math.radians(float(expected.get("slope_angle_deg") or 18.0))
+    z_drop = abs(travel) * math.tan(slope_angle_rad) if travel >= 0 else -abs(travel) * math.tan(slope_angle_rad)
+    initial = {
+        ramp_id: ramp_state,
+        subject_id: state(p0, vec3(subject_spec.get("initial_velocity_m_s") or [0, 0, 0])),
+    }
+    mid = {
+        ramp_id: ramp_state,
+        subject_id: state([round(p0[0] + travel * 0.45, 4), p0[1], round(p0[2] - z_drop * 0.45, 4)], [round(travel * 1.2, 4), 0, round(-z_drop * 1.2, 4)]),
+    }
+    final = {
+        ramp_id: ramp_state,
+        subject_id: state([round(p0[0] + travel, 4), p0[1], round(p0[2] - z_drop, 4)], [round(travel * 0.5, 4), 0, round(-z_drop * 0.5, 4)]),
+    }
+    contacts = [] if negative_mode == "missing_contact" else [contact(subject_id, ramp_id, 1, 0.2), contact(subject_id, ramp_id, 2, 0.4)]
+    return [frame(0, 0.0, initial), frame(1, 0.2, mid, contacts=contacts[:1]), frame(2, 0.4, final, contacts=contacts[1:])]
 
 
 def state(position: list[float], velocity: list[float], *, rotation: list[float] | None = None) -> dict[str, Any]:

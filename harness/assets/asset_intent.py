@@ -14,6 +14,14 @@ PHYSICS_CRITICAL_ROLES = {
     "floor",
     "ground",
     "rigid_body",
+    "rolling_subject",
+    "sliding_subject",
+    "ramp_subject",
+    "ramp",
+    "slope_surface",
+    "inclined_plane",
+    "constrained_body",
+    "constraint_anchor",
 }
 
 

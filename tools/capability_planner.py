@@ -39,6 +39,12 @@ CAPABILITY_RULES: tuple[CapabilityRule, ...] = (
         terms=("domino", "dominoes", "chain reaction", "sequential contact", "contact propagation", "多米诺", "连锁反应", "链式碰撞", "依次倒下"),
         priority=95,
     ),
+    CapabilityRule(
+        capability_id="ramp_sliding_friction",
+        case_family="ramp_sliding",
+        terms=("ramp", "inclined plane", "slope", "sliding down", "rolling down", "斜面", "坡道", "下滑", "滚下", "摩擦斜坡"),
+        priority=85,
+    ),
 )
 
 
