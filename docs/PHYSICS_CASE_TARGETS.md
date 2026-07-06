@@ -11,6 +11,7 @@
 | 目标 case | 物理现象 | Harness 状态 | 下一步 |
 |---|---|---|---|
 | `collision_billiard_break` | rigid body collision / causality | 已由 `rigid_body_contact_causality` 覆盖；台球只是 case family；本轮新增 dynamic template | 接真实 UE contact/trajectory |
+| `collision_bowling_pins` | rigid body collision / contact chain | 已由 `rigid_body_contact_causality` 覆盖；新增 bowling golden/negative cases 和 dynamic template | 接真实 UE pin collider/contact fan-out |
 | `collision_domino_chain` | chain collision | 已支持 capability + verifier；本轮新增 dynamic template | 接真实 UE rotation/contact order |
 | `falling_stack_boxes` | gravity/contact | 已支持 capability + verifier；本轮新增 dynamic template | 支持多 block stack 和 penetration metric |
 | `ramp_roll_gravity` | inclined plane | 已支持 capability + fallback trajectory + friction-aware verifier；新增 dynamic template | 接真实 UE ramp collider/contact 和 friction material |

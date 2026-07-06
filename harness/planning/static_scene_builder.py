@@ -144,9 +144,9 @@ def find_overlap_pairs(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
             left_pos = object_position(left)
             right_pos = object_position(right)
             distance = math.dist(left_pos, right_pos)
-            left_radius = float((left.get("bounds") or {}).get("bounding_radius_m", 0.0))
-            right_radius = float((right.get("bounds") or {}).get("bounding_radius_m", 0.0))
-            threshold = max((left_radius + right_radius) * 0.5, 0.01)
+            left_radius = horizontal_radius(left)
+            right_radius = horizontal_radius(right)
+            threshold = max((left_radius + right_radius) * 0.92, 0.01)
             if distance < threshold:
                 pairs.append(
                     {
@@ -156,6 +156,14 @@ def find_overlap_pairs(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     }
                 )
     return pairs
+
+
+def horizontal_radius(node: dict[str, Any]) -> float:
+    extents = (node.get("bounds") or {}).get("extents_m") or [0.0, 0.0, 0.0]
+    if not isinstance(extents, list):
+        return 0.0
+    padded = [*extents, 0.0, 0.0]
+    return max(float(padded[0]), float(padded[1]))
 
 
 def normalize_edges(raw_edges: Any) -> list[list[str]]:

@@ -181,7 +181,7 @@ agent-facing compiler capability.
 
 | Physics Capability | Current Role |
 |---|---|
-| `rigid_body_contact_causality` | Active bodies may move; passive rigid bodies must remain still until runtime contact evidence. Billiards/pool is one case family. |
+| `rigid_body_contact_causality` | Active bodies may move; passive rigid bodies must remain still until runtime contact evidence. Billiards/pool and bowling are case families. |
 | `sequential_contact_propagation` | Domino/chain activation order must be contact-driven. |
 | `rigid_body_gravity_collision` | Falling bodies should descend and contact support. |
 | `ramp_sliding_friction` | Rolling/sliding bodies on an inclined plane must respond to gravity and friction. |

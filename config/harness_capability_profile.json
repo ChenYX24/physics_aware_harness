@@ -224,7 +224,7 @@
             "passive",
             "target balls"
           ],
-          "source": "scripts/harness_generate_cases.py:249",
+          "source": "scripts/harness_generate_cases.py:252",
           "text": "\"prompt\": f\"Generated billiards collision with one cue ball and {target_count} passive target balls.\","
         },
         {
@@ -246,7 +246,7 @@
             "pool"
           ],
           "source": "README.md:184",
-          "text": "| `rigid_body_contact_causality` | Active bodies may move; passive rigid bodies must remain still until runtime contact evidence. Billiards/pool is one case family. |"
+          "text": "| `rigid_body_contact_causality` | Active bodies may move; passive rigid bodies must remain still until runtime contact evidence. Billiards/pool and bowling are case families. |"
         },
         {
           "matched_terms": [
@@ -286,7 +286,7 @@
           "text": "\"F4_causality_violation\": \"remove hidden passive motion and require runtime contact events to trigger downstream motion\","
         }
       ],
-      "evidence_count": 489,
+      "evidence_count": 517,
       "failure_modes": [
         "Passive bodies move before contact because of initial velocity leakage.",
         "Passive bodies move before contact because colliders overlap at t=0.",
@@ -390,11 +390,11 @@
             "magnetic_field_label",
             "source_relative_distance"
           ],
-          "source": "scripts/harness_generate_cases.py:1260",
+          "source": "scripts/harness_generate_cases.py:1316",
           "text": "return [\"trajectory\", \"magnetic_field_label\", \"force_field_label\", \"source_relative_distance\"]"
         }
       ],
-      "evidence_count": 64,
+      "evidence_count": 65,
       "failure_modes": [
         "Visible motion exists without magnetic field labels.",
         "Attract/repel direction is reversed.",
@@ -524,7 +524,7 @@
           "text": "\"Runtime actor creation must use the selected asset, collider, material, transform, and collision profile.\""
         }
       ],
-      "evidence_count": 424,
+      "evidence_count": 435,
       "failure_modes": [
         "Asset retrieval returns many visual candidates but no physics-critical option.",
         "The agent treats a texture/material as a collider-bearing object.",
@@ -638,7 +638,7 @@
           "text": "\"Physics-critical assets require collider, mass, rigid body, and collision profile.\","
         }
       ],
-      "evidence_count": 261,
+      "evidence_count": 278,
       "failure_modes": [
         "Selected asset exists visually but has no usable collider metadata.",
         "Proxy fallback is silently used in a production run.",
@@ -831,7 +831,7 @@
             "dominoes",
             "sequential contact"
           ],
-          "source": "scripts/harness_generate_cases.py:270",
+          "source": "scripts/harness_generate_cases.py:326",
           "text": "\"prompt\": f\"Generated domino chain with {count} dominoes and sequential contact propagation.\","
         },
         {
@@ -1001,7 +1001,7 @@
           "text": "\"Check mass labels, restitution, and solver substeps before tuning visuals.\","
         }
       ],
-      "evidence_count": 555,
+      "evidence_count": 576,
       "failure_modes": [
         "Implicit physics looks plausible once but cannot be reproduced.",
         "LLM changes multiple physical variables during a sensitivity test.",
@@ -1117,7 +1117,7 @@
           "text": "--render-passes rgb,depth,segmentation \\"
         }
       ],
-      "evidence_count": 548,
+      "evidence_count": 551,
       "failure_modes": [
         "A video exists but has no trajectory or contacts.",
         "Depth/normal proxies are mistaken for native GBuffer.",
@@ -1229,7 +1229,7 @@
           "text": "\"description\": \"Package only verifier-gated runtime artifacts into dataset-ready sample layouts with lineage, hashes, signal availability, and failure visibility.\","
         }
       ],
-      "evidence_count": 238,
+      "evidence_count": 242,
       "failure_modes": [
         "Rendered output is accepted despite failed physics evidence.",
         "Schema passes but runtime behavior diverges.",
@@ -1428,7 +1428,7 @@
           "text": "\"regression_cases\": [],"
         }
       ],
-      "evidence_count": 130,
+      "evidence_count": 137,
       "failure_modes": [
         "Fallback and UE are merged into one stability metric.",
         "Coverage is confused with runtime success.",
@@ -1952,7 +1952,7 @@
             "elastic launch",
             "stored_energy"
           ],
-          "source": "scripts/harness_generate_cases.py:987",
+          "source": "scripts/harness_generate_cases.py:1043",
           "text": "\"prompt\": f\"Generated elastic launch case: a compressed spring releases {stored_energy:.2f} J into a payload at {launch_angle:.1f} degrees.\","
         },
         {
@@ -2448,7 +2448,7 @@
           "text": "\"failure_taxonomy\": ["
         }
       ],
-      "evidence_count": 358,
+      "evidence_count": 364,
       "failure_modes": [
         "Agent adds a template instead of fixing the control surface.",
         "Multiple stages change at once and root cause becomes untraceable.",

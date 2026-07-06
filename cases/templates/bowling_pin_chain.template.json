@@ -1,0 +1,50 @@
+{
+  "schema_version": "harness_case_template_v1",
+  "template_id": "bowling_pin_chain",
+  "capability_id": "rigid_body_contact_causality",
+  "fallback_supported": true,
+  "parameter_ranges": {
+    "pin_count": {"type": "int", "min": 4, "max": 8},
+    "pin_spacing_m": {"type": "float", "min": 0.16, "max": 0.24},
+    "ball_speed_m_s": {"type": "float", "min": 1.0, "max": 2.4},
+    "ball_mass_kg": {"type": "float", "min": 4.0, "max": 7.5},
+    "pin_mass_kg": {"type": "float", "min": 1.1, "max": 1.8}
+  },
+  "object_count_ranges": {
+    "active_striker": {"min": 1, "max": 1},
+    "passive_targets": {"min": 4, "max": 8},
+    "support": {"min": 1, "max": 1}
+  },
+  "physics_critical_assets": [
+    "bowling_ball",
+    "pin_colliders",
+    "lane_collider"
+  ],
+  "visual_only_assets": [
+    "lane_material",
+    "pin_stripe_texture"
+  ],
+  "camera_policy": {
+    "default": "top_down",
+    "allowed": ["top_down", "side_static", "tracking_subject", "event_closeup"]
+  },
+  "perturbation_policy": {
+    "positive_ratio": 0.7,
+    "negative_modes": ["precontact_motion", "missing_contact", "initial_overlap"]
+  },
+  "expected_invariants": [
+    "bowling ball is the only active striker",
+    "pins are passive at frame 0",
+    "pin motion is caused by ball or previous pin contact",
+    "collision graph edges are exported as contact events"
+  ],
+  "negative_modes": [
+    "precontact_motion",
+    "missing_contact",
+    "initial_overlap"
+  ],
+  "seed_policy": {
+    "deterministic": true,
+    "sample_parameters_from_seed": true
+  }
+}

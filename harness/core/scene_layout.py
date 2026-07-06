@@ -132,6 +132,10 @@ def bounds_for_position(position: list[float], extents: list[float], role: str) 
 
 def estimate_shape_extents(obj: dict[str, Any], selected_asset: dict[str, Any] | None = None) -> list[float]:
     shape = str(obj.get("shape") or (selected_asset or {}).get("collider") or "").casefold()
+    if "capsule" in shape or "pin" in shape or "cylinder" in shape:
+        radius = safe_float(obj.get("radius_m") or (selected_asset or {}).get("radius_m"), 0.06)
+        height = safe_float(obj.get("height_m") or obj.get("pin_height_m"), 0.36)
+        return [radius, radius, max(height / 2.0, radius)]
     if "radius_m" in obj:
         radius = safe_float(obj.get("radius_m"), 0.09)
         return [radius, radius, radius]

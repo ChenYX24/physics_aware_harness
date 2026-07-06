@@ -73,7 +73,7 @@ Evidence:
 - id: `rigid_body_contact_causality`
 - pattern: `FLOW`
 - stages: `capability_planning, case_spec_compilation, scene_spec_compilation, runtime_artifact_collection, physics_verification`
-- confidence: `0.95` from `489` matched lines
+- confidence: `0.95` from `517` matched lines
 
 Compile active-to-passive rigid-body contact scenes into causal simulation programs where passive bodies move only after runtime contact evidence exists.
 
@@ -84,7 +84,7 @@ Key iteration moves:
 
 Evidence:
 - `tools/capability_planner.py:27`: terms=("billiard", "billiards", "pool", "cue ball", "cue_ball", "bowling", "pins", "rigid-body impact", "rigid body impact", "crate impact", "mass ratio collision", "台球", "白球", "目标球", "保龄球", "球瓶", "刚体碰撞", "ball collisio…
-- `scripts/harness_generate_cases.py:249`: "prompt": f"Generated billiards collision with one cue ball and {target_count} passive target balls.",
+- `scripts/harness_generate_cases.py:252`: "prompt": f"Generated billiards collision with one cue ball and {target_count} passive target balls.",
 - `tools/capability_closed_loop.py:18`: "prompt": "Create a billiards / pool scene where one cue ball hits a compact rack of passive target balls. Targets must stay still until contact.",
 
 ### Magnetic Attract/Repel Force Field
@@ -92,7 +92,7 @@ Evidence:
 - id: `magnetic_force_field`
 - pattern: `physics_constraint`
 - stages: `case_spec_compilation, physics_control, runtime_artifact_collection, physics_verification`
-- confidence: `0.95` from `64` matched lines
+- confidence: `0.95` from `65` matched lines
 
 Validate magnetic attraction or repulsion using explicit source/subject/mode/strength labels and source-relative radial trajectory evidence.
 
@@ -111,7 +111,7 @@ Evidence:
 - id: `asset_intent_resolution`
 - pattern: `HOW`
 - stages: `asset_intent_resolution, asset_retrieval`
-- confidence: `0.95` from `424` matched lines
+- confidence: `0.95` from `435` matched lines
 
 Classify object-level asset needs into typed intents and retrieve top-k candidates before runtime binding.
 
@@ -130,7 +130,7 @@ Evidence:
 - id: `asset_runtime_binding_invocation`
 - pattern: `HOW`
 - stages: `asset_runtime_binding, runtime_actor_binding, preflight_validation`
-- confidence: `0.95` from `261` matched lines
+- confidence: `0.95` from `278` matched lines
 
 Bind selected real assets or analytic proxies into runtime actors while preserving collider, mass, material, and collision-profile metadata.
 
@@ -180,14 +180,14 @@ Key iteration moves:
 Evidence:
 - `tools/capability_planner.py:39`: terms=("domino", "dominoes", "chain reaction", "sequential contact", "contact propagation", "多米诺", "连锁反应", "链式碰撞", "依次倒下"),
 - `tools/capability_closed_loop.py:26`: "prompt": "Create a domino chain reaction. The first domino is actively triggered and the later dominoes tip only through sequential contact propagation.",
-- `scripts/harness_generate_cases.py:270`: "prompt": f"Generated domino chain with {count} dominoes and sequential contact propagation.",
+- `scripts/harness_generate_cases.py:326`: "prompt": f"Generated domino chain with {count} dominoes and sequential contact propagation.",
 
 ### Explicit Physics Control Surface
 
 - id: `explicit_physics_control_surface`
 - pattern: `HOW`
 - stages: `planner, physics_control, benchmark`
-- confidence: `0.95` from `555` matched lines
+- confidence: `0.95` from `576` matched lines
 
 Represent gravity, material, rigid-body, constraint, force, time, agent, and render-physics bridge controls as typed fields that can be replayed and swept.
 
@@ -206,7 +206,7 @@ Evidence:
 - id: `canonical_signal_capture`
 - pattern: `FLOW`
 - stages: `runtime, signals, dataset`
-- confidence: `0.95` from `548` matched lines
+- confidence: `0.95` from `551` matched lines
 
 Capture video and aligned evidence streams on one timebase: RGB, trajectory, contacts, camera path, depth proxy, normal proxy, audio, engine states, and semantic labels.
 
@@ -225,7 +225,7 @@ Evidence:
 - id: `physics_verifier_truth_gate`
 - pattern: `HOW`
 - stages: `verifier, dataset`
-- confidence: `0.95` from `238` matched lines
+- confidence: `0.95` from `242` matched lines
 
 Use verifier output, not UI preview or successful rendering, as the final readiness decision for reference-ready samples.
 
@@ -263,7 +263,7 @@ Evidence:
 - id: `trajectory_benchmark_iteration`
 - pattern: `FLOW`
 - stages: `benchmark, runtime, verifier`
-- confidence: `0.95` from `130` matched lines
+- confidence: `0.95` from `137` matched lines
 
 Evaluate real runtime trajectories across seed sweeps and variants instead of dry control signals or mixed-backend stability numbers.
 
@@ -370,7 +370,7 @@ Key iteration moves:
 Evidence:
 - `tools/capability_planner.py:123`: terms=("spring launch", "spring launcher", "compressed spring", "elastic launch", "elastic energy", "catapult", "弹簧", "弹簧发射", "压缩弹簧", "弹射", "弹性势能"),
 - `docs/CAPABILITY_SYSTEM.md:61`: | `elastic_energy_launch` | stored elastic energy 通过 release event 转成 bounded kinetic response。 | 弹簧发射、弹射器 |
-- `scripts/harness_generate_cases.py:987`: "prompt": f"Generated elastic launch case: a compressed spring releases {stored_energy:.2f} J into a payload at {launch_angle:.1f} degrees.",
+- `scripts/harness_generate_cases.py:1043`: "prompt": f"Generated elastic launch case: a compressed spring releases {stored_energy:.2f} J into a payload at {launch_angle:.1f} degrees.",
 
 ### Elastic Constraint Rebound
 
@@ -434,7 +434,7 @@ Evidence:
 - id: `failure_driven_refinement_loop`
 - pattern: `BRIDGE`
 - stages: `planner, runtime, verifier, benchmark`
-- confidence: `0.95` from `358` matched lines
+- confidence: `0.95` from `364` matched lines
 
 Use structured failure evidence to decide the next minimal change: prompt expansion, asset binding, scene layout, physics controls, runtime settings, or verifier thresholds.
 

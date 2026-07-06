@@ -45,12 +45,14 @@
   "smoke_cases": [
     "cases/billiards/low_speed_single_contact.json",
     "cases/billiards/multi_ball_chain_contact.json",
+    "cases/bowling/bowling_pin_chain_contact.json",
     "cases/billiards/six_ball_triangle_low_speed.json",
     "cases/billiards/medium_speed_six_ball_break.json",
     "cases/billiards/angled_grazing_contact.json"
   ],
   "regression_cases": [
     "cases/billiards/negative_precontact_motion.json",
+    "cases/bowling/negative_pin_precontact_motion.json",
     "cases/billiards/negative_hidden_target_velocity.json"
   ],
   "capability_type": "physics_constraint",

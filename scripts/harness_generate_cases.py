@@ -23,7 +23,7 @@ TEMPLATE_SCHEMA_VERSION = "harness_case_template_v1"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate parameterized harness case specs from a template.")
     parser.add_argument("--template", help="Path to cases/templates/*.template.json")
-    parser.add_argument("--suite", choices=["billiards", "domino", "falling", "ramp", "projectile", "bounce", "rolling", "sliding", "wind", "magnetic", "mass_ratio", "spin", "agent_action", "pendulum", "impulse_chain", "elastic_launch", "elastic_constraint", "fracture", "basic_physics"], help="Named case suite shortcut.")
+    parser.add_argument("--suite", choices=["billiards", "bowling", "domino", "falling", "ramp", "projectile", "bounce", "rolling", "sliding", "wind", "magnetic", "mass_ratio", "spin", "agent_action", "pendulum", "impulse_chain", "elastic_launch", "elastic_constraint", "fracture", "basic_physics"], help="Named case suite shortcut.")
     parser.add_argument("--num-cases", type=int, help="Number of case specs to generate.")
     parser.add_argument("--count", type=int, help="Alias for --num-cases.")
     parser.add_argument("--seed", type=int, default=0, help="Deterministic generation seed.")
@@ -88,6 +88,7 @@ def template_for_suite(suite: str | None) -> str | None:
         return None
     return {
         "billiards": "cases/templates/billiards_collision.template.json",
+        "bowling": "cases/templates/bowling_pin_chain.template.json",
         "domino": "cases/templates/domino_chain.template.json",
         "falling": "cases/templates/falling_blocks.template.json",
         "ramp": "cases/templates/ramp_sliding.template.json",
@@ -130,6 +131,8 @@ def generate_case(template: dict[str, Any], rng: random.Random, *, index: int, s
     should_pass = negative_mode is None
     if template_id == "billiards_collision":
         return billiards_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
+    if template_id == "bowling_pin_chain":
+        return bowling_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
     if template_id == "domino_chain":
         return domino_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
     if template_id == "falling_blocks":
@@ -251,6 +254,59 @@ def billiards_case(template: dict[str, Any], params: dict[str, Any], *, index: i
             "objects": objects,
             "active_objects": ["cue_ball"],
             "passive_objects": [f"target_ball_{idx + 1}" for idx in range(target_count)],
+        }
+    )
+    return add_m2_case_contract(case, template, params)
+
+
+def bowling_case(template: dict[str, Any], params: dict[str, Any], *, index: int, seed: int, should_pass: bool, negative_mode: str | None) -> dict[str, Any]:
+    pin_count = int(params["pin_count"])
+    spacing = float(params["pin_spacing_m"])
+    ball_radius = 0.11
+    pin_radius = 0.06
+    ball_x = -max(1.0, spacing * (pin_count + 1))
+    objects = [
+        {
+            "id": "bowling_ball",
+            "role": "active_striker",
+            "shape": "sphere",
+            "radius_m": ball_radius,
+            "mass_kg": params["ball_mass_kg"],
+            "initial_position_m": [round(ball_x, 4), 0.0, ball_radius],
+            "initial_velocity_m_s": [params["ball_speed_m_s"], 0.0, 0.0],
+        }
+    ]
+    for idx in range(pin_count):
+        x = round(idx * spacing, 4)
+        if negative_mode == "initial_overlap" and idx == 0:
+            x = round(ball_x + ball_radius * 1.2, 4)
+        objects.append(
+            {
+                "id": f"pin_{idx + 1}",
+                "role": "passive_target",
+                "shape": "capsule",
+                "radius_m": pin_radius,
+                "mass_kg": params["pin_mass_kg"],
+                "initial_position_m": [x, 0.0, 0.18],
+                "initial_velocity_m_s": [0.0, 0.0, 0.0],
+            }
+        )
+    objects.append({"id": "lane", "role": "support", "shape": "box", "initial_position_m": [0.0, 0.0, 0.0]})
+    graph = [["bowling_ball", "pin_1"]]
+    graph += [[f"pin_{idx}", f"pin_{idx + 1}"] for idx in range(1, pin_count)]
+    case = base_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
+    case.update(
+        {
+            "prompt": f"Generated bowling pin chain with one active bowling ball and {pin_count} passive pins.",
+            "expected_physics": {
+                "coordinate_system": "z_up",
+                "case_family": "bowling_pin_chain",
+                "collision_graph": graph,
+                "camera": {"mode": "top_down_fixed"},
+            },
+            "objects": objects,
+            "active_objects": ["bowling_ball"],
+            "passive_objects": [f"pin_{idx + 1}" for idx in range(pin_count)],
         }
     )
     return add_m2_case_contract(case, template, params)

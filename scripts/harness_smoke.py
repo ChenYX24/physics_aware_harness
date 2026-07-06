@@ -20,6 +20,8 @@ DEFAULT_CASES = [
     "cases/billiards/low_speed_single_contact.json",
     "cases/billiards/multi_ball_chain_contact.json",
     "cases/billiards/negative_precontact_motion.json",
+    "cases/bowling/bowling_pin_chain_contact.json",
+    "cases/bowling/negative_pin_precontact_motion.json",
     "cases/domino/five_domino_chain.json",
     "cases/domino/negative_simultaneous_motion.json",
     "cases/falling/falling_block_on_floor.json",

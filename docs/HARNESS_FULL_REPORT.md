@@ -87,7 +87,7 @@ assets/*.local.json
 
 | Capability | 当前状态 | 验证内容 |
 |---|---|---|
-| `rigid_body_contact_causality` | 已可用 | active body 可以主动运动；passive rigid bodies 初始必须静止，只能 runtime contact 后运动。台球只是其中一个 smoke family。 |
+| `rigid_body_contact_causality` | 已可用 | active body 可以主动运动；passive rigid bodies 初始必须静止，只能 runtime contact 后运动。台球、保龄球只是其中的 case family。 |
 | `sequential_contact_propagation` | 已可用 | domino/chain reaction 必须按 contact 顺序传播。 |
 | `rigid_body_gravity_collision` | 已可用 | falling object 必须下降，并产生 support contact。 |
 | `ramp_sliding_friction` | 当前 ramp 分支已可用 | 物体沿斜面下滑，z 下降，位移符合 friction-aware 范围。 |
@@ -293,6 +293,7 @@ tests/test_harness_<family>_verifier.py
 | Template | Suite | 状态 | 用途 |
 |---|---|---|---|
 | `billiards_collision.template.json` | `--suite billiards` | 可运行 | cue/target 碰撞因果。 |
+| `bowling_pin_chain.template.json` | `--suite bowling` | 当前分支可运行 | 保龄球主动撞击被动球瓶，球瓶只能由 contact 链激活。 |
 | `domino_chain.template.json` | `--suite domino` | 可运行 | 顺序 contact propagation。 |
 | `falling_blocks.template.json` | `--suite falling` | 可运行 | 重力/support contact。 |
 | `ramp_sliding.template.json` | `--suite ramp` | 当前 ramp 分支可运行 | 斜面摩擦响应。 |
@@ -327,6 +328,12 @@ python3.13 scripts/harness_generate_cases.py \
 python3.13 scripts/harness_run_case_batch.py \
   cases/generated/billiards_seed42 \
   --backend fallback
+```
+
+```bash
+python3.13 scripts/harness_generate_cases.py --suite bowling --count 10 --seed 72 --out cases/generated/bowling_seed72
+python3.13 scripts/harness_run_case_batch.py cases/generated/bowling_seed72 --backend fallback
+# 10 cases: positive pass + negative caught, unexpected 0
 ```
 
 ## 10. Python 脚本工具说明
@@ -486,8 +493,8 @@ TODO：
 
 | 优先级 | Case | Harness capability | 状态 |
 |---|---|---|---|
-| P0 | 台球/保龄球/球体接触碰撞 | `rigid_body_contact_causality` | fallback/verifier 已有；台球是 case family；UE contact path TODO |
-| P0 | 多米诺/保龄球链式碰撞 | `sequential_contact_propagation` 扩展 | domino 已有；bowling TODO |
+| P0 | 台球/保龄球/球体接触碰撞 | `rigid_body_contact_causality` | fallback/verifier 已有；台球和保龄球都是 case family；UE contact path TODO |
+| P0 | 多米诺/保龄球链式碰撞 | `sequential_contact_propagation` 扩展 | domino 已有；bowling contact-causality family 已有；更复杂 pin fan-out 仍可扩展 |
 | P0 | 掉落/上抛/抛体 | `projectile_gravity_motion` | 当前分支已有 fallback/verifier；UE TODO |
 | P0 | 斜面滚动/下滑/上滚 | `ramp_sliding_friction` | ramp 分支已有 fallback/verifier；UE TODO |
 | P1 | 皮球/刚体反弹 | `bounce_restitution_ball` | 当前分支已有 fallback/verifier；UE restitution material/contact TODO |
@@ -507,8 +514,8 @@ TODO：
 
 推荐下一步顺序：
 
-1. 提交 `magnetic_force_field`。
-2. 做 bowling chain case family 或 `UE actor placement compiler`。
+1. 提交 bowling chain case family。
+2. 做 `UE actor placement compiler`。
 3. 回到 UE actor placement compiler，让 `scene_layout.json` 驱动真实 actor 生成。
 4. 让 billiards/ramp/falling/projectile/fracture/magnetic 通过真实 trajectory/contact verifier。
 

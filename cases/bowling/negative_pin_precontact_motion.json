@@ -1,0 +1,26 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "negative_pin_precontact_motion",
+  "capability_id": "rigid_body_contact_causality",
+  "prompt": "A bowling pin moves before any ball or contacted pin touches it, which should be rejected as hidden pre-contact motion.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "collision_graph": [["bowling_ball", "pin_1"], ["pin_1", "pin_2"]],
+    "camera": {"mode": "top_down_fixed"},
+    "case_family": "bowling_pin_chain"
+  },
+  "objects": [
+    {"id": "bowling_ball", "role": "active_striker", "shape": "sphere", "radius_m": 0.11, "mass_kg": 6.0, "initial_position_m": [-1.0, 0.0, 0.11], "initial_velocity_m_s": [1.2, 0.0, 0.0]},
+    {"id": "pin_1", "role": "passive_target", "shape": "capsule", "radius_m": 0.06, "mass_kg": 1.5, "initial_position_m": [0.0, 0.0, 0.18], "initial_velocity_m_s": [0.0, 0.0, 0.0]},
+    {"id": "pin_2", "role": "passive_target", "shape": "capsule", "radius_m": 0.06, "mass_kg": 1.5, "initial_position_m": [0.18, 0.0, 0.18], "initial_velocity_m_s": [0.0, 0.0, 0.0]},
+    {"id": "lane", "role": "support", "shape": "box", "initial_position_m": [0.0, 0.0, 0.0]}
+  ],
+  "active_objects": ["bowling_ball"],
+  "passive_objects": ["pin_1", "pin_2"],
+  "required_assets": ["bowling ball collider", "pin colliders", "lane collider"],
+  "required_signals": ["trajectory", "contact_events", "camera_trajectory"],
+  "verifier_expectation": {"status": "fail", "failure_type": "F5_passive_precontact_motion"},
+  "should_pass": false,
+  "negative_mode": "precontact_motion",
+  "notes": "Regression: bowling pins are passive rigid bodies and cannot self-start."
+}

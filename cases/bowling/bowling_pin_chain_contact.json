@@ -1,0 +1,27 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "bowling_pin_chain_contact",
+  "capability_id": "rigid_body_contact_causality",
+  "prompt": "A bowling ball rolls into a short line of passive pins. Pins must stay still until the bowling ball or another already-contacted pin hits them.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "collision_graph": [["bowling_ball", "pin_1"], ["pin_1", "pin_2"], ["pin_2", "pin_3"], ["pin_3", "pin_4"]],
+    "camera": {"mode": "top_down_fixed"},
+    "case_family": "bowling_pin_chain"
+  },
+  "objects": [
+    {"id": "bowling_ball", "role": "active_striker", "shape": "sphere", "radius_m": 0.11, "mass_kg": 6.0, "initial_position_m": [-1.2, 0.0, 0.11], "initial_velocity_m_s": [1.4, 0.0, 0.0]},
+    {"id": "pin_1", "role": "passive_target", "shape": "capsule", "radius_m": 0.06, "mass_kg": 1.5, "initial_position_m": [0.0, 0.0, 0.18], "initial_velocity_m_s": [0.0, 0.0, 0.0]},
+    {"id": "pin_2", "role": "passive_target", "shape": "capsule", "radius_m": 0.06, "mass_kg": 1.5, "initial_position_m": [0.18, 0.0, 0.18], "initial_velocity_m_s": [0.0, 0.0, 0.0]},
+    {"id": "pin_3", "role": "passive_target", "shape": "capsule", "radius_m": 0.06, "mass_kg": 1.5, "initial_position_m": [0.36, 0.0, 0.18], "initial_velocity_m_s": [0.0, 0.0, 0.0]},
+    {"id": "pin_4", "role": "passive_target", "shape": "capsule", "radius_m": 0.06, "mass_kg": 1.5, "initial_position_m": [0.54, 0.0, 0.18], "initial_velocity_m_s": [0.0, 0.0, 0.0]},
+    {"id": "lane", "role": "support", "shape": "box", "initial_position_m": [0.0, 0.0, 0.0]}
+  ],
+  "active_objects": ["bowling_ball"],
+  "passive_objects": ["pin_1", "pin_2", "pin_3", "pin_4"],
+  "required_assets": ["bowling ball collider", "pin colliders", "lane collider"],
+  "required_signals": ["trajectory", "contact_events", "camera_trajectory"],
+  "verifier_expectation": {"status": "pass"},
+  "should_pass": true,
+  "notes": "Bowling is a case family under rigid_body_contact_causality, not a separate capability."
+}
