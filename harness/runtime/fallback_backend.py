@@ -61,6 +61,8 @@ def trajectory_for_case(case_spec: dict[str, Any]) -> list[dict[str, Any]]:
         return spin_trajectory(case_id, case_spec)
     if capability_id == "agent_rigidbody_action_coupling":
         return agent_action_trajectory(case_id, case_spec)
+    if capability_id == "constraint_distance_pendulum_motion":
+        return constraint_trajectory(case_id, case_spec)
     return []
 
 
@@ -557,6 +559,57 @@ def agent_action_trajectory(case_id: str, case_spec: dict[str, Any]) -> list[dic
     ]
 
 
+def constraint_trajectory(case_id: str, case_spec: dict[str, Any]) -> list[dict[str, Any]]:
+    negative_mode = str(case_spec.get("negative_mode") or "")
+    if not negative_mode and "length_drift" in case_id:
+        negative_mode = "constraint_length_drift"
+    if not negative_mode and "teleport" in case_id:
+        negative_mode = "teleporting_body"
+    object_specs = {str(obj.get("id")): obj for obj in case_spec.get("objects", []) if isinstance(obj, dict)}
+    expected = dict(case_spec.get("expected_physics") or {})
+    anchor_id = str(expected.get("anchor_object_id") or next((oid for oid, obj in object_specs.items() if str(obj.get("role") or "") == "constraint_anchor"), "anchor"))
+    body_id = str(expected.get("constrained_object_id") or next((oid for oid, obj in object_specs.items() if str(obj.get("role") or "") == "constrained_body"), "bob"))
+    anchor_spec = object_specs.get(anchor_id) or {"initial_position_m": [0.0, 0.0, 1.6]}
+    body_spec = object_specs.get(body_id) or {"initial_position_m": [0.6, 0.0, 0.6]}
+    anchor_pos = vec3(anchor_spec.get("initial_position_m") or [0.0, 0.0, 1.6])
+    length = float(expected.get("constraint_length_m") or 1.0)
+    release_angle = math.radians(float(expected.get("release_angle_deg") or 30.0))
+    angles = [release_angle, release_angle * 0.28, -release_angle * 0.35, -release_angle * 0.16]
+    if negative_mode == "teleporting_body":
+        angles = [release_angle, -release_angle, release_angle, -release_angle]
+    frames: list[dict[str, Any]] = []
+    previous_body = vec3(body_spec.get("initial_position_m") or pendulum_position(anchor_pos, length, angles[0]))
+    for frame_id, angle in enumerate(angles):
+        distance_length = length
+        if negative_mode == "constraint_length_drift" and frame_id >= 2:
+            distance_length = length * 1.24
+        body_pos = pendulum_position(anchor_pos, distance_length, angle)
+        if negative_mode == "teleporting_body" and frame_id == 2:
+            body_pos = [round(-previous_body[0] - length * 0.9, 4), previous_body[1], previous_body[2]]
+            vector = [body_pos[0] - anchor_pos[0], body_pos[1] - anchor_pos[1], body_pos[2] - anchor_pos[2]]
+            scale = length / max(math.sqrt(sum(item * item for item in vector)), 1e-9)
+            body_pos = [round(anchor_pos[idx] + vector[idx] * scale, 4) for idx in range(3)]
+        velocity = [round(body_pos[idx] - previous_body[idx], 4) for idx in range(3)]
+        states = {
+            anchor_id: state(anchor_pos, [0.0, 0.0, 0.0]),
+            body_id: state(body_pos, velocity),
+        }
+        constraint_row = {
+            "constraint_id": "pendulum_distance",
+            "anchor_id": anchor_id,
+            "body_id": body_id,
+            "constraint_length_m": round(length, 6),
+            "measured_distance_m": round(math.sqrt(sum((body_pos[idx] - anchor_pos[idx]) ** 2 for idx in range(3))), 6),
+        }
+        frames.append(frame(frame_id, round(frame_id * 0.25, 4), states, constraints=[constraint_row]))
+        previous_body = body_pos
+    return frames
+
+
+def pendulum_position(anchor_pos: list[float], length: float, angle_rad: float) -> list[float]:
+    return [round(anchor_pos[0] + math.sin(angle_rad) * length, 4), anchor_pos[1], round(anchor_pos[2] - math.cos(angle_rad) * length, 4)]
+
+
 def state(position: list[float], velocity: list[float], *, rotation: list[float] | None = None, angular_velocity: list[float] | None = None) -> dict[str, Any]:
     result: dict[str, Any] = {"position_m": position, "velocity_m_s": velocity, "rotation_deg": rotation or [0, 0, 0]}
     if angular_velocity is not None:
@@ -587,10 +640,12 @@ def vec3(value: Any) -> list[float]:
     return [float(padded[0]), float(padded[1]), float(padded[2])]
 
 
-def frame(frame_id: int, time_s: float, objects: dict[str, Any], *, contacts: list[dict[str, Any]] | None = None, actions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def frame(frame_id: int, time_s: float, objects: dict[str, Any], *, contacts: list[dict[str, Any]] | None = None, actions: list[dict[str, Any]] | None = None, constraints: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     result: dict[str, Any] = {"frame": frame_id, "time_s": time_s, "objects": objects, "contacts": contacts or []}
     if actions is not None:
         result["actions"] = actions
+    if constraints is not None:
+        result["constraints"] = constraints
     return result
 
 

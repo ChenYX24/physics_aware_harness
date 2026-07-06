@@ -93,6 +93,12 @@ CAPABILITY_RULES: tuple[CapabilityRule, ...] = (
         terms=("agent pushes", "agent push", "robot pushes", "robot push", "character pushes", "character throws", "agent throws", "agent throw", "robot throws", "action trace", "agent-to-rigidbody", "agent rigid body", "推箱子", "智能体推", "机器人推", "角色推", "智能体抛", "角色抛", "动作轨迹"),
         priority=107,
     ),
+    CapabilityRule(
+        capability_id="constraint_distance_pendulum_motion",
+        case_family="constraint_distance_motion",
+        terms=("pendulum", "swinging pendulum", "distance constraint", "fixed length", "constraint length", "joint constraint", "rope constraint", "hinge constraint", "单摆", "摆锤", "距离约束", "固定长度", "约束长度", "铰链约束", "绳长约束"),
+        priority=78,
+    ),
 )
 
 

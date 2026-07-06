@@ -8,6 +8,7 @@ from harness.core.verifier_schema import verifier_report
 from harness.verification.agent_action_verifier import verify_agent_action
 from harness.verification.billiards_verifier import verify_billiards
 from harness.verification.bounce_verifier import verify_bounce
+from harness.verification.constraint_verifier import verify_constraint_motion
 from harness.verification.diagnosis import repair_suggestion
 from harness.verification.domino_verifier import verify_domino
 from harness.verification.falling_verifier import verify_falling
@@ -88,6 +89,8 @@ class PhysicsVerifier:
             failure_type, first_failure, evidence = verify_spin(case_spec, trajectory)
         elif capability_id == "agent_rigidbody_action_coupling":
             failure_type, first_failure, evidence = verify_agent_action(case_spec, trajectory)
+        elif capability_id == "constraint_distance_pendulum_motion":
+            failure_type, first_failure, evidence = verify_constraint_motion(case_spec, trajectory)
         else:
             failure_type, first_failure, evidence = "F7_runtime_artifact_incomplete", {"object_id": capability_id, "frame": 0, "time": 0, "metric": "unsupported_capability", "value": capability_id}, []
         return verifier_report(

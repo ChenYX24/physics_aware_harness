@@ -1,0 +1,27 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "pendulum_swing_crosses_center",
+  "capability_id": "constraint_distance_pendulum_motion",
+  "prompt": "A pendulum swings across the vertical center line while keeping the same constraint length.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "anchor_object_id": "anchor",
+    "constrained_object_id": "bob",
+    "constraint_length_m": 0.9,
+    "constraint_tolerance_m": 0.035,
+    "release_angle_deg": 28.0,
+    "expected_max_step_displacement_m": 0.65,
+    "require_center_crossing": true
+  },
+  "objects": [
+    {"id": "anchor", "role": "constraint_anchor", "shape": "fixed_point", "initial_position_m": [0.0, 0.0, 1.35], "initial_velocity_m_s": [0.0, 0.0, 0.0]},
+    {"id": "bob", "role": "constrained_body", "shape": "sphere", "radius_m": 0.1, "mass_kg": 0.5, "initial_position_m": [0.4225, 0.0, 0.5553], "initial_velocity_m_s": [0.0, 0.0, 0.0]}
+  ],
+  "active_objects": [],
+  "passive_objects": ["bob"],
+  "required_assets": ["constrained rigid body", "constraint anchor", "joint/constraint"],
+  "required_signals": ["trajectory", "constraint_trace", "constraint_parameter_labels"],
+  "verifier_expectation": {"status": "pass"},
+  "should_pass": true,
+  "notes": "Golden positive center-crossing pendulum case."
+}

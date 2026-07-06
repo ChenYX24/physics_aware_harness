@@ -1,13 +1,14 @@
 {
   "schema_version": "harness_case_template_v1",
   "template_id": "pendulum_contact",
-  "capability_id": "constraint_contact_motion",
-  "description": "Contract-only template for pendulum/constraint motion with optional contact. Runtime/verifier support is not implemented yet.",
-  "fallback_supported": false,
+  "capability_id": "constraint_distance_pendulum_motion",
+  "description": "Parameterized template for pendulum/fixed-distance constraint motion. The pendulum bob is a smoke family for generic distance-constraint verification.",
+  "fallback_supported": true,
   "parameter_ranges": {
     "constraint_length_m": {"type": "float", "min": 0.5, "max": 2.0},
     "release_angle_deg": {"type": "float", "min": 10.0, "max": 55.0},
-    "constraint_stiffness": {"type": "float", "min": 0.5, "max": 1.0}
+    "constraint_stiffness": {"type": "float", "min": 0.5, "max": 1.0},
+    "bob_mass_kg": {"type": "float", "min": 0.3, "max": 2.0}
   },
   "object_count_ranges": {
     "constrained_body": {"min": 1, "max": 1},
@@ -16,13 +17,13 @@
   "physics_critical_assets": ["constrained rigid body", "constraint anchor", "joint/constraint"],
   "visual_only_assets": ["rope/chain visual"],
   "camera_policy": {"default": "side_static", "allowed": ["side_static", "event_closeup"]},
-  "perturbation_policy": {"positive_ratio": 1.0, "vary": ["constraint_length_m", "release_angle_deg"], "lock": ["seed"]},
+  "perturbation_policy": {"positive_ratio": 0.7, "vary": ["constraint_length_m", "release_angle_deg"], "lock": ["seed"]},
   "expected_invariants": [
     "constraint_distance_preserved",
     "swing_direction_changes_after_release",
     "contact_response_occurs_after_contact_if_target_present"
   ],
-  "negative_modes": ["constraint_length_drift", "teleporting_body"],
+  "negative_modes": ["constraint_length_drift", "teleporting_body", "missing_constraint_label"],
   "seed_policy": {"deterministic": true, "record_parameter_sample": true},
   "expected_artifact_contract": ["trajectory", "constraint_trace", "contact_events", "constraint_parameter_labels"]
 }

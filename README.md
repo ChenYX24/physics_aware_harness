@@ -183,6 +183,7 @@ old `billiard_causality_compiler` id remains only as a compatibility alias.
 | `mass_ratio_momentum_transfer` | Contact-driven rigid bodies must declare mass labels and produce post-collision velocity ordering consistent with mass ratio and restitution. |
 | `angular_damping_spin_decay` | Spinning rigid bodies must declare angular velocity and damping, then show monotonic spin decay in angular velocity and rotation trace evidence. |
 | `agent_rigidbody_action_coupling` | Agent or controller actions must be explicit action traces, and target rigid bodies may move only after action/contact or release/impulse evidence. |
+| `constraint_distance_pendulum_motion` | Distance/joint-constrained rigid bodies must preserve anchor-body length within tolerance and export constraint trace evidence. Pendulum is one smoke family. |
 
 `billiard_causality_compiler` is deprecated as a core abstraction. It remains in
 the repository only so old runs and scripts can still be interpreted. New agents
@@ -245,6 +246,6 @@ git diff --check
 
 1. Replace `highres_viewport` with MRQ/Level Sequence for paper-quality RGB.
 2. Finish true rigid-body gravity advancement in the UE SceneCapture path.
-3. Expand billiards, domino, falling, ramp, pendulum, and rolling-friction cases.
+3. Expand generated case coverage for contact, constraint, gravity, friction, force-field, and agent-action capabilities.
 4. Add asset import tooling for ModelScope/GitHub-hosted asset registries without
    committing large assets to git.

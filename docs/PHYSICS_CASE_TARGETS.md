@@ -15,7 +15,7 @@
 | `falling_stack_boxes` | gravity/contact | 已支持 capability + verifier；本轮新增 dynamic template | 支持多 block stack 和 penetration metric |
 | `ramp_roll_gravity` | inclined plane | 已支持 capability + fallback trajectory + friction-aware verifier；新增 dynamic template | 接真实 UE ramp collider/contact 和 friction material |
 | `projectile_gravity_motion` | projectile / upward throw | 已支持 capability + fallback trajectory + apex/descent/contact verifier；新增 dynamic template | 接真实 UE projectile trajectory/contact |
-| `pendulum_constraint` | constraint motion | 本轮新增 template contract，不跑 runtime | 接 constraint trace / distance preservation metric |
+| `pendulum_constraint` | distance / joint constraint motion | 已支持 `constraint_distance_pendulum_motion` capability + fallback trajectory + constraint_trace + distance/continuity verifier；单摆只是 smoke family | 接真实 UE PhysicsConstraint/Chaos joint trace 和 solver drift metric |
 | `bounce_restitution_ball` | restitution | 已支持 capability + fallback trajectory + restitution-bounded verifier；新增 dynamic template | 接真实 UE restitution material/contact/export |
 | `rolling_friction_ball` | rolling friction | 已支持 capability + fallback trajectory + friction-bounded verifier；新增 dynamic template | 接真实 UE rolling friction material/contact/export |
 | `sliding_crate_friction` | sliding friction | 已支持 capability + fallback trajectory + stop-distance/static-threshold verifier；新增 dynamic template | 接真实 UE static/dynamic friction material/contact/export |

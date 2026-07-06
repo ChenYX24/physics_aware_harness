@@ -29,6 +29,8 @@ DEFAULT_CASES = [
     "cases/spin/negative_spin_gain.json",
     "cases/agent_action/agent_push_box_contact.json",
     "cases/agent_action/negative_target_preaction_motion.json",
+    "cases/constraint/pendulum_length_preserved.json",
+    "cases/constraint/negative_constraint_length_drift.json",
 ]
 
 

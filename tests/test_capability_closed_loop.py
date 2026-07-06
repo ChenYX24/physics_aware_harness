@@ -36,6 +36,7 @@ class CapabilityClosedLoopTests(unittest.TestCase):
         self.assertTrue(self.planner.profile.has("mass_ratio_momentum_transfer"))
         self.assertTrue(self.planner.profile.has("angular_damping_spin_decay"))
         self.assertTrue(self.planner.profile.has("agent_rigidbody_action_coupling"))
+        self.assertTrue(self.planner.profile.has("constraint_distance_pendulum_motion"))
 
     def test_billiards_prompt_maps_to_generic_contact_causality(self) -> None:
         plan = self.planner.plan("A pool table with a cue ball hitting passive target balls.")
@@ -50,6 +51,10 @@ class CapabilityClosedLoopTests(unittest.TestCase):
     def test_domino_prompt_maps_to_sequential_contact(self) -> None:
         plan = self.planner.plan("A domino chain reaction tips each block through sequential contact.")
         self.assertEqual(plan["primary_capability_id"], "sequential_contact_propagation")
+
+    def test_constraint_prompt_maps_to_distance_constraint(self) -> None:
+        plan = self.planner.plan("A pendulum swings while preserving a fixed length rope constraint.")
+        self.assertEqual(plan["primary_capability_id"], "constraint_distance_pendulum_motion")
 
     def test_verifier_rejects_passive_target_pre_contact_velocity(self) -> None:
         plan = self.planner.plan("billiards cue ball hits passive target")

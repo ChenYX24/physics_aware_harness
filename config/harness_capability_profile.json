@@ -1947,9 +1947,59 @@
           "text": "Agent-to-rigidbody coupling requires action trace, target rigid-body evidence, and post-action trajectory response."
         }
       ]
+    },
+    {
+      "id": "constraint_distance_pendulum_motion",
+      "title": "Distance Constraint Motion Validation",
+      "pattern_type": "physics_constraint",
+      "stage_ids": [
+        "case_spec_compilation",
+        "physics_control",
+        "runtime_artifact_collection",
+        "physics_verification"
+      ],
+      "description": "Validate fixed-distance or joint-constrained rigid-body motion with anchor/body trajectory, constraint length labels, constraint trace, and continuity checks. Pendulum swing is only the smoke family.",
+      "prompt_moves": [
+        "Identify the constraint anchor, constrained body, constraint length, tolerance, and expected release or drive condition.",
+        "Keep constraint length as a structured physics label rather than a visual rope description.",
+        "Use the same capability for pendulums, rope/chain constraints, distance joints, and fixed-length articulated bodies."
+      ],
+      "runtime_contract": [
+        "trajectory",
+        "constraint_trace",
+        "constraint_parameter_labels",
+        "object_roles",
+        "anchor_body_distance"
+      ],
+      "verifier_checks": [
+        "Constraint length label is present and positive.",
+        "Anchor and constrained body appear in every trajectory frame.",
+        "Measured anchor-body distance stays within tolerance.",
+        "Constrained body motion is continuous and does not teleport.",
+        "Pendulum-style smoke cases cross or approach the center line after release."
+      ],
+      "failure_modes": [
+        "F1_missing_trajectory",
+        "F3_invalid_initial_physics_state",
+        "F4_causality_violation",
+        "F7_runtime_artifact_incomplete"
+      ],
+      "iteration_moves": [
+        "Export constraint_trace before tuning visual rope or chain assets.",
+        "Check constraint_length_m and measured_distance_m before adjusting solver settings.",
+        "Add negative cases for length drift, teleporting body, and missing constraint label."
+      ],
+      "confidence": 0.9,
+      "evidence_count": 5,
+      "evidence": [
+        {
+          "source": "capabilities/constraint_distance_pendulum_motion.json",
+          "text": "Fixed-distance constraint motion is verified by anchor/body trajectory, constraint labels, and continuity checks."
+        }
+      ]
     }
   ],
-  "capability_count": 24,
+  "capability_count": 25,
   "iteration_playbook": [
     {
       "input": "README/docs, tests, runtime code, and public config",

@@ -38,6 +38,7 @@ PUBLIC_SOURCE_PATHS = [
     "capabilities/mass_ratio_momentum_transfer.json",
     "capabilities/angular_damping_spin_decay.json",
     "capabilities/agent_rigidbody_action_coupling.json",
+    "capabilities/constraint_distance_pendulum_motion.json",
     "capabilities/capability_runtime_artifact_bridge.json",
     "capabilities/asset_intent_resolution.json",
     "capabilities/asset_runtime_binding_invocation.json",
@@ -61,6 +62,7 @@ PUBLIC_SOURCE_PATHS = [
     "harness/verification/billiards_verifier.py",
     "harness/verification/domino_verifier.py",
     "harness/verification/falling_verifier.py",
+    "harness/verification/constraint_verifier.py",
     "tools/run_contract.py",
     "tools/draft_builder.py",
     "tools/dataset_protocol.py",
@@ -681,6 +683,53 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         ),
     ),
     CapabilitySpec(
+        capability_id="constraint_distance_pendulum_motion",
+        title="Distance Constraint Motion Validation",
+        pattern_type="physics_constraint",
+        stage_ids=("case_spec_compilation", "physics_control", "runtime_artifact_collection", "physics_verification"),
+        keywords=(
+            "pendulum",
+            "distance constraint",
+            "fixed length",
+            "constraint length",
+            "joint constraint",
+            "rope constraint",
+            "单摆",
+            "摆锤",
+            "距离约束",
+            "固定长度",
+            "约束长度",
+        ),
+        description="Validate fixed-distance or joint-constrained rigid-body motion using anchor/body trajectory, constraint length labels, constraint trace, and continuity checks.",
+        prompt_moves=(
+            "Represent the physical constraint as anchor/body ids, constraint_length_m, tolerance, and release condition.",
+            "Use visual rope or chain assets only after the distance constraint is present in the physics graph.",
+            "Generate positive and negative cases by sweeping length, release angle, tolerance, and solver drift.",
+        ),
+        runtime_contract=(
+            "Trajectory includes anchor and constrained body positions at every frame.",
+            "constraint_trace.json records constraint_id, anchor_id, body_id, expected length, and measured distance.",
+            "Runtime exports enough data to detect length drift and teleporting constrained bodies.",
+        ),
+        verifier_checks=(
+            "Constraint length label is present and positive.",
+            "Anchor-body distance stays within tolerance for every frame.",
+            "Constrained body motion is continuous and below teleport threshold.",
+            "Pendulum smoke cases cross or approach the center line after release.",
+        ),
+        failure_modes=(
+            "Constraint is rendered as a visual rope with no physics label.",
+            "Anchor/body distance drifts beyond tolerance.",
+            "Constrained body teleports between frames.",
+            "Runtime artifact misses constraint_trace or object roles.",
+        ),
+        iteration_moves=(
+            "Export constraint_trace before tuning rope visuals.",
+            "Fix constraint_length_m, anchor/body ids, and solver timestep before changing camera or materials.",
+            "Add negative cases for missing constraint label, length drift, and teleporting body.",
+        ),
+    ),
+    CapabilitySpec(
         capability_id="dataset_artifact_packaging",
         title="Verified Multi-View Dataset Packaging",
         pattern_type="FLOW",
@@ -1066,6 +1115,7 @@ def render_markdown_report(profile: dict[str, Any]) -> str:
     lines.append("| Falling blocks | `rigid_body_gravity_collision` | Gravity/collision are enabled, z decreases, and support contact is recorded |")
     lines.append("| Domino chain | `sequential_contact_propagation` | First domino is actively triggered; downstream dominoes tip through ordered adjacent contacts |")
     lines.append("| Spin decay | `angular_damping_spin_decay` | Angular velocity and damping are explicit, and angular speed decays without unexplained gain |")
+    lines.append("| Distance constraint / pendulum | `constraint_distance_pendulum_motion` | Anchor-body length stays within tolerance, motion is continuous, and constraint trace is exported |")
     lines.extend(["", "## Iteration Playbook", ""])
     for phase in profile["iteration_playbook"]:
         lines.append(f"- **{phase['phase']}**: {phase['rule']}")

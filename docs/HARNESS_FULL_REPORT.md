@@ -100,6 +100,7 @@ assets/*.local.json
 | `mass_ratio_momentum_transfer` | 当前分支已可用 | 接触碰撞必须声明质量标签；碰撞后速度顺序要符合质量比和 restitution envelope，并拒绝无解释能量增益。 |
 | `angular_damping_spin_decay` | 当前分支已可用 | 自转刚体必须声明初始角速度和角阻尼，runtime 输出 angular velocity + rotation trace，verifier 检查单调衰减和无外力增益。 |
 | `agent_rigidbody_action_coupling` | 当前分支已可用 | agent/robot/character 动作必须写成 action trace；目标刚体只能在 action/contact 或 release/impulse 证据后运动。 |
+| `constraint_distance_pendulum_motion` | 当前分支已可用 | 距离/绳长/关节约束必须声明 anchor、constrained body、constraint length，并输出 constraint_trace；单摆只是 smoke family。 |
 
 注意：如果从 `main` 使用，`ramp_sliding_friction` 需要先合并当前 ramp 分支。
 
@@ -284,7 +285,7 @@ tests/test_harness_<family>_verifier.py
 | `falling_blocks.template.json` | `--suite falling` | 可运行 | 重力/support contact。 |
 | `ramp_sliding.template.json` | `--suite ramp` | 当前 ramp 分支可运行 | 斜面摩擦响应。 |
 | `projectile_motion.template.json` | `--suite projectile` | 当前分支可运行 | 上抛/抛体轨迹、apex/descent/landing contact。 |
-| `pendulum_contact.template.json` | 暂无 suite | contract-only | 约束/contact motion TODO。 |
+| `pendulum_contact.template.json` | `--suite pendulum` | 当前分支可运行 | 距离/关节约束、constraint_trace、长度保持和连续运动。 |
 
 生成 case：
 
@@ -332,6 +333,7 @@ runs/<run_id>/
   camera_plan.json
   trajectory.json
   contact_events.json
+  constraint_trace.json
   camera_trajectory.json
   render_manifest.json
   render_pass_manifest.json
@@ -353,12 +355,12 @@ fallback 可以写 placeholder render artifact，但必须标记为非 UE。UE p
 
 ```bash
 python3.13 -m unittest discover -s tests -p 'test*.py'
-# 81 tests OK
+# 87 tests OK
 ```
 
 ```bash
 python3.13 scripts/harness_smoke.py --backend fallback
-# 12/12 expectation met
+# 14/14 expectation met
 ```
 
 ```bash
@@ -420,6 +422,12 @@ python3.13 scripts/harness_run_case_batch.py cases/generated/agent_action_seed53
 # 10 cases: 7 positive pass, 3 negative caught, unexpected 0
 ```
 
+```bash
+python3.13 scripts/harness_generate_cases.py --suite pendulum --count 10 --seed 54 --out cases/generated/pendulum_seed54
+python3.13 scripts/harness_run_case_batch.py cases/generated/pendulum_seed54 --backend fallback
+# 10 cases: 7 positive pass, 3 negative caught, unexpected 0
+```
+
 静态资产解析：
 
 - 台球三角阵 case：8/8 physics-critical assets resolved。
@@ -452,6 +460,7 @@ TODO：
 | P1 | 质量比碰撞/动量传递 | `mass_ratio_momentum_transfer` | 当前分支已有 fallback/verifier；UE mass metadata/contact impulse TODO |
 | P1 | 角阻尼/自转衰减 | `angular_damping_spin_decay` | 当前分支已有 fallback/verifier；UE angular velocity / damping / inertia export TODO |
 | P1 | agent 推/抛刚体 | `agent_rigidbody_action_coupling` | 当前分支已有 fallback/verifier；UE action trace / skeletal controller / impulse export TODO |
+| P1 | 单摆/绳长/距离约束 | `constraint_distance_pendulum_motion` | 当前分支已有 fallback/verifier；UE PhysicsConstraint / Chaos joint trace TODO |
 | P1 | 牛顿摆 | `constraint_momentum_transfer` | TODO |
 | P1 | 弹簧弹射 | `spring_launch_motion` | TODO |
 | P1 | 绳子/蹦极弹性 | `elastic_rope_bungee` | TODO |

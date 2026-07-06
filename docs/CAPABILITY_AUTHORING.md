@@ -34,6 +34,7 @@ Capability 必须包含：
 - 要写清楚物理因果规则。
 - 要写清楚这个能力属于 pipeline stage、物理约束、校验、资产操作、runtime bridge 还是 dataset packaging。
 - 资产能力要区分 retrieval 和 invocation：`asset_intent_resolution` 找候选，`asset_runtime_binding_invocation` 负责把 selected asset/proxy 绑定到 runtime actor。
+- 约束能力要区分 visual helper 和 physics graph：绳子/链条/杆件可以是 visual-only，但 distance/joint/hinge constraint 必须进入 `expected_physics` 和 `constraint_trace`。
 - negative case 必须能稳定 fail。
 - fallback backend 可以先用 deterministic toy trajectory，但必须显式标记 source。
 
@@ -46,6 +47,7 @@ Capability 必须包含：
 | `find_assets` | `asset_intent_resolution` + `asset_runtime_binding_invocation` |
 | `friction_demo_template` | `physics_property_constraint_validation` + `rolling_friction_ball` / `sliding_crate_friction` |
 | `scene_prompt_rewrite` | `prompt_case_capability_planning` + `scene_spec_compilation` |
+| `pendulum_template` 作为主能力 | `constraint_distance_pendulum_motion`，单摆/绳索/铰链作为 case family |
 
 ## 验证
 

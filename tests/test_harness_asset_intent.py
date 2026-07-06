@@ -53,6 +53,13 @@ class HarnessAssetIntentTests(unittest.TestCase):
         self.assertTrue(target.physics_critical)
         self.assertIn("collision_profile", target.required_properties)
 
+    def test_constraint_roles_are_physics_critical(self) -> None:
+        anchor = intent_from_object({"id": "anchor", "role": "constraint_anchor", "shape": "fixed_point"})
+        bob = intent_from_object({"id": "bob", "role": "constrained_body", "shape": "sphere"})
+        self.assertTrue(anchor.physics_critical)
+        self.assertTrue(bob.physics_critical)
+        self.assertIn("collider", bob.required_properties)
+
     def test_example_registry_resolves_core_static_scene_assets(self) -> None:
         case_spec = {
             "case_id": "asset_smoke",
@@ -67,14 +74,16 @@ class HarnessAssetIntentTests(unittest.TestCase):
                 {"id": "spinner", "role": "spinning_body", "shape": "sphere"},
                 {"id": "agent", "role": "active_agent", "shape": "capsule"},
                 {"id": "payload", "role": "action_coupled_body", "shape": "box"},
+                {"id": "anchor", "role": "constraint_anchor", "shape": "fixed_point"},
+                {"id": "bob", "role": "constrained_body", "shape": "sphere"},
             ],
         }
         result = resolve_asset_intents(case_spec, top_k=2)
         self.assertEqual(result["case_id"], "asset_smoke")
         self.assertEqual(result["capability_id"], "asset_intent_resolution")
         self.assertEqual(result["invocation_contract"]["next_capability_id"], "asset_runtime_binding_invocation")
-        self.assertEqual(result["physics_critical_count"], 10)
-        self.assertEqual(len(result["assets"]), 10)
+        self.assertEqual(result["physics_critical_count"], 12)
+        self.assertEqual(len(result["assets"]), 12)
         self.assertTrue(all(row["selected_asset"] for row in result["assets"]))
         self.assertTrue(all(row["runtime_binding_requirements"] for row in result["assets"]))
 

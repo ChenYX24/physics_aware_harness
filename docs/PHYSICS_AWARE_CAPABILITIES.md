@@ -61,6 +61,10 @@ agent-facing docs should use:
   checks explicit agent action traces, push contact or throw release evidence,
   and post-action target rigid-body response. Push-box and throw-ball are only
   smoke families.
+- `constraint_distance_pendulum_motion`: a concrete distance/joint-constraint
+  validator that checks anchor/body ids, `constraint_length_m`,
+  `constraint_trace`, bounded length error, and continuous motion. Pendulum is
+  only the smoke family.
 
 This keeps the harness useful beyond billiards: the same contact-causality
 contract can verify pool, bowling, crate impacts, and other contact-driven scenes.
@@ -75,6 +79,10 @@ contract can verify pool, bowling, crate impacts, and other contact-driven scene
 | Physics controls | `explicit_physics_control_surface`, `physics_property_constraint_validation` | Store gravity, mass, friction, restitution, damping, force, time, agent, and render-physics bridge controls as typed replayable fields. |
 | Runtime evidence | `capability_runtime_artifact_bridge`, `canonical_signal_capture` | Normalize UE/fallback trajectory, contacts, camera path, RGB/depth/segmentation, and render metadata. |
 | Verification/package | `physics_verifier_truth_gate`, `dataset_artifact_packaging` | Gate sample readiness and package only auditable, schema-valid artifacts. |
+
+The capability id should name the reusable invariant, not the visual example.
+For example, use `rigid_body_contact_causality` instead of a billiard compiler,
+and use `constraint_distance_pendulum_motion` instead of a pendulum template.
 
 ### Prompt / Case Capability Planning
 
@@ -341,6 +349,7 @@ Evidence:
 | Domino chain | `sequential_contact_propagation` | First domino is actively triggered; downstream dominoes tip through ordered adjacent contacts |
 | Spin decay | `angular_damping_spin_decay` | Angular velocity and damping are explicit, and angular speed decays without unexplained gain |
 | Agent action coupling | `agent_rigidbody_action_coupling` | Target rigid bodies move after explicit action/contact or release/impulse evidence |
+| Distance constraint / pendulum | `constraint_distance_pendulum_motion` | Anchor-body length is preserved within tolerance, motion is continuous, and `constraint_trace` is exported |
 
 ## Iteration Playbook
 

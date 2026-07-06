@@ -1,0 +1,58 @@
+{
+  "schema_version": "harness_capability_v1",
+  "id": "constraint_distance_pendulum_motion",
+  "capability_type": "physics_constraint",
+  "stage_ids": [
+    "physics_control",
+    "runtime_artifact_collection",
+    "physics_verification"
+  ],
+  "description": "Validate fixed-distance constraint motion such as pendulums using anchor/body trajectory, constraint length labels, and continuity checks. A pendulum bob is only the smoke family.",
+  "physical_assumptions": [
+    "A constrained body keeps a bounded distance from a constraint anchor.",
+    "Constraint length is a structured physics label, not a visual rope length.",
+    "The constrained body moves continuously along an arc instead of teleporting.",
+    "Swing direction should change after release for pendulum-style motion.",
+    "Contact response is optional and must occur after recorded contact if present."
+  ],
+  "required_signals": [
+    "trajectory",
+    "constraint_trace",
+    "constraint_parameter_labels",
+    "object_roles"
+  ],
+  "required_assets": [
+    "constraint anchor",
+    "constrained rigid body",
+    "joint or distance constraint",
+    "optional rope or chain visual"
+  ],
+  "verifier_rules": [
+    "Constraint length label is present and positive.",
+    "Anchor and constrained body appear in every trajectory frame.",
+    "Anchor-body distance stays within tolerance.",
+    "Frame-to-frame body displacement stays below teleport threshold.",
+    "Pendulum-style motion crosses or approaches the center line after release."
+  ],
+  "failure_taxonomy": [
+    "F1_missing_trajectory",
+    "F3_invalid_initial_physics_state",
+    "F4_causality_violation",
+    "F7_runtime_artifact_incomplete"
+  ],
+  "repair_suggestions": [
+    "Declare expected_physics.constraint_length_m and constraint_tolerance_m.",
+    "Export anchor/body trajectory and constraint_trace sidecars.",
+    "Use a physics constraint joint instead of keyframing a rope visual.",
+    "Reduce timestep or solver drift if distance error exceeds tolerance."
+  ],
+  "smoke_cases": [
+    "cases/constraint/pendulum_length_preserved.json",
+    "cases/constraint/pendulum_swing_crosses_center.json"
+  ],
+  "regression_cases": [
+    "cases/constraint/negative_constraint_length_drift.json",
+    "cases/constraint/negative_teleporting_body.json",
+    "cases/constraint/negative_missing_constraint_label.json"
+  ]
+}
