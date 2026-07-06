@@ -26,6 +26,7 @@ class HarnessPlannerTests(unittest.TestCase):
         self.assertEqual(planner.plan("a Newton's cradle transfers impulse through a suspended ball chain")["primary_capability_id"], "constraint_momentum_transfer")
         self.assertEqual(planner.plan("a compressed spring launches a payload through elastic energy release")["primary_capability_id"], "elastic_energy_launch")
         self.assertEqual(planner.plan("a bungee payload stretches an elastic rope then rebounds")["primary_capability_id"], "elastic_constraint_rebound")
+        self.assertEqual(planner.plan("a brittle glass panel shatters after an impact exceeds fracture threshold")["primary_capability_id"], "brittle_impact_fracture")
 
     def test_planner_returns_layered_harness_capabilities(self) -> None:
         plan = CapabilityPlanner().plan("a bowling ball hits passive pins through contact")

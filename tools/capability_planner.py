@@ -82,6 +82,12 @@ CAPABILITY_RULES: tuple[CapabilityRule, ...] = (
         priority=106,
     ),
     CapabilityRule(
+        capability_id="brittle_impact_fracture",
+        case_family="brittle_impact_fracture",
+        terms=("brittle", "fracture", "shatter", "breakable", "destructible", "glass break", "glass shatter", "mirror breaks", "wood crate breaks", "crate breaks", "破碎", "碎裂", "断裂", "玻璃碎", "镜子碎", "玻璃杯碎", "木箱破碎", "可破坏"),
+        priority=108,
+    ),
+    CapabilityRule(
         capability_id="angular_damping_spin_decay",
         case_family="angular_damping_spin",
         terms=("angular damping", "spin decay", "spinning body", "angular velocity", "rotational damping", "spin slows", "spin down", "角阻尼", "角速度", "旋转衰减", "自转", "旋转变慢"),
@@ -180,7 +186,7 @@ class CapabilityPlanner:
                 "fallback_runtime": "SIM_PROXY",
                 "dry_run_supported": True,
                 "requires_trajectory": True,
-                "requires_contact_events": primary["capability_id"] in {"rigid_body_contact_causality", "sequential_contact_propagation", "constraint_momentum_transfer"},
+                "requires_contact_events": primary["capability_id"] in {"rigid_body_contact_causality", "sequential_contact_propagation", "constraint_momentum_transfer", "brittle_impact_fracture"},
             },
         }
 

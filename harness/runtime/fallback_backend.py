@@ -69,6 +69,8 @@ def trajectory_for_case(case_spec: dict[str, Any]) -> list[dict[str, Any]]:
         return elastic_launch_trajectory(case_id, case_spec)
     if capability_id == "elastic_constraint_rebound":
         return elastic_constraint_trajectory(case_id, case_spec)
+    if capability_id == "brittle_impact_fracture":
+        return brittle_fracture_trajectory(case_id, case_spec)
     return []
 
 
@@ -836,6 +838,76 @@ def elastic_constraint_trajectory(case_id: str, case_spec: dict[str, Any]) -> li
     ]
 
 
+def brittle_fracture_trajectory(case_id: str, case_spec: dict[str, Any]) -> list[dict[str, Any]]:
+    negative_mode = str(case_spec.get("negative_mode") or "")
+    if not negative_mode and "missing_fracture" in case_id:
+        negative_mode = "missing_fracture_event"
+    if not negative_mode and "before_contact" in case_id:
+        negative_mode = "fracture_before_contact"
+    if not negative_mode and "below_threshold" in case_id:
+        negative_mode = "below_threshold_fracture"
+    if not negative_mode and "too_few" in case_id:
+        negative_mode = "too_few_fragments"
+
+    object_specs = {str(obj.get("id")): obj for obj in case_spec.get("objects", []) if isinstance(obj, dict)}
+    expected = dict(case_spec.get("expected_physics") or {})
+    impactor_id = str(expected.get("impactor_object_id") or next((oid for oid, obj in object_specs.items() if str(obj.get("role") or "") in {"active_impactor", "active_striker"}), "striker"))
+    brittle_id = str(expected.get("brittle_object_id") or next((oid for oid, obj in object_specs.items() if str(obj.get("role") or "") in {"brittle_fracture_body", "breakable_body", "destructible_body"}), "brittle_body"))
+    impactor_spec = object_specs.get(impactor_id) or {"initial_position_m": [-0.6, 0.0, 0.4], "initial_velocity_m_s": [2.8, 0.0, 0.0], "mass_kg": 1.2}
+    brittle_spec = object_specs.get(brittle_id) or {"initial_position_m": [0.0, 0.0, 0.4], "initial_velocity_m_s": [0.0, 0.0, 0.0], "mass_kg": 0.7}
+    p_impactor = vec3(impactor_spec.get("initial_position_m") or [-0.6, 0.0, 0.4])
+    p_brittle = vec3(brittle_spec.get("initial_position_m") or [0.0, 0.0, 0.4])
+    v_impactor = vec3(impactor_spec.get("initial_velocity_m_s") or [2.8, 0.0, 0.0])
+    threshold = float(expected.get("fracture_threshold_j") or brittle_spec.get("fracture_threshold_j") or 2.5)
+    min_fragments = int(expected.get("expected_min_fragment_count") or 6)
+    impact_energy = float(expected.get("impact_energy_j") or max(threshold * 1.6, 3.0))
+    if negative_mode == "below_threshold_fracture":
+        impact_energy = round(threshold * 0.45, 6)
+    fragment_count = min_fragments
+    if negative_mode == "too_few_fragments":
+        fragment_count = max(1, min_fragments - 3)
+
+    initial = {
+        impactor_id: state(p_impactor, v_impactor),
+        brittle_id: state(p_brittle, vec3(brittle_spec.get("initial_velocity_m_s") or [0.0, 0.0, 0.0])),
+    }
+    contact_state = {
+        impactor_id: state(midpoint(p_impactor, p_brittle, 0.92), [round(v_impactor[0] * 0.18, 4), round(v_impactor[1] * 0.18, 4), round(v_impactor[2] * 0.18, 4)]),
+        brittle_id: state(p_brittle, [0.0, 0.0, 0.0]),
+    }
+    post_state = {
+        impactor_id: state([round(p_brittle[0] + 0.08, 4), p_impactor[1], p_impactor[2]], [0.05, 0.0, 0.0]),
+        brittle_id: {**state(p_brittle, [0.0, 0.0, 0.0]), "fractured": negative_mode != "missing_fracture_event"},
+    }
+
+    contact_event = contact(impactor_id, brittle_id, 1, 0.2)
+    contact_event["impact_energy_j"] = round(impact_energy, 6)
+    contact_event["normal_impulse_n_s"] = round(max(0.05, impact_energy / max(abs(v_impactor[0]) or 1.0, 1e-6)), 6)
+    fracture_event = {
+        "event_type": "fracture",
+        "object_id": brittle_id,
+        "caused_by_object_id": impactor_id,
+        "frame": 0 if negative_mode == "fracture_before_contact" else 1,
+        "time_s": 0.0 if negative_mode == "fracture_before_contact" else 0.2,
+        "impact_energy_j": round(impact_energy, 6),
+        "fracture_threshold_j": round(threshold, 6),
+        "fragment_count": fragment_count,
+    }
+    fragments = [
+        {"fragment_id": f"{brittle_id}_frag_{idx}", "source_object_id": brittle_id}
+        for idx in range(fragment_count)
+    ]
+    frame0_fracture = [fracture_event] if negative_mode == "fracture_before_contact" else []
+    frame1_fracture = [] if negative_mode in {"missing_fracture_event", "fracture_before_contact"} else [fracture_event]
+    frame1_fragments = [] if negative_mode in {"missing_fracture_event", "fracture_before_contact"} else fragments
+    frame2_fragments = [] if negative_mode == "missing_fracture_event" else fragments
+    return [
+        frame(0, 0.0, initial, fracture_events=frame0_fracture, fragments=fragments if frame0_fracture else []),
+        frame(1, 0.2, contact_state, contacts=[contact_event], fracture_events=frame1_fracture, fragments=frame1_fragments),
+        frame(2, 0.4, post_state, fragments=frame2_fragments),
+    ]
+
+
 def state(position: list[float], velocity: list[float], *, rotation: list[float] | None = None, angular_velocity: list[float] | None = None) -> dict[str, Any]:
     result: dict[str, Any] = {"position_m": position, "velocity_m_s": velocity, "rotation_deg": rotation or [0, 0, 0]}
     if angular_velocity is not None:
@@ -870,7 +942,18 @@ def dist(a: list[float], b: list[float]) -> float:
     return math.sqrt(sum((a[idx] - b[idx]) ** 2 for idx in range(3)))
 
 
-def frame(frame_id: int, time_s: float, objects: dict[str, Any], *, contacts: list[dict[str, Any]] | None = None, actions: list[dict[str, Any]] | None = None, constraints: list[dict[str, Any]] | None = None, spring_events: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def frame(
+    frame_id: int,
+    time_s: float,
+    objects: dict[str, Any],
+    *,
+    contacts: list[dict[str, Any]] | None = None,
+    actions: list[dict[str, Any]] | None = None,
+    constraints: list[dict[str, Any]] | None = None,
+    spring_events: list[dict[str, Any]] | None = None,
+    fracture_events: list[dict[str, Any]] | None = None,
+    fragments: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     result: dict[str, Any] = {"frame": frame_id, "time_s": time_s, "objects": objects, "contacts": contacts or []}
     if actions is not None:
         result["actions"] = actions
@@ -878,6 +961,10 @@ def frame(frame_id: int, time_s: float, objects: dict[str, Any], *, contacts: li
         result["constraints"] = constraints
     if spring_events is not None:
         result["spring_events"] = spring_events
+    if fracture_events is not None:
+        result["fracture_events"] = fracture_events
+    if fragments is not None:
+        result["fragments"] = fragments
     return result
 
 

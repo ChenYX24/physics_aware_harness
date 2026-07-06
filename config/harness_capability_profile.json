@@ -22,7 +22,7 @@
           "matched_terms": [
             "scene_spec"
           ],
-          "source": "README.md:162",
+          "source": "README.md:164",
           "text": "| `scene_spec_compilation` | Builds runtime scene contracts from capability/case/assets. |"
         },
         {
@@ -61,7 +61,7 @@
           "text": "\"scene_spec_compilation\""
         }
       ],
-      "evidence_count": 31,
+      "evidence_count": 34,
       "failure_modes": [
         "Prompt remains visual-only and cannot drive physics.",
         "Object ids drift between planner, runtime, and verifier.",
@@ -129,7 +129,7 @@
             "passive",
             "pool"
           ],
-          "source": "README.md:174",
+          "source": "README.md:176",
           "text": "| `rigid_body_contact_causality` | Active bodies may move; passive rigid bodies must remain still until runtime contact evidence. Billiards/pool is one case family. |"
         },
         {
@@ -138,7 +138,7 @@
             "passive",
             "target balls"
           ],
-          "source": "docs/AGENT_USAGE.md:152",
+          "source": "docs/AGENT_USAGE.md:156",
           "text": "The old billiards failure was caused by passive target balls receiving hidden"
         },
         {
@@ -179,7 +179,7 @@
           "text": "| `billiard_causality_compiler` 作为主能力 | `rigid_body_contact_causality`，台球/保龄球/箱体撞击作为 case family |"
         }
       ],
-      "evidence_count": 388,
+      "evidence_count": 398,
       "failure_modes": [
         "Passive bodies move before contact because of initial velocity leakage.",
         "Passive bodies move before contact because colliders overlap at t=0.",
@@ -231,6 +231,19 @@
             "collider",
             "collision",
             "physics-critical",
+            "rigid body",
+            "visual-only"
+          ],
+          "source": "docs/CAPABILITY_SYSTEM.md:31",
+          "text": "Physics-critical asset 必须有 collider、mass、rigid body、collision profile。Visual-only asset 可以被替换或随机化，但不能进入 physics graph。"
+        },
+        {
+          "matched_terms": [
+            "Asset",
+            "asset",
+            "collider",
+            "collision",
+            "physics-critical",
             "rigid body"
           ],
           "source": "capabilities/asset_intent_resolution.json:6",
@@ -255,7 +268,7 @@
             "collision",
             "physics-critical"
           ],
-          "source": "docs/PHYSICS_AWARE_HARNESS.md:166",
+          "source": "docs/PHYSICS_AWARE_HARNESS.md:167",
           "text": "| `asset_runtime_binding_invocation` | physics-critical assets must bind colliders, mass/material metadata, collision profile, and runtime actor ids |"
         },
         {
@@ -265,7 +278,7 @@
             "physics-critical",
             "visual-only"
           ],
-          "source": "README.md:160",
+          "source": "README.md:162",
           "text": "| `asset_intent_resolution` | Classifies physics-critical vs visual-only assets. |"
         },
         {
@@ -290,24 +303,16 @@
         },
         {
           "matched_terms": [
-            "physics-critical",
-            "rigid body",
-            "skeletal"
-          ],
-          "source": "capabilities/agent_rigidbody_action_coupling.json:17",
-          "text": "\"The agent may be kinematic or skeletal, but the target rigid body must remain physics-critical.\""
-        },
-        {
-          "matched_terms": [
             "Asset",
             "asset",
-            "visual-only"
+            "collider",
+            "collision"
           ],
-          "source": "capabilities/asset_intent_resolution.json:7",
-          "text": "\"Visual-only assets may be proxied without changing physics.\","
+          "source": "docs/CAPABILITY_SYSTEM.md:29",
+          "text": "| `asset_runtime_binding_invocation` | 把 selected asset 或 analytic proxy 绑定到 runtime actor。 | object_id, runtime_actor_id, collider, mass, material, collision_profile, proxy flag |"
         }
       ],
-      "evidence_count": 281,
+      "evidence_count": 295,
       "failure_modes": [
         "Asset retrieval returns many visual candidates but no physics-critical option.",
         "The agent treats a texture/material as a collider-bearing object.",
@@ -347,12 +352,25 @@
       "evidence": [
         {
           "matched_terms": [
+            "analytic proxy",
+            "collider",
+            "collision_profile",
+            "mass",
+            "runtime actor",
+            "runtime_binding",
+            "绑定"
+          ],
+          "source": "docs/CAPABILITY_SYSTEM.md:29",
+          "text": "| `asset_runtime_binding_invocation` | 把 selected asset 或 analytic proxy 绑定到 runtime actor。 | object_id, runtime_actor_id, collider, mass, material, collision_profile, proxy flag |"
+        },
+        {
+          "matched_terms": [
             "collider",
             "mass",
             "runtime actor",
             "runtime_binding"
           ],
-          "source": "docs/PHYSICS_AWARE_HARNESS.md:166",
+          "source": "docs/PHYSICS_AWARE_HARNESS.md:167",
           "text": "| `asset_runtime_binding_invocation` | physics-critical assets must bind colliders, mass/material metadata, collision profile, and runtime actor ids |"
         },
         {
@@ -370,7 +388,7 @@
             "collision_profile",
             "mass"
           ],
-          "source": "harness/assets/asset_intent.py:89",
+          "source": "harness/assets/asset_intent.py:95",
           "text": "required = [\"collider\", \"mass\", \"rigid_body\", \"collision_profile\"] if physics_critical else [\"visual_proxy\"]"
         },
         {
@@ -387,7 +405,7 @@
             "runtime actor",
             "runtime_binding"
           ],
-          "source": "README.md:161",
+          "source": "README.md:163",
           "text": "| `asset_runtime_binding_invocation` | Resolves top-k asset candidates and binds selected real assets or analytic proxies into runtime actors. |"
         },
         {
@@ -405,17 +423,9 @@
           ],
           "source": "capabilities/asset_intent_resolution.json:17",
           "text": "\"asset registry or analytic proxy\""
-        },
-        {
-          "matched_terms": [
-            "collider",
-            "runtime actor"
-          ],
-          "source": "capabilities/asset_runtime_binding_invocation.json:9",
-          "text": "\"Runtime actor creation must use the selected asset, collider, material, transform, and collision profile.\""
         }
       ],
-      "evidence_count": 136,
+      "evidence_count": 145,
       "failure_modes": [
         "Selected asset exists visually but has no usable collider metadata.",
         "Proxy fallback is silently used in a production run.",
@@ -475,7 +485,7 @@
             "gravity",
             "ground"
           ],
-          "source": "tests/test_capability_closed_loop.py:51",
+          "source": "tests/test_capability_closed_loop.py:52",
           "text": "plan = self.planner.plan(\"Falling blocks under gravity collide with the ground.\")"
         },
         {
@@ -534,7 +544,7 @@
           "text": "\"Falling bodies have gravity and collision enabled.\","
         }
       ],
-      "evidence_count": 162,
+      "evidence_count": 167,
       "failure_modes": [
         "Object is moved downward by visual keyframes without physics evidence.",
         "Gravity or collision is disabled on a falling body.",
@@ -624,7 +634,7 @@
             "domino",
             "sequential contact"
           ],
-          "source": "tests/test_capability_closed_loop.py:55",
+          "source": "tests/test_capability_closed_loop.py:56",
           "text": "plan = self.planner.plan(\"A domino chain reaction tips each block through sequential contact.\")"
         },
         {
@@ -651,7 +661,7 @@
           "text": "return \"F7_runtime_artifact_incomplete\", failure(\"case_spec\", 0, 0, \"domino_count\", len(domino_ids)), evidence"
         }
       ],
-      "evidence_count": 83,
+      "evidence_count": 84,
       "failure_modes": [
         "Later chain objects are pre-animated or pre-rotated.",
         "Contact pairs are missing even though objects appear to fall.",
@@ -700,7 +710,7 @@
             "parameter",
             "restitution"
           ],
-          "source": "README.md:164",
+          "source": "README.md:166",
           "text": "| `physics_property_constraint_validation` | Checks mass, friction, restitution, damping, gravity, material, and parameter-sweep constraints. |"
         },
         {
@@ -714,6 +724,17 @@
           ],
           "source": "capabilities/physics_property_constraint_validation.json:4",
           "text": "\"description\": \"Validate physical property ranges and parameter sensitivity for mass, friction, restitution, damping, gravity, material density, fracture threshold, buoyancy, and force-field controls.\","
+        },
+        {
+          "matched_terms": [
+            "friction",
+            "gravity",
+            "mass",
+            "material",
+            "restitution"
+          ],
+          "source": "docs/CAPABILITY_SYSTEM.md:38",
+          "text": "| `physics_property_constraint_validation` | 检查 mass、friction、restitution、damping、gravity、material density、fracture threshold 等字段范围和 sensitivity 方向。 |"
         },
         {
           "matched_terms": [
@@ -751,7 +772,7 @@
             "material",
             "physics_control"
           ],
-          "source": "README.md:165",
+          "source": "README.md:167",
           "text": "| `explicit_physics_control_surface` | Represents gravity/material/rigid-body/constraint/force/time controls as typed replayable fields. |"
         },
         {
@@ -762,18 +783,9 @@
           ],
           "source": "capabilities/constraint_momentum_transfer.json:54",
           "text": "\"Check mass labels, restitution, and solver substeps before tuning visuals.\","
-        },
-        {
-          "matched_terms": [
-            "friction",
-            "material",
-            "restitution"
-          ],
-          "source": "capabilities/physics_property_constraint_validation.json:25",
-          "text": "\"Friction/restitution/material changes produce expected monotonic response in generated sweeps.\","
         }
       ],
-      "evidence_count": 352,
+      "evidence_count": 367,
       "failure_modes": [
         "Implicit physics looks plausible once but cannot be reproduced.",
         "LLM changes multiple physical variables during a sensitivity test.",
@@ -831,7 +843,7 @@
             "timebase",
             "trajectory"
           ],
-          "source": "README.md:167",
+          "source": "README.md:169",
           "text": "| `canonical_signal_capture` | Keeps trajectory, contacts, camera paths, RGB/depth/segmentation, and render metadata on one timebase. |"
         },
         {
@@ -865,29 +877,31 @@
         {
           "matched_terms": [
             "RGB",
+            "depth",
+            "trajectory"
+          ],
+          "source": "docs/CAPABILITY_SYSTEM.md:20",
+          "text": "| Signal synchronization | `canonical_signal_capture` | RGB/depth/segmentation/trajectory/contact/camera | aligned signal manifest |"
+        },
+        {
+          "matched_terms": [
+            "camera trajectory",
+            "contact events",
+            "trajectory"
+          ],
+          "source": "docs/CAPABILITY_SYSTEM.md:75",
+          "text": "视频存在不等于通过。没有 trajectory、contact events、camera trajectory、render pass manifest 或 required physical labels 的样本不能作为 reference-ready 数据。"
+        },
+        {
+          "matched_terms": [
+            "RGB",
             "depth"
           ],
-          "source": "README.md:122",
+          "source": "README.md:124",
           "text": "--render-passes rgb,depth,segmentation \\"
-        },
-        {
-          "matched_terms": [
-            "RGB",
-            "depth"
-          ],
-          "source": "README.md:135",
-          "text": "views/<camera_id>/{rgb.mp4,depth.exr,segmentation.png,meta.json}"
-        },
-        {
-          "matched_terms": [
-            "RGB",
-            "depth"
-          ],
-          "source": "README.md:145",
-          "text": "- `scene_capture` RGB/depth/segmentation multi-view path is the stable data path."
         }
       ],
-      "evidence_count": 469,
+      "evidence_count": 499,
       "failure_modes": [
         "A video exists but has no trajectory or contacts.",
         "Depth/normal proxies are mistaken for native GBuffer.",
@@ -972,7 +986,7 @@
             "readiness",
             "run_readiness"
           ],
-          "source": "README.md:140",
+          "source": "README.md:142",
           "text": "run_readiness.json"
         },
         {
@@ -980,7 +994,7 @@
             "readiness",
             "verifier"
           ],
-          "source": "README.md:168",
+          "source": "README.md:170",
           "text": "| `physics_verifier_truth_gate` | Makes verifier evidence the readiness source of truth instead of UI preview or render success. |"
         },
         {
@@ -999,7 +1013,7 @@
           "text": "\"description\": \"Package only verifier-gated runtime artifacts into dataset-ready sample layouts with lineage, hashes, signal availability, and failure visibility.\","
         }
       ],
-      "evidence_count": 216,
+      "evidence_count": 222,
       "failure_modes": [
         "Rendered output is accepted despite failed physics evidence.",
         "Schema passes but runtime behavior diverges.",
@@ -1042,7 +1056,7 @@
             "debug_preview",
             "ue_output"
           ],
-          "source": "harness/verification/physics_verifier.py:118",
+          "source": "harness/verification/physics_verifier.py:121",
           "text": "for name in (\"fallback_output\", \"ue_output\", \"debug_preview\"):"
         },
         {
@@ -1145,7 +1159,7 @@
           "matched_terms": [
             "regression"
           ],
-          "source": "README.md:198",
+          "source": "README.md:200",
           "text": "The old billiards failure mode is still preserved as a regression: plausible"
         },
         {
@@ -1159,21 +1173,21 @@
           "matched_terms": [
             "seed"
           ],
-          "source": "README.md:74",
+          "source": "README.md:76",
           "text": "--seed 42 \\"
         },
         {
           "matched_terms": [
             "seed"
           ],
-          "source": "README.md:75",
+          "source": "README.md:77",
           "text": "--out cases/generated/billiards_seed42"
         },
         {
           "matched_terms": [
             "seed"
           ],
-          "source": "README.md:82",
+          "source": "README.md:84",
           "text": "cases/generated/billiards_seed42 \\"
         },
         {
@@ -1198,7 +1212,7 @@
           "text": "\"regression_cases\": [],"
         }
       ],
-      "evidence_count": 61,
+      "evidence_count": 64,
       "failure_modes": [
         "Fallback and UE are merged into one stability metric.",
         "Coverage is confused with runtime success.",
@@ -1249,7 +1263,7 @@
             "角速度",
             "角阻尼"
           ],
-          "source": "tools/capability_planner.py:87",
+          "source": "tools/capability_planner.py:93",
           "text": "terms=(\"angular damping\", \"spin decay\", \"spinning body\", \"angular velocity\", \"rotational damping\", \"spin slows\", \"spin down\", \"角阻尼\", \"角速度\", \"旋转衰减\", \"自转\", \"旋转变慢\"),"
         },
         {
@@ -1268,7 +1282,7 @@
             "rotation trace",
             "spin decay"
           ],
-          "source": "README.md:184",
+          "source": "README.md:186",
           "text": "| `angular_damping_spin_decay` | Spinning rigid bodies must declare angular velocity and damping, then show monotonic spin decay in angular velocity and rotation trace evidence. |"
         },
         {
@@ -1289,6 +1303,14 @@
         },
         {
           "matched_terms": [
+            "angular velocity",
+            "自转"
+          ],
+          "source": "docs/CAPABILITY_SYSTEM.md:56",
+          "text": "| `angular_damping_spin_decay` | angular velocity 必须随 damping 衰减，不能无外力增益。 | 陀螺、自转球 |"
+        },
+        {
+          "matched_terms": [
             "angular damping",
             "spin decay"
           ],
@@ -1301,16 +1323,9 @@
           ],
           "source": "tools/capability_verifier.py:88",
           "text": "failures.append(failure_record(\"F3_invalid_initial_physics_state\", \"first domino must have an active trigger impulse or angular velocity\", evidence={\"object_id\": dominoes[0].get(\"id\")}))"
-        },
-        {
-          "matched_terms": [
-            "angular velocity"
-          ],
-          "source": "capabilities/angular_damping_spin_decay.json:12",
-          "text": "\"Spin is a rigid-body angular velocity state, not a visual-only rotation animation.\","
         }
       ],
-      "evidence_count": 15,
+      "evidence_count": 16,
       "failure_modes": [
         "Spin is only a visual rotation and no angular_velocity trace exists.",
         "Angular damping is declared but speed does not decay.",
@@ -1347,7 +1362,7 @@
       ]
     },
     {
-      "confidence": 0.75,
+      "confidence": 0.8,
       "description": "Validate that agent or controller actions cause rigid-body motion through explicit action trace, contact or impulse evidence, and post-action trajectory response.",
       "evidence": [
         {
@@ -1362,14 +1377,14 @@
             "智能体推",
             "机器人推"
           ],
-          "source": "tools/capability_planner.py:93",
+          "source": "tools/capability_planner.py:99",
           "text": "terms=(\"agent pushes\", \"agent push\", \"robot pushes\", \"robot push\", \"character pushes\", \"character throws\", \"agent throws\", \"agent throw\", \"robot throws\", \"action trace\", \"agent-to-rigidbody\", \"agent rigid body\", \"推箱子\",…"
         },
         {
           "matched_terms": [
             "action trace"
           ],
-          "source": "README.md:185",
+          "source": "README.md:187",
           "text": "| `agent_rigidbody_action_coupling` | Agent or controller actions must be explicit action traces, and target rigid bodies may move only after action/contact or release/impulse evidence. |"
         },
         {
@@ -1409,13 +1424,13 @@
         },
         {
           "matched_terms": [
-            "action trace"
+            "机器人推"
           ],
-          "source": "docs/PHYSICS_AWARE_HARNESS.md:161",
-          "text": "| `agent_rigidbody_action_coupling` | target rigid bodies must remain still before explicit agent action trace and respond after contact/impulse evidence |"
+          "source": "docs/CAPABILITY_SYSTEM.md:57",
+          "text": "| `agent_rigidbody_action_coupling` | 目标刚体只能在 action/contact/release evidence 后响应。 | 机器人推箱、角色抛球 |"
         }
       ],
-      "evidence_count": 8,
+      "evidence_count": 9,
       "failure_modes": [
         "Target has hidden pre-action motion.",
         "Motion is keyframed without structured action trace.",
@@ -1472,7 +1487,7 @@
             "约束长度",
             "距离约束"
           ],
-          "source": "tools/capability_planner.py:99",
+          "source": "tools/capability_planner.py:105",
           "text": "terms=(\"pendulum\", \"swinging pendulum\", \"distance constraint\", \"fixed length\", \"constraint length\", \"joint constraint\", \"rope constraint\", \"hinge constraint\", \"单摆\", \"摆锤\", \"距离约束\", \"固定长度\", \"约束长度\", \"铰链约束\", \"绳长约束\"),"
         },
         {
@@ -1490,7 +1505,7 @@
             "pendulum",
             "rope constraint"
           ],
-          "source": "tests/test_capability_closed_loop.py:59",
+          "source": "tests/test_capability_closed_loop.py:60",
           "text": "plan = self.planner.plan(\"A pendulum swings while preserving a fixed length rope constraint.\")"
         },
         {
@@ -1500,6 +1515,14 @@
           ],
           "source": "docs/CAPABILITY_AUTHORING.md:50",
           "text": "| `pendulum_template` 作为主能力 | `constraint_distance_pendulum_motion`，单摆/绳索/铰链作为 case family |"
+        },
+        {
+          "matched_terms": [
+            "pendulum",
+            "单摆"
+          ],
+          "source": "docs/CAPABILITY_SYSTEM.md:58",
+          "text": "| `constraint_distance_pendulum_motion` | 约束体必须保持 anchor-body 距离并连续运动。 | 单摆、绳索、铰链 |"
         },
         {
           "matched_terms": [
@@ -1521,18 +1544,11 @@
           "matched_terms": [
             "pendulum"
           ],
-          "source": "README.md:186",
+          "source": "README.md:188",
           "text": "| `constraint_distance_pendulum_motion` | Distance/joint-constrained rigid bodies must preserve anchor-body length within tolerance and export constraint trace evidence. Pendulum is one smoke family. |"
-        },
-        {
-          "matched_terms": [
-            "pendulum"
-          ],
-          "source": "capabilities/constraint_distance_pendulum_motion.json:3",
-          "text": "\"id\": \"constraint_distance_pendulum_motion\","
         }
       ],
-      "evidence_count": 32,
+      "evidence_count": 34,
       "failure_modes": [
         "Constraint is rendered as a visual rope with no physics label.",
         "Anchor/body distance drifts beyond tolerance.",
@@ -1571,7 +1587,7 @@
       ]
     },
     {
-      "confidence": 0.8,
+      "confidence": 0.9,
       "description": "Validate ordered contact-driven impulse and momentum transfer through a chain of constrained rigid bodies.",
       "evidence": [
         {
@@ -1587,7 +1603,7 @@
             "悬挂球",
             "牛顿摆"
           ],
-          "source": "tools/capability_planner.py:105",
+          "source": "tools/capability_planner.py:111",
           "text": "terms=(\"newton cradle\", \"newton's cradle\", \"impulse chain\", \"constrained impulse\", \"momentum chain\", \"chain momentum transfer\", \"suspended ball chain\", \"constraint momentum transfer\", \"牛顿摆\", \"冲量链\", \"动量链\", \"悬挂球\", \"受约束动量传…"
         },
         {
@@ -1608,17 +1624,25 @@
         },
         {
           "matched_terms": [
+            "悬挂球",
+            "牛顿摆"
+          ],
+          "source": "docs/CAPABILITY_SYSTEM.md:59",
+          "text": "| `constraint_momentum_transfer` | 受约束刚体链必须按 contact 顺序传递冲量。 | 牛顿摆、悬挂球链 |"
+        },
+        {
+          "matched_terms": [
             "newton's cradle",
             "suspended ball chain"
           ],
-          "source": "tests/test_capability_closed_loop.py:63",
+          "source": "tests/test_capability_closed_loop.py:64",
           "text": "plan = self.planner.plan(\"A Newton's cradle transfers impulse through a suspended ball chain.\")"
         },
         {
           "matched_terms": [
             "newton's cradle"
           ],
-          "source": "README.md:187",
+          "source": "README.md:189",
           "text": "| `constraint_momentum_transfer` | Constrained rigid-body chains must transfer impulse through ordered adjacent contacts; terminal receiver motion must be contact-driven. Newton's cradle is one smoke family. |"
         },
         {
@@ -1630,20 +1654,13 @@
         },
         {
           "matched_terms": [
-            "constrained impulse"
-          ],
-          "source": "docs/HARNESS_ARCHITECTURE.md:68",
-          "text": "- physical property constraints: restitution, rolling/sliding friction, wind/force field, mass-ratio momentum, angular damping spin decay, agent action to rigid-body coupling, fixed-distance/joint constraint motion, con…"
-        },
-        {
-          "matched_terms": [
             "牛顿摆"
           ],
-          "source": "docs/HARNESS_ARCHITECTURE.md:81",
-          "text": "`constraint_momentum_transfer` 是受约束刚体链的冲量/动量传递 invariant，不是牛顿摆模板；牛顿摆只是这个能力的 smoke/regression family。"
+          "source": "docs/CAPABILITY_SYSTEM.md:7",
+          "text": "- 场景名不是能力：台球、牛顿摆、单摆、玻璃破碎只是 case family。"
         }
       ],
-      "evidence_count": 9,
+      "evidence_count": 11,
       "failure_modes": [
         "A passive middle body has hidden initial velocity.",
         "Receiver motion is keyframed without ordered contact propagation.",
@@ -1700,8 +1717,18 @@
             "弹簧",
             "弹簧发射"
           ],
-          "source": "tools/capability_planner.py:111",
+          "source": "tools/capability_planner.py:117",
           "text": "terms=(\"spring launch\", \"spring launcher\", \"compressed spring\", \"elastic launch\", \"elastic energy\", \"catapult\", \"弹簧\", \"弹簧发射\", \"压缩弹簧\", \"弹射\", \"弹性势能\"),"
+        },
+        {
+          "matched_terms": [
+            "elastic energy",
+            "弹射",
+            "弹簧",
+            "弹簧发射"
+          ],
+          "source": "docs/CAPABILITY_SYSTEM.md:60",
+          "text": "| `elastic_energy_launch` | stored elastic energy 通过 release event 转成 bounded kinetic response。 | 弹簧发射、弹射器 |"
         },
         {
           "matched_terms": [
@@ -1709,7 +1736,7 @@
             "elastic energy",
             "spring launch"
           ],
-          "source": "tests/test_capability_closed_loop.py:67",
+          "source": "tests/test_capability_closed_loop.py:68",
           "text": "plan = self.planner.plan(\"A compressed spring launches a payload from elastic energy.\")"
         },
         {
@@ -1732,7 +1759,7 @@
           "matched_terms": [
             "spring launch"
           ],
-          "source": "README.md:188",
+          "source": "README.md:190",
           "text": "| `elastic_energy_launch` | Elastic stored-energy release must declare spring/compression/mass labels, export release events, and keep post-release kinetic response inside the stored-energy envelope. Spring launch is on…"
         },
         {
@@ -1748,16 +1775,9 @@
           ],
           "source": "capabilities/elastic_energy_launch.json:13",
           "text": "\"An elastic launcher stores energy through a structured spring constant and compression label.\","
-        },
-        {
-          "matched_terms": [
-            "spring_events"
-          ],
-          "source": "capabilities/elastic_energy_launch.json:21",
-          "text": "\"spring_events\","
         }
       ],
-      "evidence_count": 33,
+      "evidence_count": 34,
       "failure_modes": [
         "Payload is keyframed without a spring release event.",
         "Payload does not respond after release.",
@@ -1814,7 +1834,7 @@
             "绳子回弹",
             "蹦极"
           ],
-          "source": "tools/capability_planner.py:117",
+          "source": "tools/capability_planner.py:123",
           "text": "terms=(\"bungee\", \"elastic rope\", \"elastic tether\", \"stretchy rope\", \"rope rebound\", \"tether rebound\", \"elastic constraint\", \"蹦极\", \"弹性绳\", \"弹力绳\", \"弹性约束\", \"绳子回弹\", \"拉伸回弹\"),"
         },
         {
@@ -1828,10 +1848,19 @@
         },
         {
           "matched_terms": [
+            "弹力绳",
+            "弹性约束",
+            "蹦极"
+          ],
+          "source": "docs/CAPABILITY_SYSTEM.md:61",
+          "text": "| `elastic_constraint_rebound` | 弹性约束必须记录 extension，并在峰值后朝 anchor 回弹。 | 蹦极、弹力绳 |"
+        },
+        {
+          "matched_terms": [
             "bungee",
             "elastic tether"
           ],
-          "source": "README.md:189",
+          "source": "README.md:191",
           "text": "| `elastic_constraint_rebound` | Elastic tether or bungee-style constraints must export rest length, extension trace, max-stretch bounds, and rebound velocity toward the anchor. Bungee is one smoke family. |"
         },
         {
@@ -1863,16 +1892,9 @@
           ],
           "source": "harness/verification/elastic_constraint_verifier.py:54",
           "text": "return \"F7_runtime_artifact_incomplete\", failure(\"elastic_constraint\", 0, 0, \"constraint_trace_present\", False), evidence"
-        },
-        {
-          "matched_terms": [
-            "max_extension"
-          ],
-          "source": "harness/verification/elastic_constraint_verifier.py:66",
-          "text": "detail = failure(body_id, frame_id(max_sample[\"frame\"]), frame_time(max_sample[\"frame\"]), \"max_extension_reached_m\", round(float(max_sample[\"extension\"]), 6))"
         }
       ],
-      "evidence_count": 47,
+      "evidence_count": 48,
       "failure_modes": [
         "Visual bungee motion exists but no constraint_trace is exported.",
         "The constrained body stretches beyond the declared extension limit.",
@@ -1911,6 +1933,134 @@
     },
     {
       "confidence": 0.95,
+      "description": "Validate brittle/destructible fracture as a contact-energy threshold invariant with explicit fracture events and fragment evidence.",
+      "evidence": [
+        {
+          "matched_terms": [
+            "breakable",
+            "brittle",
+            "destructible",
+            "fracture",
+            "glass",
+            "shatter",
+            "木箱破碎",
+            "玻璃",
+            "破碎",
+            "碎裂"
+          ],
+          "source": "tools/capability_planner.py:87",
+          "text": "terms=(\"brittle\", \"fracture\", \"shatter\", \"breakable\", \"destructible\", \"glass break\", \"glass shatter\", \"mirror breaks\", \"wood crate breaks\", \"crate breaks\", \"破碎\", \"碎裂\", \"断裂\", \"玻璃碎\", \"镜子碎\", \"玻璃杯碎\", \"木箱破碎\", \"可破坏\"),"
+        },
+        {
+          "matched_terms": [
+            "brittle",
+            "destructible",
+            "fracture",
+            "glass"
+          ],
+          "source": "README.md:192",
+          "text": "| `brittle_impact_fracture` | Brittle/destructible bodies must declare fracture threshold, contact impact energy, fracture events, and fragment evidence. Glass panels, mirrors, cups, and crates are case families. |"
+        },
+        {
+          "matched_terms": [
+            "brittle",
+            "destructible",
+            "fracture",
+            "glass"
+          ],
+          "source": "capabilities/brittle_impact_fracture.json:4",
+          "text": "\"description\": \"Validate brittle or destructible rigid-body fracture as a contact-energy threshold invariant rather than a glass-specific visual template.\","
+        },
+        {
+          "matched_terms": [
+            "brittle",
+            "destructible",
+            "fracture",
+            "glass"
+          ],
+          "source": "docs/AGENT_USAGE.md:144",
+          "text": "Brittle or destructible prompts should use `brittle_impact_fracture`: glass,"
+        },
+        {
+          "matched_terms": [
+            "brittle",
+            "fracture",
+            "glass",
+            "玻璃"
+          ],
+          "source": "docs/CAPABILITY_AUTHORING.md:54",
+          "text": "| `glass_break_template` 作为主能力 | `brittle_impact_fracture`，玻璃/镜子/杯子/木箱作为 case family |"
+        },
+        {
+          "matched_terms": [
+            "breakable",
+            "brittle",
+            "destructible",
+            "fracture"
+          ],
+          "source": "harness/runtime/fallback_backend.py:855",
+          "text": "brittle_id = str(expected.get(\"brittle_object_id\") or next((oid for oid, obj in object_specs.items() if str(obj.get(\"role\") or \"\") in {\"brittle_fracture_body\", \"breakable_body\", \"destructible_body\"}), \"brittle_body\"))"
+        },
+        {
+          "matched_terms": [
+            "breakable",
+            "brittle",
+            "destructible",
+            "fracture"
+          ],
+          "source": "harness/verification/brittle_fracture_verifier.py:13",
+          "text": "brittle_id = str(expected.get(\"brittle_object_id\") or first_role(case_spec, {\"brittle_fracture_body\", \"breakable_body\", \"destructible_body\"}) or \"brittle_body\")"
+        },
+        {
+          "matched_terms": [
+            "brittle",
+            "fracture",
+            "impact_energy"
+          ],
+          "source": "harness/verification/brittle_fracture_verifier.py:47",
+          "text": "detail = failure(brittle_id, fracture_frame, float(fracture.get(\"time_s\") or 0.0), \"impact_energy_j\", round(event_energy, 6))"
+        }
+      ],
+      "evidence_count": 148,
+      "failure_modes": [
+        "Fracture is rendered before contact.",
+        "Fracture event appears below threshold energy.",
+        "Runtime shows debris visually but exports no fracture_events or fragment_manifest.",
+        "Too few fragments are exported for the declared fracture expectation."
+      ],
+      "id": "brittle_impact_fracture",
+      "iteration_moves": [
+        "Export impact_energy_j and fracture_events before tuning visual debris.",
+        "Adjust threshold/energy labels before changing mesh materials.",
+        "Use negative cases for missing event, pre-contact fracture, below-threshold fracture, and too few fragments."
+      ],
+      "pattern_type": "physics_constraint",
+      "prompt_moves": [
+        "Represent fracture as brittle_object_id, impactor_object_id, fracture_threshold_j, and expected_min_fragment_count.",
+        "Treat glass, mirror, crate, and cup as asset families under one thresholded fracture invariant.",
+        "Require runtime contact energy before any fracture event or fragments are accepted."
+      ],
+      "runtime_contract": [
+        "Contact events include the impactor-brittle pair and impact_energy_j.",
+        "fracture_events.json records object_id, caused_by_object_id, frame/time, threshold, and fragment_count.",
+        "fragment_manifest.json contains fragment ids linked back to the source brittle object."
+      ],
+      "stage_ids": [
+        "case_spec_compilation",
+        "physics_control",
+        "runtime_artifact_collection",
+        "physics_verification"
+      ],
+      "title": "Brittle Impact Fracture",
+      "verifier_checks": [
+        "Fracture threshold is positive and declared.",
+        "Fracture event is not earlier than the causal contact frame.",
+        "Impact energy meets or exceeds the fracture threshold.",
+        "Fragment count meets expected_min_fragment_count."
+      ]
+    },
+    {
+      "confidence": 0.95,
       "description": "Package only readiness-gated runs into a dataset layout with video, synchronized signals, physics labels, asset metadata, and hashes.",
       "evidence": [
         {
@@ -1919,7 +2069,7 @@
             "depth",
             "multi-view"
           ],
-          "source": "README.md:145",
+          "source": "README.md:147",
           "text": "- `scene_capture` RGB/depth/segmentation multi-view path is the stable data path."
         },
         {
@@ -1944,7 +2094,7 @@
             "RGB",
             "depth"
           ],
-          "source": "README.md:122",
+          "source": "README.md:124",
           "text": "--render-passes rgb,depth,segmentation \\"
         },
         {
@@ -1952,7 +2102,7 @@
             "RGB",
             "depth"
           ],
-          "source": "README.md:135",
+          "source": "README.md:137",
           "text": "views/<camera_id>/{rgb.mp4,depth.exr,segmentation.png,meta.json}"
         },
         {
@@ -1960,7 +2110,7 @@
             "RGB",
             "depth"
           ],
-          "source": "README.md:167",
+          "source": "README.md:169",
           "text": "| `canonical_signal_capture` | Keeps trajectory, contacts, camera paths, RGB/depth/segmentation, and render metadata on one timebase. |"
         },
         {
@@ -1979,7 +2129,7 @@
           "text": "\"description\": \"Package only verifier-gated runtime artifacts into dataset-ready sample layouts with lineage, hashes, signal availability, and failure visibility.\","
         }
       ],
-      "evidence_count": 121,
+      "evidence_count": 126,
       "failure_modes": [
         "A debug run is silently included as training data.",
         "Dataset docs overclaim native signal quality.",
@@ -2023,7 +2173,7 @@
             "failure",
             "失败"
           ],
-          "source": "docs/PHYSICS_AWARE_HARNESS.md:189",
+          "source": "docs/PHYSICS_AWARE_HARNESS.md:190",
           "text": "每个失败必须归因到 failure type，例如："
         },
         {
@@ -2031,7 +2181,7 @@
             "failed",
             "failure"
           ],
-          "source": "harness/verification/physics_verifier.py:45",
+          "source": "harness/verification/physics_verifier.py:46",
           "text": "\"value\": str(ue_backend_report.get(\"failure_message\") or \"UE backend failed\"),"
         },
         {
@@ -2062,14 +2212,14 @@
           "matched_terms": [
             "failure"
           ],
-          "source": "README.md:159",
+          "source": "README.md:161",
           "text": "| `prompt_case_capability_planning` | Maps prompt/task intent into capability layers, case family, required signals, and failure taxonomy. |"
         },
         {
           "matched_terms": [
             "failure"
           ],
-          "source": "README.md:198",
+          "source": "README.md:200",
           "text": "The old billiards failure mode is still preserved as a regression: plausible"
         },
         {
@@ -2080,7 +2230,7 @@
           "text": "\"failure_taxonomy\": ["
         }
       ],
-      "evidence_count": 288,
+      "evidence_count": 304,
       "failure_modes": [
         "Agent adds a template instead of fixing the control surface.",
         "Multiple stages change at once and root cause becomes untraceable.",
@@ -2129,6 +2279,13 @@
         },
         {
           "matched_terms": [
+            "lineage"
+          ],
+          "source": "docs/CAPABILITY_SYSTEM.md:22",
+          "text": "| Full orchestration | `pipeline_stage_orchestration` | stage artifacts | staged lineage and failure attribution |"
+        },
+        {
+          "matched_terms": [
             "WHAT"
           ],
           "source": "README.md:10",
@@ -2138,46 +2295,39 @@
           "matched_terms": [
             "BRIDGE"
           ],
-          "source": "README.md:166",
+          "source": "README.md:168",
           "text": "| `capability_runtime_artifact_bridge` | Adapts runtime artifacts into verifier inputs. |"
         },
         {
           "matched_terms": [
             "lineage"
           ],
-          "source": "README.md:169",
+          "source": "README.md:171",
           "text": "| `dataset_artifact_packaging` | Packages only readiness-gated artifacts with lineage, hashes, and signal availability. |"
         },
         {
           "matched_terms": [
             "HOW"
           ],
-          "source": "README.md:178",
+          "source": "README.md:180",
           "text": "| `projectile_gravity_motion` | Thrown bodies must show launch, apex/descent, forward displacement, and landing/contact evidence. |"
         },
         {
           "matched_terms": [
             "HOW"
           ],
-          "source": "README.md:184",
+          "source": "README.md:186",
           "text": "| `angular_damping_spin_decay` | Spinning rigid bodies must declare angular velocity and damping, then show monotonic spin decay in angular velocity and rotation trace evidence. |"
         },
         {
           "matched_terms": [
-            "BRIDGE"
+            "WHAT"
           ],
-          "source": "capabilities/canonical_signal_capture.json:4",
-          "text": "\"capability_type\": \"runtime_bridge\","
-        },
-        {
-          "matched_terms": [
-            "BRIDGE"
-          ],
-          "source": "capabilities/capability_runtime_artifact_bridge.json:3",
-          "text": "\"id\": \"capability_runtime_artifact_bridge\","
+          "source": "README.md:197",
+          "text": "`mass_ratio_momentum_transfer`, or `brittle_impact_fracture` depending on what"
         }
       ],
-      "evidence_count": 22,
+      "evidence_count": 27,
       "failure_modes": [
         "A report becomes a generic essay with no owner files.",
         "Private session logs leak into the public repo.",
@@ -2772,7 +2922,52 @@
       ]
     }
   ],
-  "capability_count": 31,
+  "capability_count": 32,
+  "capability_taxonomy": {
+    "asset_operation_capabilities": [
+      "asset_intent_resolution",
+      "asset_runtime_binding_invocation"
+    ],
+    "deprecated_aliases": {
+      "billiard_causality_compiler": "rigid_body_contact_causality"
+    },
+    "physical_property_constraint_capabilities": [
+      "explicit_physics_control_surface",
+      "physics_property_constraint_validation"
+    ],
+    "physics_behavior_capabilities": [
+      "rigid_body_contact_causality",
+      "rigid_body_gravity_collision",
+      "sequential_contact_propagation",
+      "ramp_sliding_friction",
+      "projectile_gravity_motion",
+      "bounce_restitution_ball",
+      "rolling_friction_ball",
+      "sliding_crate_friction",
+      "force_field_wind_drift",
+      "mass_ratio_momentum_transfer",
+      "angular_damping_spin_decay",
+      "agent_rigidbody_action_coupling",
+      "constraint_distance_pendulum_motion",
+      "constraint_momentum_transfer",
+      "elastic_energy_launch",
+      "elastic_constraint_rebound",
+      "brittle_impact_fracture"
+    ],
+    "pipeline_stage_capabilities": [
+      "prompt_case_capability_planning",
+      "scene_spec_compilation",
+      "static_scene_placement",
+      "pipeline_stage_orchestration",
+      "capability_runtime_artifact_bridge",
+      "canonical_signal_capture",
+      "dataset_artifact_packaging"
+    ],
+    "principle": "Active capabilities describe reusable pipeline stages or physics invariants. Scene families such as billiards are smoke/regression cases, not primary capability abstractions.",
+    "verification_capabilities": [
+      "physics_verifier_truth_gate"
+    ]
+  },
   "contact_causality_reference_workflow": [
     {
       "contract": "Create active driver bodies and passive receiver bodies with stable ids.",

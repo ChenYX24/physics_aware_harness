@@ -34,7 +34,7 @@ python3.13 scripts/harness_list_capabilities.py
 | Runtime/signal bridge | `capability_runtime_artifact_bridge`, `canonical_signal_capture` | 把 UE/fallback 输出标准化成 trajectory/contact/camera/render evidence。 |
 | Verification/package | `physics_verifier_truth_gate`, `dataset_artifact_packaging` | 以 verifier 为真值门，并只打包 readiness-gated artifacts。 |
 
-`billiard_causality_compiler` 不再是主能力。它只是旧 run 的兼容 alias；台球、保龄球、箱体撞击、质量比碰撞都应该走 `rigid_body_contact_causality`。
+`billiard_causality_compiler` 不再是 active capability。若仓库里还有旧 JSON，只把它当旧 artifact alias；台球、保龄球、箱体撞击应走 `rigid_body_contact_causality`，质量差异应叠加 `mass_ratio_momentum_transfer`，可破碎对象应走 `brittle_impact_fracture`。
 `constraint_distance_pendulum_motion` 同样不是“单摆模板”，而是距离/绳长/关节约束的通用 invariant；单摆只是 smoke case。
 `constraint_momentum_transfer` 也不是“牛顿摆模板”，而是受约束刚体链中的 ordered contact / impulse transfer invariant；牛顿摆只是 smoke case。
 
@@ -163,6 +163,7 @@ Verifier 不检查“画面是否动了”，而检查 capability invariants：
 | `constraint_momentum_transfer` | constrained chain bodies must start still, adjacent contacts must be ordered, and terminal receiver response must follow final contact |
 | `elastic_energy_launch` | launched body must start still, release event must exist, and post-release speed/energy must match the stored elastic-energy envelope |
 | `elastic_constraint_rebound` | elastic tether must export constraint trace, stay within max extension, and rebound toward the anchor after peak stretch |
+| `brittle_impact_fracture` | fracture events must occur after causal contact, impact energy must exceed threshold, and fragments must be exported |
 | `asset_runtime_binding_invocation` | physics-critical assets must bind colliders, mass/material metadata, collision profile, and runtime actor ids |
 
 验证命令：

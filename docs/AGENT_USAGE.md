@@ -141,13 +141,17 @@ kinetic response.
 Elastic rope or bungee prompts should use `elastic_constraint_rebound`: bungee is
 only a smoke family, while the reusable invariant is rest length, bounded
 extension, constraint trace, and rebound velocity toward the anchor.
+Brittle or destructible prompts should use `brittle_impact_fracture`: glass,
+mirror, cup, and crate breakage are asset/case families. The reusable invariant
+is contact impact energy above threshold, post-contact fracture event timing,
+and fragment manifest evidence.
 
 ## Generic Contact Causality Rule
 
-Do not use `billiard_causality_compiler` for new work. It is a deprecated alias
-for old run compatibility. Use `rigid_body_contact_causality` for pool,
-bowling, crate impacts, mass-ratio collisions, brittle-object impacts, and any
-scene where passive rigid bodies should move only after active contact.
+Do not use `billiard_causality_compiler` for new work. It is not an active
+capability. Use reusable invariants such as `rigid_body_contact_causality`,
+`mass_ratio_momentum_transfer`, or `brittle_impact_fracture` depending on the
+physical behavior you need to verify.
 
 The old billiards failure was caused by passive target balls receiving hidden
 initial velocity. The generic rule is:

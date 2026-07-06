@@ -51,6 +51,7 @@ Capability 必须包含：
 | `newton_cradle_template` 作为主能力 | `constraint_momentum_transfer`，牛顿摆/悬挂球链作为 case family |
 | `spring_launcher_template` 作为主能力 | `elastic_energy_launch`，弹簧/弹射器作为 case family |
 | `bungee_template` 作为主能力 | `elastic_constraint_rebound`，蹦极/弹性绳作为 case family |
+| `glass_break_template` 作为主能力 | `brittle_impact_fracture`，玻璃/镜子/杯子/木箱作为 case family |
 
 ## 验证
 

@@ -81,6 +81,14 @@ class HarnessAssetIntentTests(unittest.TestCase):
         self.assertTrue(payload.physics_critical)
         self.assertTrue(tether.physics_critical)
 
+    def test_brittle_fracture_roles_are_physics_critical(self) -> None:
+        impactor = intent_from_object({"id": "striker", "role": "active_impactor", "shape": "sphere"})
+        brittle = intent_from_object({"id": "panel", "role": "brittle_fracture_body", "shape": "thin_box"})
+        fragment = intent_from_object({"id": "frag", "role": "fracture_fragment", "shape": "shard"})
+        self.assertTrue(impactor.physics_critical)
+        self.assertTrue(brittle.physics_critical)
+        self.assertTrue(fragment.physics_critical)
+
     def test_example_registry_resolves_core_static_scene_assets(self) -> None:
         case_spec = {
             "case_id": "asset_smoke",
@@ -104,14 +112,17 @@ class HarnessAssetIntentTests(unittest.TestCase):
                 {"id": "elastic_anchor", "role": "elastic_constraint_anchor", "shape": "fixed_point"},
                 {"id": "elastic_payload", "role": "elastic_constrained_body", "shape": "sphere"},
                 {"id": "elastic_tether", "role": "elastic_tether_constraint", "shape": "constraint"},
+                {"id": "striker", "role": "active_impactor", "shape": "sphere"},
+                {"id": "glass_panel", "role": "brittle_fracture_body", "shape": "thin_box"},
+                {"id": "fragment", "role": "fracture_fragment", "shape": "shard"},
             ],
         }
         result = resolve_asset_intents(case_spec, top_k=2)
         self.assertEqual(result["case_id"], "asset_smoke")
         self.assertEqual(result["capability_id"], "asset_intent_resolution")
         self.assertEqual(result["invocation_contract"]["next_capability_id"], "asset_runtime_binding_invocation")
-        self.assertEqual(result["physics_critical_count"], 19)
-        self.assertEqual(len(result["assets"]), 19)
+        self.assertEqual(result["physics_critical_count"], 22)
+        self.assertEqual(len(result["assets"]), 22)
         self.assertTrue(all(row["selected_asset"] for row in result["assets"]))
         self.assertTrue(all(row["runtime_binding_requirements"] for row in result["assets"]))
 

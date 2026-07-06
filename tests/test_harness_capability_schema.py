@@ -11,7 +11,6 @@ class HarnessCapabilitySchemaTests(unittest.TestCase):
         self.assertGreaterEqual(len(capabilities), 6)
         ids = {item.id for item in capabilities}
         self.assertIn("rigid_body_contact_causality", ids)
-        self.assertIn("billiard_causality_compiler", ids)
         self.assertIn("prompt_case_capability_planning", ids)
         self.assertIn("explicit_physics_control_surface", ids)
         self.assertIn("physics_verifier_truth_gate", ids)
@@ -32,15 +31,19 @@ class HarnessCapabilitySchemaTests(unittest.TestCase):
         self.assertIn("constraint_momentum_transfer", ids)
         self.assertIn("elastic_energy_launch", ids)
         self.assertIn("elastic_constraint_rebound", ids)
-        alias = next(item for item in capabilities if item.id == "billiard_causality_compiler")
-        self.assertEqual(alias.capability_type, "compatibility_alias")
-        self.assertEqual(alias.deprecated_by, "rigid_body_contact_causality")
+        self.assertIn("brittle_impact_fracture", ids)
+        alias = next((item for item in capabilities if item.id == "billiard_causality_compiler"), None)
+        if alias is not None:
+            self.assertEqual(alias.capability_type, "compatibility_alias")
+            self.assertEqual(alias.deprecated_by, "rigid_body_contact_causality")
         contact = next(item for item in capabilities if item.id == "rigid_body_contact_causality")
         self.assertEqual(contact.capability_type, "physics_constraint")
         elastic = next(item for item in capabilities if item.id == "elastic_energy_launch")
         self.assertEqual(elastic.capability_type, "physics_constraint")
         elastic_constraint = next(item for item in capabilities if item.id == "elastic_constraint_rebound")
         self.assertEqual(elastic_constraint.capability_type, "physics_constraint")
+        fracture = next(item for item in capabilities if item.id == "brittle_impact_fracture")
+        self.assertEqual(fracture.capability_type, "physics_constraint")
 
 
 if __name__ == "__main__":

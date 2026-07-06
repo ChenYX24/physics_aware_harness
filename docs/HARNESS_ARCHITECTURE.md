@@ -65,7 +65,7 @@ Agent 可以：
 - generic rigid-body contact causality
 - rigid body gravity/collision
 - sequential contact propagation
-- physical property constraints: restitution, rolling/sliding friction, wind/force field, mass-ratio momentum, angular damping spin decay, agent action to rigid-body coupling, fixed-distance/joint constraint motion, constrained impulse-chain transfer, elastic energy launch, elastic tether rebound
+- physical property constraints: restitution, rolling/sliding friction, wind/force field, mass-ratio momentum, angular damping spin decay, agent action to rigid-body coupling, fixed-distance/joint constraint motion, constrained impulse-chain transfer, elastic energy launch, elastic tether rebound, brittle impact fracture
 - asset intent resolution
 - asset runtime binding invocation
 - scene spec compilation
@@ -76,7 +76,7 @@ Agent 可以：
 - physics verifier truth gate
 - dataset artifact packaging
 
-`billiard_causality_compiler` 只保留为 deprecated compatibility alias。新 planner 和新 case 不应再依赖它；台球只是 `rigid_body_contact_causality` 的 regression/smoke family。
+`billiard_causality_compiler` 不属于 active capability。若保留旧 JSON，也只是 artifact compatibility alias；新 planner 和新 case 不应依赖它。台球只是 `rigid_body_contact_causality` 的 regression/smoke family。
 同理，`constraint_distance_pendulum_motion` 是距离/绳长/关节约束 invariant，不是单摆模板。Agent 应该先选择通用物理约束能力，再让 case template 决定是否用单摆、绳索、链条或关节作为实例。
 `constraint_momentum_transfer` 是受约束刚体链的冲量/动量传递 invariant，不是牛顿摆模板；牛顿摆只是这个能力的 smoke/regression family。
 

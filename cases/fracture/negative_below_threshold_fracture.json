@@ -1,0 +1,27 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "negative_below_threshold_fracture",
+  "capability_id": "brittle_impact_fracture",
+  "prompt": "Negative brittle fracture case: a fracture is emitted even though contact energy is below threshold.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "impactor_object_id": "striker",
+    "brittle_object_id": "glass_panel",
+    "expected_contact_pair": ["striker", "glass_panel"],
+    "impact_energy_j": 0.9,
+    "fracture_threshold_j": 2.4,
+    "expected_min_fragment_count": 6
+  },
+  "objects": [
+    {"id": "striker", "role": "active_impactor", "shape": "sphere", "mass_kg": 1.2, "initial_position_m": [-0.6, 0.0, 0.4], "initial_velocity_m_s": [1.0, 0.0, 0.0]},
+    {"id": "glass_panel", "role": "brittle_fracture_body", "shape": "thin_box", "mass_kg": 0.7, "fracture_threshold_j": 2.4, "initial_position_m": [0.0, 0.0, 0.4], "initial_velocity_m_s": [0.0, 0.0, 0.0]}
+  ],
+  "active_objects": ["striker"],
+  "passive_objects": ["glass_panel"],
+  "required_assets": ["impactor rigid body", "brittle fracture body", "fracture fragment proxy"],
+  "required_signals": ["trajectory", "contact_events", "fracture_events", "fragment_manifest", "energy_labels"],
+  "verifier_expectation": {"status": "fail", "failure_type": "F4_causality_violation"},
+  "should_pass": false,
+  "negative_mode": "below_threshold_fracture",
+  "notes": "Verifier should reject below-threshold fracture events."
+}

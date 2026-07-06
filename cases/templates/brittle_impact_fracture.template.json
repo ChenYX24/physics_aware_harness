@@ -1,0 +1,61 @@
+{
+  "schema_version": "harness_case_template_v1",
+  "template_id": "brittle_impact_fracture",
+  "capability_id": "brittle_impact_fracture",
+  "description": "Parameterized brittle/destructible impact-fracture cases. Fracture is allowed only after contact energy exceeds the declared threshold.",
+  "fallback_supported": true,
+  "parameter_ranges": {
+    "impact_energy_j": {"type": "float", "min": 2.5, "max": 9.0},
+    "fracture_threshold_j": {"type": "float", "min": 1.2, "max": 4.5},
+    "fragment_count": {"type": "int", "min": 4, "max": 12},
+    "brittle_mass_kg": {"type": "float", "min": 0.3, "max": 2.0},
+    "striker_mass_kg": {"type": "float", "min": 0.6, "max": 3.0},
+    "striker_speed_m_s": {"type": "float", "min": 1.2, "max": 4.0}
+  },
+  "object_count_ranges": {
+    "impactor": {"min": 1, "max": 1},
+    "brittle_body": {"min": 1, "max": 1},
+    "fragments": {"min": 4, "max": 12}
+  },
+  "physics_critical_assets": [
+    "impactor rigid body",
+    "brittle fracture body",
+    "collider",
+    "fracture fragment proxy"
+  ],
+  "visual_only_assets": [
+    "crack decal",
+    "dust particle effect"
+  ],
+  "camera_policy": {
+    "default": "event_closeup",
+    "allowed": ["front_static", "side_static", "top_down", "event_closeup", "tracking_subject"]
+  },
+  "perturbation_policy": {
+    "positive_ratio": 0.7,
+    "vary": ["impact_energy_j", "fracture_threshold_j", "fragment_count", "striker_speed_m_s"]
+  },
+  "expected_invariants": [
+    "fracture_requires_contact",
+    "fracture_requires_threshold_energy",
+    "fragments_require_fracture_event",
+    "fragment_count_above_minimum"
+  ],
+  "negative_modes": [
+    "missing_fracture_event",
+    "fracture_before_contact",
+    "below_threshold_fracture",
+    "too_few_fragments"
+  ],
+  "seed_policy": {
+    "deterministic": true,
+    "record_seed_in_case": true
+  },
+  "expected_artifact_contract": [
+    "trajectory",
+    "contact_events",
+    "fracture_events",
+    "fragment_manifest",
+    "energy_labels"
+  ]
+}

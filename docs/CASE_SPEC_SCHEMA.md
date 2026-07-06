@@ -45,5 +45,6 @@ Case spec 是可执行 contract，不是 prompt 模板。
 | `constraint_momentum_transfer` | `chain_objects`, `active_object_id`, `receiver_object_id`, `expected_contact_chain`, `expected_min_receiver_speed_m_s` |
 | `elastic_energy_launch` | `launcher_object_id`, `launched_object_id`, `spring_constant_n_m`, `compression_m`, `payload_mass_kg`, `expected_max_energy_ratio` |
 | `elastic_constraint_rebound` | `anchor_object_id`, `constrained_object_id`, `rest_length_m`, `max_extension_m`, `constraint_stiffness_n_m`, `expected_min_rebound_speed_m_s` |
+| `brittle_impact_fracture` | `impactor_object_id`, `brittle_object_id`, `fracture_threshold_j`, `impact_energy_j`, `expected_min_fragment_count`, `expected_contact_pair` |
 
 物理参数必须结构化放在 `expected_physics` 或 object 字段里；不要只写在 prompt 文本中。

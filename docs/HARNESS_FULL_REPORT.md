@@ -88,7 +88,6 @@ assets/*.local.json
 | Capability | 当前状态 | 验证内容 |
 |---|---|---|
 | `rigid_body_contact_causality` | 已可用 | active body 可以主动运动；passive rigid bodies 初始必须静止，只能 runtime contact 后运动。台球只是其中一个 smoke family。 |
-| `billiard_causality_compiler` | 兼容 alias | 仅保留旧脚本/旧 profile 兼容；新 planner、case template、文档不再把它作为核心能力。 |
 | `sequential_contact_propagation` | 已可用 | domino/chain reaction 必须按 contact 顺序传播。 |
 | `rigid_body_gravity_collision` | 已可用 | falling object 必须下降，并产生 support contact。 |
 | `ramp_sliding_friction` | 当前 ramp 分支已可用 | 物体沿斜面下滑，z 下降，位移符合 friction-aware 范围。 |
@@ -104,6 +103,7 @@ assets/*.local.json
 | `constraint_momentum_transfer` | 当前分支已可用 | 受约束刚体链必须按相邻 contact 顺序传递冲量，末端 receiver 响应必须由 contact 链解释；牛顿摆只是 smoke family。 |
 | `elastic_energy_launch` | 当前分支已可用 | 弹性势能释放必须声明 spring/compression/mass，输出 release event；payload 初始静止，释放后速度/能量响应必须在 stored-energy envelope 内。 |
 | `elastic_constraint_rebound` | 当前分支已可用 | 弹性绳/蹦极约束必须声明 rest length、max extension、stiffness，并输出 constraint_trace；达到最大拉伸后必须朝 anchor 回弹。 |
+| `brittle_impact_fracture` | 当前分支已可用 | 可破碎刚体必须声明 fracture threshold、impact energy、fracture event 和 fragment manifest；玻璃/镜子/杯子/木箱只是 case family。 |
 
 注意：如果从 `main` 使用，`ramp_sliding_friction` 需要先合并当前 ramp 分支。
 
@@ -288,8 +288,18 @@ tests/test_harness_<family>_verifier.py
 | `falling_blocks.template.json` | `--suite falling` | 可运行 | 重力/support contact。 |
 | `ramp_sliding.template.json` | `--suite ramp` | 当前 ramp 分支可运行 | 斜面摩擦响应。 |
 | `projectile_motion.template.json` | `--suite projectile` | 当前分支可运行 | 上抛/抛体轨迹、apex/descent/landing contact。 |
+| `bounce_restitution.template.json` | `--suite bounce` | 当前分支可运行 | 恢复系数反弹 envelope。 |
+| `rolling_friction.template.json` | `--suite rolling` | 当前分支可运行 | 滚动摩擦、停距、速度衰减。 |
+| `sliding_crate_friction.template.json` | `--suite sliding` | 当前分支可运行 | 滑动摩擦和静摩擦阈值。 |
+| `wind_balloon_drift.template.json` | `--suite wind` | 当前分支可运行 | 风场/力场方向漂移。 |
+| `mass_ratio_collision.template.json` | `--suite mass_ratio` | 当前分支可运行 | 质量比碰撞和动量传递。 |
+| `angular_damping_spin.template.json` | `--suite spin` | 当前分支可运行 | 角阻尼和旋转衰减。 |
+| `agent_rigidbody_action.template.json` | `--suite agent_action` | 当前分支可运行 | agent action trace 到刚体响应。 |
 | `pendulum_contact.template.json` | `--suite pendulum` | 当前分支可运行 | 距离/关节约束、constraint_trace、长度保持和连续运动。 |
 | `constraint_momentum_transfer.template.json` | `--suite impulse_chain` | 当前分支可运行 | 受约束冲量链、相邻接触顺序、末端 receiver 响应。 |
+| `elastic_energy_launch.template.json` | `--suite elastic_launch` | 当前分支可运行 | 弹性势能释放和 energy envelope。 |
+| `elastic_constraint_rebound.template.json` | `--suite elastic_constraint` | 当前分支可运行 | 弹性绳/约束回弹。 |
+| `brittle_impact_fracture.template.json` | `--suite fracture` | 当前分支可运行 | 接触能量阈值破碎、fracture event、fragment manifest。 |
 
 生成 case：
 
@@ -474,7 +484,7 @@ TODO：
 | P1 | 单摆/绳长/距离约束 | `constraint_distance_pendulum_motion` | 当前分支已有 fallback/verifier；UE PhysicsConstraint / Chaos joint trace TODO |
 | P1 | 牛顿摆/悬挂球链 | `constraint_momentum_transfer` | 当前分支已有 fallback/verifier；UE suspension constraint / contact impulse / receiver velocity TODO |
 | P1 | 绳子/蹦极弹性 | `elastic_constraint_rebound` | 当前分支已有 fallback/verifier；UE elastic PhysicsConstraint / extension trace / rebound velocity TODO |
-| P1 | 玻璃/镜子/玻璃杯/木箱破碎 | `brittle_impact_fracture` family | TODO |
+| P1 | 玻璃/镜子/玻璃杯/木箱破碎 | `brittle_impact_fracture` | fallback/verifier 已有；UE Chaos/destructible fracture event、impact energy、fragment export TODO |
 | P2 | 风吹纸片/气球 | `force_field_wind_drift` | 当前分支已有 fallback/verifier；UE force field / wind volume TODO |
 | P2 | 磁吸/排斥 | `magnetic_force_field` | TODO |
 | P3 | 浮力/水流/搅拌流体 | fluid capability family | 暂缓，等待 fluid backend |

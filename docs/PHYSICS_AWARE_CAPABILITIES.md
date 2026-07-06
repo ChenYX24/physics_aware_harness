@@ -12,10 +12,21 @@ This report is generated from project memory, docs, tests, and runtime code. It 
 ## 能力抽象原则
 
 - capability id 必须命名可复用的不变量或 pipeline 阶段，不能命名成某个单独场景模板。
-- `billiard_causality_compiler` 不进入 public profile；旧 JSON 只作为 legacy artifact alias 保留。
+- `billiard_causality_compiler` 不作为 active capability；旧 JSON 若存在，只是 legacy artifact alias。
 - 台球、保龄球、箱体撞击等都属于 `rigid_body_contact_causality` 的 case family。
 - 资产能力拆成 `asset_intent_resolution` 和 `asset_runtime_binding_invocation`：先检索/筛选，再绑定 runtime actor。
 - 物理能力必须绑定 verifier invariant、required signals、failure taxonomy 和 repair suggestions。
+
+## Capability Taxonomy
+
+| Layer | Capability IDs |
+|---|---|
+| `pipeline_stage_capabilities` | `prompt_case_capability_planning`, `scene_spec_compilation`, `static_scene_placement`, `pipeline_stage_orchestration`, `capability_runtime_artifact_bridge`, `canonical_signal_capture`, `dataset_artifact_packaging` |
+| `asset_operation_capabilities` | `asset_intent_resolution`, `asset_runtime_binding_invocation` |
+| `physical_property_constraint_capabilities` | `explicit_physics_control_surface`, `physics_property_constraint_validation` |
+| `physics_behavior_capabilities` | `rigid_body_contact_causality`, `rigid_body_gravity_collision`, `sequential_contact_propagation`, `ramp_sliding_friction`, `projectile_gravity_motion`, `bounce_restitution_ball`, `rolling_friction_ball`, `sliding_crate_friction`, `force_field_wind_drift`, `mass_ratio_momentum_transfer`, `angular_damping_spin_decay`, `agent_rigidbody_action_coupling`, `constraint_distance_pendulum_motion`, `constraint_momentum_transfer`, `elastic_energy_launch`, `elastic_constraint_rebound`, `brittle_impact_fracture` |
+| `verification_capabilities` | `physics_verifier_truth_gate` |
+| `deprecated_aliases` | `billiard_causality_compiler` -> `rigid_body_contact_causality` |
 
 ## Capability Summary
 
@@ -24,7 +35,7 @@ This report is generated from project memory, docs, tests, and runtime code. It 
 - id: `prompt_case_capability_planning`
 - pattern: `FLOW`
 - stages: `planner, scene_spec, asset_resolution`
-- confidence: `0.95` from `31` matched lines
+- confidence: `0.95` from `34` matched lines
 
 Compile natural language into explicit objects, roles, asset intents, camera needs, lighting, and runtime scene requests instead of a free-form video description.
 
@@ -36,14 +47,14 @@ Key iteration moves:
 Evidence:
 - `tools/capability_verifier.py:202`: "F1_scene_parsing_failure": "repair prompt expansion and object roles before execution",
 - `README.md:16`: -> asset intent resolution
-- `README.md:162`: | `scene_spec_compilation` | Builds runtime scene contracts from capability/case/assets. |
+- `README.md:164`: | `scene_spec_compilation` | Builds runtime scene contracts from capability/case/assets. |
 
 ### Generic Rigid-Body Contact Causality
 
 - id: `rigid_body_contact_causality`
 - pattern: `FLOW`
 - stages: `capability_planning, case_spec_compilation, scene_spec_compilation, runtime_artifact_collection, physics_verification`
-- confidence: `0.95` from `388` matched lines
+- confidence: `0.95` from `398` matched lines
 
 Compile active-to-passive rigid-body contact scenes into causal simulation programs where passive bodies move only after runtime contact evidence exists.
 
@@ -55,14 +66,14 @@ Key iteration moves:
 Evidence:
 - `tools/capability_planner.py:27`: terms=("billiard", "billiards", "pool", "cue ball", "cue_ball", "bowling", "pins", "rigid-body impact", "rigid body impact", "crate impact", "mass ratio collision", "台球", "白球", "目标球", "保龄球", "球瓶", "刚体碰撞", "ball collisio…
 - `tools/capability_closed_loop.py:18`: "prompt": "Create a billiards / pool scene where one cue ball hits a compact rack of passive target balls. Targets must stay still until contact.",
-- `README.md:174`: | `rigid_body_contact_causality` | Active bodies may move; passive rigid bodies must remain still until runtime contact evidence. Billiards/pool is one case family. |
+- `README.md:176`: | `rigid_body_contact_causality` | Active bodies may move; passive rigid bodies must remain still until runtime contact evidence. Billiards/pool is one case family. |
 
 ### Asset Intent Resolution
 
 - id: `asset_intent_resolution`
 - pattern: `HOW`
 - stages: `asset_intent_resolution, asset_retrieval`
-- confidence: `0.95` from `281` matched lines
+- confidence: `0.95` from `295` matched lines
 
 Classify object-level asset needs into typed intents and retrieve top-k candidates before runtime binding.
 
@@ -72,16 +83,16 @@ Key iteration moves:
 - Add role-specific tags for repeated physical object families.
 
 Evidence:
+- `docs/CAPABILITY_SYSTEM.md:31`: Physics-critical asset 必须有 collider、mass、rigid body、collision profile。Visual-only asset 可以被替换或随机化，但不能进入 physics graph。
 - `capabilities/asset_intent_resolution.json:6`: "Physics-critical assets require collider, mass, rigid body, and collision profile.",
 - `capabilities/static_scene_placement.json:25`: "Physics-critical assets have collider, mass/material, and collision profile.",
-- `docs/PHYSICS_AWARE_HARNESS.md:166`: | `asset_runtime_binding_invocation` | physics-critical assets must bind colliders, mass/material metadata, collision profile, and runtime actor ids |
 
 ### Asset Runtime Binding Invocation
 
 - id: `asset_runtime_binding_invocation`
 - pattern: `HOW`
 - stages: `asset_runtime_binding, runtime_actor_binding, preflight_validation`
-- confidence: `0.95` from `136` matched lines
+- confidence: `0.95` from `145` matched lines
 
 Bind selected real assets or analytic proxies into runtime actors while preserving collider, mass, material, and collision-profile metadata.
 
@@ -91,16 +102,16 @@ Key iteration moves:
 - Add binding audit output for missing collider, wrong mass, wrong constraint, and missing binding.
 
 Evidence:
-- `docs/PHYSICS_AWARE_HARNESS.md:166`: | `asset_runtime_binding_invocation` | physics-critical assets must bind colliders, mass/material metadata, collision profile, and runtime actor ids |
+- `docs/CAPABILITY_SYSTEM.md:29`: | `asset_runtime_binding_invocation` | 把 selected asset 或 analytic proxy 绑定到 runtime actor。 | object_id, runtime_actor_id, collider, mass, material, collision_profile, proxy flag |
+- `docs/PHYSICS_AWARE_HARNESS.md:167`: | `asset_runtime_binding_invocation` | physics-critical assets must bind colliders, mass/material metadata, collision profile, and runtime actor ids |
 - `docs/CAPABILITY_AUTHORING.md:36`: - 资产能力要区分 retrieval 和 invocation：`asset_intent_resolution` 找候选，`asset_runtime_binding_invocation` 负责把 selected asset/proxy 绑定到 runtime actor。
-- `harness/assets/asset_intent.py:89`: required = ["collider", "mass", "rigid_body", "collision_profile"] if physics_critical else ["visual_proxy"]
 
 ### Rigid Body Gravity Collision
 
 - id: `rigid_body_gravity_collision`
 - pattern: `FLOW`
 - stages: `planner, physics_control, runtime, verifier`
-- confidence: `0.95` from `162` matched lines
+- confidence: `0.95` from `167` matched lines
 
 Compile falling or stacking prompts into gravity-driven rigid-body traces where objects descend under gravity and collide with a support surface instead of being visually animated.
 
@@ -111,7 +122,7 @@ Key iteration moves:
 
 Evidence:
 - `tools/capability_planner.py:33`: terms=("falling block", "falling blocks", "falling crate", "falling object", "stacking", "gravity", "下落", "坠落", "堆叠", "重力", "落到地面"),
-- `tests/test_capability_closed_loop.py:51`: plan = self.planner.plan("Falling blocks under gravity collide with the ground.")
+- `tests/test_capability_closed_loop.py:52`: plan = self.planner.plan("Falling blocks under gravity collide with the ground.")
 - `tools/capability_closed_loop.py:22`: "prompt": "Create falling blocks under gravity. Rigid bodies fall and collide with the ground and each other; the motion must not be a visual-only animation.",
 
 ### Sequential Contact Propagation
@@ -119,7 +130,7 @@ Evidence:
 - id: `sequential_contact_propagation`
 - pattern: `FLOW`
 - stages: `planner, physics_control, runtime, verifier`
-- confidence: `0.95` from `83` matched lines
+- confidence: `0.95` from `84` matched lines
 
 Compile domino or chain-reaction prompts into ordered contact propagation where only the first body is actively triggered and later bodies move after upstream contact.
 
@@ -138,7 +149,7 @@ Evidence:
 - id: `explicit_physics_control_surface`
 - pattern: `HOW`
 - stages: `planner, physics_control, benchmark`
-- confidence: `0.95` from `352` matched lines
+- confidence: `0.95` from `367` matched lines
 
 Represent gravity, material, rigid-body, constraint, force, time, agent, and render-physics bridge controls as typed fields that can be replayed and swept.
 
@@ -148,16 +159,16 @@ Key iteration moves:
 - Compare reproduction variance and verifier pass rate.
 
 Evidence:
-- `README.md:164`: | `physics_property_constraint_validation` | Checks mass, friction, restitution, damping, gravity, material, and parameter-sweep constraints. |
+- `README.md:166`: | `physics_property_constraint_validation` | Checks mass, friction, restitution, damping, gravity, material, and parameter-sweep constraints. |
 - `capabilities/physics_property_constraint_validation.json:4`: "description": "Validate physical property ranges and parameter sensitivity for mass, friction, restitution, damping, gravity, material density, fracture threshold, buoyancy, and force-field controls.",
-- `capabilities/physics_property_constraint_validation.json:23`: "Mass, radius, friction, restitution, gravity, and damping stay in capability-specific ranges.",
+- `docs/CAPABILITY_SYSTEM.md:38`: | `physics_property_constraint_validation` | 检查 mass、friction、restitution、damping、gravity、material density、fracture threshold 等字段范围和 sensitivity 方向。 |
 
 ### Canonical Multi-Signal Capture
 
 - id: `canonical_signal_capture`
 - pattern: `FLOW`
 - stages: `runtime, signals, dataset`
-- confidence: `0.95` from `469` matched lines
+- confidence: `0.95` from `499` matched lines
 
 Capture video and aligned evidence streams on one timebase: RGB, trajectory, contacts, camera path, depth proxy, normal proxy, audio, engine states, and semantic labels.
 
@@ -168,7 +179,7 @@ Key iteration moves:
 
 Evidence:
 - `capabilities/canonical_signal_capture.json:10`: "description": "Collect RGB, depth, segmentation, trajectory, contact events, camera trajectory, and engine-state labels on a single deterministic timebase.",
-- `README.md:167`: | `canonical_signal_capture` | Keeps trajectory, contacts, camera paths, RGB/depth/segmentation, and render metadata on one timebase. |
+- `README.md:169`: | `canonical_signal_capture` | Keeps trajectory, contacts, camera paths, RGB/depth/segmentation, and render metadata on one timebase. |
 - `docs/HARNESS_ARCHITECTURE.md:108`: 输出同步多视角 RGB/depth/segmentation，以及 trajectory/contact/camera timeline。
 
 ### Verifier As Runtime Truth Gate
@@ -176,7 +187,7 @@ Evidence:
 - id: `physics_verifier_truth_gate`
 - pattern: `HOW`
 - stages: `verifier, dataset`
-- confidence: `0.95` from `216` matched lines
+- confidence: `0.95` from `222` matched lines
 
 Use verifier output, not UI preview or successful rendering, as the final readiness decision for reference-ready samples.
 
@@ -205,7 +216,7 @@ Key iteration moves:
 - Use capability_diagnosis.md to decide whether the issue is planning, runtime, evidence, or verifier.
 
 Evidence:
-- `harness/verification/physics_verifier.py:118`: for name in ("fallback_output", "ue_output", "debug_preview"):
+- `harness/verification/physics_verifier.py:121`: for name in ("fallback_output", "ue_output", "debug_preview"):
 - `tests/test_capability_runtime_adapter.py:8`: from tools.capability_runtime_adapter import CapabilityRuntimeAdapter, resolve_runtime_output_dir, verify_capability_run
 - `tests/test_capability_runtime_adapter.py:12`: def test_resolves_ue_output_before_debug_preview(self) -> None:
 
@@ -214,7 +225,7 @@ Evidence:
 - id: `trajectory_benchmark_iteration`
 - pattern: `FLOW`
 - stages: `benchmark, runtime, verifier`
-- confidence: `0.95` from `61` matched lines
+- confidence: `0.95` from `64` matched lines
 
 Evaluate real runtime trajectories across seed sweeps and variants instead of dry control signals or mixed-backend stability numbers.
 
@@ -224,16 +235,16 @@ Key iteration moves:
 - Cluster failures before changing planner or schema.
 
 Evidence:
-- `README.md:198`: The old billiards failure mode is still preserved as a regression: plausible
+- `README.md:200`: The old billiards failure mode is still preserved as a regression: plausible
 - `README.md:36`: | `tests/` | Regression tests for CLI, capabilities, verifier, render sync, artifacts. |
-- `README.md:74`: --seed 42 \
+- `README.md:76`: --seed 42 \
 
 ### Angular Damping Spin Decay
 
 - id: `angular_damping_spin_decay`
 - pattern: `physics_constraint`
 - stages: `physics_control, runtime_artifact_collection, physics_verification`
-- confidence: `0.95` from `15` matched lines
+- confidence: `0.95` from `16` matched lines
 
 Validate rotational damping for spinning rigid bodies using explicit angular velocity, angular damping labels, rotation trace, and monotonic spin-decay evidence.
 
@@ -243,16 +254,16 @@ Key iteration moves:
 - Add negative cases for missing labels, no decay, and unexplained spin gain.
 
 Evidence:
-- `tools/capability_planner.py:87`: terms=("angular damping", "spin decay", "spinning body", "angular velocity", "rotational damping", "spin slows", "spin down", "角阻尼", "角速度", "旋转衰减", "自转", "旋转变慢"),
+- `tools/capability_planner.py:93`: terms=("angular damping", "spin decay", "spinning body", "angular velocity", "rotational damping", "spin slows", "spin down", "角阻尼", "角速度", "旋转衰减", "自转", "旋转变慢"),
 - `capabilities/angular_damping_spin_decay.json:10`: "description": "Validate rotational damping for spinning rigid bodies using explicit angular velocity, angular damping labels, rotation trace, and monotonic spin-decay evidence.",
-- `README.md:184`: | `angular_damping_spin_decay` | Spinning rigid bodies must declare angular velocity and damping, then show monotonic spin decay in angular velocity and rotation trace evidence. |
+- `README.md:186`: | `angular_damping_spin_decay` | Spinning rigid bodies must declare angular velocity and damping, then show monotonic spin decay in angular velocity and rotation trace evidence. |
 
 ### Agent Action To Rigid-Body Coupling
 
 - id: `agent_rigidbody_action_coupling`
 - pattern: `physics_constraint`
 - stages: `action_trace_planning, physics_control, runtime_artifact_collection, physics_verification`
-- confidence: `0.75` from `8` matched lines
+- confidence: `0.8` from `9` matched lines
 
 Validate that agent or controller actions cause rigid-body motion through explicit action trace, contact or impulse evidence, and post-action trajectory response.
 
@@ -262,8 +273,8 @@ Key iteration moves:
 - Use negative cases for pre-action motion, missing action trace, and no post-action response.
 
 Evidence:
-- `tools/capability_planner.py:93`: terms=("agent pushes", "agent push", "robot pushes", "robot push", "character pushes", "character throws", "agent throws", "agent throw", "robot throws", "action trace", "agent-to-rigidbody", "agent rigid body", "推箱子",…
-- `README.md:185`: | `agent_rigidbody_action_coupling` | Agent or controller actions must be explicit action traces, and target rigid bodies may move only after action/contact or release/impulse evidence. |
+- `tools/capability_planner.py:99`: terms=("agent pushes", "agent push", "robot pushes", "robot push", "character pushes", "character throws", "agent throws", "agent throw", "robot throws", "action trace", "agent-to-rigidbody", "agent rigid body", "推箱子",…
+- `README.md:187`: | `agent_rigidbody_action_coupling` | Agent or controller actions must be explicit action traces, and target rigid bodies may move only after action/contact or release/impulse evidence. |
 - `capabilities/agent_rigidbody_action_coupling.json:11`: "description": "Validate that agent or controller actions cause rigid-body motion through an explicit action trace, contact/impulse evidence, and post-action trajectory response. Pushing a box or throwing a ball are smo…
 
 ### Distance Constraint Motion Validation
@@ -271,7 +282,7 @@ Evidence:
 - id: `constraint_distance_pendulum_motion`
 - pattern: `physics_constraint`
 - stages: `case_spec_compilation, physics_control, runtime_artifact_collection, physics_verification`
-- confidence: `0.95` from `32` matched lines
+- confidence: `0.95` from `34` matched lines
 
 Validate fixed-distance or joint-constrained rigid-body motion using anchor/body trajectory, constraint length labels, constraint trace, and continuity checks.
 
@@ -281,16 +292,16 @@ Key iteration moves:
 - Add negative cases for missing constraint label, length drift, and teleporting body.
 
 Evidence:
-- `tools/capability_planner.py:99`: terms=("pendulum", "swinging pendulum", "distance constraint", "fixed length", "constraint length", "joint constraint", "rope constraint", "hinge constraint", "单摆", "摆锤", "距离约束", "固定长度", "约束长度", "铰链约束", "绳长约束"),
+- `tools/capability_planner.py:105`: terms=("pendulum", "swinging pendulum", "distance constraint", "fixed length", "constraint length", "joint constraint", "rope constraint", "hinge constraint", "单摆", "摆锤", "距离约束", "固定长度", "约束长度", "铰链约束", "绳长约束"),
 - `capabilities/constraint_distance_pendulum_motion.json:10`: "description": "Validate fixed-distance constraint motion such as pendulums using anchor/body trajectory, constraint length labels, and continuity checks. A pendulum bob is only the smoke family.",
-- `tests/test_capability_closed_loop.py:59`: plan = self.planner.plan("A pendulum swings while preserving a fixed length rope constraint.")
+- `tests/test_capability_closed_loop.py:60`: plan = self.planner.plan("A pendulum swings while preserving a fixed length rope constraint.")
 
 ### Constrained Impulse Chain Transfer
 
 - id: `constraint_momentum_transfer`
 - pattern: `physics_constraint`
 - stages: `case_spec_compilation, physics_control, runtime_artifact_collection, physics_verification`
-- confidence: `0.8` from `9` matched lines
+- confidence: `0.9` from `11` matched lines
 
 Validate ordered contact-driven impulse and momentum transfer through a chain of constrained rigid bodies.
 
@@ -300,7 +311,7 @@ Key iteration moves:
 - Add negative cases for pre-chain motion, terminal no-response, and contact order violations.
 
 Evidence:
-- `tools/capability_planner.py:105`: terms=("newton cradle", "newton's cradle", "impulse chain", "constrained impulse", "momentum chain", "chain momentum transfer", "suspended ball chain", "constraint momentum transfer", "牛顿摆", "冲量链", "动量链", "悬挂球", "受约束动量传…
+- `tools/capability_planner.py:111`: terms=("newton cradle", "newton's cradle", "impulse chain", "constrained impulse", "momentum chain", "chain momentum transfer", "suspended ball chain", "constraint momentum transfer", "牛顿摆", "冲量链", "动量链", "悬挂球", "受约束动量传…
 - `capabilities/constraint_momentum_transfer.json:11`: "description": "Validate constrained impulse-chain momentum transfer across adjacent rigid bodies. Newton's cradle is only the smoke family; the reusable invariant is ordered contact-driven transfer through constrained…
 - `docs/CAPABILITY_AUTHORING.md:51`: | `newton_cradle_template` 作为主能力 | `constraint_momentum_transfer`，牛顿摆/悬挂球链作为 case family |
 
@@ -309,7 +320,7 @@ Evidence:
 - id: `elastic_energy_launch`
 - pattern: `physics_constraint`
 - stages: `case_spec_compilation, physics_control, runtime_artifact_collection, physics_verification`
-- confidence: `0.95` from `33` matched lines
+- confidence: `0.95` from `34` matched lines
 
 Validate stored elastic energy release into launched rigid-body motion using explicit release events, spring parameters, payload mass, and bounded kinetic-energy response.
 
@@ -319,16 +330,16 @@ Key iteration moves:
 - Add negative cases for missing release, no launch response, and energy gain.
 
 Evidence:
-- `tools/capability_planner.py:111`: terms=("spring launch", "spring launcher", "compressed spring", "elastic launch", "elastic energy", "catapult", "弹簧", "弹簧发射", "压缩弹簧", "弹射", "弹性势能"),
-- `tests/test_capability_closed_loop.py:67`: plan = self.planner.plan("A compressed spring launches a payload from elastic energy.")
-- `docs/AGENT_USAGE.md:137`: Elastic launch prompts should use `elastic_energy_launch`: spring/catapult-like
+- `tools/capability_planner.py:117`: terms=("spring launch", "spring launcher", "compressed spring", "elastic launch", "elastic energy", "catapult", "弹簧", "弹簧发射", "压缩弹簧", "弹射", "弹性势能"),
+- `docs/CAPABILITY_SYSTEM.md:60`: | `elastic_energy_launch` | stored elastic energy 通过 release event 转成 bounded kinetic response。 | 弹簧发射、弹射器 |
+- `tests/test_capability_closed_loop.py:68`: plan = self.planner.plan("A compressed spring launches a payload from elastic energy.")
 
 ### Elastic Constraint Rebound
 
 - id: `elastic_constraint_rebound`
 - pattern: `physics_constraint`
 - stages: `case_spec_compilation, physics_control, runtime_artifact_collection, physics_verification`
-- confidence: `0.95` from `47` matched lines
+- confidence: `0.95` from `48` matched lines
 
 Validate elastic tether or bungee-style constrained motion using rest length, bounded extension, constraint trace, and rebound velocity toward the anchor.
 
@@ -338,16 +349,35 @@ Key iteration moves:
 - Add negative cases for missing trace, overstretch, and no rebound.
 
 Evidence:
-- `tools/capability_planner.py:117`: terms=("bungee", "elastic rope", "elastic tether", "stretchy rope", "rope rebound", "tether rebound", "elastic constraint", "蹦极", "弹性绳", "弹力绳", "弹性约束", "绳子回弹", "拉伸回弹"),
+- `tools/capability_planner.py:123`: terms=("bungee", "elastic rope", "elastic tether", "stretchy rope", "rope rebound", "tether rebound", "elastic constraint", "蹦极", "弹性绳", "弹力绳", "弹性约束", "绳子回弹", "拉伸回弹"),
 - `docs/CAPABILITY_AUTHORING.md:53`: | `bungee_template` 作为主能力 | `elastic_constraint_rebound`，蹦极/弹性绳作为 case family |
-- `README.md:189`: | `elastic_constraint_rebound` | Elastic tether or bungee-style constraints must export rest length, extension trace, max-stretch bounds, and rebound velocity toward the anchor. Bungee is one smoke family. |
+- `docs/CAPABILITY_SYSTEM.md:61`: | `elastic_constraint_rebound` | 弹性约束必须记录 extension，并在峰值后朝 anchor 回弹。 | 蹦极、弹力绳 |
+
+### Brittle Impact Fracture
+
+- id: `brittle_impact_fracture`
+- pattern: `physics_constraint`
+- stages: `case_spec_compilation, physics_control, runtime_artifact_collection, physics_verification`
+- confidence: `0.95` from `148` matched lines
+
+Validate brittle/destructible fracture as a contact-energy threshold invariant with explicit fracture events and fragment evidence.
+
+Key iteration moves:
+- Export impact_energy_j and fracture_events before tuning visual debris.
+- Adjust threshold/energy labels before changing mesh materials.
+- Use negative cases for missing event, pre-contact fracture, below-threshold fracture, and too few fragments.
+
+Evidence:
+- `tools/capability_planner.py:87`: terms=("brittle", "fracture", "shatter", "breakable", "destructible", "glass break", "glass shatter", "mirror breaks", "wood crate breaks", "crate breaks", "破碎", "碎裂", "断裂", "玻璃碎", "镜子碎", "玻璃杯碎", "木箱破碎", "可破坏"),
+- `README.md:192`: | `brittle_impact_fracture` | Brittle/destructible bodies must declare fracture threshold, contact impact energy, fracture events, and fragment evidence. Glass panels, mirrors, cups, and crates are case families. |
+- `capabilities/brittle_impact_fracture.json:4`: "description": "Validate brittle or destructible rigid-body fracture as a contact-energy threshold invariant rather than a glass-specific visual template.",
 
 ### Verified Multi-View Dataset Packaging
 
 - id: `dataset_artifact_packaging`
 - pattern: `FLOW`
 - stages: `dataset, signals, verifier`
-- confidence: `0.95` from `121` matched lines
+- confidence: `0.95` from `126` matched lines
 
 Package only readiness-gated runs into a dataset layout with video, synchronized signals, physics labels, asset metadata, and hashes.
 
@@ -357,7 +387,7 @@ Key iteration moves:
 - Use benchmark taxonomy to grow cases systematically.
 
 Evidence:
-- `README.md:145`: - `scene_capture` RGB/depth/segmentation multi-view path is the stable data path.
+- `README.md:147`: - `scene_capture` RGB/depth/segmentation multi-view path is the stable data path.
 - `capabilities/canonical_signal_capture.json:30`: "Every planned view has RGB/depth/segmentation metadata or a hard failure.",
 - `docs/HARNESS_ARCHITECTURE.md:166`: 真实 UE 后续还必须补 `camera_trajectory.json`、视频/frame sequence、depth/normal/audio/pass manifest。
 
@@ -366,7 +396,7 @@ Evidence:
 - id: `failure_driven_refinement_loop`
 - pattern: `BRIDGE`
 - stages: `planner, runtime, verifier, benchmark`
-- confidence: `0.95` from `288` matched lines
+- confidence: `0.95` from `304` matched lines
 
 Use structured failure evidence to decide the next minimal change: prompt expansion, asset binding, scene layout, physics controls, runtime settings, or verifier thresholds.
 
@@ -376,8 +406,8 @@ Key iteration moves:
 - Rerun tests and a small prompt suite before publishing.
 
 Evidence:
-- `docs/PHYSICS_AWARE_HARNESS.md:189`: 每个失败必须归因到 failure type，例如：
-- `harness/verification/physics_verifier.py:45`: "value": str(ue_backend_report.get("failure_message") or "UE backend failed"),
+- `docs/PHYSICS_AWARE_HARNESS.md:190`: 每个失败必须归因到 failure type，例如：
+- `harness/verification/physics_verifier.py:46`: "value": str(ue_backend_report.get("failure_message") or "UE backend failed"),
 - `tools/capability_runtime_adapter.py:318`: lines.append(f"- `{failure.get('failure_type')}`: {failure.get('reason')}")
 
 ### Lineage-Based Harness Capability Extraction
@@ -385,7 +415,7 @@ Evidence:
 - id: `lineage_based_capability_extraction`
 - pattern: `BRIDGE`
 - stages: `meta, docs, tests`
-- confidence: `0.95` from `22` matched lines
+- confidence: `0.95` from `27` matched lines
 
 Mine repeated project memory, reports, and final artifacts into reusable harness capabilities without publishing raw private sessions or secrets.
 
@@ -396,8 +426,8 @@ Key iteration moves:
 
 Evidence:
 - `capabilities/dataset_artifact_packaging.json:10`: "description": "Package only verifier-gated runtime artifacts into dataset-ready sample layouts with lineage, hashes, signal availability, and failure visibility.",
+- `docs/CAPABILITY_SYSTEM.md:22`: | Full orchestration | `pipeline_stage_orchestration` | stage artifacts | staged lineage and failure attribution |
 - `README.md:10`: ## What Is Included
-- `README.md:166`: | `capability_runtime_artifact_bridge` | Adapts runtime artifacts into verifier inputs. |
 
 ### Bounce Restitution Ball
 

@@ -58,6 +58,12 @@ PHYSICS_CRITICAL_ROLES = {
     "action_coupled_body",
     "pushed_body",
     "rigid_body_payload",
+    "active_impactor",
+    "brittle_fracture_body",
+    "breakable_body",
+    "destructible_body",
+    "fracture_fragment",
+    "fragment_proxy",
 }
 
 

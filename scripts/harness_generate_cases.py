@@ -23,7 +23,7 @@ TEMPLATE_SCHEMA_VERSION = "harness_case_template_v1"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate parameterized harness case specs from a template.")
     parser.add_argument("--template", help="Path to cases/templates/*.template.json")
-    parser.add_argument("--suite", choices=["billiards", "domino", "falling", "ramp", "projectile", "bounce", "rolling", "sliding", "wind", "mass_ratio", "spin", "agent_action", "pendulum", "impulse_chain", "elastic_launch", "elastic_constraint", "basic_physics"], help="Named case suite shortcut.")
+    parser.add_argument("--suite", choices=["billiards", "domino", "falling", "ramp", "projectile", "bounce", "rolling", "sliding", "wind", "mass_ratio", "spin", "agent_action", "pendulum", "impulse_chain", "elastic_launch", "elastic_constraint", "fracture", "basic_physics"], help="Named case suite shortcut.")
     parser.add_argument("--num-cases", type=int, help="Number of case specs to generate.")
     parser.add_argument("--count", type=int, help="Alias for --num-cases.")
     parser.add_argument("--seed", type=int, default=0, help="Deterministic generation seed.")
@@ -103,6 +103,7 @@ def template_for_suite(suite: str | None) -> str | None:
         "impulse_chain": "cases/templates/constraint_momentum_transfer.template.json",
         "elastic_launch": "cases/templates/elastic_energy_launch.template.json",
         "elastic_constraint": "cases/templates/elastic_constraint_rebound.template.json",
+        "fracture": "cases/templates/brittle_impact_fracture.template.json",
         "basic_physics": "cases/templates/falling_blocks.template.json",
     }[suite]
 
@@ -158,6 +159,8 @@ def generate_case(template: dict[str, Any], rng: random.Random, *, index: int, s
         return elastic_launch_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
     if template_id == "elastic_constraint_rebound":
         return elastic_constraint_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
+    if template_id == "brittle_impact_fracture":
+        return brittle_fracture_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
     raise ValueError(f"unsupported runnable template: {template_id}")
 
 
@@ -993,6 +996,58 @@ def elastic_constraint_case(template: dict[str, Any], params: dict[str, Any], *,
     return add_m2_case_contract(case, template, params)
 
 
+def brittle_fracture_case(template: dict[str, Any], params: dict[str, Any], *, index: int, seed: int, should_pass: bool, negative_mode: str | None) -> dict[str, Any]:
+    threshold = float(params["fracture_threshold_j"])
+    impact_energy = max(float(params["impact_energy_j"]), threshold * 1.35)
+    fragment_count = max(int(params["fragment_count"]), 4)
+    if negative_mode == "below_threshold_fracture":
+        impact_energy = round(threshold * 0.45, 4)
+    if negative_mode == "too_few_fragments":
+        fragment_count = max(1, min(fragment_count, 3))
+    striker_speed = float(params["striker_speed_m_s"])
+    expected = {
+        "coordinate_system": "z_up",
+        "impactor_object_id": "striker",
+        "brittle_object_id": "brittle_body",
+        "expected_contact_pair": ["striker", "brittle_body"],
+        "impact_energy_j": round(impact_energy, 4),
+        "fracture_threshold_j": round(threshold, 4),
+        "expected_min_fragment_count": max(4, int(params["fragment_count"])),
+    }
+    objects = [
+        {
+            "id": "striker",
+            "role": "active_impactor",
+            "shape": "sphere",
+            "radius_m": 0.12,
+            "mass_kg": params["striker_mass_kg"],
+            "initial_position_m": [-0.62, 0.0, 0.4],
+            "initial_velocity_m_s": [round(striker_speed, 4), 0.0, 0.0],
+        },
+        {
+            "id": "brittle_body",
+            "role": "brittle_fracture_body",
+            "shape": "thin_box",
+            "mass_kg": params["brittle_mass_kg"],
+            "fracture_threshold_j": round(threshold, 4),
+            "expected_fragment_count": fragment_count,
+            "initial_position_m": [0.0, 0.0, 0.4],
+            "initial_velocity_m_s": [0.0, 0.0, 0.0],
+        },
+    ]
+    case = base_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
+    case.update(
+        {
+            "prompt": f"Generated brittle-impact fracture case: an impactor hits a brittle body with {impact_energy:.2f} J against threshold {threshold:.2f} J.",
+            "expected_physics": expected,
+            "objects": objects,
+            "active_objects": ["striker"],
+            "passive_objects": ["brittle_body"],
+        }
+    )
+    return add_m2_case_contract(case, template, params)
+
+
 def collision_speeds(striker_mass: float, target_mass: float, initial_speed: float, restitution: float) -> tuple[float, float]:
     denominator = max(striker_mass + target_mass, 1e-9)
     striker_post = ((striker_mass - restitution * target_mass) / denominator) * initial_speed
@@ -1114,6 +1169,14 @@ def expected_event_for(case: dict[str, Any]) -> dict[str, Any]:
             "rest_length_m": expected_physics.get("rest_length_m"),
             "max_extension_m": expected_physics.get("max_extension_m"),
         }
+    if capability_id == "brittle_impact_fracture":
+        return {
+            "type": "brittle_impact_fracture",
+            "impactor_object_id": expected_physics.get("impactor_object_id"),
+            "brittle_object_id": expected_physics.get("brittle_object_id"),
+            "fracture_threshold_j": expected_physics.get("fracture_threshold_j"),
+            "expected_min_fragment_count": expected_physics.get("expected_min_fragment_count"),
+        }
     return {"type": "trajectory_event"}
 
 
@@ -1150,6 +1213,8 @@ def required_signals_for(capability_id: str) -> list[str]:
         return ["trajectory", "spring_events", "energy_labels", "post_release_velocity"]
     if capability_id == "elastic_constraint_rebound":
         return ["trajectory", "constraint_trace", "elastic_constraint_labels", "post_stretch_velocity"]
+    if capability_id == "brittle_impact_fracture":
+        return ["trajectory", "contact_events", "fracture_events", "fragment_manifest", "energy_labels"]
     return ["trajectory"]
 
 
@@ -1175,6 +1240,8 @@ def expected_failure_for(negative_mode: str | None) -> str:
     if negative_mode in {"missing_release_event"}:
         return "F7_runtime_artifact_incomplete"
     if negative_mode in {"missing_constraint_trace"}:
+        return "F7_runtime_artifact_incomplete"
+    if negative_mode in {"missing_fracture_event"}:
         return "F7_runtime_artifact_incomplete"
     return "F4_causality_violation"
 

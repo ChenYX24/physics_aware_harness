@@ -5,7 +5,7 @@
       "asset_id": "analytic_sphere_billiard_ball",
       "category": "physics_critical",
       "type": "static_mesh",
-      "tags": ["sphere", "ball", "billiard", "rolling_subject", "rolling_body", "friction_subject", "ramp_subject", "spinning_body", "spin_subject", "angular_damping_subject", "constrained_body", "pendulum_bob", "active_chain_driver", "constrained_chain_body", "impulse_chain_body", "newton_cradle_ball", "launched_body", "elastic_payload", "spring_payload", "elastic_constrained_body", "bungee_payload"],
+      "tags": ["sphere", "ball", "billiard", "rolling_subject", "rolling_body", "friction_subject", "ramp_subject", "spinning_body", "spin_subject", "angular_damping_subject", "constrained_body", "pendulum_bob", "active_chain_driver", "constrained_chain_body", "impulse_chain_body", "newton_cradle_ball", "launched_body", "elastic_payload", "spring_payload", "elastic_constrained_body", "bungee_payload", "active_impactor"],
       "ue_path": "/Engine/BasicShapes/Sphere.Sphere",
       "collider": "sphere",
       "radius_m": 0.09,
@@ -101,7 +101,7 @@
       "asset_id": "analytic_crate_box",
       "category": "physics_critical",
       "type": "static_mesh",
-      "tags": ["box", "crate", "sliding_subject", "sliding_body", "sliding_crate", "friction_subject", "falling_body", "stack_block", "action_coupled_body", "pushed_body", "rigid_body_payload"],
+      "tags": ["box", "crate", "sliding_subject", "sliding_body", "sliding_crate", "friction_subject", "falling_body", "stack_block", "action_coupled_body", "pushed_body", "rigid_body_payload", "brittle_fracture_body", "breakable_body", "destructible_body", "wood_crate"],
       "ue_path": "/Engine/BasicShapes/Cube.Cube",
       "collider": "box",
       "mass_kg": 1.0,
@@ -109,6 +109,42 @@
         "static_friction": 0.55,
         "dynamic_friction": 0.4,
         "restitution": 0.2
+      },
+      "collision_profile": "PhysicsActor",
+      "fracture_threshold_j": 5.0,
+      "fragment_proxy": "analytic_fracture_fragment_proxy",
+      "proxy": true
+    },
+    {
+      "asset_id": "analytic_brittle_panel",
+      "category": "physics_critical",
+      "type": "static_mesh",
+      "tags": ["glass_panel", "mirror", "glass", "brittle_fracture_body", "breakable_body", "destructible_body", "thin_box"],
+      "ue_path": "/Engine/BasicShapes/Cube.Cube",
+      "collider": "box",
+      "mass_kg": 0.7,
+      "material": {
+        "static_friction": 0.4,
+        "dynamic_friction": 0.3,
+        "restitution": 0.05
+      },
+      "collision_profile": "PhysicsActor",
+      "fracture_threshold_j": 2.4,
+      "fragment_proxy": "analytic_fracture_fragment_proxy",
+      "proxy": true
+    },
+    {
+      "asset_id": "analytic_fracture_fragment_proxy",
+      "category": "physics_critical",
+      "type": "analytic_fragment_proxy",
+      "tags": ["fracture_fragment", "fragment_proxy", "shard", "debris"],
+      "ue_path": "/Engine/BasicShapes/Cube.Cube",
+      "collider": "box",
+      "mass_kg": 0.05,
+      "material": {
+        "static_friction": 0.45,
+        "dynamic_friction": 0.35,
+        "restitution": 0.08
       },
       "collision_profile": "PhysicsActor",
       "proxy": true

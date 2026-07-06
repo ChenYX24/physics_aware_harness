@@ -37,6 +37,12 @@ class HarnessCapabilityExtractorTests(unittest.TestCase):
             self.assertIn("asset_runtime_binding_invocation", capabilities)
             self.assertIn("elastic_energy_launch", capabilities)
             self.assertIn("elastic_constraint_rebound", capabilities)
+            self.assertIn("brittle_impact_fracture", capabilities)
+            taxonomy = profile["capability_taxonomy"]
+            self.assertIn("prompt_case_capability_planning", taxonomy["pipeline_stage_capabilities"])
+            self.assertIn("asset_runtime_binding_invocation", taxonomy["asset_operation_capabilities"])
+            self.assertIn("physics_property_constraint_validation", taxonomy["physical_property_constraint_capabilities"])
+            self.assertIn("brittle_impact_fracture", taxonomy["physics_behavior_capabilities"])
 
     def test_public_profile_suppresses_private_sources(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -64,6 +70,7 @@ class HarnessCapabilityExtractorTests(unittest.TestCase):
             self.assertNotIn("asset_physics_binding", encoded)
             report = render_markdown_report(profile)
             self.assertIn("Physics-Aware Harness Capability Profile", report)
+            self.assertIn("Capability Taxonomy", report)
 
 
 if __name__ == "__main__":

@@ -37,6 +37,8 @@ DEFAULT_CASES = [
     "cases/elastic_launch/negative_missing_release_event.json",
     "cases/elastic_constraint/bungee_rebound.json",
     "cases/elastic_constraint/negative_overstretch.json",
+    "cases/fracture/glass_panel_impact_fracture.json",
+    "cases/fracture/negative_below_threshold_fracture.json",
 ]
 
 

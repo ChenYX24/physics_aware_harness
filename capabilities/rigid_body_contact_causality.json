@@ -1,7 +1,7 @@
 {
   "schema_version": "harness_capability_v1",
   "id": "rigid_body_contact_causality",
-  "description": "Generic rigid-body contact causality capability for active-to-passive motion transfer across balls, pins, crates, brittle objects, or other contact-driven actors.",
+  "description": "Generic rigid-body contact causality capability for active-to-passive motion transfer across balls, pins, crates, or other contact-driven actors. Destruction/fracture should use a separate thresholded fracture capability.",
   "physical_assumptions": [
     "Active bodies may receive structured initial velocity, impulse, or action trace.",
     "Passive bodies must start with zero unexplained motion unless explicitly marked as active.",

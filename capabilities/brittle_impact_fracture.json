@@ -1,0 +1,62 @@
+{
+  "schema_version": "harness_capability_v1",
+  "id": "brittle_impact_fracture",
+  "description": "Validate brittle or destructible rigid-body fracture as a contact-energy threshold invariant rather than a glass-specific visual template.",
+  "physical_assumptions": [
+    "A brittle body has a declared fracture threshold and minimum fragment evidence requirement.",
+    "Fracture may occur only after runtime contact or impact evidence with sufficient impact energy.",
+    "Below-threshold impacts should not produce fracture events unless an alternate force source is explicitly labeled.",
+    "Fragments are runtime evidence and must be represented in artifacts, not only rendered as visual debris."
+  ],
+  "required_signals": [
+    "trajectory",
+    "contact_events",
+    "fracture_events",
+    "fragment_manifest",
+    "energy_labels",
+    "object_roles"
+  ],
+  "required_assets": [
+    "impactor rigid body",
+    "brittle or destructible body",
+    "collider",
+    "fracture fragment mesh or analytic fragment proxy"
+  ],
+  "verifier_rules": [
+    "Brittle object declares a positive fracture_threshold_j.",
+    "Expected impactor-brittle contact pair appears in contact events.",
+    "Impact energy is present and exceeds threshold when fracture occurs.",
+    "Fracture frame is not earlier than the causal contact frame.",
+    "Fragment count is at least expected_min_fragment_count."
+  ],
+  "failure_taxonomy": [
+    "F1_missing_trajectory",
+    "F2_missing_contact_events",
+    "F3_invalid_initial_physics_state",
+    "F4_causality_violation",
+    "F7_runtime_artifact_incomplete"
+  ],
+  "repair_suggestions": [
+    "Add fracture_threshold_j and expected_min_fragment_count to expected_physics.",
+    "Export contact impact energy from the runtime before checking fracture behavior.",
+    "Move any pre-contact break animation into a post-contact fracture event.",
+    "Use analytic fragment proxy for smoke if a real destructible mesh is unavailable, and mark it as proxy."
+  ],
+  "smoke_cases": [
+    "cases/fracture/glass_panel_impact_fracture.json",
+    "cases/fracture/wood_crate_impact_fracture.json"
+  ],
+  "regression_cases": [
+    "cases/fracture/negative_missing_fracture_event.json",
+    "cases/fracture/negative_fracture_before_contact.json",
+    "cases/fracture/negative_below_threshold_fracture.json",
+    "cases/fracture/negative_too_few_fragments.json"
+  ],
+  "capability_type": "physics_constraint",
+  "stage_ids": [
+    "case_spec_compilation",
+    "physics_control",
+    "runtime_artifact_collection",
+    "physics_verification"
+  ]
+}

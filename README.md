@@ -37,6 +37,8 @@ Main paths:
 
 For the complete design, setup, asset import, tool usage, and extension guide,
 see [`docs/HARNESS_FULL_REPORT.md`](docs/HARNESS_FULL_REPORT.md).
+For the machine/actionable capability layering model, see
+[`docs/CAPABILITY_SYSTEM.md`](docs/CAPABILITY_SYSTEM.md).
 
 Not included in the public main path:
 
@@ -151,8 +153,8 @@ Current renderer status:
 ## Capabilities
 
 The harness separates reusable pipeline-stage capabilities from physics case
-families. Billiards is now one smoke family under generic contact causality; the
-old `billiard_causality_compiler` id remains only as a compatibility alias.
+families. Billiards is one smoke family under generic contact causality, not an
+agent-facing compiler capability.
 
 | Pipeline Capability | Current Role |
 |---|---|
@@ -187,13 +189,13 @@ old `billiard_causality_compiler` id remains only as a compatibility alias.
 | `constraint_momentum_transfer` | Constrained rigid-body chains must transfer impulse through ordered adjacent contacts; terminal receiver motion must be contact-driven. Newton's cradle is one smoke family. |
 | `elastic_energy_launch` | Elastic stored-energy release must declare spring/compression/mass labels, export release events, and keep post-release kinetic response inside the stored-energy envelope. Spring launch is one smoke family. |
 | `elastic_constraint_rebound` | Elastic tether or bungee-style constraints must export rest length, extension trace, max-stretch bounds, and rebound velocity toward the anchor. Bungee is one smoke family. |
+| `brittle_impact_fracture` | Brittle/destructible bodies must declare fracture threshold, contact impact energy, fracture events, and fragment evidence. Glass panels, mirrors, cups, and crates are case families. |
 
-`billiard_causality_compiler` is deprecated as a core abstraction. It remains in
-the repository only so old runs and scripts can still be interpreted. New agents
-should use `rigid_body_contact_causality`: active/passive contact transfer with
-trajectory and contact-event evidence. Pool, bowling, crate impacts, mass-ratio
-collisions, and brittle-object impacts are all case families of that one
-capability.
+`billiard_causality_compiler` is not an active capability. If the legacy JSON is
+present, treat it only as a compatibility alias for old artifacts. New agents
+should use reusable invariants such as `rigid_body_contact_causality`,
+`mass_ratio_momentum_transfer`, or `brittle_impact_fracture` depending on what
+must be verified.
 
 The old billiards failure mode is still preserved as a regression: plausible
 videos can be faked by giving passive bodies hidden velocity. The verifier
@@ -249,6 +251,6 @@ git diff --check
 
 1. Replace `highres_viewport` with MRQ/Level Sequence for paper-quality RGB.
 2. Finish true rigid-body gravity advancement in the UE SceneCapture path.
-3. Expand generated case coverage for contact, constraint, gravity, friction, force-field, and agent-action capabilities.
+3. Expand generated case coverage for contact, constraint, gravity, friction, force-field, fracture, and agent-action capabilities.
 4. Add asset import tooling for ModelScope/GitHub-hosted asset registries without
    committing large assets to git.

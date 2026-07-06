@@ -1,0 +1,42 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "wood_crate_impact_fracture",
+  "capability_id": "brittle_impact_fracture",
+  "prompt": "A heavy striker hits a brittle wooden crate. The crate breaks only after sufficient impact energy.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "impactor_object_id": "striker",
+    "brittle_object_id": "wood_crate",
+    "expected_contact_pair": ["striker", "wood_crate"],
+    "impact_energy_j": 7.5,
+    "fracture_threshold_j": 5.0,
+    "expected_min_fragment_count": 8
+  },
+  "objects": [
+    {
+      "id": "striker",
+      "role": "active_impactor",
+      "shape": "sphere",
+      "radius_m": 0.14,
+      "mass_kg": 2.0,
+      "initial_position_m": [-0.7, 0.0, 0.35],
+      "initial_velocity_m_s": [3.1, 0.0, 0.0]
+    },
+    {
+      "id": "wood_crate",
+      "role": "destructible_body",
+      "shape": "box",
+      "mass_kg": 1.4,
+      "fracture_threshold_j": 5.0,
+      "initial_position_m": [0.0, 0.0, 0.35],
+      "initial_velocity_m_s": [0.0, 0.0, 0.0]
+    }
+  ],
+  "active_objects": ["striker"],
+  "passive_objects": ["wood_crate"],
+  "required_assets": ["impactor rigid body", "brittle fracture body", "fracture fragment proxy"],
+  "required_signals": ["trajectory", "contact_events", "fracture_events", "fragment_manifest", "energy_labels"],
+  "verifier_expectation": {"status": "pass"},
+  "should_pass": true,
+  "notes": "Generic brittle fracture smoke case using a crate family asset."
+}

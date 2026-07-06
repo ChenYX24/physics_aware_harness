@@ -18,6 +18,7 @@ PUBLIC_SOURCE_PATHS = [
     "docs/CASE_SPEC_SCHEMA.md",
     "docs/ARTIFACT_SCHEMA.md",
     "docs/CAPABILITY_AUTHORING.md",
+    "docs/CAPABILITY_SYSTEM.md",
     "docs/OPTIONAL_VIEWER.md",
     "docs/PHYSICS_AWARE_HARNESS.md",
     "capabilities/prompt_case_capability_planning.json",
@@ -40,6 +41,7 @@ PUBLIC_SOURCE_PATHS = [
     "capabilities/constraint_distance_pendulum_motion.json",
     "capabilities/constraint_momentum_transfer.json",
     "capabilities/elastic_energy_launch.json",
+    "capabilities/brittle_impact_fracture.json",
     "capabilities/capability_runtime_artifact_bridge.json",
     "capabilities/asset_intent_resolution.json",
     "capabilities/asset_runtime_binding_invocation.json",
@@ -67,6 +69,7 @@ PUBLIC_SOURCE_PATHS = [
     "harness/verification/impulse_chain_verifier.py",
     "harness/verification/elastic_launch_verifier.py",
     "harness/verification/elastic_constraint_verifier.py",
+    "harness/verification/brittle_fracture_verifier.py",
     "tools/run_contract.py",
     "tools/draft_builder.py",
     "tools/dataset_protocol.py",
@@ -925,6 +928,55 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         ),
     ),
     CapabilitySpec(
+        capability_id="brittle_impact_fracture",
+        title="Brittle Impact Fracture",
+        pattern_type="physics_constraint",
+        stage_ids=("case_spec_compilation", "physics_control", "runtime_artifact_collection", "physics_verification"),
+        keywords=(
+            "brittle",
+            "fracture",
+            "fracture_events",
+            "fragment_manifest",
+            "impact_energy",
+            "glass",
+            "shatter",
+            "destructible",
+            "breakable",
+            "破碎",
+            "碎裂",
+            "玻璃",
+            "木箱破碎",
+        ),
+        description="Validate brittle/destructible fracture as a contact-energy threshold invariant with explicit fracture events and fragment evidence.",
+        prompt_moves=(
+            "Represent fracture as brittle_object_id, impactor_object_id, fracture_threshold_j, and expected_min_fragment_count.",
+            "Treat glass, mirror, crate, and cup as asset families under one thresholded fracture invariant.",
+            "Require runtime contact energy before any fracture event or fragments are accepted.",
+        ),
+        runtime_contract=(
+            "Contact events include the impactor-brittle pair and impact_energy_j.",
+            "fracture_events.json records object_id, caused_by_object_id, frame/time, threshold, and fragment_count.",
+            "fragment_manifest.json contains fragment ids linked back to the source brittle object.",
+        ),
+        verifier_checks=(
+            "Fracture threshold is positive and declared.",
+            "Fracture event is not earlier than the causal contact frame.",
+            "Impact energy meets or exceeds the fracture threshold.",
+            "Fragment count meets expected_min_fragment_count.",
+        ),
+        failure_modes=(
+            "Fracture is rendered before contact.",
+            "Fracture event appears below threshold energy.",
+            "Runtime shows debris visually but exports no fracture_events or fragment_manifest.",
+            "Too few fragments are exported for the declared fracture expectation.",
+        ),
+        iteration_moves=(
+            "Export impact_energy_j and fracture_events before tuning visual debris.",
+            "Adjust threshold/energy labels before changing mesh materials.",
+            "Use negative cases for missing event, pre-contact fracture, below-threshold fracture, and too few fragments.",
+        ),
+    ),
+    CapabilitySpec(
         capability_id="dataset_artifact_packaging",
         title="Verified Multi-View Dataset Packaging",
         pattern_type="FLOW",
@@ -1103,9 +1155,58 @@ def extract_capability_profile(
             ],
         },
         "capability_count": len(capabilities),
+        "capability_taxonomy": capability_taxonomy(),
         "capabilities": capabilities,
         "contact_causality_reference_workflow": contact_causality_reference_workflow(),
         "iteration_playbook": iteration_playbook(source_preset),
+    }
+
+
+def capability_taxonomy() -> dict[str, Any]:
+    return {
+        "principle": "Active capabilities describe reusable pipeline stages or physics invariants. Scene families such as billiards are smoke/regression cases, not primary capability abstractions.",
+        "pipeline_stage_capabilities": [
+            "prompt_case_capability_planning",
+            "scene_spec_compilation",
+            "static_scene_placement",
+            "pipeline_stage_orchestration",
+            "capability_runtime_artifact_bridge",
+            "canonical_signal_capture",
+            "dataset_artifact_packaging",
+        ],
+        "asset_operation_capabilities": [
+            "asset_intent_resolution",
+            "asset_runtime_binding_invocation",
+        ],
+        "physical_property_constraint_capabilities": [
+            "explicit_physics_control_surface",
+            "physics_property_constraint_validation",
+        ],
+        "physics_behavior_capabilities": [
+            "rigid_body_contact_causality",
+            "rigid_body_gravity_collision",
+            "sequential_contact_propagation",
+            "ramp_sliding_friction",
+            "projectile_gravity_motion",
+            "bounce_restitution_ball",
+            "rolling_friction_ball",
+            "sliding_crate_friction",
+            "force_field_wind_drift",
+            "mass_ratio_momentum_transfer",
+            "angular_damping_spin_decay",
+            "agent_rigidbody_action_coupling",
+            "constraint_distance_pendulum_motion",
+            "constraint_momentum_transfer",
+            "elastic_energy_launch",
+            "elastic_constraint_rebound",
+            "brittle_impact_fracture",
+        ],
+        "verification_capabilities": [
+            "physics_verifier_truth_gate",
+        ],
+        "deprecated_aliases": {
+            "billiard_causality_compiler": "rigid_body_contact_causality"
+        },
     }
 
 
@@ -1330,10 +1431,32 @@ def render_markdown_report(profile: dict[str, Any]) -> str:
             "## 能力抽象原则",
             "",
             "- capability id 必须命名可复用的不变量或 pipeline 阶段，不能命名成某个单独场景模板。",
-            "- `billiard_causality_compiler` 不进入 public profile；旧 JSON 只作为 legacy artifact alias 保留。",
+            "- `billiard_causality_compiler` 不作为 active capability；旧 JSON 若存在，只是 legacy artifact alias。",
             "- 台球、保龄球、箱体撞击等都属于 `rigid_body_contact_causality` 的 case family。",
             "- 资产能力拆成 `asset_intent_resolution` 和 `asset_runtime_binding_invocation`：先检索/筛选，再绑定 runtime actor。",
             "- 物理能力必须绑定 verifier invariant、required signals、failure taxonomy 和 repair suggestions。",
+            "",
+            "## Capability Taxonomy",
+            "",
+            "| Layer | Capability IDs |",
+            "|---|---|",
+        ]
+    )
+    taxonomy = profile.get("capability_taxonomy") or {}
+    for key in (
+        "pipeline_stage_capabilities",
+        "asset_operation_capabilities",
+        "physical_property_constraint_capabilities",
+        "physics_behavior_capabilities",
+        "verification_capabilities",
+    ):
+        values = taxonomy.get(key) or []
+        lines.append(f"| `{key}` | {', '.join(f'`{item}`' for item in values)} |")
+    deprecated = taxonomy.get("deprecated_aliases") or {}
+    if deprecated:
+        lines.append(f"| `deprecated_aliases` | {', '.join(f'`{key}` -> `{value}`' for key, value in deprecated.items())} |")
+    lines.extend(
+        [
             "",
             "## Capability Summary",
             "",
