@@ -13,6 +13,7 @@ from harness.verification.falling_verifier import verify_falling
 from harness.verification.projectile_verifier import verify_projectile
 from harness.verification.ramp_verifier import verify_ramp
 from harness.verification.rolling_verifier import verify_rolling
+from harness.verification.sliding_verifier import verify_sliding
 
 
 class PhysicsVerifier:
@@ -73,6 +74,8 @@ class PhysicsVerifier:
             failure_type, first_failure, evidence = verify_bounce(case_spec, trajectory)
         elif capability_id == "rolling_friction_ball":
             failure_type, first_failure, evidence = verify_rolling(case_spec, trajectory)
+        elif capability_id == "sliding_crate_friction":
+            failure_type, first_failure, evidence = verify_sliding(case_spec, trajectory)
         else:
             failure_type, first_failure, evidence = "F7_runtime_artifact_incomplete", {"object_id": capability_id, "frame": 0, "time": 0, "metric": "unsupported_capability", "value": capability_id}, []
         return verifier_report(

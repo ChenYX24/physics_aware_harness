@@ -15,6 +15,7 @@ class HarnessPlannerTests(unittest.TestCase):
         self.assertEqual(planner.plan("a projectile is thrown upward at a launch angle")["primary_capability_id"], "projectile_gravity_motion")
         self.assertEqual(planner.plan("a ball drops and rebounds with high restitution")["primary_capability_id"], "bounce_restitution_ball")
         self.assertEqual(planner.plan("a ball rolls on a floor and stops due to rolling friction")["primary_capability_id"], "rolling_friction_ball")
+        self.assertEqual(planner.plan("a sliding crate slows down due to sliding friction")["primary_capability_id"], "sliding_crate_friction")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,29 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "medium_friction_slide",
+  "capability_id": "sliding_crate_friction",
+  "prompt": "A crate slides across a flat floor with medium dynamic friction. It starts with horizontal velocity and slows to a stop.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "gravity_m_s2": 9.81,
+    "mode": "sliding_stop",
+    "initial_speed_m_s": 1.6,
+    "friction_dynamic": 0.32,
+    "friction_static": 0.45,
+    "expected_min_slide_distance_m": 0.25,
+    "expected_max_slide_distance_m": 0.9,
+    "expected_final_speed_max_m_s": 0.18,
+    "support": "floor"
+  },
+  "objects": [
+    {"id": "sliding_crate", "role": "sliding_body", "shape": "box", "mass_kg": 2.0, "friction_dynamic": 0.32, "friction_static": 0.45, "initial_position_m": [0.0, 0.0, 0.25], "initial_velocity_m_s": [1.6, 0.0, 0.0]},
+    {"id": "floor", "role": "support", "shape": "box", "friction_dynamic": 0.32, "friction_static": 0.45, "initial_position_m": [0.0, 0.0, 0.0]}
+  ],
+  "active_objects": ["sliding_crate"],
+  "passive_objects": [],
+  "required_assets": ["sliding rigid body", "support collider", "friction physics material"],
+  "required_signals": ["trajectory", "contact_events", "initial_velocity", "material_friction_label"],
+  "verifier_expectation": {"status": "pass"},
+  "should_pass": true,
+  "notes": "Positive sliding case: dynamic friction decelerates the crate and bounds stop distance."
+}

@@ -1722,9 +1722,60 @@
         "Horizontal speed decays.",
         "Forward displacement is within the expected friction response envelope."
       ]
+    },
+    {
+      "confidence": 0.95,
+      "description": "Validate flat-surface sliding friction and static-friction threshold behavior. The smoke family uses a crate, but the invariant applies to any sliding rigid body with a support contact and friction material.",
+      "evidence": [
+        {
+          "matched_terms": [
+            "sliding",
+            "friction",
+            "static threshold"
+          ],
+          "source": "capabilities/sliding_crate_friction.json:4",
+          "text": "Validate flat-surface sliding friction and static-friction threshold behavior."
+        }
+      ],
+      "evidence_count": 1,
+      "failure_modes": [
+        "F1_missing_trajectory",
+        "F2_missing_contact_events",
+        "F3_invalid_initial_physics_state",
+        "F4_causality_violation",
+        "F7_runtime_artifact_incomplete"
+      ],
+      "id": "sliding_crate_friction",
+      "iteration_moves": [
+        "Inspect support contact before checking sliding distance.",
+        "Compare dynamic-friction stopping distance against final speed.",
+        "For static-threshold cases, verify applied force is below static limit before expecting no motion."
+      ],
+      "pattern_type": "physics_property_capability",
+      "prompt_moves": [
+        "Identify sliding body, support surface, initial horizontal velocity or applied force, static friction, dynamic friction, and expected stop/static envelope."
+      ],
+      "runtime_contract": [
+        "Sliding mode starts with declared horizontal velocity and decelerates.",
+        "Static-threshold mode declares applied force below static friction limit and remains nearly stationary.",
+        "Support contact and friction labels are exported."
+      ],
+      "stage_ids": [
+        "case_spec_compilation",
+        "physics_control",
+        "runtime_artifact_collection",
+        "physics_verification"
+      ],
+      "title": "Sliding Crate Friction Validation",
+      "verifier_checks": [
+        "Support contact exists.",
+        "Sliding body decelerates and stops within distance range.",
+        "Static-threshold body remains under displacement/speed thresholds.",
+        "Motion does not accelerate or reverse without declared external force."
+      ]
     }
   ],
-  "capability_count": 16,
+  "capability_count": 17,
   "iteration_playbook": [
     {
       "input": "README/docs, tests, runtime code, and public config",

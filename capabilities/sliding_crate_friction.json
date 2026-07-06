@@ -1,0 +1,52 @@
+{
+  "schema_version": "harness_capability_v1",
+  "id": "sliding_crate_friction",
+  "description": "Validate flat-surface sliding friction and static-friction threshold behavior. The smoke family uses a crate, but the invariant applies to any sliding rigid body with a support contact and friction material.",
+  "physical_assumptions": [
+    "A sliding body with initial horizontal velocity should decelerate under dynamic friction.",
+    "Travel distance should stay within a friction-bounded stopping envelope.",
+    "A body pushed below static-friction threshold should remain nearly stationary.",
+    "Support contact and friction labels must be present before interpreting motion."
+  ],
+  "required_signals": [
+    "trajectory",
+    "contact_events",
+    "initial_velocity",
+    "material_friction_label",
+    "applied_force_label",
+    "support_contact"
+  ],
+  "required_assets": [
+    "sliding rigid body",
+    "support collider",
+    "physics material with static and dynamic friction"
+  ],
+  "verifier_rules": [
+    "Support contact exists during sliding or static hold.",
+    "Sliding body with initial velocity decelerates and stops within distance range.",
+    "Static-threshold case remains below displacement and speed thresholds.",
+    "Sliding body does not accelerate or reverse without declared external force."
+  ],
+  "failure_taxonomy": [
+    "F1_missing_trajectory",
+    "F2_missing_contact_events",
+    "F3_invalid_initial_physics_state",
+    "F4_causality_violation",
+    "F7_runtime_artifact_incomplete"
+  ],
+  "repair_suggestions": [
+    "Declare initial velocity or applied force mode explicitly.",
+    "Bind static/dynamic friction material metadata to body and support.",
+    "Export support contact events before validating friction response.",
+    "Use a separate force-field capability if motion accelerates after launch."
+  ],
+  "smoke_cases": [
+    "cases/sliding/medium_friction_slide.json",
+    "cases/sliding/static_threshold_hold.json"
+  ],
+  "regression_cases": [
+    "cases/sliding/negative_no_deceleration.json",
+    "cases/sliding/negative_static_threshold_violation.json",
+    "cases/sliding/negative_missing_contact.json"
+  ]
+}

@@ -18,7 +18,7 @@
 | `pendulum_constraint` | constraint motion | 本轮新增 template contract，不跑 runtime | 接 constraint trace / distance preservation metric |
 | `bounce_restitution_ball` | restitution | 已支持 capability + fallback trajectory + restitution-bounded verifier；新增 dynamic template | 接真实 UE restitution material/contact/export |
 | `rolling_friction_ball` | rolling friction | 已支持 capability + fallback trajectory + friction-bounded verifier；新增 dynamic template | 接真实 UE rolling friction material/contact/export |
-| `sliding_crate_friction` | sliding friction | 未实现 | 加 stop distance / static friction threshold |
+| `sliding_crate_friction` | sliding friction | 已支持 capability + fallback trajectory + stop-distance/static-threshold verifier；新增 dynamic template | 接真实 UE static/dynamic friction material/contact/export |
 | `wind_balloon_drift` | force field wind | 未实现 | 加 wind vector and displacement invariant |
 | `mass_ratio_collision` | momentum transfer | 复用 `rigid_body_contact_causality` + `physics_property_constraint_validation` | 加 mass ratio / post-collision velocity ordering |
 | `angular_damping_spin` | rotational damping | 未实现 | 加 spin decay trace |

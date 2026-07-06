@@ -1,0 +1,30 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "negative_no_deceleration",
+  "capability_id": "sliding_crate_friction",
+  "prompt": "A crate slides on a frictional floor but the runtime trace incorrectly shows almost no deceleration.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "gravity_m_s2": 9.81,
+    "mode": "sliding_stop",
+    "initial_speed_m_s": 1.4,
+    "friction_dynamic": 0.4,
+    "friction_static": 0.55,
+    "expected_min_slide_distance_m": 0.16,
+    "expected_max_slide_distance_m": 0.7,
+    "expected_final_speed_max_m_s": 0.15,
+    "support": "floor"
+  },
+  "objects": [
+    {"id": "sliding_crate", "role": "sliding_body", "shape": "box", "mass_kg": 2.0, "friction_dynamic": 0.4, "friction_static": 0.55, "initial_position_m": [0.0, 0.0, 0.25], "initial_velocity_m_s": [1.4, 0.0, 0.0]},
+    {"id": "floor", "role": "support", "shape": "box", "friction_dynamic": 0.4, "friction_static": 0.55, "initial_position_m": [0.0, 0.0, 0.0]}
+  ],
+  "active_objects": ["sliding_crate"],
+  "passive_objects": [],
+  "required_assets": ["sliding rigid body", "support collider", "friction physics material"],
+  "required_signals": ["trajectory", "contact_events", "initial_velocity", "material_friction_label"],
+  "verifier_expectation": {"status": "fail", "failure_type": "F4_causality_violation"},
+  "should_pass": false,
+  "negative_mode": "no_deceleration",
+  "notes": "Negative sliding case: final speed and distance are too high for friction."
+}

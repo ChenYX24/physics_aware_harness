@@ -34,6 +34,9 @@ agent-facing docs should use:
 - `rolling_friction_ball`: a concrete rolling-friction validator that checks
   support contact, speed decay, and friction-bounded travel distance. The rolling
   ball is only the smoke family.
+- `sliding_crate_friction`: a concrete sliding/static-friction validator that
+  checks support contact, dynamic-friction stop distance, and below-threshold
+  static hold. The crate is only the smoke family.
 
 This keeps the harness useful beyond billiards: the same contact-causality
 contract can verify pool, bowling, crate impacts, and other contact-driven scenes.

@@ -23,7 +23,7 @@ TEMPLATE_SCHEMA_VERSION = "harness_case_template_v1"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate parameterized harness case specs from a template.")
     parser.add_argument("--template", help="Path to cases/templates/*.template.json")
-    parser.add_argument("--suite", choices=["billiards", "domino", "falling", "ramp", "projectile", "bounce", "rolling", "basic_physics"], help="Named case suite shortcut.")
+    parser.add_argument("--suite", choices=["billiards", "domino", "falling", "ramp", "projectile", "bounce", "rolling", "sliding", "basic_physics"], help="Named case suite shortcut.")
     parser.add_argument("--num-cases", type=int, help="Number of case specs to generate.")
     parser.add_argument("--count", type=int, help="Alias for --num-cases.")
     parser.add_argument("--seed", type=int, default=0, help="Deterministic generation seed.")
@@ -94,6 +94,7 @@ def template_for_suite(suite: str | None) -> str | None:
         "projectile": "cases/templates/projectile_motion.template.json",
         "bounce": "cases/templates/bounce_restitution.template.json",
         "rolling": "cases/templates/rolling_friction.template.json",
+        "sliding": "cases/templates/sliding_crate_friction.template.json",
         "basic_physics": "cases/templates/falling_blocks.template.json",
     }[suite]
 
@@ -131,6 +132,8 @@ def generate_case(template: dict[str, Any], rng: random.Random, *, index: int, s
         return bounce_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
     if template_id == "rolling_friction":
         return rolling_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
+    if template_id == "sliding_crate_friction":
+        return sliding_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
     raise ValueError(f"unsupported runnable template: {template_id}")
 
 
@@ -456,6 +459,74 @@ def rolling_case(template: dict[str, Any], params: dict[str, Any], *, index: int
     return add_m2_case_contract(case, template, params)
 
 
+def sliding_case(template: dict[str, Any], params: dict[str, Any], *, index: int, seed: int, should_pass: bool, negative_mode: str | None) -> dict[str, Any]:
+    mode = "static_threshold" if negative_mode == "static_threshold_violation" or (should_pass and index % 4 == 0) else "sliding_stop"
+    mass = float(params["crate_mass_kg"])
+    friction_dynamic = float(params["friction_dynamic"])
+    friction_static = max(float(params["friction_static"]), friction_dynamic + 0.05)
+    gravity = float(params["gravity_m_s2"])
+    speed = float(params["initial_speed_m_s"])
+    z = 0.25
+    if mode == "static_threshold":
+        static_limit = mass * gravity * friction_static
+        applied_force = round(static_limit * 0.55, 4)
+        expected = {
+            "coordinate_system": "z_up",
+            "gravity_m_s2": gravity,
+            "mode": "static_threshold",
+            "crate_mass_kg": mass,
+            "friction_dynamic": friction_dynamic,
+            "friction_static": friction_static,
+            "applied_force_n": applied_force,
+            "static_friction_limit_n": round(static_limit, 4),
+            "max_static_displacement_m": 0.02,
+            "expected_final_speed_max_m_s": 0.02,
+            "support": "floor",
+        }
+        initial_velocity = [0.0, 0.0, 0.0]
+    else:
+        stop_distance = speed * speed / max(2.0 * friction_dynamic * gravity, 1e-6)
+        proxy_distance = max(0.06, min(2.5, stop_distance * 0.8))
+        expected = {
+            "coordinate_system": "z_up",
+            "gravity_m_s2": gravity,
+            "mode": "sliding_stop",
+            "initial_speed_m_s": speed,
+            "friction_dynamic": friction_dynamic,
+            "friction_static": friction_static,
+            "expected_min_slide_distance_m": round(max(0.03, proxy_distance * 0.45), 4),
+            "expected_max_slide_distance_m": round(max(0.1, proxy_distance * 1.6), 4),
+            "expected_final_speed_max_m_s": round(max(0.06, speed * 0.15), 4),
+            "fallback_slide_distance_m": round(proxy_distance, 4),
+            "support": "floor",
+        }
+        initial_velocity = [speed, 0.0, 0.0]
+    objects = [
+        {
+            "id": "sliding_crate",
+            "role": "sliding_body",
+            "shape": "box",
+            "mass_kg": mass,
+            "friction_dynamic": friction_dynamic,
+            "friction_static": friction_static,
+            "initial_position_m": [0.0, 0.0, z],
+            "initial_velocity_m_s": initial_velocity,
+        },
+        {"id": "floor", "role": "support", "shape": "box", "friction_dynamic": friction_dynamic, "friction_static": friction_static, "initial_position_m": [0.0, 0.0, 0.0]},
+    ]
+    case = base_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
+    case.update(
+        {
+            "prompt": f"Generated sliding-friction case: mode={mode}, dynamic friction={friction_dynamic:.2f}, static friction={friction_static:.2f}.",
+            "expected_physics": expected,
+            "objects": objects,
+            "active_objects": ["sliding_crate"] if mode == "sliding_stop" else [],
+            "passive_objects": [] if mode == "sliding_stop" else ["sliding_crate"],
+        }
+    )
+    return add_m2_case_contract(case, template, params)
+
+
 def add_m2_case_contract(case: dict[str, Any], template: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
     expected_physics = dict(case.get("expected_physics") or {})
     camera_policy = dict(template.get("camera_policy") or {})
@@ -523,6 +594,8 @@ def expected_event_for(case: dict[str, Any]) -> dict[str, Any]:
         return {"type": "restitution_bounce", "support": expected_physics.get("support", "floor")}
     if capability_id == "rolling_friction_ball":
         return {"type": "friction_bounded_roll", "support": expected_physics.get("support", "floor")}
+    if capability_id == "sliding_crate_friction":
+        return {"type": "friction_bounded_slide_or_static_hold", "support": expected_physics.get("support", "floor"), "mode": expected_physics.get("mode", "sliding_stop")}
     return {"type": "trajectory_event"}
 
 
@@ -541,6 +614,8 @@ def required_signals_for(capability_id: str) -> list[str]:
         return ["trajectory", "contact_events", "gravity_label", "material_restitution_label"]
     if capability_id == "rolling_friction_ball":
         return ["trajectory", "contact_events", "initial_velocity", "material_friction_label"]
+    if capability_id == "sliding_crate_friction":
+        return ["trajectory", "contact_events", "initial_velocity", "material_friction_label", "applied_force_label"]
     return ["trajectory"]
 
 

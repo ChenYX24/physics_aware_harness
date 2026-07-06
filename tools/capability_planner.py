@@ -63,6 +63,12 @@ CAPABILITY_RULES: tuple[CapabilityRule, ...] = (
         terms=("rolling friction", "rolls on a floor", "rolling distance", "roll and stop", "frictional rolling", "滚动摩擦", "滚动距离", "滚动停止", "地面滚动", "球滚动"),
         priority=82,
     ),
+    CapabilityRule(
+        capability_id="sliding_crate_friction",
+        case_family="sliding_crate_friction",
+        terms=("sliding crate", "sliding friction", "crate slides", "slide and stop", "static friction threshold", "滑动摩擦", "箱子滑动", "滑动停止", "静摩擦阈值", "推不动"),
+        priority=81,
+    ),
 )
 
 

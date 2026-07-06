@@ -53,7 +53,7 @@
       "asset_id": "analytic_crate_box",
       "category": "physics_critical",
       "type": "static_mesh",
-      "tags": ["box", "crate", "sliding_subject", "falling_body", "stack_block"],
+      "tags": ["box", "crate", "sliding_subject", "sliding_body", "sliding_crate", "friction_subject", "falling_body", "stack_block"],
       "ue_path": "/Engine/BasicShapes/Cube.Cube",
       "collider": "box",
       "mass_kg": 1.0,

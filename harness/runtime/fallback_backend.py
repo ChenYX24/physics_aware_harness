@@ -51,6 +51,8 @@ def trajectory_for_case(case_spec: dict[str, Any]) -> list[dict[str, Any]]:
         return bounce_trajectory(case_id, case_spec)
     if capability_id == "rolling_friction_ball":
         return rolling_trajectory(case_id, case_spec)
+    if capability_id == "sliding_crate_friction":
+        return sliding_trajectory(case_id, case_spec)
     return []
 
 
@@ -279,6 +281,51 @@ def rolling_trajectory(case_id: str, case_spec: dict[str, Any]) -> list[dict[str
         final_speed = 0.0
     initial = {support_id: support_state, body_id: state(p0, v0)}
     mid = {support_id: support_state, body_id: state([round(p0[0] + travel * 0.65, 4), p0[1], p0[2]], [round(max(final_speed, abs(v0[0]) * 0.45), 4), 0.0, 0.0])}
+    final = {support_id: support_state, body_id: state([round(p0[0] + travel, 4), p0[1], p0[2]], [round(final_speed, 4), 0.0, 0.0])}
+    contacts = [] if negative_mode == "missing_contact" else [contact(body_id, support_id, 0, 0.0), contact(body_id, support_id, 1, 0.3), contact(body_id, support_id, 2, 0.6)]
+    return [
+        frame(0, 0.0, initial, contacts=contacts[:1]),
+        frame(1, 0.3, mid, contacts=contacts[1:2]),
+        frame(2, 0.6, final, contacts=contacts[2:]),
+    ]
+
+
+def sliding_trajectory(case_id: str, case_spec: dict[str, Any]) -> list[dict[str, Any]]:
+    negative_mode = str(case_spec.get("negative_mode") or "")
+    if not negative_mode and "no_deceleration" in case_id:
+        negative_mode = "no_deceleration"
+    if not negative_mode and "static_threshold_violation" in case_id:
+        negative_mode = "static_threshold_violation"
+    object_specs = {str(obj.get("id")): obj for obj in case_spec.get("objects", []) if isinstance(obj, dict)}
+    body_id = next((oid for oid, obj in object_specs.items() if str(obj.get("role") or "") in {"sliding_body", "sliding_crate", "friction_subject"}), "sliding_crate")
+    support_id = next((oid for oid, obj in object_specs.items() if str(obj.get("role") or "") in {"support", "ground", "floor"}), "floor")
+    body_spec = object_specs.get(body_id) or {"initial_position_m": [0.0, 0.0, 0.25], "initial_velocity_m_s": [1.2, 0.0, 0.0]}
+    support_state = state(vec3((object_specs.get(support_id) or {}).get("initial_position_m") or [0.0, 0.0, 0.0]), [0, 0, 0])
+    p0 = vec3(body_spec.get("initial_position_m") or [0.0, 0.0, 0.25])
+    v0 = vec3(body_spec.get("initial_velocity_m_s") or [1.2, 0.0, 0.0])
+    expected = dict(case_spec.get("expected_physics") or {})
+    mode = str(expected.get("mode") or "sliding_stop")
+    if mode == "static_threshold":
+        travel = 0.0
+        final_speed = 0.0
+        if negative_mode == "static_threshold_violation":
+            travel = max(0.08, float(expected.get("max_static_displacement_m") or 0.02) * 8.0)
+            final_speed = max(0.12, float(expected.get("expected_final_speed_max_m_s") or 0.02) * 8.0)
+        initial = {support_id: support_state, body_id: state(p0, [0.0, 0.0, 0.0])}
+        final = {support_id: support_state, body_id: state([round(p0[0] + travel, 4), p0[1], p0[2]], [round(final_speed, 4), 0.0, 0.0])}
+        contacts = [] if negative_mode == "missing_contact" else [contact(body_id, support_id, 0, 0.0), contact(body_id, support_id, 1, 0.5)]
+        return [frame(0, 0.0, initial, contacts=contacts[:1]), frame(1, 0.5, final, contacts=contacts[1:])]
+
+    travel = float(expected.get("fallback_slide_distance_m") or midpoint_value(float(expected.get("expected_min_slide_distance_m") or 0.1), float(expected.get("expected_max_slide_distance_m") or 0.7)))
+    final_speed = min(abs(v0[0]) * 0.12, float(expected.get("expected_final_speed_max_m_s") or abs(v0[0]) * 0.2))
+    if negative_mode == "no_deceleration":
+        travel = float(expected.get("expected_max_slide_distance_m") or travel) + 0.35
+        final_speed = max(abs(v0[0]) * 0.9, float(expected.get("expected_final_speed_max_m_s") or 0.0) + 0.25)
+    elif negative_mode == "excessive_friction_stop":
+        travel = max(0.0, float(expected.get("expected_min_slide_distance_m") or travel) * 0.2)
+        final_speed = 0.0
+    initial = {support_id: support_state, body_id: state(p0, v0)}
+    mid = {support_id: support_state, body_id: state([round(p0[0] + travel * 0.65, 4), p0[1], p0[2]], [round(max(final_speed, abs(v0[0]) * 0.35), 4), 0.0, 0.0])}
     final = {support_id: support_state, body_id: state([round(p0[0] + travel, 4), p0[1], p0[2]], [round(final_speed, 4), 0.0, 0.0])}
     contacts = [] if negative_mode == "missing_contact" else [contact(body_id, support_id, 0, 0.0), contact(body_id, support_id, 1, 0.3), contact(body_id, support_id, 2, 0.6)]
     return [

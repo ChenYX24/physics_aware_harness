@@ -16,6 +16,8 @@ PHYSICS_CRITICAL_ROLES = {
     "rigid_body",
     "rolling_subject",
     "sliding_subject",
+    "sliding_body",
+    "sliding_crate",
     "ramp_subject",
     "ramp",
     "slope_surface",

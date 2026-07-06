@@ -1,0 +1,31 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "negative_static_threshold_violation",
+  "capability_id": "sliding_crate_friction",
+  "prompt": "A crate is pushed below static-friction threshold, but the runtime trace incorrectly shows it sliding.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "gravity_m_s2": 9.81,
+    "mode": "static_threshold",
+    "crate_mass_kg": 2.0,
+    "friction_dynamic": 0.3,
+    "friction_static": 0.65,
+    "applied_force_n": 7.0,
+    "static_friction_limit_n": 12.753,
+    "max_static_displacement_m": 0.02,
+    "expected_final_speed_max_m_s": 0.02,
+    "support": "floor"
+  },
+  "objects": [
+    {"id": "sliding_crate", "role": "sliding_body", "shape": "box", "mass_kg": 2.0, "friction_dynamic": 0.3, "friction_static": 0.65, "initial_position_m": [0.0, 0.0, 0.25], "initial_velocity_m_s": [0.0, 0.0, 0.0]},
+    {"id": "floor", "role": "support", "shape": "box", "friction_dynamic": 0.3, "friction_static": 0.65, "initial_position_m": [0.0, 0.0, 0.0]}
+  ],
+  "active_objects": [],
+  "passive_objects": ["sliding_crate"],
+  "required_assets": ["sliding rigid body", "support collider", "friction physics material"],
+  "required_signals": ["trajectory", "contact_events", "applied_force_label", "material_friction_label"],
+  "verifier_expectation": {"status": "fail", "failure_type": "F4_causality_violation"},
+  "should_pass": false,
+  "negative_mode": "static_threshold_violation",
+  "notes": "Negative static threshold case: object moves despite applied force below static friction limit."
+}

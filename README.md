@@ -173,6 +173,7 @@ old `billiard_causality_compiler` id remains only as a compatibility alias.
 | `projectile_gravity_motion` | Thrown bodies must show launch, apex/descent, forward displacement, and landing/contact evidence. |
 | `bounce_restitution_ball` | Bouncing rigid bodies must descend, contact support, and rebound within a restitution-bounded height envelope. |
 | `rolling_friction_ball` | Rolling rigid bodies must maintain support contact, slow down, and travel within a friction-bounded distance envelope. |
+| `sliding_crate_friction` | Sliding rigid bodies must maintain support contact, decelerate within stop-distance bounds, or stay still below static-friction threshold. |
 
 The billiards cases include the old failure mode that produced plausible-looking
 videos by giving passive balls hidden velocity. The verifier rejects that:

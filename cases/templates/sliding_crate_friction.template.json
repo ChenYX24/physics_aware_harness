@@ -1,0 +1,31 @@
+{
+  "schema_version": "harness_case_template_v1",
+  "template_id": "sliding_crate_friction",
+  "capability_id": "sliding_crate_friction",
+  "description": "Runnable template for flat-surface sliding friction and static-friction threshold validation.",
+  "fallback_supported": true,
+  "parameter_ranges": {
+    "initial_speed_m_s": {"type": "float", "min": 0.8, "max": 3.0},
+    "friction_dynamic": {"type": "float", "min": 0.12, "max": 0.75},
+    "friction_static": {"type": "float", "min": 0.2, "max": 0.9},
+    "crate_mass_kg": {"type": "float", "min": 0.8, "max": 5.0},
+    "gravity_m_s2": {"type": "float", "min": 9.81, "max": 9.81}
+  },
+  "object_count_ranges": {
+    "sliding_body": {"min": 1, "max": 1},
+    "support": {"min": 1, "max": 1}
+  },
+  "physics_critical_assets": ["sliding rigid body", "support collider", "friction physics material"],
+  "visual_only_assets": ["distance guide material"],
+  "camera_policy": {"default": "side_static", "allowed": ["side_static", "tracking_subject", "top_down"]},
+  "perturbation_policy": {"positive_ratio": 0.7, "vary": ["initial_speed_m_s", "friction_dynamic", "friction_static", "crate_mass_kg"], "lock": ["seed", "gravity_m_s2"]},
+  "expected_invariants": [
+    "support_contact_required",
+    "dynamic_friction_deceleration",
+    "friction_bounded_stop_distance",
+    "static_threshold_hold"
+  ],
+  "negative_modes": ["no_deceleration", "static_threshold_violation", "missing_contact"],
+  "seed_policy": {"deterministic": true, "record_parameter_sample": true},
+  "expected_artifact_contract": ["trajectory", "contact_events", "initial_velocity", "material_friction_label", "applied_force_label"]
+}

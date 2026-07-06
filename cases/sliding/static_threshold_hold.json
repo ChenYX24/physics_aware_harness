@@ -1,0 +1,30 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "static_threshold_hold",
+  "capability_id": "sliding_crate_friction",
+  "prompt": "A crate is pushed on a flat floor with a force below static-friction threshold, so it should remain nearly stationary.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "gravity_m_s2": 9.81,
+    "mode": "static_threshold",
+    "crate_mass_kg": 2.5,
+    "friction_dynamic": 0.35,
+    "friction_static": 0.6,
+    "applied_force_n": 8.0,
+    "static_friction_limit_n": 14.715,
+    "max_static_displacement_m": 0.02,
+    "expected_final_speed_max_m_s": 0.02,
+    "support": "floor"
+  },
+  "objects": [
+    {"id": "sliding_crate", "role": "sliding_body", "shape": "box", "mass_kg": 2.5, "friction_dynamic": 0.35, "friction_static": 0.6, "initial_position_m": [0.0, 0.0, 0.25], "initial_velocity_m_s": [0.0, 0.0, 0.0]},
+    {"id": "floor", "role": "support", "shape": "box", "friction_dynamic": 0.35, "friction_static": 0.6, "initial_position_m": [0.0, 0.0, 0.0]}
+  ],
+  "active_objects": [],
+  "passive_objects": ["sliding_crate"],
+  "required_assets": ["sliding rigid body", "support collider", "friction physics material"],
+  "required_signals": ["trajectory", "contact_events", "applied_force_label", "material_friction_label"],
+  "verifier_expectation": {"status": "pass"},
+  "should_pass": true,
+  "notes": "Positive static friction case: applied force is below static threshold, so displacement remains near zero."
+}
