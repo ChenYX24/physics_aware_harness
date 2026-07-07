@@ -1,0 +1,135 @@
+{
+  "schema_version": "harness_capability_v1",
+  "id": "physics_parameter_semantics",
+  "capability_type": "physics_constraint",
+  "stage_ids": [
+    "physics_parameter_annotation",
+    "case_spec_compilation",
+    "verifier_expectation"
+  ],
+  "description": "Provide model-readable meanings, units, default effects, and verifier expectations for controllable physical parameters.",
+  "physical_assumptions": [
+    "The model must treat physical parameters as executable controls, not descriptive prose.",
+    "Changing one parameter should have a directionally predictable effect when seed, camera, initial state, and action trace are locked.",
+    "Inertia, damping, friction, restitution, mass, gravity, and force-field controls must be explicit enough for runtime replay and verifier diagnosis."
+  ],
+  "required_signals": [
+    "parameter_name",
+    "unit",
+    "value",
+    "source",
+    "confidence",
+    "expected_effect",
+    "runtime_control_echo",
+    "sensitivity_direction"
+  ],
+  "required_assets": [
+    "physics material profiles",
+    "rigid-body metadata",
+    "constraint metadata"
+  ],
+  "verifier_rules": [
+    "Every physics-critical object declares the parameters required by its capability.",
+    "Runtime control echo matches case spec values within tolerance.",
+    "Single-parameter sweeps preserve locked camera, action trace, seed, and initial state.",
+    "Observed trajectory/contact direction agrees with declared sensitivity direction unless a failure is reported."
+  ],
+  "failure_taxonomy": [
+    "F3_invalid_initial_physics_state",
+    "F4_causality_violation",
+    "F7_runtime_artifact_incomplete"
+  ],
+  "repair_suggestions": [
+    "Move hidden physical assumptions from prompt text into physical_parameters or physics_control.",
+    "Add units and expected_effect for each changed parameter.",
+    "When a behavior looks wrong, inspect runtime_control_echo before tuning prompts."
+  ],
+  "smoke_cases": [
+    "cases/bounce/high_restitution_bounce.json",
+    "cases/rolling/rolling_ball_friction_stop.json",
+    "cases/spin/high_damping_spin_decay.json"
+  ],
+  "regression_cases": [
+    "cases/spin/negative_spin_gain.json"
+  ],
+  "parameter_table": [
+    {
+      "name": "mass_kg",
+      "unit": "kg",
+      "meaning_for_model": "Amount of matter assigned to a rigid body. Higher mass resists acceleration from the same impulse and changes momentum transfer in collisions.",
+      "expected_effect": "With the same impulse, larger mass produces lower velocity change; in collision, heavier bodies transfer momentum differently from lighter bodies."
+    },
+    {
+      "name": "inertia_scale",
+      "unit": "ratio",
+      "meaning_for_model": "Multiplier on rotational inertia. Higher inertia_scale makes angular acceleration and spin changes smaller for the same torque or off-center impact.",
+      "expected_effect": "Increasing inertia_scale slows spin-up and spin-down response without necessarily changing linear motion."
+    },
+    {
+      "name": "linear_velocity_init",
+      "unit": "m/s",
+      "meaning_for_model": "Initial translational velocity applied at frame 0 only to active or explicitly launched bodies.",
+      "expected_effect": "Controls starting motion direction and speed; passive targets should usually be [0,0,0] until contact/action/release evidence."
+    },
+    {
+      "name": "angular_velocity_init",
+      "unit": "rad/s or deg/s as declared",
+      "meaning_for_model": "Initial rotational velocity around object axes.",
+      "expected_effect": "Creates spin; angular damping should reduce its magnitude over time unless torque is applied."
+    },
+    {
+      "name": "linear_damping",
+      "unit": "1/s",
+      "meaning_for_model": "Velocity-proportional drag applied to linear motion.",
+      "expected_effect": "Higher linear_damping shortens travel distance and reduces speed faster."
+    },
+    {
+      "name": "angular_damping",
+      "unit": "1/s",
+      "meaning_for_model": "Velocity-proportional drag applied to rotation.",
+      "expected_effect": "Higher angular_damping makes spin decay faster and prevents unexplained angular energy gain."
+    },
+    {
+      "name": "friction_static",
+      "unit": "coefficient",
+      "meaning_for_model": "Maximum friction ratio that can prevent motion before sliding starts.",
+      "expected_effect": "Higher static friction increases the threshold required to start sliding."
+    },
+    {
+      "name": "friction_dynamic",
+      "unit": "coefficient",
+      "meaning_for_model": "Friction ratio after sliding begins.",
+      "expected_effect": "Higher dynamic friction reduces sliding speed faster and shortens stop distance."
+    },
+    {
+      "name": "restitution",
+      "unit": "coefficient",
+      "meaning_for_model": "Bounciness or normal velocity retention across impact.",
+      "expected_effect": "Higher restitution increases rebound height or post-impact separation speed; values above 1 imply energy gain and should be rejected unless explicitly modeled."
+    },
+    {
+      "name": "gravity",
+      "unit": "m/s^2",
+      "meaning_for_model": "World acceleration applied to gravity-enabled bodies.",
+      "expected_effect": "Higher gravity increases downward acceleration, impact speed, and contact timing."
+    },
+    {
+      "name": "collision_profile",
+      "unit": "engine enum/string",
+      "meaning_for_model": "Runtime collision behavior such as PhysicsActor, BlockAll, NoCollision.",
+      "expected_effect": "NoCollision bodies should not generate contacts; physics-critical collision bodies must use a collision-enabled profile."
+    },
+    {
+      "name": "constraint_stiffness",
+      "unit": "N/m or engine-equivalent",
+      "meaning_for_model": "Resistance of a constraint or spring to displacement.",
+      "expected_effect": "Higher stiffness reduces stretch but increases rebound force and possible instability if timestep is too large."
+    },
+    {
+      "name": "break_threshold",
+      "unit": "energy/force as declared",
+      "meaning_for_model": "Threshold at which fracture or constraint breaking is allowed.",
+      "expected_effect": "Break/fracture events should occur only after runtime contact/force exceeds this threshold."
+    }
+  ]
+}

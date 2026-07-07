@@ -275,8 +275,9 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
 
 def ue_path_for_binding(binding: dict[str, Any]) -> str:
     asset = binding.get("asset") if isinstance(binding.get("asset"), dict) else {}
-    if asset.get("ue_path"):
-        return str(asset["ue_path"])
+    ue_path = str(asset.get("ue_path") or "")
+    if is_runtime_mesh_path(ue_path):
+        return ue_path
     physics = binding.get("physics") if isinstance(binding.get("physics"), dict) else {}
     collider = str(physics.get("collider") or "").casefold()
     role = str(binding.get("role") or "").casefold()
@@ -285,6 +286,16 @@ def ue_path_for_binding(binding: dict[str, Any]) -> str:
     if "capsule" in collider or "cylinder" in collider or "pin" in role or "domino" in role:
         return "/Engine/BasicShapes/Cylinder.Cylinder" if "pin" in role else "/Engine/BasicShapes/Cube.Cube"
     return "/Engine/BasicShapes/Cube.Cube"
+
+
+def is_runtime_mesh_path(ue_path: str) -> bool:
+    if not ue_path:
+        return False
+    if ue_path.startswith("/Script/"):
+        return False
+    if "." not in ue_path:
+        return False
+    return True
 
 
 def scale_for_binding(binding: dict[str, Any]) -> list[float]:
@@ -646,6 +657,23 @@ def classify_native_pass_failure(native_output: Path, pass_mode: str) -> dict[st
     summary = read_optional_json(summary_path)
     errors = summary.get("errors") if isinstance(summary.get("errors"), list) else []
     error_text = "\n".join(str(item.get("error") or item) for item in errors if isinstance(item, dict) or item)
+    process_text = "\n".join(
+        [
+            error_text,
+            read_text_tail(native_output / "ue_process_stdout.log", limit=20000),
+            read_text_tail(native_output / "ue_process_stderr.log", limit=20000),
+        ]
+    )
+    if "ADPPhysicsRuntime" in process_text and ("Unable to find module" in process_text or "无法找到模块" in process_text or "插件" in process_text):
+        return {
+            "failure_code": "F_UE_PLUGIN_MODULE_MISSING",
+            "failure_message": "UE project could not load the ADPPhysicsRuntime plugin module. Build the UE template/plugin for the configured engine version before rendering.",
+        }
+    if "failed to load runtime material-library asset" in process_text:
+        return {
+            "failure_code": "F_ASSET_RUNTIME_BINDING_INVALID",
+            "failure_message": "UE runner tried to load a non-mesh class or invalid asset path as a renderable runtime asset. Keep Blueprint/class paths separate from StaticMesh asset paths.",
+        }
     if pass_mode == "rgb" and "timeout waiting for" in error_text and "frames/frame_" in error_text:
         return {
             "failure_code": "F_RGB_HIGHRES_VIEWPORT_UNAVAILABLE",

@@ -1,54 +1,61 @@
 # Agentic Data Platform: Physics-Aware Harness
 
-A **physics-aware simulation harness for code agents**.
+A production-oriented **physics-aware simulation harness for code agents**.
 
-This repository is the harness-facing core, not a frontend-first demo and not a
-generic prompt-to-video app. It gives an agent a stable way to compile a task
-into a capability-backed case, run UE or fallback execution, collect synchronized
-artifacts, verify physical causality, and package dataset-ready evidence.
+This repository provides a reproducible path from an agent task to executable
+physics cases, UE runtime execution, synchronized artifacts, physics-aware
+verification, and dataset-ready packaging. It is not a frontend-first demo and
+not a generic prompt-to-video application.
 
-## What Is Included
+## Core Contract
 
 ```text
-Agent task / prompt
+agent task / prompt
   -> capability planning
-  -> case spec or generated case
-  -> asset intent resolution
-  -> runtime backend
+  -> case spec or generated cases
+  -> asset retrieval
+  -> asset placement and runtime binding
+  -> physics parameter control
+  -> UE runtime / debug fallback runtime
   -> trajectory/contact/render artifact collection
-  -> physics verifier
-  -> diagnosis / repair suggestion
-  -> dataset-ready artifact package
+  -> physics and render synchronization verification
+  -> diagnosis and dataset-ready manifest
 ```
 
-Main paths:
+UE is the production renderer and physics runtime. The fallback backend is only
+for deterministic schema, verifier, and CLI development.
+
+## Repository Layout
 
 | Path | Purpose |
 |---|---|
-| `harness/` | Core harness modules: planning, runtime, verification, packaging. |
+| `harness/` | Core planning, assets, runtime, verification, and artifact modules. |
 | `capabilities/` | Machine-readable capability contracts. |
-| `cases/` | Golden cases and parameterized templates. |
+| `cases/` | Golden cases and parameterized case templates. |
 | `scripts/harness_*.py` | Agent-callable CLI tools. |
-| `scripts/native_ue_physics_phenomena_scene.py` | UE Python scene/capture script used by the local runner. |
+| `scripts/harness_local_ue_runner.py` | Harness-compatible local UE runner. |
+| `scripts/native_ue_physics_phenomena_scene.py` | UE Python scene/capture script. |
 | `ue_template/` | Minimal UE project and `ADPPhysicsRuntime` plugin source. |
-| `assets/` | Public-safe examples only; real assets stay local. |
-| `docs/` | Agent usage, UE setup, schemas, authoring notes. |
-| `tests/` | Regression tests for CLI, capabilities, verifier, render sync, artifacts. |
+| `assets/` | Public-safe example asset registry and asset docs. |
+| `docs/` | Architecture, usage, schemas, UE setup, authoring, and report docs. |
+| `tests/` | Regression coverage for capabilities, CLI, runtime, verifier, and artifacts. |
 
-For the complete design, setup, asset import, tool usage, and extension guide,
-see [`docs/HARNESS_FULL_REPORT.md`](docs/HARNESS_FULL_REPORT.md).
-For the machine/actionable capability layering model, see
-[`docs/CAPABILITY_SYSTEM.md`](docs/CAPABILITY_SYSTEM.md).
+Generated outputs and private data must stay local:
 
-Not included in the public main path:
+```text
+runs/
+outputs/
+artifacts/
+cases/generated/
+agent-docs/
+_local_inputs/
+assets/downloads/
+assets/ue_imports/
+assets/cache/
+assets/*.local.json
+```
 
-- old Studio frontend/API;
-- generated `runs/`, `outputs/`, `artifacts/`;
-- `agent-docs/` working notes;
-- local asset dumps or private dataset materializations;
-- API keys, ModelScope tokens, GitHub tokens, or `.env`.
-
-## Quickstart
+## Install And Validate
 
 Use Python 3.13.
 
@@ -58,16 +65,16 @@ python3.13 scripts/harness_list_capabilities.py
 python3.13 scripts/harness_smoke.py --backend fallback
 ```
 
-Run one fallback case:
+Run one debug fallback case:
 
 ```bash
 python3.13 scripts/harness_run_case.py \
-  cases/billiards/low_speed_single_contact.json \
+  cases/falling/falling_block_on_floor.json \
   --backend fallback \
   --output-root runs/harness_cases
 ```
 
-Generate dynamic billiards cases:
+Generate parameterized cases:
 
 ```bash
 python3.13 scripts/harness_generate_cases.py \
@@ -77,23 +84,7 @@ python3.13 scripts/harness_generate_cases.py \
   --out cases/generated/billiards_seed42
 ```
 
-Build and verify a static scene layout before runtime:
-
-```bash
-python3.13 scripts/harness_build_static_scene.py \
-  cases/billiards/low_speed_single_contact.json \
-  --output-dir runs/static_scene/low_speed_single_contact
-```
-
-Compile deterministic runtime actor bindings before UE execution:
-
-```bash
-python3.13 scripts/harness_compile_actor_placement.py \
-  cases/bowling/bowling_pin_chain_contact.json \
-  --output-dir runs/actor_placement/bowling_pin_chain_contact
-```
-
-Run a batch:
+Run a generated batch:
 
 ```bash
 python3.13 scripts/harness_run_case_batch.py \
@@ -101,18 +92,21 @@ python3.13 scripts/harness_run_case_batch.py \
   --backend fallback
 ```
 
-Verify a run:
+## UE Runtime Setup
 
-```bash
-python3.13 scripts/harness_verify_run.py runs/harness_cases/low_speed_single_contact_fallback
-```
+Required environment variables for production UE execution:
 
-## UE Rendering
+| Variable | Meaning |
+|---|---|
+| `SIM_STUDIO_UE_PROJECT` | Absolute path to a valid `.uproject`. |
+| `SIM_STUDIO_UE_EXECUTABLE` | `UnrealEditor-Cmd` or equivalent UE executable. |
+| `SIM_STUDIO_UE_MAP` | UE map package path. |
+| `SIM_STUDIO_UE_ACTOR_CLASS` | Blueprint/C++ actor class used by the runner. |
+| `SIM_STUDIO_ASSET_REGISTRY` | JSON registry containing UE package paths and physical metadata. |
+| `SIM_STUDIO_UE_CONTACT_EXPORT` | Must be `1` for reference-ready UE verification. |
+| `SIM_STUDIO_UE_RUNNER_CMD` | Harness-compatible runner command. |
 
-The UE path is the production renderer. Fallback is only for deterministic
-debugging of schema and verifier behavior.
-
-Set the required paths:
+Recommended local configuration:
 
 ```bash
 export SIM_STUDIO_UE_PROJECT="$PWD/ue_template/SimulatorStudioTemplate.uproject"
@@ -122,26 +116,119 @@ export SIM_STUDIO_UE_ACTOR_CLASS="/Script/Engine.StaticMeshActor"
 export SIM_STUDIO_ASSET_REGISTRY="$PWD/assets/asset_registry.example.json"
 export SIM_STUDIO_UE_CONTACT_EXPORT=1
 export SIM_STUDIO_UE_RUNNER_CMD="python3.13 scripts/harness_local_ue_runner.py"
+export SIM_STUDIO_UE_RENDER_MODE=both
+export SIM_STUDIO_UE_RGB_CAPTURE_BACKEND=scene_capture
+export SIM_STUDIO_UE_WIDTH=1280
+export SIM_STUDIO_UE_HEIGHT=720
+export SIM_STUDIO_UE_FPS=60
 ```
 
-Stable UE multi-view data pass:
+Run one UE case:
 
 ```bash
-SIM_STUDIO_UE_RENDER_MODE=both \
-SIM_STUDIO_UE_RGB_CAPTURE_BACKEND=scene_capture \
-SIM_STUDIO_UE_WIDTH=1280 \
-SIM_STUDIO_UE_HEIGHT=720 \
-SIM_STUDIO_UE_FPS=60 \
 python3.13 scripts/harness_run_case.py \
   cases/falling/falling_block_on_floor.json \
   --backend ue \
   --mode both \
   --views front_static,side_static,top_down,tracking_subject,event_closeup \
   --render-passes rgb,depth,segmentation \
-  --output-root runs/ue_smoke
+  --output-root runs/ue_cases
 ```
 
-Expected artifact layout:
+## Capability Layers
+
+Capabilities are reusable contracts, not scene names. Billiards, bowling,
+dominoes, pendulums, glass breakage, and ramps are case families under generic
+capabilities.
+
+Important layers:
+
+| Layer | Capabilities |
+|---|---|
+| Pipeline | `prompt_case_capability_planning`, `scene_spec_compilation`, `static_scene_placement`, `runtime_actor_placement_compilation`, `runtime_backend_execution`, `pipeline_stage_orchestration` |
+| Assets | `asset_intent_resolution`, `asset_runtime_binding_invocation` |
+| Physics controls | `explicit_physics_control_surface`, `physics_parameter_semantics`, `physics_property_constraint_validation` |
+| Runtime bridge | `blueprint_function_invocation`, `capability_runtime_artifact_bridge`, `canonical_signal_capture` |
+| Verification | `physics_verifier_truth_gate`, `render_signal_sync_validation` |
+| Packaging | `dataset_artifact_packaging` |
+
+`billiard_causality_compiler` is intentionally not an active capability. Old
+artifacts may map it to `rigid_body_contact_causality` as a deprecated alias.
+
+## Asset Retrieval And Placement
+
+Asset handling is split into two separate operations:
+
+1. `asset_intent_resolution`
+   - converts case objects into typed asset intents;
+   - retrieves top-k candidates from the configured asset registry;
+   - classifies physics-critical, visual-only, skeletal, Blueprint/logic, and
+     scene/map assets;
+   - records selected asset or explicit analytic proxy fallback.
+
+2. `asset_runtime_binding_invocation`
+   - turns selected assets into runtime actor bindings;
+   - requires physics-critical metadata: collider, mass or density, material,
+     collision profile, and rigid-body behavior;
+   - excludes visual-only assets from the physics graph;
+   - produces deterministic input for UE actor spawning and physics setup.
+
+Static placement and runtime actor binding:
+
+```bash
+python3.13 scripts/harness_build_static_scene.py \
+  cases/bowling/bowling_pin_chain_contact.json \
+  --output-dir runs/static_scene/bowling
+
+python3.13 scripts/harness_compile_actor_placement.py \
+  cases/bowling/bowling_pin_chain_contact.json \
+  --output-dir runs/actor_placement/bowling
+```
+
+## Physics Parameter Semantics
+
+`physics_parameter_semantics` tells agents what each physical control means and
+how a change should affect runtime evidence. Examples:
+
+| Parameter | Meaning | Expected Effect |
+|---|---|---|
+| `mass_kg` | Rigid-body mass. | Same impulse produces smaller velocity change for larger mass. |
+| `inertia_scale` | Rotational inertia multiplier. | Higher value resists spin-up and spin change from torque. |
+| `linear_damping` | Velocity-proportional linear drag. | Higher value shortens travel distance and slows faster. |
+| `angular_damping` | Velocity-proportional rotational drag. | Higher value makes spin decay faster. |
+| `friction_static` | Threshold resisting start of sliding. | Higher value requires larger force before motion starts. |
+| `friction_dynamic` | Sliding friction after motion starts. | Higher value shortens sliding distance. |
+| `restitution` | Impact bounciness. | Higher value increases rebound height or separation speed. |
+| `collision_profile` | Engine collision behavior. | `NoCollision` should not generate contact events. |
+| `constraint_stiffness` | Constraint/spring resistance. | Higher value reduces stretch and increases rebound force. |
+
+The full machine-readable table is in
+`capabilities/physics_parameter_semantics.json`.
+
+## Blueprint And C++ Runtime Invocation
+
+`blueprint_function_invocation` treats UE Blueprint, C++ plugin, and Python
+function calls as first-class runtime actions. Physics-mutating calls must be
+ordered, replayable, and logged.
+
+Supported call families include:
+
+- actor spawn and transform;
+- mesh and material binding;
+- collision and rigid-body setup;
+- mass, damping, velocity, impulse, gravity, and collision profile assignment;
+- ADPPhysicsRuntime body registration and capture;
+- camera, depth, segmentation, and render capture.
+
+Relevant UE-side components:
+
+- `ue_template/Plugins/ADPPhysicsRuntime/`
+- `scripts/harness_local_ue_runner.py`
+- `scripts/native_ue_physics_phenomena_scene.py`
+
+## Artifact Contract
+
+Reference-ready runs should contain:
 
 ```text
 runs/<run_id>/
@@ -158,120 +245,26 @@ runs/<run_id>/
   run_readiness.json
 ```
 
-Current renderer status:
+## Current Integration Status
 
-- `scene_capture` RGB/depth/segmentation multi-view path is the stable data path.
-- `highres_viewport` is kept as a debug path and can fail in headless/offscreen
-  UE because editor screenshot frames are not produced reliably.
-- Production high-quality RGB should move to Movie Render Queue / Level Sequence,
-  while data passes stay on SceneCapture and share the same camera trajectory.
+- Fallback smoke and verifier development path are stable.
+- UE backend has strict preflight and no silent fallback.
+- UE backend now generates asset resolution, static scene layout, and runtime
+  actor placement before runner invocation.
+- Local UE runner can consume `runtime_actor_placement.json`.
+- SceneCapture is the stable synchronized RGB/depth/segmentation path.
+- High-quality RGB should move to Movie Render Queue / Level Sequence while
+  sharing the same camera trajectory with data passes.
+- No UE-specific MCP tool is currently available in this Codex session; only a
+  non-UE MCP server is exposed. UE integration is therefore local CLI/script
+  based for now.
 
-## Capabilities
+## Main Docs
 
-The harness separates reusable pipeline-stage capabilities from physics case
-families. Billiards is one smoke family under generic contact causality, not an
-agent-facing compiler capability.
-
-| Pipeline Capability | Current Role |
-|---|---|
-| `prompt_case_capability_planning` | Maps prompt/task intent into capability layers, case family, required signals, and failure taxonomy. |
-| `asset_intent_resolution` | Classifies physics-critical vs visual-only assets. |
-| `asset_runtime_binding_invocation` | Resolves top-k asset candidates and binds selected real assets or analytic proxies into runtime actors. |
-| `scene_spec_compilation` | Builds runtime scene contracts from capability/case/assets. |
-| `static_scene_placement` | Validates object ids, transforms, support relations, non-overlap, camera coverage, and physics graph membership before runtime. |
-| `runtime_actor_placement_compilation` | Compiles static layout and asset selections into deterministic runtime actor bindings. |
-| `runtime_backend_execution` | Executes UE or labeled debug backend without silent fallback and owns runtime artifact collection. |
-| `physics_property_constraint_validation` | Checks mass, friction, restitution, damping, gravity, material, and parameter-sweep constraints. |
-| `explicit_physics_control_surface` | Represents gravity/material/rigid-body/constraint/force/time controls as typed replayable fields. |
-| `capability_runtime_artifact_bridge` | Adapts runtime artifacts into verifier inputs. |
-| `canonical_signal_capture` | Keeps trajectory, contacts, camera paths, RGB/depth/segmentation, and render metadata on one timebase. |
-| `render_signal_sync_validation` | Validates RGB/depth/segmentation/camera/physics alignment and fails missing views or placeholder passes. |
-| `physics_verifier_truth_gate` | Makes verifier evidence the readiness source of truth instead of UI preview or render success. |
-| `dataset_artifact_packaging` | Packages only readiness-gated artifacts with lineage, hashes, and signal availability. |
-| `pipeline_stage_orchestration` | Keeps capability planning, case spec, scene layout, asset binding, runtime, verifier, diagnosis, and dataset packaging as explicit stages. |
-
-| Physics Capability | Current Role |
-|---|---|
-| `rigid_body_contact_causality` | Active bodies may move; passive rigid bodies must remain still until runtime contact evidence. Billiards/pool and bowling are case families. |
-| `sequential_contact_propagation` | Domino/chain activation order must be contact-driven. |
-| `rigid_body_gravity_collision` | Falling bodies should descend and contact support. |
-| `ramp_sliding_friction` | Rolling/sliding bodies on an inclined plane must respond to gravity and friction. |
-| `projectile_gravity_motion` | Thrown bodies must show launch, apex/descent, forward displacement, and landing/contact evidence. |
-| `bounce_restitution_ball` | Bouncing rigid bodies must descend, contact support, and rebound within a restitution-bounded height envelope. |
-| `rolling_friction_ball` | Rolling rigid bodies must maintain support contact, slow down, and travel within a friction-bounded distance envelope. |
-| `sliding_crate_friction` | Sliding rigid bodies must maintain support contact, decelerate within stop-distance bounds, or stay still below static-friction threshold. |
-| `force_field_wind_drift` | Wind/force-field driven light bodies must declare an explicit wind vector and drift along it within bounded displacement and altitude ranges. |
-| `magnetic_force_field` | Magnetic attraction/repulsion must declare source, subject, mode, and strength; trajectory must move radially toward or away from the source as specified. |
-| `mass_ratio_momentum_transfer` | Contact-driven rigid bodies must declare mass labels and produce post-collision velocity ordering consistent with mass ratio and restitution. |
-| `angular_damping_spin_decay` | Spinning rigid bodies must declare angular velocity and damping, then show monotonic spin decay in angular velocity and rotation trace evidence. |
-| `agent_rigidbody_action_coupling` | Agent or controller actions must be explicit action traces, and target rigid bodies may move only after action/contact or release/impulse evidence. |
-| `constraint_distance_pendulum_motion` | Distance/joint-constrained rigid bodies must preserve anchor-body length within tolerance and export constraint trace evidence. Pendulum is one smoke family. |
-| `constraint_momentum_transfer` | Constrained rigid-body chains must transfer impulse through ordered adjacent contacts; terminal receiver motion must be contact-driven. Newton's cradle is one smoke family. |
-| `elastic_energy_launch` | Elastic stored-energy release must declare spring/compression/mass labels, export release events, and keep post-release kinetic response inside the stored-energy envelope. Spring launch is one smoke family. |
-| `elastic_constraint_rebound` | Elastic tether or bungee-style constraints must export rest length, extension trace, max-stretch bounds, and rebound velocity toward the anchor. Bungee is one smoke family. |
-| `brittle_impact_fracture` | Brittle/destructible bodies must declare fracture threshold, contact impact energy, fracture events, and fragment evidence. Glass panels, mirrors, cups, and crates are case families. |
-
-`billiard_causality_compiler` is not an active capability and is no longer
-published as a capability contract. Treat the name only as a deprecated alias
-when reading old artifacts. New agents should use reusable invariants such as
-`rigid_body_contact_causality`,
-`mass_ratio_momentum_transfer`, or `brittle_impact_fracture` depending on what
-must be verified.
-
-The old billiards failure mode is still preserved as a regression: plausible
-videos can be faked by giving passive bodies hidden velocity. The verifier
-rejects that by requiring passive bodies to start still and move only after
-runtime contact evidence.
-
-Planner output is layered. `CapabilityPlanner.plan(prompt)` returns a primary
-physics capability plus:
-
-- `capability_layers.pipeline_stages`
-- `capability_layers.physics_constraints`
-- `capability_layers.asset_operations`
-- `capability_layers.verification`
-- `supporting_capabilities`
-
-Agents should call these stage capabilities in order rather than treating a case
-family as a template.
-
-## Customization Points
-
-Agents can safely customize:
-
-- case JSON under `cases/`;
-- template parameter ranges under `cases/templates/`;
-- capability contracts under `capabilities/`;
-- asset registry path through `SIM_STUDIO_ASSET_REGISTRY`;
-- camera list through `--views`;
-- render passes through `--render-passes`;
-- UE render size/FPS through `SIM_STUDIO_UE_WIDTH`, `SIM_STUDIO_UE_HEIGHT`,
-  `SIM_STUDIO_UE_FPS`;
-- RGB backend through `SIM_STUDIO_UE_RGB_CAPTURE_BACKEND=scene_capture`.
-
-Agents should not commit generated media, local asset downloads, `runs/`, or
-secret-bearing config.
-
-## Validation Gates
-
-```bash
-python3.13 -m py_compile \
-  run_experiment.py \
-  scripts/harness_generate_cases.py \
-  scripts/harness_local_ue_runner.py \
-  scripts/harness_run_case.py \
-  scripts/harness_run_case_batch.py \
-  scripts/harness_verify_batch.py \
-  scripts/native_ue_physics_phenomena_scene.py
-
-python3.13 -m unittest discover -s tests -p 'test*.py'
-git diff --check
-```
-
-## Known Next Work
-
-1. Replace `highres_viewport` with MRQ/Level Sequence for paper-quality RGB.
-2. Finish true rigid-body gravity advancement in the UE SceneCapture path.
-3. Expand generated case coverage for contact, constraint, gravity, friction, force-field, fracture, and agent-action capabilities.
-4. Add asset import tooling for ModelScope/GitHub-hosted asset registries without
-   committing large assets to git.
+- `docs/HARNESS_FULL_REPORT.md`
+- `docs/CAPABILITY_SYSTEM.md`
+- `docs/AGENT_USAGE.md`
+- `docs/UE_SETUP.md`
+- `docs/ARTIFACT_SCHEMA.md`
+- `docs/CAPABILITY_AUTHORING.md`
+- `docs/PHYSICS_CASE_TARGETS.md`

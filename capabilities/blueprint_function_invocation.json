@@ -1,0 +1,108 @@
+{
+  "schema_version": "harness_capability_v1",
+  "id": "blueprint_function_invocation",
+  "capability_type": "runtime_bridge",
+  "stage_ids": [
+    "blueprint_binding",
+    "runtime_function_invocation",
+    "engine_state_capture"
+  ],
+  "description": "Represent UE Blueprint, C++ plugin, and Python-exposed function calls as deterministic runtime actions with declared inputs, side effects, and required evidence.",
+  "physical_assumptions": [
+    "Blueprint or C++ function calls are part of the executable physics program, not informal implementation details.",
+    "Calls that mutate physics state must be ordered, replayable, and visible in engine-state logs.",
+    "Runtime actor placement should determine which actors receive mesh, material, collision, mass, velocity, impulse, and capture-driver calls."
+  ],
+  "required_signals": [
+    "blueprint_call_plan",
+    "runtime_actor_id",
+    "function_name",
+    "arguments",
+    "call_order",
+    "engine_state_before",
+    "engine_state_after",
+    "runner_log"
+  ],
+  "required_assets": [
+    "UE project",
+    "Blueprint or C++ actor class",
+    "ADPPhysicsRuntime plugin or equivalent contact/trajectory exporter",
+    "asset registry with UE package paths"
+  ],
+  "verifier_rules": [
+    "Every physics-mutating function call references a known runtime_actor_id.",
+    "Mass, collider, collision profile, material, transform, velocity, impulse, and capture calls are echoed in engine-state logs.",
+    "No passive body receives hidden velocity or impulse before the declared action/contact/release event.",
+    "Contact and trajectory export functions run before the verifier marks a UE run reference-ready."
+  ],
+  "failure_taxonomy": [
+    "F2_asset_missing",
+    "F3_invalid_initial_physics_state",
+    "F4_causality_violation",
+    "F6_runtime_or_render_failure",
+    "F7_runtime_artifact_incomplete"
+  ],
+  "repair_suggestions": [
+    "Add blueprint_call_plan to the runtime scene when a case requires Blueprint/C++ side effects.",
+    "Expose missing Blueprint or C++ function calls through the local UE runner instead of hard-coding case behavior.",
+    "Record function-call echo artifacts before trusting trajectory or contact outputs."
+  ],
+  "smoke_cases": [
+    "cases/falling/falling_block_on_floor.json",
+    "cases/bowling/bowling_pin_chain_contact.json"
+  ],
+  "regression_cases": [
+    "cases/billiards/negative_precontact_motion.json"
+  ],
+  "supported_call_families": [
+    {
+      "family": "actor_spawn_and_transform",
+      "examples": [
+        "SpawnActor",
+        "SetActorTransform",
+        "SetActorLocation",
+        "SetActorRotation"
+      ]
+    },
+    {
+      "family": "asset_and_material_binding",
+      "examples": [
+        "SetStaticMesh",
+        "SetMaterial",
+        "ApplyPhysicsMaterial"
+      ]
+    },
+    {
+      "family": "collision_and_rigidbody_setup",
+      "examples": [
+        "SetCollisionEnabled",
+        "SetCollisionProfileName",
+        "SetSimulatePhysics",
+        "SetEnableGravity",
+        "SetMassOverrideInKg",
+        "SetPhysicsLinearVelocity",
+        "AddImpulse"
+      ]
+    },
+    {
+      "family": "physics_trace_capture",
+      "examples": [
+        "RegisterBodyMeters",
+        "RegisterStaticBody",
+        "StartCapture",
+        "AdvanceCapture",
+        "StopCapture",
+        "WriteCaptureJson"
+      ]
+    },
+    {
+      "family": "render_and_camera_capture",
+      "examples": [
+        "SetViewTarget",
+        "SceneCaptureComponent2D.CaptureScene",
+        "ExportDepth",
+        "ExportInstanceSegmentation"
+      ]
+    }
+  ]
+}

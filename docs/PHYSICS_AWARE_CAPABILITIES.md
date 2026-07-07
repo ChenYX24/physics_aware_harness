@@ -15,6 +15,9 @@ This report is generated from project memory, docs, tests, and runtime code. It 
 - `billiard_causality_compiler` 不作为 active capability，也不作为 capability JSON 发布；它只是旧 artifact 的 deprecated alias。
 - 台球、保龄球、箱体撞击等都属于 `rigid_body_contact_causality` 的 case family。
 - 资产能力拆成 `asset_intent_resolution` 和 `asset_runtime_binding_invocation`：先检索/筛选，再绑定 runtime actor。
+- `runtime_actor_placement_compilation` 是 UE 执行前的必经 contract；当前 `ue_backend.py` 已生成并传给 local UE runner。
+- `physics_parameter_semantics` 负责给模型解释 mass、inertia、damping、friction、restitution、gravity、constraint 等参数的单位、意义和预期效果。
+- `blueprint_function_invocation` 把 UE Blueprint/C++/Python 函数调用视为 runtime bridge 能力，要求函数调用计划、参数、顺序和 engine-state echo。
 - 物理能力必须绑定 verifier invariant、required signals、failure taxonomy 和 repair suggestions。
 
 ## Capability Taxonomy
@@ -24,8 +27,8 @@ This report is generated from project memory, docs, tests, and runtime code. It 
 | `pipeline_execution_order` | `prompt_case_capability_planning`, `asset_intent_resolution`, `scene_spec_compilation`, `static_scene_placement`, `asset_runtime_binding_invocation`, `runtime_actor_placement_compilation`, `runtime_backend_execution`, `capability_runtime_artifact_bridge`, `canonical_signal_capture`, `render_signal_sync_validation`, `physics_verifier_truth_gate`, `dataset_artifact_packaging`, `pipeline_stage_orchestration` |
 | `pipeline_stage_capabilities` | `prompt_case_capability_planning`, `scene_spec_compilation`, `static_scene_placement`, `runtime_actor_placement_compilation`, `runtime_backend_execution`, `pipeline_stage_orchestration`, `capability_runtime_artifact_bridge`, `canonical_signal_capture`, `dataset_artifact_packaging` |
 | `asset_operation_capabilities` | `asset_intent_resolution`, `asset_runtime_binding_invocation` |
-| `runtime_bridge_capabilities` | `capability_runtime_artifact_bridge`, `canonical_signal_capture` |
-| `physical_property_constraint_capabilities` | `explicit_physics_control_surface`, `physics_property_constraint_validation` |
+| `runtime_bridge_capabilities` | `blueprint_function_invocation`, `capability_runtime_artifact_bridge`, `canonical_signal_capture` |
+| `physical_property_constraint_capabilities` | `explicit_physics_control_surface`, `physics_parameter_semantics`, `physics_property_constraint_validation` |
 | `physics_behavior_capabilities` | `rigid_body_contact_causality`, `rigid_body_gravity_collision`, `sequential_contact_propagation`, `ramp_sliding_friction`, `projectile_gravity_motion`, `bounce_restitution_ball`, `rolling_friction_ball`, `sliding_crate_friction`, `force_field_wind_drift`, `magnetic_force_field`, `mass_ratio_momentum_transfer`, `angular_damping_spin_decay`, `agent_rigidbody_action_coupling`, `constraint_distance_pendulum_motion`, `constraint_momentum_transfer`, `elastic_energy_launch`, `elastic_constraint_rebound`, `brittle_impact_fracture` |
 | `verification_capabilities` | `physics_verifier_truth_gate`, `render_signal_sync_validation` |
 | `dataset_packaging_capabilities` | `dataset_artifact_packaging` |
@@ -117,6 +120,44 @@ Evidence:
 - confidence: `0.95` from `528` matched lines
 
 Classify object-level asset needs into typed intents and retrieve top-k candidates before runtime binding.
+
+### Physics Parameter Semantics
+
+- id: `physics_parameter_semantics`
+- pattern: `physics_constraint`
+- stages: `physics_parameter_annotation, case_spec_compilation, verifier_expectation`
+- confidence: `0.95`
+
+Make physical controls model-readable and replayable. This capability explains
+what each parameter means and how changing it should affect runtime evidence.
+For example, `inertia_scale` controls resistance to angular acceleration,
+`linear_damping` shortens travel distance, `angular_damping` decays spin,
+`restitution` controls rebound, and `friction_static` changes the threshold
+needed to start sliding.
+
+Key iteration moves:
+- Move parameter choices from prose into `physical_parameters` or `physics_control`.
+- Include units, source, confidence, and expected effect.
+- During sensitivity tests, change one parameter while locking seed, camera,
+  action trace, and initial state.
+
+### Blueprint Function Invocation
+
+- id: `blueprint_function_invocation`
+- pattern: `BRIDGE`
+- stages: `blueprint_binding, runtime_function_invocation, engine_state_capture`
+- confidence: `0.90`
+
+Treat UE Blueprint/C++/Python calls as part of the executable physics program.
+This includes actor spawning, mesh/material binding, collision setup, mass and
+damping assignment, velocity/impulse application, ADPPhysicsRuntime capture,
+and RGB/depth/segmentation capture.
+
+Key iteration moves:
+- Generate `blueprint_call_plan` from `runtime_actor_placement.json`.
+- Record before/after engine state for physics-mutating calls.
+- Reject hidden passive-body velocity or impulse before declared action/contact
+  evidence.
 
 Key iteration moves:
 - Rebuild asset registry or physics index after changing asset sources.

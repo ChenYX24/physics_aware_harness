@@ -6,7 +6,8 @@
     "Asset retrieval is separate from physics verification but must preserve physics-critical properties.",
     "Visual-only assets can be randomized or proxied without changing the physics graph.",
     "Physics-critical asset fallback must be explicit and recorded.",
-    "Runtime actor creation must use the selected asset, collider, material, transform, and collision profile."
+    "Runtime actor creation must use the selected asset, collider, material, transform, and collision profile.",
+    "StaticMesh asset paths, Blueprint/Actor class paths, material paths, and analytic proxy definitions are separate binding channels and must not be substituted for one another."
   ],
   "required_signals": [
     "asset_intents",
@@ -24,7 +25,9 @@
     "Every physics-critical object has a selected asset or explicit proxy fallback.",
     "Selected asset includes collider and material metadata.",
     "Runtime actor bindings reference known object ids.",
-    "Visual-only assets are excluded from the physics graph."
+    "Visual-only assets are excluded from the physics graph.",
+    "Renderable mesh bindings reject `/Script/...` Blueprint/C++ class paths as mesh paths.",
+    "Blueprint or native function invocation is recorded through the blueprint_function_invocation capability, not the static mesh asset field."
   ],
   "failure_taxonomy": [
     "F2_asset_missing",
@@ -34,7 +37,8 @@
   "repair_suggestions": [
     "Update `SIM_STUDIO_ASSET_REGISTRY` or import an ADP asset index.",
     "Add missing collider/mass/material/collision profile fields.",
-    "Use analytic proxy only when real asset metadata is unavailable."
+    "Use analytic proxy only when real asset metadata is unavailable.",
+    "Move Blueprint class paths out of selected_asset.ue_path and into runtime actor class/function invocation metadata."
   ],
   "smoke_cases": [
     "cases/billiards/six_ball_triangle_low_speed.json",

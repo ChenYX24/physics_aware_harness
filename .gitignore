@@ -167,6 +167,12 @@ agent-docs/
 cases/generated/
 _local_inputs/
 
+# UE template runtime materializations and local editor config
+ue_template/Config/DefaultEngine.ini
+ue_template/Config/DefaultInput.ini
+ue_template/Content/AgenticGenerated/
+ue_template/Plugins/*/Config/FilterPlugin.ini
+
 # Local/private asset materializations
 assets/*.local.json
 assets/ue_imports/

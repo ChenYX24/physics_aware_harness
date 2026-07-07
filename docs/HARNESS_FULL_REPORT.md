@@ -79,10 +79,12 @@ assets/*.local.json
 | `asset_intent_resolution` | 已可用 | 区分 physics-critical、visual-only、skeletal/animation、blueprint/logic、scene/map 等资产意图，并检索候选资产。 |
 | `asset_runtime_binding_invocation` | 已可用 | 记录 top-k candidates、selected asset、proxy fallback reason，并要求 runtime actor binding 对齐 object id。 |
 | `static_scene_placement` | 已可用 | 从 case spec + asset resolution 生成 `scene_layout.json`，并检查 object id、support relation、non-overlap、camera coverage 和 physics graph membership。 |
-| `scene_spec_compilation` | 部分可用 | 定义 scene spec contract；真实 UE scene translation 仍需接 runner。 |
-| `runtime_actor_placement_compilation` | 已可用 | 将 scene layout + asset resolution + camera plan 编译成 deterministic runtime actor bindings，并输出 report。 |
+| `scene_spec_compilation` | 部分可用 | 定义 scene spec contract；UE local runner 已可消费 runtime scene，仍需继续收敛更完整的 Blueprint/state echo。 |
+| `runtime_actor_placement_compilation` | 已可用并已接入 UE backend | 将 scene layout + asset resolution + camera plan 编译成 deterministic runtime actor bindings；`--backend ue` 会把 `runtime_actor_placement.json` 传给 local UE runner。 |
 | `runtime_backend_execution` | 新增 contract | 区分 UE production runtime 与 labeled fallback debug runtime；不允许 silent fallback。 |
+| `physics_parameter_semantics` | 已可用 | 给模型提供 mass、inertia、damping、friction、restitution、gravity、constraint 等参数的单位、含义和 expected effect。 |
 | `physics_property_constraint_validation` | 新增 contract | 检查 mass、friction、restitution、damping、gravity、material、parameter sweep 的结构化范围和方向性响应。 |
+| `blueprint_function_invocation` | 已新增 contract | 把 UE Blueprint/C++/Python 函数调用建模为可排序、可回放、可记录的 runtime action。 |
 | `capability_runtime_artifact_bridge` | 已可用 | 把 runtime artifact 标准化为 verifier 输入。 |
 | `render_signal_sync_validation` | 新增 contract | 检查 RGB/depth/segmentation/camera/physics trace 的帧同步、视角完整性和 depth 有效性。 |
 
@@ -229,9 +231,18 @@ python3.13 scripts/import_adp_asset_index.py \
 
 注意：这个脚本不是下载器。它的作用是转换 metadata。真实大资产仍应放在本地、Git LFS、ModelScope 或其他外部存储。
 
-## 7. 静态场景摆放构建能力
+## 7. 资产检索、摆放与调用能力
 
-静态场景构建是核心能力，不是 UI 附属功能。
+资产使用被分成三层：检索、静态摆放、运行时调用。这样模型可以先提出需要什么资产，再让 harness 检索候选，最后把选中的资产或 analytic proxy 绑定到 UE runtime actor，而不是把“找资产”和“物理执行”混在一起。
+
+```text
+case objects
+  -> asset_intent_resolution: top-k candidates, selected asset, fallback reason
+  -> static_scene_placement: object nodes, support relation, non-overlap, camera coverage
+  -> runtime_actor_placement_compilation: runtime_actor_id, transform, collider, mass, material, collision profile
+  -> asset_runtime_binding_invocation: selected UE path/proxy becomes spawnable actor
+  -> blueprint_function_invocation: SpawnActor / SetMesh / SetCollision / SetMass / SetVelocity / StartCapture
+```
 
 当前已经实现：
 
@@ -253,6 +264,12 @@ python3.13 scripts/import_adp_asset_index.py \
   - 检查 non-overlap、support relation、collider/mass/material/collision profile、camera plan。
 - `scripts/harness_build_static_scene.py`
   - 生成 `asset_resolution.json`、`scene_layout.json`、`static_scene_report.json`。
+- `scripts/harness_compile_actor_placement.py`
+  - 生成 `runtime_actor_placement.json`、`runtime_actor_placement_report.json`。
+- `harness/runtime/ue_backend.py`
+  - 在 UE preflight 前生成 asset/static/runtime actor contract，并把 `--actor-placement` 传给 runner。
+- `scripts/harness_local_ue_runner.py`
+  - 优先读取 `runtime_actor_placement.json`，再生成 `studio_runtime_scene.json` 给 native UE script。
 
 当前验证结果：
 
@@ -262,13 +279,41 @@ python3.13 scripts/import_adp_asset_index.py \
 - `falling_block_on_floor`：static scene layout pass。
 - 人工重叠 negative case：`F3_invalid_initial_physics_state` 被抓到。
 - 缺 asset binding negative case：`F2_asset_missing` 被抓到。
+- fake UE runner 成功路径：确认收到 `--actor-placement`，完整 artifact contract 生成。
 
-仍然缺真实 UE 消费路径：
+仍然缺的真实 UE 深化：
 
-1. UE runner 直接读取 `runtime_actor_placement.json`。
-   - 当前 compiler 已生成 actor bindings。
-   - 还需要在 UE 中按 binding 创建 actor、设置 transform、collider、mass、material、collision profile。
-   - 生成 camera rig / light rig，并把 runtime actor id 回写 artifact。
+1. native UE script 需要进一步把 actor placement 转成完整 Blueprint/C++ function call echo：
+   - `SpawnActor`
+   - `SetStaticMesh`
+   - `SetMaterial`
+   - `SetCollisionEnabled`
+   - `SetCollisionProfileName`
+   - `SetSimulatePhysics`
+   - `SetMassOverrideInKg`
+   - `SetPhysicsLinearVelocity`
+   - `RegisterBodyMeters`
+2. 每个 physics-mutating call 都应写入 engine-state log，用于 verifier 回读。
+3. camera rig / light rig 也应有调用计划和状态回写。
+
+## 7.1 物理参数控制语义
+
+`physics_parameter_semantics` 是给模型和 verifier 共用的参数说明层。它避免模型只说“更有惯性/更滑/更弹”，而不输出可执行字段。
+
+| 参数 | 含义 | 对行为的影响 |
+|---|---|---|
+| `mass_kg` | 刚体质量。 | 同样 impulse 下质量越大，速度变化越小；碰撞动量传递受质量比影响。 |
+| `inertia_scale` | 转动惯量倍率。 | 越大越不容易被扭矩或偏心碰撞改变角速度。 |
+| `linear_velocity_init` | 初始线速度。 | 只应给 active/launch body；passive target 默认必须为 0。 |
+| `angular_velocity_init` | 初始角速度。 | 产生自转；需要 angular damping 或外力解释后续变化。 |
+| `linear_damping` | 线速度阻尼。 | 越大移动越快衰减，停距更短。 |
+| `angular_damping` | 角速度阻尼。 | 越大 spin 衰减越快。 |
+| `friction_static` | 静摩擦阈值。 | 越大越难被推/滑动。 |
+| `friction_dynamic` | 动摩擦。 | 越大滑行越短。 |
+| `restitution` | 反弹/恢复系数。 | 越大反弹更高；大于 1 通常是能量增益。 |
+| `constraint_stiffness` | 约束/弹簧刚度。 | 越大拉伸越小、回弹越强，也更易不稳定。 |
+
+完整 machine-readable 表在 `capabilities/physics_parameter_semantics.json`。
 
 ## 8. 动态物理 case 系统
 
@@ -390,7 +435,7 @@ fallback 可以写 placeholder render artifact，但必须标记为非 UE。UE p
 
 ```bash
 python3.13 -m unittest discover -s tests -p 'test*.py'
-# 93 tests OK
+# 132 tests OK
 ```
 
 ```bash
@@ -480,6 +525,15 @@ python3.13 scripts/harness_run_case_batch.py cases/generated/impulse_chain_seed5
 - 台球三角阵 case：8/8 physics-critical assets resolved。
 - 斜面 case：2/2 physics-critical assets resolved。
 
+真实 UE 双 pass 视频验证：
+
+| Case | 输出 | Sync | Verifier | 结论 |
+|---|---|---|---|---|
+| `six_ball_triangle_low_speed` | 5 机位 RGB/depth/segmentation，各 241 帧，1280x720/60fps | pass，`depth_source=ue`，`multi_view_sync_ok=true` | pass | `reference_ready=true`，当前最稳定的真实 UE reference case。 |
+| `falling_block_on_floor` | 5 机位 RGB/depth/segmentation，各 241 帧，1280x720/60fps | pass，`depth_source=ue`，`multi_view_sync_ok=true` | fail: `F4_causality_violation`，`z_drop_m=0.0` | 视觉/信号合同通过，但真实物理 trace 未满足下落 invariant，不能作为 reference-ready。 |
+
+注意：RGB-only run 可以产出 `rgb.mp4`，但在 M2.3 strict multimodal gate 下会因为缺 depth/segmentation 被判为非 reference-ready。这是预期行为，不应把 RGB-only smoke 当作完整数据样本。
+
 ## 13. PDF 派生物理 TODO
 
 来源：用户提供的物理模拟场景 PDF。public 文档不保留本机绝对路径。
@@ -497,9 +551,9 @@ TODO：
 
 | 优先级 | Case | Harness capability | 状态 |
 |---|---|---|---|
-| P0 | 台球/保龄球/球体接触碰撞 | `rigid_body_contact_causality` | fallback/verifier 已有；台球和保龄球都是 case family；UE contact path TODO |
+| P0 | 台球/保龄球/球体接触碰撞 | `rigid_body_contact_causality` | fallback/verifier 已有；台球 `six_ball_triangle_low_speed` 已跑通真实 UE 5 机位 RGB/depth/segmentation reference case；保龄球 UE case 仍 TODO |
 | P0 | 多米诺/保龄球链式碰撞 | `sequential_contact_propagation` 扩展 | domino 已有；bowling contact-causality family 已有；更复杂 pin fan-out 仍可扩展 |
-| P0 | 掉落/上抛/抛体 | `projectile_gravity_motion` | 当前分支已有 fallback/verifier；UE TODO |
+| P0 | 掉落/上抛/抛体 | `projectile_gravity_motion` | 当前分支已有 fallback/verifier；`falling_block_on_floor` UE render/sync 已过，但真实下落 trace 被 verifier 拒绝，需修 actor physics application |
 | P0 | 斜面滚动/下滑/上滚 | `ramp_sliding_friction` | ramp 分支已有 fallback/verifier；UE TODO |
 | P1 | 皮球/刚体反弹 | `bounce_restitution_ball` | 当前分支已有 fallback/verifier；UE restitution material/contact TODO |
 | P1 | 滚动摩擦/停距 | `rolling_friction_ball` | 当前分支已有 fallback/verifier；UE rolling friction material/contact TODO |
@@ -518,10 +572,24 @@ TODO：
 
 推荐下一步顺序：
 
-1. 让 UE runner 读取 `runtime_actor_placement.json`。
-2. 让 actor bindings 驱动真实 actor 生成。
-3. 接 `runtime_backend_execution` 的真实 UE trajectory/contact/camera/render outputs。
+1. 让 actor bindings 驱动完整真实 actor 生成：mesh、material、collider、mass、damping、velocity、impulse、constraint。
+2. 让 native UE script 逐项回写 `blueprint_call_plan` / engine-state echo。
+3. 修复 falling/ramp/projectile 等 case 的真实 UE physics stepping，使 trajectory/contact 不再只是视觉或 replay 证据。
 4. 让 billiards/ramp/falling/projectile/fracture/magnetic 通过真实 trajectory/contact verifier。
+5. 批量跑视频时，先用 generated cases + seeds 建 batch manifest，再按 suite 输出 `batch_render_report.json`，统计 video_count、depth/mask availability、sync pass rate、verifier pass rate。
+
+### 13.1 批量视频生产 TODO
+
+| 优先级 | TODO | 验收 |
+|---|---|---|
+| P0 | `scripts/harness_run_case_batch.py --backend ue` 支持 deterministic batch manifest。 | 同一 seed 的 case list、run ids、camera plan 稳定。 |
+| P0 | UE run 输出每 case 的 `video.mp4`、multi-view RGB、depth、segmentation、trajectory、contacts。 | `render_sync_report.json` pass 或明确 failure code。 |
+| P0 | 批量报告 `batch_render_report.json`。 | success_rate、video_count、depth_fail_rate、sync_fail_rate、avg_render_time、per-camera stats。 |
+| P0 | 分离 quick smoke 与 production profiles。 | quick: 少机位/短时/低分辨率；production: 5 机位、RGB/depth/mask、固定 seed、完整 sync gate。 |
+| P1 | asset batch audit。 | 每个 physics-critical actor 有 selected asset/proxy、collider、mass、material、collision profile。 |
+| P1 | Blueprint call echo。 | 每个 physics-mutating call 有 before/after engine state。 |
+| P1 | MRQ/Level Sequence 高质量 RGB。 | 与 data pass 共享 camera trajectory，frame mismatch 为 0。 |
+| P2 | 远程/多进程 UE worker。 | 不共享临时目录，不混 run artifacts，可恢复失败 case。 |
 
 ## 14. 其他人如何扩展/优化 harness
 
@@ -574,5 +642,6 @@ git diff --check
 - fallback backend 是 deterministic toy/proxy，只适合 verifier 开发，不是 ground-truth physics。
 - UE SceneCapture multi-view RGB/depth/segmentation 是当前稳定 data path；highres viewport 只作为 debug。
 - 一些 UE rigid-body trajectory 还需要 runtime stepping 修复，才能让真实物理 trace 通过 verifier。
-- 静态场景摆放和 runtime actor placement compiler 已有 builder/verifier；真实 UE actor 创建仍需接入 `runtime_actor_placement.json`。
+- 静态场景摆放和 runtime actor placement compiler 已有 builder/verifier；UE backend 已传入 `runtime_actor_placement.json`，但 native UE script 仍需更完整的 Blueprint/C++ call echo 和 physics parameter application。
 - 流体类 case 暂缓，等真实 fluid backend 或可靠 proxy 方案。
+- 当前 Codex session 没有暴露 UE 专用 MCP；可用 MCP 不是 Unreal 相关。短期集成路径仍是本地 CLI、UE Python、ADPPhysicsRuntime plugin；后续如有 UE MCP，应封装成 `blueprint_function_invocation` 的执行 provider，而不是绕过 harness contract。

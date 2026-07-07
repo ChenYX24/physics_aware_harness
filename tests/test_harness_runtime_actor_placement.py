@@ -84,6 +84,24 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual(report["failure_type"], "F2_asset_missing")
         self.assertEqual(report["first_failure"]["metric"], "missing_asset_or_proxy_binding")
 
+    def test_local_ue_runner_does_not_treat_blueprint_class_as_mesh_path(self) -> None:
+        from scripts.harness_local_ue_runner import is_runtime_mesh_path, ue_path_for_binding
+
+        binding = {
+            "role": "support",
+            "asset": {
+                "ue_path": "/Script/Engine.Actor",
+                "proxy": True,
+                "binding_source": "ue_asset",
+            },
+            "physics": {
+                "collider": "box",
+            },
+        }
+
+        self.assertFalse(is_runtime_mesh_path("/Script/Engine.Actor"))
+        self.assertEqual(ue_path_for_binding(binding), "/Engine/BasicShapes/Cube.Cube")
+
     def test_actor_placement_cli_writes_contract_and_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result = subprocess.run(

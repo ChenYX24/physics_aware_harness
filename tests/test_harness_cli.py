@@ -183,6 +183,8 @@ class HarnessCliTests(unittest.TestCase):
         taxonomy = payload["capability_taxonomy"]
         self.assertIn("prompt_case_capability_planning", taxonomy["pipeline_stage_capabilities"])
         self.assertIn("asset_intent_resolution", taxonomy["asset_operation_capabilities"])
+        self.assertIn("blueprint_function_invocation", taxonomy["runtime_bridge_capabilities"])
+        self.assertIn("physics_parameter_semantics", taxonomy["physical_property_constraint_capabilities"])
         self.assertIn("physics_verifier_truth_gate", taxonomy["verification_capabilities"])
         self.assertIn("rigid_body_contact_causality", taxonomy["physics_behavior_capabilities"])
         self.assertEqual(taxonomy["pipeline_execution_order"][0], "prompt_case_capability_planning")

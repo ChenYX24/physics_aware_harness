@@ -110,7 +110,7 @@ class CapabilityStore:
             "physical_property_constraint_capabilities": sorted(
                 item.id
                 for item in active
-                if item.id in {"explicit_physics_control_surface", "physics_property_constraint_validation"}
+                if item.id in {"explicit_physics_control_surface", "physics_parameter_semantics", "physics_property_constraint_validation"}
             ),
             "physics_behavior_capabilities": sorted(
                 item.id
@@ -165,11 +165,11 @@ def order_capability_ids(capability_ids: Any, *, preferred_order: tuple[str, ...
 def infer_capability_type(capability_id: str) -> str:
     if capability_id in {"asset_intent_resolution", "asset_runtime_binding_invocation"}:
         return "asset_operation"
-    if capability_id in {"capability_runtime_artifact_bridge", "canonical_signal_capture"}:
+    if capability_id in {"blueprint_function_invocation", "capability_runtime_artifact_bridge", "canonical_signal_capture"}:
         return "runtime_bridge"
     if capability_id in {"pipeline_stage_orchestration", "scene_spec_compilation", "static_scene_placement", "prompt_case_capability_planning", "runtime_actor_placement_compilation", "runtime_backend_execution"}:
         return "pipeline_stage"
-    if capability_id in {"physics_property_constraint_validation", "explicit_physics_control_surface"}:
+    if capability_id in {"physics_parameter_semantics", "physics_property_constraint_validation", "explicit_physics_control_surface"}:
         return "physics_constraint"
     if capability_id in {"physics_verifier_truth_gate", "render_signal_sync_validation"}:
         return "verification"
