@@ -267,6 +267,8 @@ export SIM_STUDIO_ASSET_REGISTRY="$SIM_HARNESS_WORKSPACE/catalog/adp/asset_regis
 export SIM_STUDIO_UE_CONTACT_EXPORT=1
 export SIM_STUDIO_UE_RUNNER_CMD="python3.13 scripts/harness_local_ue_runner.py"
 export SIM_STUDIO_UE_RGB_CAPTURE_BACKEND=scene_capture
+# Optional on a shared multi-GPU host:
+export SIM_STUDIO_UE_GRAPHICS_ADAPTER=3
 export SIM_HARNESS_ALLOW_LOCAL_PREVIEW_ASSETS=1
 export SIM_STUDIO_UE_RIGID_MODE=chaos_live
 ```

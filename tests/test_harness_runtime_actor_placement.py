@@ -121,6 +121,21 @@ class RuntimeActorPlacementTests(unittest.TestCase):
 
         self.assertFalse(controls["gravity_enabled"])
 
+    def test_unreal_editor_command_can_select_a_shared_server_gpu(self) -> None:
+        from scripts.harness_local_ue_runner import unreal_editor_command
+
+        with patch.dict("os.environ", {"SIM_STUDIO_UE_GRAPHICS_ADAPTER": "3"}, clear=True):
+            command = unreal_editor_command(
+                Path("/opt/UE/Engine/Binaries/Linux/UnrealEditor-Cmd"),
+                Path("/workspace/SimulatorWorkspace.uproject"),
+                Path("/repo/scripts/native_scene.py"),
+            )
+
+        self.assertIn("-graphicsadapter=3", command)
+        with patch.dict("os.environ", {"SIM_STUDIO_UE_GRAPHICS_ADAPTER": "-1"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "non-negative integer"):
+                unreal_editor_command(Path("/ue"), Path("/project"), Path("/script"))
+
     def test_bowling_case_compiles_runtime_actor_bindings(self) -> None:
         from harness.assets.asset_resolver import resolve_asset_intents
         from harness.planning.static_scene_builder import build_static_scene_layout

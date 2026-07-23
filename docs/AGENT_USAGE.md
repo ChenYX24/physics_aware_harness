@@ -87,6 +87,7 @@ Optional:
 | `SIM_STUDIO_UE_FPS` | Frame rate and physics trace sampling target. |
 | `SIM_STUDIO_UE_RENDER_MODE` | `rgb`, `data`, or `both`. |
 | `SIM_STUDIO_UE_RGB_CAPTURE_BACKEND` | Use `scene_capture` for stable synchronized output. |
+| `SIM_STUDIO_UE_GRAPHICS_ADAPTER` | Non-negative UE adapter index for a shared multi-GPU host. |
 
 ## What To Read After A Run
 

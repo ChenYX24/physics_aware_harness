@@ -93,17 +93,7 @@ def main() -> int:
         write_json(run_dir / "local_ue_runner_report.json", fail_report("F3_UE_SCRIPT_MISSING", f"UE Python scene script not found: {ue_script}"))
         return 2
 
-    command = [
-        str(ue_executable),
-        f"-project={ue_project}",
-        "-RenderOffScreen",
-        "-unattended",
-        "-nosplash",
-        "-NoScreenMessages",
-        "-stdout",
-        "-FullStdOutLogOutput",
-        f"-ExecutePythonScript={ue_script}",
-    ]
+    command = unreal_editor_command(ue_executable, ue_project, ue_script)
     started = time.perf_counter()
     pass_results: dict[str, dict[str, Any]] = {}
     rgb_native_output: Path | None = None
@@ -949,6 +939,30 @@ def default_lighting_controls(pass_mode: str = "data", case_spec: dict[str, Any]
             }
         )
     return controls
+
+
+def unreal_editor_command(ue_executable: Path, ue_project: Path, ue_script: Path) -> list[str]:
+    command = [
+        str(ue_executable),
+        f"-project={ue_project}",
+        "-RenderOffScreen",
+        "-unattended",
+        "-nosplash",
+        "-NoScreenMessages",
+        "-stdout",
+        "-FullStdOutLogOutput",
+        f"-ExecutePythonScript={ue_script}",
+    ]
+    adapter = os.environ.get("SIM_STUDIO_UE_GRAPHICS_ADAPTER")
+    if adapter is not None:
+        try:
+            adapter_index = int(adapter)
+        except ValueError as exc:
+            raise ValueError("SIM_STUDIO_UE_GRAPHICS_ADAPTER must be a non-negative integer") from exc
+        if adapter_index < 0:
+            raise ValueError("SIM_STUDIO_UE_GRAPHICS_ADAPTER must be a non-negative integer")
+        command.append(f"-graphicsadapter={adapter_index}")
+    return command
 
 
 def build_render_config(args: argparse.Namespace, case_spec: dict[str, Any], camera_plan: dict[str, Any]) -> dict[str, Any]:
