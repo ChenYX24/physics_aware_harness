@@ -953,7 +953,7 @@ def render_video_grid(
     )
     filters.append(
         "".join(f"[v{index}]" for index in range(len(sources)))
-        + f"xstack=inputs={len(sources)}:layout={layout}:fill=black:shortest=1[vout]"
+        + f"xstack=inputs={len(sources)}:layout={layout}:shortest=1[vout]"
     )
     command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
     for source in sources:

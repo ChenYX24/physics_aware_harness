@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ from harness.core.artifact_manager import (
     DeliveryError,
     publish_complete_case_delivery,
     publish_diagnostic_case_delivery,
+    render_video_grid,
 )
 from harness.core.artifact_schema import read_json, write_json
 
@@ -97,6 +99,27 @@ def write_delivery_run(run_dir: Path, *, frame_count: int = 2, hard_gate_passed:
 
 
 class WorldModelArtifactManagerTests(unittest.TestCase):
+    def test_video_grid_uses_legacy_compatible_xstack_options(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sources = [root / "front.mp4", root / "event.mp4"]
+            for source in sources:
+                source.write_bytes(MP4)
+            target = root / "overall.mp4"
+
+            def fake_run(command, **_kwargs):
+                Path(command[-1]).write_bytes(MP4)
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+            with patch("harness.core.artifact_manager.subprocess.run", side_effect=fake_run) as runner:
+                render_video_grid(sources, target, columns=2, rows=1)
+
+            command = runner.call_args.args[0]
+            filter_graph = command[command.index("-filter_complex") + 1]
+            self.assertIn("xstack=inputs=2:layout=0_0|640_0:shortest=1", filter_graph)
+            self.assertNotIn(":fill=", filter_graph)
+            self.assertTrue(target.is_file())
+
     def test_one_run_publish_creates_and_exports_three_multiview_overalls(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
