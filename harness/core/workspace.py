@@ -128,7 +128,8 @@ def setup_doctor(
             and ue_version.get("MajorVersion") == 5
             and ue_version.get("MinorVersion") == 7
         ),
-        "adp_physics_runtime": _project_plugin_ready(project),
+        "adp_physics_runtime_source": _project_plugin_source_ready(project),
+        "adp_physics_runtime_binary": _project_plugin_binary_ready(project, ue_path),
         "asset_content": bool(
             asset_path
             and asset_path.is_dir()
@@ -144,7 +145,8 @@ def setup_doctor(
         "workspace_ue_project",
         "ue_executable",
         "ue_version_5_7",
-        "adp_physics_runtime",
+        "adp_physics_runtime_source",
+        "adp_physics_runtime_binary",
         "asset_content",
         "asset_mount",
     )
@@ -158,7 +160,8 @@ def setup_doctor(
         "workspace_ue_project": "workspace UE project",
         "ue_executable": "executable UnrealEditor-Cmd",
         "ue_version_5_7": "Unreal Engine 5.7 Build.version",
-        "adp_physics_runtime": "enabled ADPPhysicsRuntime plugin source",
+        "adp_physics_runtime_source": "enabled ADPPhysicsRuntime plugin source",
+        "adp_physics_runtime_binary": "ADPPhysicsRuntime editor binary for the UE host platform",
         "asset_content": "operator-supplied UE asset Content with .uasset/.umap packages",
         "asset_mount": "workspace UE Content mount",
         "native_smoke_accepted": "hard-gate-passing native UE smoke run",
@@ -197,7 +200,7 @@ def _unreal_version(executable: Path | None) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _project_plugin_ready(project: Path) -> bool:
+def _project_plugin_source_ready(project: Path) -> bool:
     if not project.is_file() or project.is_symlink():
         return False
     try:
@@ -217,6 +220,121 @@ def _project_plugin_ready(project: Path) -> bool:
         and (plugin / "ADPPhysicsRuntime.uplugin").is_file()
         and (plugin / "Source" / "ADPPhysicsRuntime" / "ADPPhysicsRuntime.Build.cs").is_file()
     )
+
+
+def _project_plugin_binary_ready(project: Path, ue_executable: Path | None) -> bool:
+    platform = _ue_host_platform(ue_executable)
+    if platform is None or not _project_plugin_source_ready(project):
+        return False
+    return _plugin_binary_ready(project.parent / "Plugins" / "ADPPhysicsRuntime", platform)
+
+
+def _ue_host_platform(ue_executable: Path | None) -> str | None:
+    if ue_executable is None:
+        return None
+    platform = ue_executable.parent.name
+    return platform if platform in {"Linux", "Mac", "Win64"} else None
+
+
+def _plugin_binary_ready(plugin: Path, platform: str) -> bool:
+    binaries = plugin / "Binaries" / platform
+    expected = {
+        "Linux": "libUnrealEditor-ADPPhysicsRuntime.so",
+        "Mac": "UnrealEditor-ADPPhysicsRuntime.dylib",
+        "Win64": "UnrealEditor-ADPPhysicsRuntime.dll",
+    }
+    return bool(
+        (binaries / "UnrealEditor.modules").is_file()
+        and (binaries / expected[platform]).is_file()
+    )
+
+
+def build_ue_plugin(
+    path: str | Path | None,
+    *,
+    ue_executable: str | Path,
+    repo_root: str | Path = REPO_ROOT,
+    max_parallel_actions: int = 4,
+) -> dict[str, object]:
+    """Build and activate the runtime plugin without modifying the Git checkout."""
+    root = workspace_root(path)
+    _require_initialized(root)
+    if max_parallel_actions < 1:
+        raise WorkspaceError("max_parallel_actions must be at least 1")
+    ue_path = Path(ue_executable).expanduser().resolve(strict=False)
+    if not ue_path.is_file() or not os.access(ue_path, os.X_OK):
+        raise WorkspaceError(f"UE executable is missing or not executable: {ue_path}")
+    platform = _ue_host_platform(ue_path)
+    if platform not in {"Linux", "Mac"}:
+        raise WorkspaceError(f"automatic plugin build is supported on Linux and Mac, not {platform or 'unknown'}")
+    engine_root = ue_path.parents[2]
+    uat = engine_root / "Build" / "BatchFiles" / "RunUAT.sh"
+    if not uat.is_file() or not os.access(uat, os.X_OK):
+        raise WorkspaceError(f"RunUAT.sh is missing or not executable: {uat}")
+    source = _existing_directory(
+        Path(repo_root).expanduser().resolve(strict=False) / "ue_template" / "Plugins" / "ADPPhysicsRuntime",
+        "template runtime plugin",
+    )
+    cache_key = _plugin_build_cache_key(source, engine_root / "Build" / "Build.version")
+    build_root = root / "cache" / "ue_plugins"
+    package = build_root / f"ADPPhysicsRuntime_{platform}_{cache_key}"
+    log_path = build_root / f"ADPPhysicsRuntime_{platform}_{cache_key}.log"
+    reused = _plugin_binary_ready(package, platform)
+    command: list[str] = []
+    if not reused:
+        if _lexists(package):
+            raise WorkspaceError(f"cached plugin package is incomplete; inspect without overwriting it: {package}")
+        build_root.mkdir(parents=True, exist_ok=True)
+        staging = build_root / f".ADPPhysicsRuntime_{platform}_{cache_key}.building-{os.getpid()}-{time.time_ns()}"
+        command = [
+            str(uat),
+            "BuildPlugin",
+            f"-Plugin={source / 'ADPPhysicsRuntime.uplugin'}",
+            f"-Package={staging}",
+            f"-TargetPlatforms={platform}",
+            f"-MaxParallelActions={max_parallel_actions}",
+        ]
+        with log_path.open("w", encoding="utf-8") as log:
+            completed = subprocess.run(
+                command,
+                cwd=Path(repo_root).expanduser().resolve(strict=False),
+                text=True,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+        if completed.returncode != 0:
+            raise WorkspaceError(f"UE plugin build failed with exit code {completed.returncode}; inspect {log_path}")
+        if not _plugin_binary_ready(staging, platform):
+            raise WorkspaceError(f"UE plugin build completed without the expected {platform} editor binary; inspect {log_path}")
+        staging.rename(package)
+
+    link = root / "ue" / "Plugins" / "ADPPhysicsRuntime"
+    if _lexists(link) and not link.is_symlink():
+        raise WorkspaceError(f"refusing to replace non-symlink runtime plugin: {link}")
+    if link.is_symlink() and link.resolve(strict=False) != package:
+        link.unlink()
+    if not link.is_symlink():
+        link.symlink_to(package, target_is_directory=True)
+    return {
+        "schema_version": "harness_ue_plugin_build_v1",
+        "platform": platform,
+        "package": str(package),
+        "runtime_plugin": str(link),
+        "reused": reused,
+        "log": str(log_path) if log_path.exists() else None,
+        "command": command,
+    }
+
+
+def _plugin_build_cache_key(source: Path, build_version: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted((row for row in source.rglob("*") if row.is_file() and not row.is_symlink()), key=lambda row: row.as_posix()):
+        digest.update(path.relative_to(source).as_posix().encode("utf-8"))
+        digest.update(path.read_bytes())
+    if build_version.is_file() and not build_version.is_symlink():
+        digest.update(build_version.read_bytes())
+    return digest.hexdigest()[:12]
 
 
 def _contains_ue_package(content: Path) -> bool:

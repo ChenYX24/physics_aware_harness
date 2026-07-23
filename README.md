@@ -210,13 +210,18 @@ export SIM_HARNESS_ADP_ROOT=/absolute/path/to/AgenticDataPlatform
 
 python3.13 scripts/harness_workspace.py bootstrap \
   --adp-content "$SIM_HARNESS_ADP_ROOT/Content"
+python3.13 scripts/harness_workspace.py build-ue-plugin \
+  --ue-executable /absolute/path/to/UnrealEditor-Cmd
 python3.13 scripts/harness_workspace.py doctor \
   --ue-executable /absolute/path/to/UnrealEditor-Cmd \
   --asset-content "$SIM_HARNESS_ADP_ROOT/Content"
 python3.13 scripts/harness_workspace.py status
 ```
 
-第一次 doctor 只应达到 `ue_config_ready=true`；`ue_ready` 还要求一次已通过
+`build-ue-plugin` 会使用 UE 自带的 `RunUAT.sh BuildPlugin`，把与当前 UE
+版本和宿主平台匹配的插件编译到 workspace cache，再原子切换 workspace
+插件软链接；不会把 Linux/Mac 二进制写回 Git。第一次 doctor 只应达到
+`ue_config_ready=true`；`ue_ready` 还要求一次已通过
 hard gate 的真实 UE smoke。完成 smoke 后再提供其 run 目录：
 
 ```bash

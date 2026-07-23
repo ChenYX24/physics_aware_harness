@@ -480,8 +480,9 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual(binding["physics"]["collision_geometry_source"], "analytic_sphere")
         self.assertEqual(binding["physics"]["collision_geometry_verification"], "runtime_controlled")
 
-    def test_selected_asset_collision_metadata_is_not_reported_as_body_setup_verified(self) -> None:
+    def test_declared_box_collider_overrides_unverified_selected_asset_collision(self) -> None:
         from harness.runtime.actor_placement import compile_runtime_actor_placement
+        from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement, ue_path_for_binding
 
         placement = compile_runtime_actor_placement(
             {"case_id": "box"},
@@ -499,9 +500,18 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         )
 
         binding = placement["actor_bindings"][0]
-        self.assertEqual(binding["asset"]["runtime_usage"], "collision_and_visual")
-        self.assertEqual(binding["physics"]["collision_geometry_source"], "selected_asset")
-        self.assertEqual(binding["physics"]["collision_geometry_verification"], "declared_unverified")
+        self.assertEqual(binding["asset"]["runtime_usage"], "analytic_proxy")
+        self.assertEqual(binding["physics"]["collision_geometry_source"], "analytic_box")
+        self.assertEqual(binding["physics"]["collision_geometry_verification"], "runtime_controlled")
+        self.assertEqual(ue_path_for_binding(binding), "/Engine/BasicShapes/Cube.Cube")
+        dynamic, static = runtime_objects_from_actor_placement(
+            placement,
+            {"case_id": "box", "objects": [{"id": "box"}]},
+        )
+        self.assertEqual(static, [])
+        self.assertEqual(dynamic[0]["ue5_path"], "/Engine/BasicShapes/Cube.Cube")
+        self.assertNotIn("visual_ue5_path", dynamic[0]["params"])
+        self.assertEqual(dynamic[0]["physics_properties"]["collision_geometry_source"], "analytic_box")
 
     def test_local_ue_runner_preserves_compiled_actor_extent(self) -> None:
         from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement
@@ -566,6 +576,19 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual(physics_controls["state_solver"], "ue_chaos")
         self.assertEqual([obj["id"] for obj in dynamic], [f"domino_{index}" for index in range(5)])
         self.assertEqual([obj["id"] for obj in static], ["domino_floor"])
+        self.assertTrue(all(obj["ue5_path"] == "/Engine/BasicShapes/Cube.Cube" for obj in dynamic + static))
+        self.assertTrue(
+            all(
+                obj["physics_properties"]["collision_geometry_source"] == "analytic_box"
+                for obj in dynamic + static
+            )
+        )
+        self.assertTrue(
+            all(
+                obj["physics_properties"]["collision_geometry_verification"] == "runtime_controlled"
+                for obj in dynamic + static
+            )
+        )
         self.assertEqual(static[0]["params"]["support_top_m"], 0.0)
         self.assertEqual(dynamic[0]["rotation_degrees"], [0.0, -20.0, 0.0])
         self.assertTrue(all(obj.get("rotation_degrees") == [0.0, 0.0, 0.0] for obj in dynamic[1:]))

@@ -80,17 +80,31 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
     ue_path = asset_binding.get("selected_asset_ue_path")
     collider = str(physics.get("collider") or node.get("shape") or "box").casefold()
     collision_enabled = bool(physics_critical and not is_field)
-    controlled_analytic_collision = not ue_path or (simulate_physics and "sphere" in collider)
+    analytic_primitive = (
+        "sphere"
+        if "sphere" in collider
+        else "box"
+        if "box" in collider
+        else None
+    )
+    # A declared primitive collider is part of the CaseSpec physics contract.
+    # Never let an arbitrary selected asset's pivot or BodySetup silently replace
+    # that geometry: those properties vary by asset and by target UE platform.
+    controlled_analytic_collision = bool(
+        collision_enabled and (not ue_path or analytic_primitive is not None)
+    )
     collision_geometry_source = (
         "none"
         if not collision_enabled
-        else f"analytic_{collider}"
+        else f"analytic_{analytic_primitive or collider}"
         if controlled_analytic_collision
         else "selected_asset"
     )
     runtime_usage = (
         "visual_proxy"
-        if ue_path and collision_geometry_source != "selected_asset"
+        if ue_path and analytic_primitive == "sphere" and simulate_physics
+        else "analytic_proxy"
+        if controlled_analytic_collision
         else "collision_and_visual"
         if ue_path
         else "analytic_proxy"

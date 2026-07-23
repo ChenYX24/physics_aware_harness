@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +17,7 @@ from harness.core.workspace import (
     WORKSPACE_DIRS,
     WorkspaceError,
     bootstrap_workspace,
+    build_ue_plugin,
     case_output_root,
     configure_ue_mount,
     init_workspace,
@@ -156,12 +159,48 @@ class HarnessWorkspaceTests(unittest.TestCase):
             self.assertIn("workspace UE project", before_mount["missing_for_ue"])
             self.assertFalse(fake_engine["ue_config_ready"])
             self.assertIn("Unreal Engine 5.7 Build.version", fake_engine["missing_for_ue"])
+            self.assertTrue(configured["checks"]["adp_physics_runtime_binary"])
             self.assertTrue(configured["ue_config_ready"])
             self.assertFalse(configured["ue_ready"])
             self.assertIn("hard-gate-passing native UE smoke run", configured["missing_for_ue"])
             self.assertFalse(fake_report["ue_ready"])
             self.assertTrue(accepted["ue_ready"])
             self.assertFalse(all_static["ue_ready"])
+
+    def test_build_ue_plugin_packages_and_activates_host_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = init_workspace(base / "workspace")
+            ue = base / "UE_5.7" / "Engine" / "Binaries" / "Linux" / "UnrealEditor-Cmd"
+            ue.parent.mkdir(parents=True)
+            ue.write_text("#!/bin/sh\n", encoding="utf-8")
+            ue.chmod(0o755)
+            uat = base / "UE_5.7" / "Engine" / "Build" / "BatchFiles" / "RunUAT.sh"
+            uat.parent.mkdir(parents=True)
+            uat.write_text("#!/bin/sh\n", encoding="utf-8")
+            uat.chmod(0o755)
+
+            def fake_build(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                package = Path(next(part.split("=", 1)[1] for part in command if part.startswith("-Package=")))
+                shutil.copytree(workspace_module.REPO_ROOT / "ue_template" / "Plugins" / "ADPPhysicsRuntime", package)
+                binaries = package / "Binaries" / "Linux"
+                binaries.mkdir(parents=True)
+                (binaries / "UnrealEditor.modules").write_text("{}", encoding="utf-8")
+                (binaries / "libUnrealEditor-ADPPhysicsRuntime.so").write_bytes(b"linux-plugin")
+                return subprocess.CompletedProcess(command, 0)
+
+            (root / "ue" / "Plugins").mkdir(parents=True)
+            source_link = root / "ue" / "Plugins" / "ADPPhysicsRuntime"
+            source_link.symlink_to(
+                workspace_module.REPO_ROOT / "ue_template" / "Plugins" / "ADPPhysicsRuntime",
+                target_is_directory=True,
+            )
+            with patch("harness.core.workspace.subprocess.run", side_effect=fake_build):
+                report = build_ue_plugin(root, ue_executable=ue)
+
+            self.assertFalse(report["reused"])
+            self.assertTrue(source_link.is_symlink())
+            self.assertTrue((source_link / "Binaries" / "Linux" / "libUnrealEditor-ADPPhysicsRuntime.so").is_file())
 
     def test_relative_runtime_paths_resolve_under_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

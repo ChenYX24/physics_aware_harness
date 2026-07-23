@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 from harness.core.workspace import (
     WorkspaceError,
     bootstrap_workspace,
+    build_ue_plugin,
     configure_ue_mount,
     init_workspace,
     prune_rejected,
@@ -33,6 +34,9 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--ue-executable", help="Absolute UnrealEditor-Cmd path.")
     doctor.add_argument("--asset-content", help="Operator-supplied Unreal Content directory.")
     doctor.add_argument("--native-smoke-run", help="Hard-gate-passing native UE run under workspace/cases.")
+    build_plugin = commands.add_parser("build-ue-plugin", help="Build and activate ADPPhysicsRuntime for this UE host.")
+    build_plugin.add_argument("--ue-executable", required=True, help="Absolute UnrealEditor-Cmd path.")
+    build_plugin.add_argument("--max-parallel-actions", type=int, default=4)
     commands.add_parser("status", help="Show workspace, review, and UE mount status.")
     mount = commands.add_parser("mount-ue", help="Create a content-only UE project with local asset links.")
     mount.add_argument("--adp-content", required=True, help="Path to the imported ADP Unreal Content directory.")
@@ -68,6 +72,12 @@ def main(argv: list[str] | None = None) -> int:
                 ue_executable=args.ue_executable,
                 asset_content=args.asset_content,
                 native_smoke_run=args.native_smoke_run,
+            )
+        elif args.command == "build-ue-plugin":
+            result = build_ue_plugin(
+                args.workspace,
+                ue_executable=args.ue_executable,
+                max_parallel_actions=args.max_parallel_actions,
             )
         elif args.command == "status":
             result = workspace_status(args.workspace)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import shlex
 import subprocess
 from pathlib import Path
@@ -562,8 +563,26 @@ def invoke_real_ue_runner(
 ) -> dict[str, Any]:
     run_id = run_dir.name
     runner_command = build_runner_command(run_dir, preflight, requested_views=requested_views, render_passes=render_passes)
+    timeout = int(os.environ.get("SIM_STUDIO_UE_TIMEOUT_SECONDS", "3600"))
     try:
-        completed = subprocess.run(runner_command, cwd=Path(__file__).resolve().parents[2], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=int(os.environ.get("SIM_STUDIO_UE_TIMEOUT_SECONDS", "3600")))
+        completed = run_runner_process_group(
+            runner_command,
+            cwd=Path(__file__).resolve().parents[2],
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:  # pragma: no cover - requires a real long-running UE child.
+        write_json(output_dir / "runner_stdout.json", {"stdout": exc.stdout or ""})
+        write_json(output_dir / "runner_stderr.json", {"stderr": exc.stderr or ""})
+        return build_backend_report(
+            case,
+            run_id,
+            preflight,
+            phase="runtime",
+            real_ue_invoked=True,
+            failure_code="F7_UE_RUNNER_TIMEOUT",
+            failure_message=f"UE runner exceeded {timeout} seconds; its process group was terminated.",
+            runner_command=runner_command,
+        )
     except Exception as exc:  # pragma: no cover - requires real UE bridge config.
         return build_backend_report(
             case,
@@ -618,6 +637,40 @@ def invoke_real_ue_runner(
             failure_category="artifact_missing" if first_code in {"F_DEPTH_MISSING", "F_VIEW_MISMATCH"} else "render_sync_failure",
         )
     return build_backend_report(case, run_id, preflight, phase="runtime", real_ue_invoked=True, status="completed", runner_command=runner_command)
+
+
+def run_runner_process_group(
+    command: list[str],
+    *,
+    cwd: Path,
+    timeout: int,
+) -> subprocess.CompletedProcess[str]:
+    """Run the bridge and ensure a timeout also terminates its UnrealEditor child."""
+    proc = subprocess.Popen(
+        command,
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGTERM)
+        else:  # pragma: no cover - Windows is not a supported native-UE host yet.
+            proc.terminate()
+        try:
+            stdout, stderr = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            if os.name == "posix":
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:  # pragma: no cover
+                proc.kill()
+            stdout, stderr = proc.communicate()
+        raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
 
 
 def build_runner_command(run_dir: Path, preflight: dict[str, Any], *, requested_views: list[str], render_passes: list[str]) -> list[str]:

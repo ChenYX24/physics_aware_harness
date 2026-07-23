@@ -598,9 +598,12 @@ def ue_path_for_binding(binding: dict[str, Any]) -> str:
     ue_path = str(asset.get("ue_path") or "")
     physics = binding.get("physics") if isinstance(binding.get("physics"), dict) else {}
     collider = str(physics.get("collider") or "").casefold()
+    collision_geometry_source = str(physics.get("collision_geometry_source") or "").casefold()
     role = str(binding.get("role") or "").casefold()
-    if physics.get("simulate_physics") and "sphere" in collider:
+    if collision_geometry_source == "analytic_sphere":
         return "/Engine/BasicShapes/Sphere.Sphere"
+    if collision_geometry_source == "analytic_box":
+        return "/Engine/BasicShapes/Cube.Cube"
     if role == "elastic_constrained_body":
         return "/Engine/BasicShapes/Sphere.Sphere"
     if role == "elastic_constraint_anchor":
