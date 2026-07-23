@@ -1,0 +1,270 @@
+{
+  "schema_version": "harness_variant_plan_v1",
+  "case_route": "brittle_fracture/glass_panel/v001_energy_response",
+  "base_case": "cases/fracture/glass_energy_response_matrix/glass_panel_e16_shatter.json",
+  "selection_strategy": "baseline_plus_one_factor_at_a_time",
+  "combination_count": 3,
+  "axes": [
+    {
+      "id": "impact_speed",
+      "label": "撞击速度",
+      "tier": "primary",
+      "baseline": "2p0_m_s",
+      "value_pointer": "/physical_parameters/impact_speed_m_s",
+      "input": {
+        "type": "number",
+        "unit": "m/s",
+        "min": 0.8,
+        "max": 4.0,
+        "step": 0.1,
+        "allow_custom": true
+      },
+      "levels": [
+        {
+          "id": "1p0_m_s",
+          "label": "1.0 m/s · 裂纹",
+          "value": 1.0,
+          "edits": {
+            "/physical_parameters/impact_speed_m_s": 1.0
+          }
+        },
+        {
+          "id": "2p0_m_s",
+          "label": "2.0 m/s · 破碎",
+          "value": 2.0,
+          "edits": {
+            "/physical_parameters/impact_speed_m_s": 2.0
+          }
+        },
+        {
+          "id": "3p0_m_s",
+          "label": "3.0 m/s · 爆裂",
+          "value": 3.0,
+          "edits": {
+            "/physical_parameters/impact_speed_m_s": 3.0
+          }
+        }
+      ]
+    }
+  ],
+  "selected_variants": [
+    {
+      "id": "baseline",
+      "levels": {
+        "impact_speed": "2p0_m_s"
+      }
+    },
+    {
+      "id": "impact_speed-1p0_m_s",
+      "levels": {
+        "impact_speed": "1p0_m_s"
+      }
+    },
+    {
+      "id": "impact_speed-3p0_m_s",
+      "levels": {
+        "impact_speed": "3p0_m_s"
+      }
+    }
+  ],
+  "ui": {
+    "title": "钢球撞击玻璃板",
+    "summary": "改变初速度，同时保持 0.25 秒撞击时刻与目标撞点不变。",
+    "fields": [
+      {
+        "id": "impactor_mass",
+        "label": "钢球质量",
+        "tier": "common",
+        "type": "number",
+        "unit": "kg",
+        "min": 4.0,
+        "max": 12.0,
+        "step": 0.5,
+        "pointers": [
+          "/physical_parameters/impactor_mass_kg",
+          "/objects/0/mass_kg"
+        ]
+      },
+      {
+        "id": "duration",
+        "label": "仿真时长",
+        "tier": "common",
+        "type": "number",
+        "unit": "s",
+        "min": 1.0,
+        "max": 6.0,
+        "step": 0.5,
+        "pointers": [
+          "/scene/duration_s",
+          "/expected_physics/duration_s"
+        ]
+      },
+      {
+        "id": "render_fps",
+        "label": "渲染 FPS",
+        "tier": "common",
+        "type": "number",
+        "unit": "fps",
+        "min": 12,
+        "max": 60,
+        "step": 1,
+        "pointers": [
+          "/timebase/render_fps"
+        ]
+      },
+      {
+        "id": "physics_hz",
+        "label": "物理解算频率",
+        "tier": "advanced",
+        "type": "number",
+        "unit": "Hz",
+        "min": 60,
+        "max": 240,
+        "step": 1,
+        "warning": "改变后需要重新检查 timebase、CCD 和接触证据。",
+        "pointers": [
+          "/timebase/physics_hz"
+        ]
+      },
+      {
+        "id": "ballistic_time",
+        "label": "计划撞击时间",
+        "tier": "advanced",
+        "type": "number",
+        "unit": "s",
+        "min": 0.1,
+        "max": 0.6,
+        "step": 0.01,
+        "warning": "会同步改变钢球初始位置；过短可能使初态贴近玻璃。",
+        "pointers": [
+          "/physical_parameters/ballistic_time_to_impact_s"
+        ]
+      },
+      {
+        "id": "shatter_threshold",
+        "label": "破碎能量阈值",
+        "tier": "advanced",
+        "type": "number",
+        "unit": "J",
+        "min": 2.0,
+        "max": 24.0,
+        "step": 0.5,
+        "warning": "这是 verifier 与 Geometry Collection 响应共同使用的能力边界。",
+        "pointers": [
+          "/physical_parameters/energy_response_curve_j/shattered",
+          "/objects/1/fracture_response/energy_response_levels/1/minimum_impact_energy_j"
+        ]
+      },
+      {
+        "id": "burst_threshold",
+        "label": "爆裂能量阈值",
+        "tier": "advanced",
+        "type": "number",
+        "unit": "J",
+        "min": 10.0,
+        "max": 60.0,
+        "step": 0.5,
+        "warning": "必须高于破碎阈值，否则能量响应区间会重叠。",
+        "pointers": [
+          "/physical_parameters/energy_response_curve_j/burst",
+          "/objects/1/fracture_response/energy_response_levels/2/minimum_impact_energy_j"
+        ]
+      },
+      {
+        "id": "map",
+        "label": "UE Map",
+        "tier": "advanced",
+        "type": "text",
+        "warning": "只能填写当前 workspace UE 工程中真实存在的 /Game package。",
+        "pointers": [
+          "/scene/map_preference"
+        ]
+      }
+    ],
+    "computed_edits": {
+      "/physical_parameters/nominal_incident_energy_j": {
+        "op": "mul",
+        "args": [
+          0.5,
+          {
+            "path": "/physical_parameters/impactor_mass_kg"
+          },
+          {
+            "op": "pow",
+            "args": [
+              {
+                "path": "/physical_parameters/impact_speed_m_s"
+              },
+              2
+            ]
+          }
+        ]
+      },
+      "/expected_physics/nominal_incident_energy_j": {
+        "path": "/physical_parameters/nominal_incident_energy_j"
+      },
+      "/objects/0/initial_position_m/1": {
+        "op": "sub",
+        "args": [
+          {
+            "path": "/physical_parameters/target_impact_point_m/1"
+          },
+          {
+            "op": "mul",
+            "args": [
+              {
+                "path": "/physical_parameters/impact_speed_m_s"
+              },
+              {
+                "path": "/physical_parameters/ballistic_time_to_impact_s"
+              }
+            ]
+          }
+        ]
+      },
+      "/objects/0/initial_velocity_m_s/1": {
+        "path": "/physical_parameters/impact_speed_m_s"
+      },
+      "/expected_physics/expected_damage_state": {
+        "op": "bands",
+        "value": {
+          "path": "/physical_parameters/nominal_incident_energy_j"
+        },
+        "bands": [
+          {
+            "lt": {
+              "path": "/physical_parameters/energy_response_curve_j/shattered"
+            },
+            "result": "cracked"
+          },
+          {
+            "lt": {
+              "path": "/physical_parameters/energy_response_curve_j/burst"
+            },
+            "result": "shattered"
+          },
+          {
+            "result": "burst"
+          }
+        ]
+      }
+    },
+    "render": {
+      "passes": [
+        "rgb"
+      ],
+      "available_passes": [
+        "rgb",
+        "depth",
+        "segmentation"
+      ],
+      "views": [
+        "front_static",
+        "side_static",
+        "top_down",
+        "tracking_subject",
+        "event_closeup"
+      ]
+    }
+  }
+}

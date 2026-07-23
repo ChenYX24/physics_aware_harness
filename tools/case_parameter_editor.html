@@ -1,0 +1,677 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Case Parameter Plane · Physics Harness</title>
+    <style>
+      :root {
+        --paper: #eaf3f7;
+        --ink: #14262e;
+        --cyan: #53b8c7;
+        --orange: #f26b38;
+        --steel: #64777f;
+        --line: rgba(20, 38, 46, 0.22);
+        --white: #f8fcfd;
+        --shadow: 7px 7px 0 rgba(20, 38, 46, 0.1);
+      }
+
+      * { box-sizing: border-box; }
+      html { background: var(--paper); color: var(--ink); }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "Avenir Next", "Segoe UI", sans-serif;
+        background: var(--paper);
+      }
+
+      button, input { font: inherit; }
+      button { color: inherit; }
+      code, .micro, .eyebrow, .route, .status, .tag {
+        font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+      }
+
+      .topbar {
+        display: flex;
+        align-items: center;
+        min-height: 68px;
+        border-bottom: 2px solid var(--ink);
+        background: rgba(234, 243, 247, 0.96);
+      }
+
+      .brand {
+        align-self: stretch;
+        display: grid;
+        place-items: center;
+        width: 220px;
+        padding: 0 20px;
+        color: var(--white);
+        background: var(--ink);
+        font-family: "Avenir Next Condensed", "Arial Narrow", sans-serif;
+        font-size: 19px;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+      }
+
+      .top-actions {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        width: 100%;
+        padding: 10px 24px;
+      }
+
+      .status {
+        margin-left: auto;
+        font-size: 11px;
+        letter-spacing: 0.03em;
+      }
+
+      .status::before {
+        content: "";
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        margin-right: 8px;
+        border-radius: 50%;
+        background: var(--steel);
+      }
+
+      .status[data-kind="ready"]::before { background: var(--cyan); }
+      .status[data-kind="error"] { color: #9e3017; }
+      .status[data-kind="error"]::before { background: var(--orange); }
+
+      .button, .file-button {
+        min-height: 38px;
+        border: 1px solid var(--ink);
+        padding: 8px 14px;
+        background: transparent;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .button:hover, .file-button:hover { background: var(--white); }
+      .button.primary {
+        color: var(--white);
+        background: var(--ink);
+      }
+      .button.primary:hover { background: #263d47; }
+      .file-button input { display: none; }
+
+      main { padding: 34px clamp(18px, 4vw, 64px) 100px; }
+
+      .empty-state {
+        max-width: 760px;
+        margin: 12vh auto 0;
+        border: 2px solid var(--ink);
+        padding: 48px;
+        background: var(--white);
+        box-shadow: var(--shadow);
+      }
+
+      .empty-state h1, .case-head h1 {
+        margin: 0;
+        font-family: "Avenir Next Condensed", "Arial Narrow", sans-serif;
+        font-size: clamp(44px, 7vw, 92px);
+        line-height: 0.88;
+        letter-spacing: -0.045em;
+        text-transform: uppercase;
+      }
+
+      .empty-state p { max-width: 560px; font-size: 18px; line-height: 1.6; }
+      .editor { max-width: 1540px; margin: 0 auto; }
+
+      .case-head {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 32px;
+        align-items: end;
+        margin-bottom: 30px;
+      }
+
+      .case-head h1 { max-width: 920px; }
+      .case-head p {
+        max-width: 720px;
+        margin: 18px 0 0;
+        color: #3e555f;
+        font-size: 17px;
+        line-height: 1.55;
+      }
+
+      .route-plate {
+        width: min(340px, 100%);
+        border-left: 5px solid var(--cyan);
+        padding: 9px 0 9px 16px;
+      }
+      .eyebrow, .micro {
+        margin: 0 0 7px;
+        color: var(--steel);
+        font-size: 10px;
+        font-weight: 800;
+        letter-spacing: 0.12em;
+      }
+      .route { font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+
+      .workbench {
+        display: grid;
+        grid-template-columns: minmax(520px, 1.55fr) minmax(310px, 0.8fr);
+        gap: 24px;
+        align-items: start;
+      }
+
+      .control-stack { display: grid; gap: 20px; }
+      .panel {
+        border: 1px solid var(--ink);
+        background: rgba(248, 252, 253, 0.88);
+        box-shadow: var(--shadow);
+      }
+      .panel-head {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-height: 48px;
+        padding: 10px 16px;
+        border-bottom: 1px solid var(--ink);
+      }
+      .panel-head h2 {
+        margin: 0;
+        font-family: "Avenir Next Condensed", "Arial Narrow", sans-serif;
+        font-size: 22px;
+        text-transform: uppercase;
+      }
+      .tag {
+        margin-left: auto;
+        padding: 3px 6px;
+        color: var(--white);
+        background: var(--steel);
+        font-size: 9px;
+        letter-spacing: 0.08em;
+      }
+      .panel-body { padding: 18px; }
+
+      fieldset { min-width: 0; border: 0; margin: 0; padding: 0; }
+      legend {
+        margin-bottom: 3px;
+        font-family: "Avenir Next Condensed", "Arial Narrow", sans-serif;
+        font-size: 28px;
+        font-weight: 800;
+      }
+
+      .preset-row {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+        margin: 16px 0 10px;
+      }
+      .preset {
+        display: grid;
+        gap: 12px;
+        min-height: 84px;
+        border: 1px solid var(--line);
+        padding: 12px;
+        text-align: left;
+        background: transparent;
+        cursor: pointer;
+      }
+      .preset span { font-size: 12px; }
+      .preset strong { font-family: "IBM Plex Mono", monospace; font-size: 16px; }
+      .preset:hover, .preset.selected {
+        border-color: var(--ink);
+        background: rgba(83, 184, 199, 0.17);
+      }
+      .preset.selected { box-shadow: inset 0 -4px 0 var(--cyan); }
+
+      .custom-value {
+        display: grid;
+        grid-template-columns: auto auto minmax(100px, 160px) auto 1fr;
+        gap: 9px;
+        align-items: center;
+        min-height: 46px;
+        border-top: 1px dashed var(--line);
+        padding-top: 10px;
+      }
+      .custom-value input[type="number"], .field-input input {
+        width: 100%;
+        min-height: 38px;
+        border: 1px solid var(--line);
+        border-radius: 0;
+        padding: 7px 9px;
+        color: var(--ink);
+        background: var(--white);
+      }
+      .custom-value.active input[type="number"] { border-color: var(--orange); }
+
+      .field-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+      .field-control {
+        display: grid;
+        align-content: start;
+        gap: 7px;
+        min-width: 0;
+        border-left: 3px solid var(--line);
+        padding-left: 12px;
+      }
+      .field-control > span { font-weight: 750; }
+      .field-input { display: grid; grid-template-columns: 1fr auto; gap: 7px; align-items: center; }
+      .field-input b { color: var(--steel); font-size: 11px; }
+      .field-control code {
+        color: var(--steel);
+        font-size: 9px;
+        line-height: 1.35;
+        overflow-wrap: anywhere;
+      }
+      .field-warning {
+        margin: 0;
+        color: #963316;
+        font-size: 11px;
+        line-height: 1.4;
+      }
+
+      details.panel > summary {
+        display: flex;
+        align-items: center;
+        min-height: 48px;
+        border-bottom: 1px solid transparent;
+        padding: 10px 16px;
+        font-family: "Avenir Next Condensed", "Arial Narrow", sans-serif;
+        font-size: 22px;
+        font-weight: 800;
+        text-transform: uppercase;
+        cursor: pointer;
+      }
+      details[open] > summary { border-bottom-color: var(--ink); }
+      details > summary::after {
+        content: "NOT RECOMMENDED / EDITABLE";
+        margin-left: auto;
+        color: var(--orange);
+        font-family: "IBM Plex Mono", monospace;
+        font-size: 9px;
+        letter-spacing: 0.08em;
+      }
+
+      .capture-grid {
+        display: grid;
+        grid-template-columns: 0.75fr 1.25fr;
+        gap: 22px;
+      }
+      .capture-grid h3 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase; }
+      .check-row { display: flex; flex-wrap: wrap; gap: 7px; }
+      .check-chip input { position: absolute; opacity: 0; pointer-events: none; }
+      .check-chip span {
+        display: block;
+        border: 1px solid var(--line);
+        padding: 7px 9px;
+        font-family: "IBM Plex Mono", monospace;
+        font-size: 10px;
+        cursor: pointer;
+      }
+      .check-chip input:checked + span {
+        border-color: var(--ink);
+        color: var(--ink);
+        background: var(--cyan);
+      }
+
+      .audit-stack { display: grid; gap: 20px; position: sticky; top: 18px; }
+      .energy-body {
+        display: grid;
+        grid-template-columns: 92px 1fr;
+        gap: 22px;
+        min-height: 270px;
+      }
+      .energy-ladder {
+        position: relative;
+        width: 38px;
+        height: 232px;
+        margin-left: 18px;
+        border-left: 2px solid var(--ink);
+      }
+      .energy-marker {
+        position: absolute;
+        left: -10px;
+        width: 20px;
+        height: 20px;
+        border: 4px solid var(--paper);
+        border-radius: 50%;
+        background: var(--orange);
+        box-shadow: 0 0 0 1px var(--ink);
+        transition: bottom 180ms ease-out;
+      }
+      .threshold {
+        position: absolute;
+        left: -2px;
+        width: 82px;
+        border-top: 1px solid var(--ink);
+      }
+      .threshold span {
+        position: absolute;
+        top: -8px;
+        left: 46px;
+        width: 110px;
+        padding-left: 4px;
+        color: var(--steel);
+        background: var(--white);
+        font-family: "IBM Plex Mono", monospace;
+        font-size: 8px;
+      }
+      .energy-readout { align-self: end; padding-bottom: 15px; }
+      .energy-readout strong {
+        display: block;
+        margin: 2px 0 14px;
+        font-family: "Avenir Next Condensed", sans-serif;
+        font-size: 42px;
+        line-height: 1;
+      }
+      .damage-state {
+        display: inline-block;
+        border: 1px solid var(--ink);
+        padding: 5px 8px;
+        color: var(--white);
+        background: var(--ink);
+        font-family: "IBM Plex Mono", monospace;
+        font-size: 11px;
+        text-transform: uppercase;
+      }
+
+      .file-list, .diff-list { list-style: none; margin: 0; padding: 0; }
+      .file-list li {
+        display: grid;
+        grid-template-columns: 54px 1fr;
+        gap: 4px 10px;
+        border-bottom: 1px solid var(--line);
+        padding: 11px 0;
+      }
+      .file-list li:last-child { border: 0; }
+      .file-list b { color: var(--orange); font-family: "IBM Plex Mono", monospace; font-size: 9px; }
+      .file-list code { overflow-wrap: anywhere; font-size: 10px; }
+      .file-list span { grid-column: 2; color: var(--steel); font-size: 10px; }
+
+      .diff-list {
+        max-height: 390px;
+        overflow: auto;
+        scrollbar-color: var(--steel) transparent;
+      }
+      .diff-list li {
+        display: grid;
+        grid-template-columns: 1fr auto 1fr;
+        gap: 5px 8px;
+        border-bottom: 1px solid var(--line);
+        padding: 10px 0;
+        font-family: "IBM Plex Mono", monospace;
+        font-size: 9px;
+      }
+      .diff-list code { grid-column: 1 / -1; color: var(--steel); overflow-wrap: anywhere; }
+      .diff-list span { color: var(--steel); overflow-wrap: anywhere; }
+      .diff-list i { font-style: normal; }
+      .diff-list strong { color: var(--ink); overflow-wrap: anywhere; }
+
+      .save-row {
+        display: grid;
+        grid-template-columns: minmax(160px, 0.7fr) auto 1fr;
+        gap: 10px;
+        align-items: end;
+        margin-bottom: 18px;
+      }
+      .save-row label { display: grid; gap: 5px; font-size: 11px; font-weight: 750; }
+      .save-row input {
+        min-height: 38px;
+        border: 1px solid var(--line);
+        border-radius: 0;
+        padding: 7px 9px;
+        background: var(--white);
+      }
+      .save-row p { margin: 0; color: var(--steel); font-size: 11px; line-height: 1.4; }
+      .variant-queue { display: grid; gap: 7px; list-style: none; margin: 0; padding: 0; }
+      .variant-queue li {
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        gap: 12px;
+        align-items: center;
+        border: 1px solid var(--line);
+        padding: 10px 12px;
+        background: rgba(234, 243, 247, 0.45);
+      }
+      .variant-queue strong { font-family: "IBM Plex Mono", monospace; font-size: 11px; }
+      .variant-queue p { margin: 4px 0; color: #3e555f; font-size: 11px; }
+      .variant-queue code { color: var(--steel); font-size: 9px; }
+      .variant-queue button {
+        border: 0;
+        padding: 6px 9px;
+        color: var(--steel);
+        background: transparent;
+        font-size: 20px;
+        cursor: pointer;
+      }
+      .queue-select input { position: absolute; opacity: 0; }
+      .queue-select span {
+        display: block;
+        width: 19px;
+        height: 19px;
+        border: 1px solid var(--ink);
+        cursor: pointer;
+      }
+      .queue-select input:checked + span {
+        border: 4px solid var(--white);
+        outline: 1px solid var(--ink);
+        background: var(--cyan);
+      }
+      .planned-badge, .custom-badge {
+        margin-left: 7px;
+        padding: 2px 4px;
+        color: var(--white);
+        background: var(--steel);
+        font-family: "IBM Plex Mono", monospace;
+        font-size: 7px;
+        letter-spacing: 0.06em;
+      }
+      .custom-badge { background: var(--orange); }
+
+      .command-dock {
+        position: fixed;
+        right: 0;
+        bottom: 0;
+        left: 0;
+        z-index: 4;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) repeat(3, auto);
+        align-items: center;
+        gap: 12px;
+        border-top: 2px solid var(--ink);
+        padding: 12px clamp(18px, 4vw, 64px);
+        color: var(--white);
+        background: var(--ink);
+      }
+      .command-dock pre {
+        min-width: 0;
+        max-height: 72px;
+        margin: 0;
+        overflow: auto;
+        color: #c7f5fb;
+        font-size: 10px;
+        white-space: pre-wrap;
+      }
+      .command-dock .button { border-color: var(--white); color: var(--white); }
+      .command-dock .button.primary { color: var(--ink); background: var(--cyan); }
+      .output-meta { display: block; margin-bottom: 5px; color: #9fb1b8; font-size: 9px; }
+      .muted { color: var(--steel); font-size: 12px; }
+
+      input:focus-visible, button:focus-visible, summary:focus-visible {
+        outline: 3px solid var(--orange);
+        outline-offset: 2px;
+      }
+
+      [hidden] { display: none !important; }
+
+      @media (max-width: 1050px) {
+        .workbench { grid-template-columns: 1fr; }
+        .audit-stack { position: static; grid-template-columns: 1fr 1fr; }
+        .audit-stack .panel:last-child { grid-column: 1 / -1; }
+        .case-head { grid-template-columns: 1fr; }
+      }
+
+      @media (max-width: 720px) {
+        .topbar { align-items: stretch; flex-direction: column; }
+        .brand { width: 100%; min-height: 46px; }
+        .top-actions { flex-wrap: wrap; padding: 10px 14px; }
+        .status { width: 100%; margin: 0; }
+        main { padding: 24px 14px 160px; }
+        .empty-state { padding: 28px 22px; }
+        .preset-row, .field-grid, .capture-grid, .audit-stack, .save-row { grid-template-columns: 1fr; }
+        .audit-stack .panel:last-child { grid-column: auto; }
+        .command-dock { grid-template-columns: 1fr 1fr; }
+        .command-dock > div { grid-column: 1 / -1; }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">PHYSICS / PARAMETER PLANE</div>
+      <div class="top-actions">
+        <button id="loadSample" class="button" type="button">载入玻璃示例</button>
+        <label class="file-button">
+          选择 Plan + CaseSpec JSON
+          <input id="jsonFiles" type="file" accept=".json,application/json" multiple>
+        </label>
+        <div id="status" class="status" role="status" aria-live="polite">等待 JSON</div>
+      </div>
+    </header>
+
+    <main>
+      <section id="emptyState" class="empty-state">
+        <p class="eyebrow">NO LLM REQUIRED AFTER PLANNING</p>
+        <h1>Case Parameter Plane</h1>
+        <p>
+          解析模型第一次规划生成的 variant plan，把主要变量、通用设置和高级设置映射为
+          可运行的 CaseSpec。选择上方玻璃示例，或同时载入 plan 与基础 CaseSpec。
+        </p>
+      </section>
+
+      <section id="editor" class="editor" hidden>
+        <header class="case-head">
+          <div>
+            <p class="eyebrow">MODEL-PLANNED / HUMAN-EDITABLE / SCRIPT-RUNNABLE</p>
+            <h1 id="caseTitle"></h1>
+            <p id="caseSummary"></p>
+          </div>
+          <div class="route-plate">
+            <p class="eyebrow">WORKSPACE ROUTE</p>
+            <div id="caseRoute" class="route"></div>
+          </div>
+        </header>
+
+        <div class="workbench">
+          <div class="control-stack">
+            <section class="panel">
+              <div class="panel-head">
+                <h2>01 / 核心变量</h2>
+                <span class="tag">PRESET + CUSTOM</span>
+              </div>
+              <div id="primaryControls" class="panel-body"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <h2>02 / 通用参数</h2>
+                <span class="tag">SAFE TO TUNE</span>
+              </div>
+              <div id="commonControls" class="panel-body field-grid"></div>
+            </section>
+
+            <details class="panel">
+              <summary>03 / 高级选项</summary>
+              <div id="advancedControls" class="panel-body field-grid"></div>
+            </details>
+
+            <section class="panel">
+              <div class="panel-head">
+                <h2>04 / 捕获计划</h2>
+                <span class="tag">ONE COMMAND</span>
+              </div>
+              <div class="panel-body capture-grid">
+                <div>
+                  <h3>Render passes</h3>
+                  <div id="passControls" class="check-row"></div>
+                </div>
+                <div>
+                  <h3>Camera views</h3>
+                  <div id="viewControls" class="check-row"></div>
+                </div>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <h2>05 / 变体队列</h2>
+                <span id="queueCount" class="tag"></span>
+              </div>
+              <div class="panel-body">
+                <div class="save-row">
+                  <label>
+                    变体名称
+                    <input id="variantLabel" type="text" autocomplete="off">
+                  </label>
+                  <button id="saveVariant" class="button" type="button">保存当前参数</button>
+                  <p>模型首轮计划的变体会自动列出，但默认只勾选 baseline；人工编辑保存后自动选中。</p>
+                </div>
+                <ul id="variantQueue" class="variant-queue"></ul>
+              </div>
+            </section>
+          </div>
+
+          <aside class="audit-stack">
+            <section id="energyPanel" class="panel">
+              <div class="panel-head">
+                <h2>Energy ladder</h2>
+                <span id="damageState" class="damage-state"></span>
+              </div>
+              <div class="panel-body energy-body">
+                <div class="energy-ladder" aria-label="撞击能量与破碎阈值">
+                  <div id="energyMarker" class="energy-marker"></div>
+                  <div id="shatterMark" class="threshold"><span id="shatterLabel"></span></div>
+                  <div id="burstMark" class="threshold"><span id="burstLabel"></span></div>
+                </div>
+                <div class="energy-readout">
+                  <p class="micro">COMPUTED INCIDENT ENERGY</p>
+                  <strong id="energyValue"></strong>
+                  <p class="muted">速度、质量或阈值变化会立即更新联动字段和预期破坏等级。</p>
+                </div>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head"><h2>影响文件</h2></div>
+              <div class="panel-body"><ul id="fileList" class="file-list"></ul></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <h2>JSON 变更</h2>
+                <span id="changeCount" class="tag"></span>
+              </div>
+              <div class="panel-body"><ul id="diffList" class="diff-list"></ul></div>
+            </section>
+          </aside>
+        </div>
+      </section>
+    </main>
+
+    <footer class="command-dock">
+      <div>
+        <span id="outputName" class="output-meta">尚未生成 CaseSpec</span>
+        <pre id="renderCommand">载入 JSON 后生成命令</pre>
+      </div>
+      <button id="copyCommand" class="button" type="button">复制当前命令</button>
+      <button id="copyBatchCommand" class="button" type="button">复制批次命令</button>
+      <button id="downloadBatch" class="button primary" type="button">下载已选批次 JSON</button>
+    </footer>
+
+    <script src="case_parameter_editor.js"></script>
+  </body>
+</html>

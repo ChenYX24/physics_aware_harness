@@ -39,6 +39,23 @@ def base_case() -> dict:
 
 
 class VariantPlanTests(unittest.TestCase):
+    def test_glass_speed_plan_recomputes_coupled_case_fields(self) -> None:
+        plan = ROOT / "config" / "variant_plans" / "glass_panel_impact_speed.json"
+        expected = {
+            "impact_speed-1p0_m_s": (1.0, 4.0, -0.33, "cracked"),
+            "baseline": (2.0, 16.0, -0.58, "shattered"),
+            "impact_speed-3p0_m_s": (3.0, 36.0, -0.83, "burst"),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            for variant, (speed, energy, start_y, state) in expected.items():
+                payload = materialize_variant(plan, variant, Path(tmp) / f"{variant}.json")
+                self.assertEqual(payload["physical_parameters"]["impact_speed_m_s"], speed)
+                self.assertEqual(payload["physical_parameters"]["nominal_incident_energy_j"], energy)
+                self.assertEqual(payload["expected_physics"]["nominal_incident_energy_j"], energy)
+                self.assertAlmostEqual(payload["objects"][0]["initial_position_m"][1], start_y)
+                self.assertEqual(payload["objects"][0]["initial_velocity_m_s"][1], speed)
+                self.assertEqual(payload["expected_physics"]["expected_damage_state"], state)
+
     def test_plan_records_full_space_but_selects_only_baseline_and_ofat_variants(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

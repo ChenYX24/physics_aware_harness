@@ -216,6 +216,7 @@ class HarnessCliTests(unittest.TestCase):
             "harness_smoke.py",
             "harness_generate_cases.py",
             "harness_run_case_batch.py",
+            "harness_render_parameter_batch.py",
             "harness_verify_batch.py",
             "harness_build_static_scene.py",
             "harness_compile_actor_placement.py",

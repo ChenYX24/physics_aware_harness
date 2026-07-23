@@ -95,6 +95,9 @@ def materialize_variant(
             edits[pointer] = copy.deepcopy(value)
     for pointer, value in edits.items():
         _set_json_pointer(payload, pointer, value)
+    computed_edits = _variant_computed_edits(plan)
+    for pointer, expression in computed_edits.items():
+        _set_json_pointer(payload, pointer, _evaluate_plan_expression(expression, payload))
     payload["case_id"] = f"{payload['case_id']}__{safe_filename(variant_id)}"
     payload["variant_plan"] = {
         "schema_version": VARIANT_PLAN_SCHEMA_VERSION,
@@ -102,6 +105,7 @@ def materialize_variant(
         "plan_sha256": file_sha256(plan_path),
         "variant": variant_id,
         "levels": variant["levels"],
+        "computed_pointers": list(computed_edits),
     }
     validate_case_spec(payload)
     write_json(Path(output_path), payload)
@@ -386,6 +390,7 @@ def _validate_variant_plan(plan: dict[str, Any], *, source: Path) -> None:
         for axis_id, level_id in levels.items():
             if level_id not in axis_levels[axis_id]:
                 raise CaseLibraryError(f"unknown {axis_id} level in {variant_id}: {level_id}")
+    _variant_computed_edits(plan)
     _plan_base_case(plan, source)
 
 
@@ -455,12 +460,7 @@ def _resolve_base_case(path: str | Path) -> Path:
 
 
 def _set_json_pointer(payload: Any, pointer: str, value: Any) -> None:
-    parts = [
-        part.replace("~1", "/").replace("~0", "~")
-        for part in pointer.removeprefix("/").split("/")
-    ]
-    if not pointer.startswith("/") or not parts or any(part == "" for part in parts):
-        raise CaseLibraryError(f"invalid JSON pointer: {pointer}")
+    parts = _json_pointer_parts(pointer)
     parent = payload
     for part in parts[:-1]:
         if isinstance(parent, list):
@@ -482,6 +482,125 @@ def _set_json_pointer(payload: Any, pointer: str, value: Any) -> None:
         parent[last] = copy.deepcopy(value)
     else:
         raise CaseLibraryError(f"JSON pointer does not resolve: {pointer}")
+
+
+def _get_json_pointer(payload: Any, pointer: str) -> Any:
+    value = payload
+    for part in _json_pointer_parts(pointer):
+        if isinstance(value, list):
+            try:
+                value = value[int(part)]
+            except (ValueError, IndexError) as exc:
+                raise CaseLibraryError(f"JSON pointer does not resolve: {pointer}") from exc
+        elif isinstance(value, dict) and part in value:
+            value = value[part]
+        else:
+            raise CaseLibraryError(f"JSON pointer does not resolve: {pointer}")
+    return value
+
+
+def _json_pointer_parts(pointer: str) -> list[str]:
+    parts = [
+        part.replace("~1", "/").replace("~0", "~")
+        for part in pointer.removeprefix("/").split("/")
+    ]
+    if not pointer.startswith("/") or not parts or any(part == "" for part in parts):
+        raise CaseLibraryError(f"invalid JSON pointer: {pointer}")
+    return parts
+
+
+def _variant_computed_edits(plan: dict[str, Any]) -> dict[str, Any]:
+    ui = plan.get("ui")
+    if ui is None:
+        return {}
+    if not isinstance(ui, dict):
+        raise CaseLibraryError("variant plan ui must be an object")
+    computed = ui.get("computed_edits", {})
+    if not isinstance(computed, dict):
+        raise CaseLibraryError("variant plan ui.computed_edits must be an object")
+    for pointer, expression in computed.items():
+        if not isinstance(pointer, str):
+            raise CaseLibraryError("computed edit JSON pointers must be strings")
+        _json_pointer_parts(pointer)
+        _validate_plan_expression(expression)
+    return computed
+
+
+def _validate_plan_expression(expression: Any) -> None:
+    if expression is None or isinstance(expression, (str, int, float, bool)):
+        return
+    if not isinstance(expression, dict):
+        raise CaseLibraryError("computed edit expression must be a literal or object")
+    if set(expression) == {"path"} and isinstance(expression["path"], str):
+        _json_pointer_parts(expression["path"])
+        return
+    op = expression.get("op")
+    if op in {"add", "sub", "mul", "div", "pow"}:
+        args = expression.get("args")
+        required = 2 if op in {"sub", "div", "pow"} else 1
+        if not isinstance(args, list) or len(args) < required or (
+            op in {"sub", "div", "pow"} and len(args) != required
+        ):
+            raise CaseLibraryError(f"computed edit {op} has invalid args")
+        for arg in args:
+            _validate_plan_expression(arg)
+        return
+    if op == "bands":
+        _validate_plan_expression(expression.get("value"))
+        bands = expression.get("bands")
+        if not isinstance(bands, list) or not bands:
+            raise CaseLibraryError("computed edit bands requires non-empty bands")
+        for band in bands:
+            if not isinstance(band, dict) or "result" not in band or set(band) - {"lt", "result"}:
+                raise CaseLibraryError("computed edit band must contain result and optional lt")
+            if "lt" in band:
+                _validate_plan_expression(band["lt"])
+        return
+    raise CaseLibraryError(f"unsupported computed edit operator: {op!r}")
+
+
+def _evaluate_plan_expression(expression: Any, payload: dict[str, Any]) -> Any:
+    if expression is None or isinstance(expression, (str, int, float, bool)):
+        return copy.deepcopy(expression)
+    if set(expression) == {"path"}:
+        return copy.deepcopy(_get_json_pointer(payload, expression["path"]))
+    op = expression["op"]
+    if op == "bands":
+        value = _numeric_value(
+            _evaluate_plan_expression(expression["value"], payload),
+            operator=op,
+        )
+        for band in expression["bands"]:
+            if "lt" not in band or value < _numeric_value(
+                _evaluate_plan_expression(band["lt"], payload),
+                operator=op,
+            ):
+                return copy.deepcopy(band["result"])
+        raise CaseLibraryError("computed edit bands has no matching or default result")
+    args = [
+        _numeric_value(_evaluate_plan_expression(arg, payload), operator=op)
+        for arg in expression["args"]
+    ]
+    try:
+        if op == "add":
+            result = sum(args)
+        elif op == "mul":
+            result = math.prod(args)
+        elif op == "sub":
+            result = args[0] - args[1]
+        elif op == "div":
+            result = args[0] / args[1]
+        else:
+            result = args[0] ** args[1]
+    except (OverflowError, ZeroDivisionError, ValueError) as exc:
+        raise CaseLibraryError(f"computed edit {op} failed: {exc}") from exc
+    return _numeric_value(result, operator=op)
+
+
+def _numeric_value(value: Any, *, operator: str) -> int | float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise CaseLibraryError(f"computed edit {operator} requires finite numbers")
+    return value
 
 
 def _case_versions(root: Path, routes: Iterable[str] | None) -> list[Path]:

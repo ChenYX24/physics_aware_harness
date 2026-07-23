@@ -72,9 +72,49 @@ python3.13 scripts/harness_case_library.py render \
 Pointer 的 `config/variant_plans/*.json` 才能直接 render，不能把符号规划冒充
 可执行 case。
 
+### 参数编辑器与多变体批次
+
+[`tools/case_parameter_editor.html`](tools/case_parameter_editor.html) 是零依赖的
+本地参数工作台。它直接解析 variant plan 和基础 CaseSpec，不调用 LLM：
+
+```bash
+python3.13 -m http.server 8000
+# 浏览器打开 http://127.0.0.1:8000/tools/case_parameter_editor.html
+```
+
+variant plan 把可编辑内容分成三层：
+
+- `axes[].tier=primary`：模型第一次规划时明确要研究的变量。`levels` 提供默认档，
+  `value_pointer` 和 `input` 允许人工输入自定义值。
+- `ui.fields[].tier=common`：质量、时长、FPS 等常用设置；一个字段可以同步写入多个
+  JSON Pointer。
+- `ui.fields[].tier=advanced`：物理解算频率、响应阈值、UE Map 等不建议日常修改的
+  字段；页面折叠显示并保留风险提示。
+- `ui.computed_edits`：改动速度、质量或撞击时间后自动更新能量、初态和期望状态。
+  只支持 JSON Pointer 与 `add/sub/mul/div/pow/bands` 数据算子，不执行模型提供的代码。
+
+可运行示例是
+[`config/variant_plans/glass_panel_impact_speed.json`](config/variant_plans/glass_panel_impact_speed.json)。
+它预先考虑 1/2/3 m/s 三档，但页面只默认勾选 baseline；其他模型规划档和人工
+自定义档都进入“变体队列”，由用户决定哪些需要渲染。保存当前参数后，页面会把
+完整 CaseSpec、机位和 RGB/depth/segmentation 选择写入一个
+`harness_parameter_batch_v1` JSON。先检查、再直接串行渲染：
+
+```bash
+python3.13 scripts/harness_render_parameter_batch.py \
+  ./glass_panel_e16_shatter__render_batch.json --dry-run
+python3.13 scripts/harness_render_parameter_batch.py \
+  ./glass_panel_e16_shatter__render_batch.json --execute
+```
+
+批次脚本会验证每个内嵌 CaseSpec，把输入持久化到对应 case route 的
+`inputs/parameter_batches/`，再按每个变体自己的 `views × passes` 调用现有 UE
+入口；任何一项失败默认停止，避免继续消耗渲染资源。
+
 UE 的 RGB 与 metric depth/instance segmentation 依赖不同 render pass，不能在
 同一张 capture 中同时取得三份 canonical truth；上面的三模态命令会在同一个
-solver state cache 上顺序捕获并按 frame id 对齐。`render` 默认五机位 RGB，
+solver state cache 上顺序捕获并按 frame id 对齐。一次命令可以请求多个机位；
+UE 会复用同一份 solver state，逐机位生成各自的完整序列。`render` 默认五机位 RGB，
 `--render-passes` 可随时切换，整个过程不需要 LLM。`harness_run_case.py` 与
 batch runner 的自定义 probe 也默认 RGB；`candidate/publish` profile 和
 `--formal` 仍强制完整传感器契约。
