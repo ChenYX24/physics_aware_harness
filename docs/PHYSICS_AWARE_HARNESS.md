@@ -183,7 +183,7 @@ python3.13 scripts/harness_run_case.py cases/domino/six_domino_chain.json --back
 # publish 仅在用户 keep candidate 后运行。
 ```
 
-`smoke/candidate/publish` 分别为 `320×180×1 view×RGB`、`640×360×5 views×3 modalities`、`1280×720×5 views×3 modalities`。每个 run 必须写 `execution_profile.json` 和 `efficiency_report.json`；smoke 不能进入 review delivery。外部 solver/cached replay 的 UE 阶段必须报告 `solver_pass_count=0`，不得为每个机位重复求解。
+`smoke/candidate/publish` 分别为 `1280×720×1 view×RGB`、`1920×1080×5 views×3 modalities`、`3840×2160×5 views×3 modalities`。每个 run 必须写 `execution_profile.json` 和 `efficiency_report.json`；smoke 不能进入 review delivery，4K publish 只在用户 keep candidate 后运行。外部 solver/cached replay 的 UE 阶段必须报告 `solver_pass_count=0`，不得为每个机位重复求解。
 
 ## Stage 5: Artifact Collection
 

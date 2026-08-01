@@ -25,6 +25,7 @@ WORKSPACE_ENV = "SIM_HARNESS_WORKSPACE"
 WORKSPACE_DIRS = (
     "cases",
     "runs",
+    "runs/case_routes",
     "catalog",
     "review",
     "review/inbox",
@@ -360,8 +361,12 @@ def _asset_mount_ready(root: Path, content: Path | None) -> bool:
 def _native_smoke_accepted(root: Path, run: Path | None) -> bool:
     if run is None or run.is_symlink() or not run.is_dir():
         return False
-    cases = (root / "cases").resolve(strict=False)
-    if not run.resolve(strict=False).is_relative_to(cases):
+    run_path = run.resolve(strict=False)
+    accepted_roots = (
+        (root / "runs" / "case_routes").resolve(strict=False),
+        (root / "cases").resolve(strict=False),  # pre-v2 workspace compatibility
+    )
+    if not any(run_path.is_relative_to(candidate) for candidate in accepted_roots):
         return False
     try:
         quality = evaluate_run(
@@ -422,14 +427,18 @@ def workspace_path(
 
 
 def case_output_root(route: str, workspace: str | Path | None = None) -> Path:
-    """Resolve physics/scenario/version into the canonical local case directory."""
+    """Resolve a route into internal run storage, outside the flat case library."""
     candidate = Path(str(route).strip())
     parts = candidate.parts
     if candidate.is_absolute() or len(parts) != 3 or any(not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", part) for part in parts):
         raise WorkspaceError("case route must be physics/scenario/vNNN_description using lowercase letters, digits, '_' or '-'")
     if not re.fullmatch(r"v\d+_[a-z0-9][a-z0-9_-]*", parts[2]):
         raise WorkspaceError("case route version must be vNNN_description")
-    return workspace_path(None, default_relative=Path("cases").joinpath(*parts), workspace=workspace)
+    return workspace_path(
+        None,
+        default_relative=Path("runs", "case_routes").joinpath(*parts),
+        workspace=workspace,
+    )
 
 
 def workspace_status(path: str | Path | None = None) -> dict[str, object]:

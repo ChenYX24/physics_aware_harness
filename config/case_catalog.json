@@ -108,17 +108,17 @@
     },
     {
       "id": "agent_push_throw",
-      "name": "人物推掷物体",
+      "name": "人物与物体交互",
       "scene": "会议室",
-      "event": "人物推椅子、丢球",
+      "event": "人物推、扔、拿起、放置物体",
       "physics": "人物交互",
       "object_count": "1–3",
-      "assets": ["人", "椅子", "球"],
-      "variable_space": "冲量3*目标质量3*方向3*动作2*角色资产2",
-      "combination_count": 108,
+      "assets": ["人", "箱子", "球", "桌子", "容器"],
+      "variable_space": "冲量3*目标质量3*方向3*动作4*角色资产2",
+      "combination_count": 216,
       "status": 0,
       "capability_ids": ["agent_rigidbody_action_coupling"],
-      "case_specs": ["cases/agent_action/agent_push_box_contact.json", "cases/agent_action/agent_throw_ball_release.json"]
+      "case_specs": ["cases/agent_action/agent_push_box_contact.json", "cases/agent_action/agent_throw_ball_release.json", "cases/agent_action/agent_pick_object_lift.json", "cases/agent_action/agent_pick_and_place_on_table.json", "cases/agent_action/agent_throw_object_into_bin.json"]
     },
     {
       "id": "steel_ball_wood_board",

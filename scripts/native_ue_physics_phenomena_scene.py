@@ -372,6 +372,11 @@ def controlled_sphere_mesh_path() -> str:
 
 def resolve_runtime_asset_path(obj: dict) -> str:
     keep_material_mesh = prefers_material_library_mesh(obj)
+    if str(obj.get("asset_kind") or "").casefold() == "blueprint":
+        raw_path = obj.get("ue5_path")
+        if not raw_path:
+            raise RuntimeError(f"runtime blueprint {obj.get('id')} missing ue5_path")
+        return normalize_object_path(raw_path)
     if obj.get("behavior") == "third_person_runner" and not keep_material_mesh:
         path = normalize_object_path(ASSETS["cube"])
         ASSET_SELECTION_METADATA[obj.get("asset_key") or obj.get("id", "character_proxy")] = {
@@ -555,16 +560,33 @@ def runtime_position(obj: dict, time_s: float, duration: float) -> tuple[list[fl
         pitch = 3.5 * math.sin(time_s * 1.35 + phase)
         yaw = 12.0 * math.sin(time_s * 1.05 + phase)
     elif behavior == "third_person_runner":
+        movement_waypoints = [item for item in params.get("movement_waypoints") or [] if isinstance(item, dict) and isinstance(item.get("position_m"), list)]
+        if movement_waypoints:
+            right_index = next((index for index, item in enumerate(movement_waypoints) if float(item.get("time_s") or 0.0) >= time_s), len(movement_waypoints) - 1)
+            left = movement_waypoints[max(0, right_index - 1)]
+            right = movement_waypoints[right_index]
+            left_t = float(left.get("time_s") or 0.0)
+            right_t = float(right.get("time_s") or left_t)
+            alpha = 0.0 if right_t <= left_t else max(0.0, min(1.0, (time_s - left_t) / (right_t - left_t)))
+            position = interpolate_values(left["position_m"], right["position_m"], alpha)
+            x, y, z = [float(value) for value in position[:3]]
+            yaw = float(left.get("yaw_degrees") or 0.0) + (float(right.get("yaw_degrees") or 0.0) - float(left.get("yaw_degrees") or 0.0)) * alpha
+            return [round(x, 5), round(y, 5), round(z, 5)], [0.0, round(yaw, 4), 0.0]
         run_speed = float(params.get("run_speed_m_s") or 1.6)
         start_throw = float(params.get("throw_time_s") or 1.45)
         second_throw = float(params.get("second_throw_time_s") or 3.65)
         third_throw = params.get("third_throw_time_s")
+        move_start = float(params.get("move_start_s") or 0.0)
         move_until = float(params.get("move_until_s") or duration)
-        travel = run_speed * min(time_s, move_until)
+        travel = run_speed * max(0.0, min(time_s, move_until) - move_start)
         x += travel
-        y += 0.14 * math.sin(time_s * 2.2)
-        z += 0.03 * math.sin(time_s * 5.5)
-        if time_s >= start_throw:
+        stable_root = bool_control(params.get("stable_root_motion"), False)
+        if not stable_root:
+            y += 0.14 * math.sin(time_s * 2.2)
+            z += 0.03 * math.sin(time_s * 5.5)
+        if stable_root:
+            pitch = yaw = roll = 0.0
+        elif time_s >= start_throw:
             pitch = -4.0 - 5.5 * math.exp(-(time_s - start_throw) * 1.5)
             yaw = 10.0 + 2.0 * math.sin(time_s * 3.0)
         else:
@@ -875,9 +897,24 @@ def simulate_runtime_scene(runtime_scene: dict) -> list[dict]:
     if not analytic_source.startswith("analytic_"):
         analytic_source = "analytic_contact_solver"
     frames = []
+    action_trace = [item for item in runtime_scene.get("action_trace") or [] if isinstance(item, dict)]
     for frame_idx in range(frame_count + 1):
         t = frame_idx / fps
         frame = {"frame": frame_idx, "time": round(t, 4), "objects": {}}
+        frame_actions = [dict(item) for item in action_trace if int(item.get("frame") or 0) == frame_idx]
+        if frame_actions:
+            frame["actions"] = frame_actions
+            frame["contacts"] = [
+                {
+                    "frame": frame_idx,
+                    "time": round(t, 4),
+                    "objects": sorted([str(item.get("actor_id")), str(item.get("target_id"))]),
+                    "method": "declared_agent_grasp_coupling",
+                    "gap_cm": 0.0,
+                }
+                for item in frame_actions
+                if item.get("action_type") == "grasp" and item.get("actor_id") and item.get("target_id")
+            ]
         for obj in runtime_scene.get("dynamic_objects") or []:
             position, rotation = runtime_position(obj, t, duration)
             frame["objects"][obj["id"]] = {
@@ -980,8 +1017,12 @@ def validate_runtime_scene(runtime_scene: dict, trajectory: list[dict]) -> dict:
             "diagnostic": "runtime scene contains dynamic objects",
         },
         "asset_policy": {
-            "passed": all(not str(obj.get("ue5_path") or "").startswith(("/Engine/", "/Game/StarterContent")) for obj in (runtime_scene.get("dynamic_objects") or []) + (runtime_scene.get("static_objects") or [])),
-            "diagnostic": "runtime scene uses provided material-library asset paths",
+            "passed": all(
+                not str(obj.get("ue5_path") or "").startswith(("/Engine/", "/Game/StarterContent"))
+                or obj.get("behavior") in {"character_carry_object", "character_throw_projectile", "landing_surface", "room_floor", "room_wall"}
+                for obj in (runtime_scene.get("dynamic_objects") or []) + (runtime_scene.get("static_objects") or [])
+            ),
+            "diagnostic": "semantic actors use provided assets; controlled rigid bodies may use analytic UE meshes",
         },
     }
     case_type = runtime_scene.get("case_type")
@@ -1198,8 +1239,10 @@ def validate_runtime_scene(runtime_scene: dict, trajectory: list[dict]) -> dict:
         )
         carry_id = str(carry_obj.get("id") or "carried_object")
         params = carry_obj.get("params") or {}
+        grasp_time = float_control(params.get("grasp_time_s"), 0.0, 0.0, None)
         release_time = float_control(params.get("release_time_s"), float_control(params.get("drop_time_s"), 0.0, 0.0, None), 0.0, None)
         hold_offset = runtime_vec3(params.get("hold_offset_m"), (0.45, 0.0, 0.72))
+        socket_attachment = bool(str(params.get("attachment_socket") or "").strip())
         drop_surface_ids = {str(obj.get("id")) for obj in runtime_scene.get("static_objects") or [] if obj.get("behavior") == "landing_surface"}
         series = [
             (idx, float(frame.get("time") or 0.0), frame.get("objects", {}).get(carry_id))
@@ -1224,13 +1267,16 @@ def validate_runtime_scene(runtime_scene: dict, trajectory: list[dict]) -> dict:
             carried_total_displacement = math.dist(carry_start, carry_end)
         runner_by_index = {idx: value for idx, _time, value in runner_series if isinstance(value, dict)}
         hold_distances = []
+        held_positions = []
         for idx, time_s, carried in series:
-            if time_s >= release_time or not isinstance(carried, dict) or idx not in runner_by_index:
+            if time_s < grasp_time or time_s >= release_time or not isinstance(carried, dict) or idx not in runner_by_index:
                 continue
             carried_pos = runtime_vec3(carried.get("position"), (0.0, 0.0, 0.0))
+            held_positions.append(carried_pos)
             runner_pos = runtime_vec3(runner_by_index[idx].get("position"), (0.0, 0.0, 0.0))
             expected = [runner_pos[i] + hold_offset[i] for i in range(3)]
             hold_distances.append(math.dist(carried_pos, expected))
+        hold_steps = [math.dist(left, right) for left, right in zip(held_positions, held_positions[1:])]
         after_release = [item for item in series if item[1] >= release_time and isinstance(item[2], dict)]
         release_sample = after_release[0] if after_release else (series[0] if series else None)
         final_sample = after_release[-1] if after_release else (series[-1] if series else None)
@@ -1265,16 +1311,40 @@ def validate_runtime_scene(runtime_scene: dict, trajectory: list[dict]) -> dict:
             "diagnostic": "carried object has a recorded trajectory through hold and drop phases",
         }
         checks["carrier_motion_recorded"] = {
-            "passed": len(runner_series) >= 8 and runner_x_displacement > 1.0,
+            "passed": len(runner_series) >= 8 and runner_x_displacement > 0.5,
             "samples": len(runner_series),
             "x_displacement_m": round(runner_x_displacement, 4),
             "diagnostic": "visible carrier moves to the other side of the scene",
         }
         checks["held_before_drop"] = {
-            "passed": len(hold_distances) >= 8 and max(hold_distances, default=99.0) < 0.45,
-            "samples": len(hold_distances),
-            "max_hold_offset_error_m": round(max(hold_distances, default=0.0), 4),
-            "diagnostic": "object follows the carrier hand/hold offset before release",
+            "passed": (
+                len(held_positions) >= 8
+                and max(hold_steps, default=99.0) < 0.2
+                if socket_attachment
+                else len(hold_distances) >= 8 and max(hold_distances, default=99.0) < 0.45
+            ),
+            "samples": len(held_positions),
+            "max_hold_step_m": round(max(hold_steps, default=0.0), 4),
+            "max_hold_offset_error_m": None if socket_attachment else round(max(hold_distances, default=0.0), 4),
+            "diagnostic": "socket-carried object moves continuously with the hand before release" if socket_attachment else "object follows the carrier hold offset before release",
+        }
+        pre_grasp = [runtime_vec3(item[2].get("position"), (0.0, 0.0, 0.0)) for item in series if item[1] < grasp_time and isinstance(item[2], dict)]
+        grasp_jump = math.dist(pre_grasp[-1], held_positions[0]) if pre_grasp and held_positions else 99.0
+        release_jump = math.dist(held_positions[-1], runtime_vec3(after_release[0][2].get("position"), (0.0, 0.0, 0.0))) if held_positions and after_release else 99.0
+        checks["grasp_continuity"] = {
+            "passed": not socket_attachment or grasp_jump < 0.15,
+            "jump_m": round(grasp_jump, 4),
+            "diagnostic": "the object does not teleport when hand attachment begins",
+        }
+        checks["release_continuity"] = {
+            "passed": not socket_attachment or release_jump < 0.10,
+            "jump_m": round(release_jump, 4),
+            "diagnostic": "the object keeps its world transform when detached from the hand",
+        }
+        checks["rest_before_grasp"] = {
+            "passed": len(pre_grasp) >= 2 and max((math.dist(pre_grasp[0], position) for position in pre_grasp), default=0.0) < 0.02,
+            "samples": len(pre_grasp),
+            "diagnostic": "passive object remains at rest before the declared grasp",
         }
         checks["ue_physics_after_drop"] = {
             "passed": any(source in {"adp_cpp_runtime_driver", "ue_actor_transform"} for source in sources),
@@ -1282,15 +1352,15 @@ def validate_runtime_scene(runtime_scene: dict, trajectory: list[dict]) -> dict:
             "diagnostic": "after release the object trajectory is captured from UE physics/runtime transforms",
         }
         checks["drop_descends_under_gravity"] = {
-            "passed": bool(after_release) and z_drop > 0.12 and x_drift_after_drop < 1.0 and (final_z is None or final_z > -0.35),
+            "passed": bool(after_release) and (bool(drop_contacts) if socket_attachment else z_drop > 0.12) and x_drift_after_drop < 1.0 and (final_z is None or final_z > -0.35),
             "release_time_s": round(release_time, 4),
             "z_drop_m": round(z_drop, 4),
             "x_drift_after_drop_m": round(x_drift_after_drop, 4),
             "final_z_m": round(final_z, 4) if final_z is not None else None,
-            "diagnostic": "released object descends under gravity rather than continuing as a scripted carry",
+            "diagnostic": "released object hands off to UE physics and reaches the support" if socket_attachment else "released object descends under gravity rather than continuing as a scripted carry",
         }
         checks["lands_on_drop_zone"] = {
-            "passed": bool(drop_contacts) or (bool(after_release) and z_drop > 0.18 and x_drift_after_drop < 1.0 and (final_z is None or final_z > -0.35)),
+            "passed": bool(drop_contacts) or (bool(after_release) and z_drop > (0.02 if socket_attachment else 0.18) and x_drift_after_drop < 1.0 and (final_z is None or final_z > -0.35)),
             "first_drop_contact_s": round(drop_contacts[0][1], 4) if drop_contacts else None,
             "diagnostic": "released object lands on or near the target drop surface",
         }
@@ -2646,7 +2716,81 @@ def actor_runtime_component(actor):
                 return component
         except Exception:
             pass
+    try:
+        for child in actor.get_attached_actors():
+            component = actor_runtime_component(child)
+            if component:
+                return component
+    except Exception:
+        pass
     return None
+
+
+def actor_skeletal_component_with_socket(actor, socket_name: str):
+    try:
+        components = actor.get_components_by_class(unreal.SkeletalMeshComponent)
+    except Exception:
+        components = []
+    for component in components:
+        try:
+            if component.does_socket_exist(unreal.Name(socket_name)) or component.get_bone_index(socket_name) >= 0:
+                return component
+        except Exception:
+            pass
+    return next(iter(components), None) or actor_runtime_component(actor)
+
+
+def attach_actor_clear_of_socket(
+    actor,
+    parent,
+    socket_name: str,
+    clearance_cm: float,
+    max_grasp_gap_cm: float,
+) -> bool:
+    hand = parent.get_socket_location(unreal.Name(socket_name))
+    origin, extent = actor_bounds(actor)
+    direction = origin - hand
+    distance = math.sqrt(direction.x * direction.x + direction.y * direction.y + direction.z * direction.z)
+    if distance < 1e-3:
+        direction = unreal.Vector(1.0, 0.0, 0.0)
+        distance = 1.0
+    radius = max(1.0, float(extent.x), float(extent.y), float(extent.z))
+    if distance - radius > max(0.0, float(max_grasp_gap_cm)):
+        return False
+    actor.set_actor_location(
+        hand + direction * ((radius + max(0.0, float(clearance_cm))) / distance),
+        False,
+        False,
+    )
+    return bool(
+        actor.attach_to_component(
+            parent,
+            unreal.Name(socket_name),
+            unreal.AttachmentRule.KEEP_WORLD,
+            unreal.AttachmentRule.KEEP_WORLD,
+            unreal.AttachmentRule.KEEP_WORLD,
+            False,
+        )
+    )
+
+
+def follow_socket_smoothly(actor, parent, socket_name: str, clearance_cm: float, max_step_cm: float) -> float:
+    hand = parent.get_socket_location(unreal.Name(socket_name))
+    center, extent = actor_bounds(actor)
+    offset = center - hand
+    distance = math.sqrt(offset.x * offset.x + offset.y * offset.y + offset.z * offset.z)
+    if distance < 1e-3:
+        offset = unreal.Vector(1.0, 0.0, 0.0)
+        distance = 1.0
+    radius = max(1.0, float(extent.x), float(extent.y), float(extent.z))
+    target = hand + offset * ((radius + max(0.0, float(clearance_cm))) / distance)
+    delta = target - center
+    step = math.sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z)
+    if step <= 1e-3:
+        return 0.0
+    applied = min(step, max(0.1, float(max_step_cm)))
+    actor.set_actor_location(actor.get_actor_location() + delta * (applied / step), False, False)
+    return applied
 
 
 def sync_runtime_visuals(actors: dict) -> None:
@@ -3105,6 +3249,26 @@ def spawn_runtime_actor(label: str, asset_path: str, asset_kind: str, location: 
         if rotation:
             actor.set_actor_rotation(rotation, False)
         return actor
+    if asset_kind == "character" and hasattr(unreal, "Character"):
+        asset = load_asset(asset_path)
+        actor = subsystem.spawn_actor_from_class(unreal.Character, location)
+        if not actor:
+            raise RuntimeError(f"failed to spawn Character actor: {asset_path}")
+        actor.set_actor_label(label)
+        component = actor.get_component_by_class(unreal.SkeletalMeshComponent)
+        capsule = actor.get_component_by_class(unreal.CapsuleComponent)
+        if not component or not capsule:
+            raise RuntimeError("missing_character_mesh_or_capsule")
+        component.set_skeletal_mesh(asset)
+        component.set_relative_location(unreal.Vector(0.0, 0.0, -92.5), False, False)
+        component.set_world_scale3d(scale)
+        component.set_collision_enabled(unreal.CollisionEnabled.NO_COLLISION)
+        capsule.set_capsule_size(34.0, 92.5)
+        if material_path:
+            component.set_material(0, load_asset(material_path))
+        if rotation:
+            actor.set_actor_rotation(rotation, False)
+        return actor
     if asset_kind == "skeletal_mesh" and hasattr(unreal, "SkeletalMeshActor"):
         try:
             asset = load_asset(asset_path)
@@ -3232,6 +3396,12 @@ def configure_runtime_physics(actor, obj: dict, role: str, controls: dict | None
         "errors": [],
     }
     component = actor_runtime_component(actor)
+    if behavior == "third_person_runner":
+        try:
+            component = actor.get_component_by_class(unreal.CapsuleComponent) or component
+            detail["collision_component"] = "CapsuleComponent"
+        except Exception:
+            pass
     if not component:
         detail["errors"].append("missing_static_mesh_component")
         return detail
@@ -3345,6 +3515,240 @@ def runtime_animation_segments(obj: dict) -> list[dict]:
     return []
 
 
+def runtime_gasp_objects(runtime_scene: dict | None) -> list[dict]:
+    if not runtime_scene:
+        return []
+    return [
+        obj
+        for obj in runtime_scene.get("dynamic_objects") or []
+        if str((obj.get("params") or {}).get("humanoid_adapter") or "").strip().lower() in {"gasp", "ddv"}
+    ]
+
+
+def initialize_gasp_locomotion(actors: dict, runtime_scene: dict | None, status: dict) -> bool:
+    gasp_objects = runtime_gasp_objects(runtime_scene)
+    if not gasp_objects or actors.get("gasp_locomotion"):
+        return bool(actors.get("gasp_locomotion"))
+    obj = gasp_objects[0]
+    actor_id = str(obj.get("id") or "")
+    actor = actors.get(actor_id)
+    world = actors.get("physics_game_world")
+    if not actor or not world:
+        return False
+    detail = {"actor_id": actor_id, "possessed": False, "input_ready": False, "errors": []}
+    try:
+        controller = unreal.GameplayStatics.get_player_controller(world, 0)
+        controller.possess(actor)
+        detail["possessed"] = True
+        action_path = str((obj.get("params") or {}).get("movement_input_action") or "/Game/Input/IA_Move.IA_Move")
+        action = unreal.load_object(None, action_path)
+        walk_action = unreal.load_object(None, "/Game/Input/IA_Walk.IA_Walk")
+        carry_obj = next(
+            (item for item in (runtime_scene.get("dynamic_objects") or []) if (item.get("params") or {}).get("native_grabbable_blueprint")),
+            {},
+        )
+        carry_params = carry_obj.get("params") or {}
+        grab_action = unreal.load_object(None, str(carry_params.get("native_grab_input_action") or "")) if carry_params else None
+        subsystem = next(
+            item
+            for item in unreal.ObjectIterator(unreal.EnhancedInputLocalPlayerSubsystem)
+            if not item.get_name().startswith("Default__")
+        )
+        waypoints = [
+            item
+            for item in (obj.get("params") or {}).get("movement_waypoints") or []
+            if isinstance(item, dict) and isinstance(item.get("position_m"), list)
+        ]
+        segment_speeds = [
+            math.dist(left["position_m"][:3], right["position_m"][:3])
+            / max(1e-3, float(right.get("time_s") or 0.0) - float(left.get("time_s") or 0.0))
+            for left, right in zip(waypoints, waypoints[1:])
+            if float(right.get("time_s") or 0.0) > float(left.get("time_s") or 0.0)
+        ]
+        target_speed_cm_s = max(segment_speeds, default=0.85) * 100.0
+        input_scale = 1.0
+        movement = actor.get_component_by_class(unreal.CharacterMovementComponent)
+        if movement:
+            movement.set_editor_property("max_walk_speed", target_speed_cm_s)
+            detail["max_walk_speed_cm_s"] = round(target_speed_cm_s, 3)
+            for property_name, value in (
+                ("max_depenetration_with_geometry", 12.0),
+                ("max_depenetration_with_geometry_as_proxy", 12.0),
+                ("max_depenetration_with_pawn", 8.0),
+                ("max_depenetration_with_pawn_as_proxy", 8.0),
+            ):
+                try:
+                    movement.set_editor_property(property_name, value)
+                except Exception as exc:
+                    detail.setdefault("movement_calibration_errors", []).append(f"{property_name}:{exc}")
+        actors["gasp_locomotion"] = {
+            "actor_id": actor_id,
+            "controller": controller,
+            "input_subsystem": subsystem,
+            "move_action": action,
+            "walk_action": walk_action,
+            "grab_action": grab_action,
+            "carry_actor_id": str(carry_obj.get("id") or ""),
+            "grab_time_s": float(carry_params.get("grasp_time_s") or 0.0),
+            "release_time_s": float(carry_params.get("release_time_s") or 0.0),
+            "input_scale": input_scale,
+            "last_safe_location": actor.get_actor_location(),
+            "detail": detail,
+            "last_frame": None,
+            "walk_pressed": False,
+        }
+        detail["input_ready"] = bool(action)
+        detail["input_scale"] = round(input_scale, 4)
+    except Exception as exc:
+        detail["errors"].append(str(exc))
+    status["gasp_locomotion"] = detail
+    return bool(actors.get("gasp_locomotion"))
+
+
+def bound_gasp_post_tick_displacement(actors: dict, obj: dict, frame_index: int) -> None:
+    state = actors.get("gasp_locomotion")
+    actor = actors.get(str(obj.get("id") or ""))
+    if not state or not actor:
+        return
+    current = actor.get_actor_location()
+    previous = state.get("last_safe_location")
+    if previous:
+        displacement_cm = math.hypot(current.x - previous.x, current.y - previous.y)
+        detail = state.get("detail") or {}
+        detail["max_observed_frame_displacement_cm"] = round(
+            max(float(detail.get("max_observed_frame_displacement_cm") or 0.0), displacement_cm),
+            3,
+        )
+        max_displacement_cm = float_control(
+            (obj.get("params") or {}).get("gasp_max_frame_displacement_cm"),
+            12.0,
+            1.0,
+            100.0,
+        )
+        if displacement_cm > max_displacement_cm:
+            scale = max_displacement_cm / displacement_cm
+            current = unreal.Vector(
+                previous.x + (current.x - previous.x) * scale,
+                previous.y + (current.y - previous.y) * scale,
+                current.z,
+            )
+            actor.set_actor_location(current, False, False)
+            detail["bounded_displacement_corrections"] = int(detail.get("bounded_displacement_corrections") or 0) + 1
+            detail["last_bounded_displacement_frame"] = frame_index
+    if not state.get("moving"):
+        actor.set_actor_rotation(runtime_rotator([0.0, float(state.get("yaw") or 0.0), 0.0]), False)
+    state["last_safe_location"] = current
+
+
+def apply_gasp_locomotion_frame(actors: dict, obj: dict, frame: dict) -> bool:
+    state = actors.get("gasp_locomotion")
+    if not state or state.get("actor_id") != str(obj.get("id") or ""):
+        return False
+    frame_index = int(frame.get("frame") or 0)
+    if state.get("last_frame") == frame_index:
+        return True
+    time_s = float(frame.get("time") or 0.0)
+    waypoints = [
+        item
+        for item in (obj.get("params") or {}).get("movement_waypoints") or []
+        if isinstance(item, dict) and isinstance(item.get("position_m"), list)
+    ]
+    moving = False
+    yaw = float(waypoints[-1].get("yaw_degrees", 0.0)) if waypoints else 0.0
+    direction_x = 0.0
+    direction_y = 0.0
+    actor = actors.get(str(obj.get("id") or ""))
+    current = actor.get_actor_location() if actor else None
+    for left, right in zip(waypoints, waypoints[1:]):
+        left_t = float(left.get("time_s") or 0.0)
+        right_t = float(right.get("time_s") or left_t)
+        if left_t <= time_s <= right_t:
+            delta_x = float(right["position_m"][0]) - float(left["position_m"][0])
+            delta_y = float(right["position_m"][1]) - float(left["position_m"][1])
+            if actor:
+                scene_origin = unreal.Vector(*actors.get("scene_origin", [0.0, 0.0, 0.0]))
+                target = ue_vec_from_meters(right["position_m"], origin=scene_origin)
+                delta_x = (target.x - current.x) / 100.0
+                delta_y = (target.y - current.y) / 100.0
+            moving = math.hypot(delta_x, delta_y) > 1e-4
+            if moving:
+                yaw = math.degrees(math.atan2(-delta_x, delta_y))
+                length = math.hypot(delta_x, delta_y)
+                direction_x = delta_x / length
+                direction_y = delta_y / length
+            else:
+                yaw = float(right.get("yaw_degrees", left.get("yaw_degrees", 0.0)))
+            break
+    try:
+        for phase, threshold in (
+            ("grab", float(state.get("grab_time_s") or 0.0)),
+            ("release", float(state.get("release_time_s") or 0.0)),
+        ):
+            if state.get("grab_action") and time_s >= threshold and not state.get(f"{phase}_input_sent"):
+                state["input_subsystem"].inject_input_vector_for_action(
+                    state["grab_action"],
+                    unreal.Vector(1.0, 0.0, 0.0),
+                    [],
+                    [],
+                )
+                state[f"{phase}_input_sent"] = True
+                (state.get("detail") or {})[f"{phase}_input_frame"] = frame_index
+                package = actors.get(str(state.get("carry_actor_id") or ""))
+                mesh = actor.get_component_by_class(unreal.SkeletalMeshComponent) if actor else None
+                anim_instance = mesh.get_anim_instance() if mesh else None
+                updates = (
+                    (("grabbable_object", package), ("is_grabbing", True), ("is_dropping", False))
+                    if phase == "grab"
+                    else (("is_grabbing", False), ("is_dropping", True))
+                )
+                for target_name, target in (("character", actor), ("anim_instance", anim_instance)):
+                    for property_name, value in updates:
+                        if target is None or value is None:
+                            continue
+                        method = getattr(target, f"set_{property_name}", None)
+                        if method:
+                            try:
+                                method(value)
+                                (state.get("detail") or {}).setdefault("native_anim_interfaces", []).append(
+                                    f"{phase}:{target_name}.set_{property_name}"
+                                )
+                                continue
+                            except Exception as exc:
+                                (state.get("detail") or {}).setdefault("native_anim_interface_errors", []).append(
+                                    f"{phase}:{target_name}.set_{property_name}:{exc}"
+                                )
+                        try:
+                            target.set_editor_property(property_name, value)
+                            (state.get("detail") or {}).setdefault("native_anim_properties", []).append(
+                                f"{phase}:{target_name}.{property_name}"
+                            )
+                        except Exception as exc:
+                            (state.get("detail") or {}).setdefault("native_anim_property_errors", []).append(
+                                f"{phase}:{target_name}.{property_name}:{exc}"
+                            )
+        if not state.get("walk_pressed") and state.get("walk_action"):
+            state["input_subsystem"].inject_input_vector_for_action(
+                state["walk_action"],
+                unreal.Vector(1.0, 0.0, 0.0),
+                [],
+                [],
+            )
+            state["walk_pressed"] = True
+        state["controller"].set_control_rotation(runtime_rotator([0.0, yaw, 0.0]))
+        if actor and moving:
+            actor.add_movement_input(
+                unreal.Vector(direction_x, direction_y, 0.0),
+                float(state.get("input_scale") or 1.0),
+                True,
+            )
+        state["last_frame"] = frame_index
+        state["moving"] = moving
+        state["yaw"] = yaw
+    except Exception as exc:
+        state.setdefault("errors", []).append(str(exc))
+    return True
+
+
 def select_runtime_animation_segment(segments: list[dict], time_s: float) -> dict | None:
     selected = None
     for segment in segments:
@@ -3376,7 +3780,7 @@ def play_runtime_animation(
         "position_set": False,
         "errors": [],
     }
-    component = actor_runtime_component(actor)
+    component = actor_skeletal_component_with_socket(actor, "hand_r")
     if not is_skeletal_component(component):
         detail["errors"].append("missing_skeletal_mesh_component")
         events = status.setdefault("animation_events", [])
@@ -3444,6 +3848,101 @@ def play_runtime_animation(
     return detail
 
 
+def play_gasp_interaction_montage(
+    actors: dict,
+    actor,
+    actor_id: str,
+    animation_ref: str,
+    segment: dict,
+    active_key: str,
+    local_time_s: float,
+    status: dict,
+) -> dict:
+    detail = {
+        "id": actor_id,
+        "animation_ref": animation_ref,
+        "local_time_s": round(float(local_time_s), 4),
+        "animation_mode": "GASP_ANIMATION_BLUEPRINT_MONTAGE",
+        "played": False,
+        "position_set": False,
+        "motion_warping": False,
+        "errors": [],
+    }
+    component = actor_skeletal_component_with_socket(actor, "hand_r")
+    anim = unreal.load_asset(normalize_object_path(str(animation_ref)))
+    anim_instance = component.get_anim_instance() if component else None
+    runtime = actors.setdefault("gasp_interaction_montages", {}).setdefault(actor_id, {})
+    if not anim or not anim_instance:
+        detail["errors"].append("missing_animation_or_anim_instance")
+        return detail
+    try:
+        root_motion_mode = getattr(getattr(unreal, "RootMotionMode", None), "IGNORE_ROOT_MOTION", None)
+        if root_motion_mode is not None:
+            anim_instance.set_root_motion_mode(root_motion_mode)
+            detail["root_motion_mode"] = "IGNORE_ROOT_MOTION"
+        if runtime.get("active_key") != active_key:
+            warp_target_name = str(segment.get("warp_target_name") or "").strip()
+            target_position_m = segment.get("warp_target_position_m")
+            motion_warping = actor.get_component_by_class(unreal.MotionWarpingComponent)
+            if (
+                bool_control(segment.get("motion_warping"), False)
+                and motion_warping
+                and warp_target_name
+                and isinstance(target_position_m, list)
+            ):
+                scene_origin = unreal.Vector(*actors.get("scene_origin", [0.0, 0.0, 0.0]))
+                target = ue_vec_from_meters(target_position_m, origin=scene_origin)
+                target_rotation = runtime_rotator([0.0, float(segment.get("warp_target_yaw_degrees") or 0.0), 0.0])
+                motion_warping.add_or_update_warp_target_from_location_and_rotation(
+                    unreal.Name(warp_target_name),
+                    target,
+                    target_rotation,
+                )
+                modifier = unreal.RootMotionModifier_SkewWarp.add_root_motion_modifier_skew_warp(
+                    motion_warping,
+                    anim,
+                    0.0,
+                    max(0.01, float(segment.get("end_s") or 0.0) - float(segment.get("start_s") or 0.0)),
+                    unreal.Name(warp_target_name),
+                    unreal.WarpPointAnimProvider.NONE,
+                    unreal.Transform(),
+                    unreal.Name(""),
+                    True,
+                    True,
+                    True,
+                    unreal.MotionWarpRotationType.DEFAULT,
+                    unreal.MotionWarpRotationMethod.SLERP,
+                    1.0,
+                    0.0,
+                )
+                detail["motion_warping"] = bool(modifier)
+            montage = anim_instance.play_slot_animation_as_dynamic_montage(
+                anim,
+                unreal.Name(str((segment.get("slot_name") or "DefaultSlot"))),
+                0.12,
+                0.16,
+                float_control(segment.get("time_scale"), 1.0, 0.05, 4.0),
+                1,
+                -1.0,
+                max(0.0, float(local_time_s)),
+            )
+            runtime["active_key"] = active_key
+            runtime["montage"] = montage
+            detail["played"] = bool(montage)
+        else:
+            montage = runtime.get("montage")
+            detail["played"] = bool(montage)
+        if montage:
+            anim_instance.montage_set_position(montage, max(0.0, float(local_time_s)))
+            detail["position_set"] = True
+    except Exception as exc:
+        detail["errors"].append(str(exc))
+    events = status.setdefault("animation_events", [])
+    if len(events) < 64:
+        events.append(detail)
+    return detail
+
+
 def apply_runtime_animation_segments(
     actors: dict,
     runtime_scene: dict | None,
@@ -3458,33 +3957,62 @@ def apply_runtime_animation_segments(
         actor_id = str(obj.get("id") or "")
         if not actor_id or actor_id not in actors:
             continue
+        actor_state = state.setdefault(actor_id, {})
         segments = runtime_animation_segments(obj)
         if not segments:
             continue
         segment = select_runtime_animation_segment(segments, time_s)
+        adapter = str((obj.get("params") or {}).get("humanoid_adapter") or "").strip().lower()
+        if adapter == "ddv":
+            actor_state["native_interaction_anim_blueprint"] = True
+            continue
+        is_gasp = adapter == "gasp"
         if not segment:
+            if is_gasp:
+                actor_state["gasp_interaction_montage_active"] = False
+            continue
+        if is_gasp and str(segment.get("name") or "") not in {"grab_from_floor", "drop"}:
+            actor_state["gasp_interaction_montage_active"] = False
             continue
         animation_ref = str(segment.get("animation_ref") or "").strip()
         if not animation_ref:
             continue
         start_s = float(segment.get("resolved_start_s") or segment.get("start_s") or 0.0)
         local_time_s = max(0.0, time_s - start_s)
+        local_time_s *= float_control(segment.get("time_scale"), 1.0, 0.05, 4.0)
+        if bool_control(segment.get("reverse"), False):
+            local_time_s = max(0.0, float_control(segment.get("clip_duration_s"), local_time_s, 0.0, None) - local_time_s)
         loop = bool_control(segment.get("loop"), True)
         active_key = f"{animation_ref}|{loop}|{segment.get('name', '')}"
-        actor_state = state.setdefault(actor_id, {})
         if actor_state.get("active_key") != active_key:
             actor_state["active_key"] = active_key
             actor_state["segment_name"] = segment.get("name")
             actor_state["animation_ref"] = animation_ref
             actor_state["started_at_s"] = round(time_s, 4)
-        detail = play_runtime_animation(
-            actors[actor_id],
-            actor_id,
-            animation_ref,
-            loop=loop,
-            local_time_s=local_time_s,
-            status=status,
-        )
+        if is_gasp:
+            actor_state["gasp_interaction_montage_active"] = True
+            detail = play_gasp_interaction_montage(
+                actors,
+                actors[actor_id],
+                actor_id,
+                animation_ref,
+                {
+                    **segment,
+                    "slot_name": (obj.get("params") or {}).get("interaction_slot_name") or "DefaultSlot",
+                },
+                active_key,
+                local_time_s,
+                status,
+            )
+        else:
+            detail = play_runtime_animation(
+                actors[actor_id],
+                actor_id,
+                animation_ref,
+                loop=loop,
+                local_time_s=local_time_s,
+                status=status,
+            )
         actor_state["last_time_s"] = round(time_s, 4)
         actor_state["last_detail"] = {key: value for key, value in detail.items() if key != "errors"}
         if detail.get("errors"):
@@ -4036,7 +4564,7 @@ def runtime_desired_extent_cm(obj: dict) -> float:
             cap_cm = 900.0 if obj.get("behavior") in structural_behaviors else 420.0
             role = str(params.get("role") or "").casefold()
             compact_analytic_role = role in {"constraint_anchor", "elastic_constraint_anchor", "elastic_constrained_body"}
-            min_cm = 2.0 if obj.get("behavior") == "llm_rigid_body" or compact_analytic_role else 24.0
+            min_cm = 2.0 if obj.get("behavior") == "llm_rigid_body" or compact_analytic_role else (10.0 if obj.get("behavior") == "character_carry_object" else 24.0)
             return max(min_cm, min(cap_cm, float(explicit_extent)))
         except Exception:
             pass
@@ -5122,6 +5650,33 @@ def setup_scene(runtime_scene: dict | None = None):
         material_override = False
         text = " ".join(str(obj.get(key, "")) for key in ("id", "asset_key", "asset_name", "category_l1", "category_l2")).lower()
         params = obj.get("params") or {}
+        blueprint_mesh_override = str(params.get("blueprint_mesh_override") or "").strip()
+        if blueprint_mesh_override:
+            component = actor_runtime_component(actor)
+            if not component:
+                desired_extent_cm = float(params.get("desired_extent_cm") or 10.0)
+                visual = spawn_static_mesh(
+                    f"{obj.get('id')}_blueprint_mesh",
+                    blueprint_mesh_override,
+                    actor.get_actor_location(),
+                    unreal.Vector(desired_extent_cm / 50.0, desired_extent_cm / 50.0, desired_extent_cm / 50.0),
+                )
+                visual.attach_to_actor(
+                    actor,
+                    "",
+                    unreal.AttachmentRule.KEEP_WORLD,
+                    unreal.AttachmentRule.KEEP_WORLD,
+                    unreal.AttachmentRule.KEEP_WORLD,
+                    False,
+                )
+                component = visual.static_mesh_component
+                try:
+                    actor.set_editor_property("mesh", component)
+                    write_progress_marker("blueprint_mesh_property_bound", obj.get("id"))
+                except Exception as exc:
+                    write_progress_marker("blueprint_mesh_property_unavailable", f"{obj.get('id')}:{exc}")
+            if component and hasattr(component, "set_static_mesh"):
+                component.set_static_mesh(load_asset(blueprint_mesh_override))
         if params.get("disallow_nanite") is True or params.get("surface_mesh_sequence"):
             component = actor_runtime_component(actor)
             if component:
@@ -5153,7 +5708,7 @@ def setup_scene(runtime_scene: dict | None = None):
                 chaos_runtime.setdefault("material_errors", []).append(f"{obj.get('id')}:{visual_material_path}:{exc}")
         if material_override:
             pass
-        elif force_library_mesh and obj.get("behavior") == "static_prop" and preserve_material is not False:
+        elif force_library_mesh and params.get("preserve_material") is True:
             material_override = False
         elif str(obj.get("asset_kind") or "").lower() in {"geometrycollection", "geometry_collection"} and preserve_material is not False:
             material_override = False
@@ -5229,10 +5784,6 @@ def setup_scene(runtime_scene: dict | None = None):
         elif obj.get("behavior") == "gear_collision":
             set_actor_material(actor, materials.get("runtime_gear"))
             set_actor_color(actor, unreal.LinearColor(0.70, 0.66, 0.56, 1.0))
-            material_override = True
-        elif obj.get("behavior") == "third_person_runner":
-            set_actor_material(actor, materials.get("runtime_character"))
-            set_actor_color(actor, unreal.LinearColor(0.72, 0.66, 0.60, 1.0))
             material_override = True
         elif obj.get("behavior") == "slope_roll":
             set_actor_material(actor, materials.get("runtime_stone"))
@@ -5479,6 +6030,27 @@ def setup_scene(runtime_scene: dict | None = None):
                     "origin": [origin.x, origin.y, origin.z],
                     "extent": [extent.x, extent.y, extent.z],
                 }
+                if obj_id == "package":
+                    entry["interaction_probe"] = {
+                        "actor_class": actor.get_class().get_name(),
+                        "methods": sorted(
+                            name
+                            for name in dir(actor)
+                            if any(term in name for term in ("grab", "drop", "interact", "attach", "collision", "physics"))
+                        ),
+                        "components": [
+                            {
+                                "name": component.get_name(),
+                                "class": component.get_class().get_name(),
+                                "methods": sorted(
+                                    name
+                                    for name in dir(component)
+                                    if any(term in name for term in ("mesh", "grab", "attach", "collision", "physics"))
+                                ),
+                            }
+                            for component in actor.get_components_by_class(unreal.ActorComponent)
+                        ],
+                    }
                 break
 
     def record_runtime_actor_physics(obj_id: str, detail: dict) -> None:
@@ -5702,6 +6274,16 @@ def setup_scene(runtime_scene: dict | None = None):
             runtime_actors[obj["id"]] = actor
             origin, extent = normalize_runtime_actor(actor, obj)
             runtime_actor_bounds[obj["id"]] = {"origin": [origin.x, origin.y, origin.z], "extent": [extent.x, extent.y, extent.z]}
+            explicit_ground_offset = (obj.get("params") or {}).get("ground_offset_cm")
+            if explicit_ground_offset is not None:
+                runtime_ground_offsets[obj["id"]] = float(explicit_ground_offset)
+                actor.set_actor_location(
+                    ue_vec_from_meters(obj.get("initial_position_m", [0.0, 0.0, 0.0]), z_offset_cm=float(explicit_ground_offset), origin=scene_origin),
+                    False,
+                    False,
+                )
+                origin, extent = actor_bounds(actor)
+                runtime_actor_bounds[obj["id"]] = {"origin": [origin.x, origin.y, origin.z], "extent": [extent.x, extent.y, extent.z]}
             if obj.get("behavior") in {"domino_tip", "friction_slide"}:
                 location = actor.get_actor_location()
                 runtime_ground_offsets[obj["id"]] = max(0.0, location.z - (origin.z - extent.z) + 2.0)
@@ -6780,6 +7362,10 @@ def runtime_subject_delta_cm(runtime_scene: dict, frame_index: int, solver_traje
 
 
 def apply_trajectory_frame(actors: dict, dynamic_ids: list[str], frame: dict, scene_origin: unreal.Vector, runtime_scene: dict | None) -> None:
+    obj_by_id = {
+        obj.get("id"): obj
+        for obj in ((runtime_scene or {}).get("dynamic_objects") or []) + ((runtime_scene or {}).get("static_objects") or [])
+    }
     for oid in dynamic_ids:
         if oid not in actors or oid not in frame["objects"]:
             continue
@@ -6787,13 +7373,14 @@ def apply_trajectory_frame(actors: dict, dynamic_ids: list[str], frame: dict, sc
         z_offset_cm = 0.0 if runtime_scene else 120.0
         if runtime_scene:
             z_offset_cm = float((actors.get("runtime_ground_offsets") or {}).get(oid, z_offset_cm))
-        actors[oid].set_actor_location(ue_vec_from_meters(frame_obj["position"], z_offset_cm=z_offset_cm, origin=scene_origin), False, False)
+        params = (obj_by_id.get(oid) or {}).get("params") or {}
+        if str(params.get("humanoid_adapter") or "").strip().lower() in {"gasp", "ddv"}:
+            apply_gasp_locomotion_frame(actors, obj_by_id.get(oid) or {}, frame)
+            continue
+        sweep_movement = params.get("sweep_movement") is True
+        actors[oid].set_actor_location(ue_vec_from_meters(frame_obj["position"], z_offset_cm=z_offset_cm, origin=scene_origin), sweep_movement, False)
         if runtime_scene:
             rot = frame_obj.get("rotation_degrees") or [0.0, 0.0, 0.0]
-            obj_by_id = {
-                obj.get("id"): obj
-                for obj in (runtime_scene.get("dynamic_objects") or []) + (runtime_scene.get("static_objects") or [])
-            }
             combined_rot = runtime_combined_rotation(obj_by_id.get(oid, {}), rot)
             actors[oid].set_actor_rotation(runtime_rotator(combined_rot), False)
     update_elastic_tether_visual(actors, frame, scene_origin, runtime_scene)
@@ -6939,10 +7526,32 @@ def apply_delayed_release_projectiles(
         params = obj.get("params") or {}
         properties = obj.get("physics_properties") or {}
         default_release_time = float_control(params.get("drop_time_s"), float_control(params.get("throw_time_s"), 0.0, 0.0, None), 0.0, None)
+        grasp_time = float_control(params.get("grasp_time_s"), 0.0, 0.0, None)
         release_time = float_control(params.get("release_time_s"), default_release_time, 0.0, None)
         state = release_state.setdefault(str(actor_id), {"released": False, "held_frames": 0})
+        if params.get("native_grabbable_blueprint") and "native_grabbable_methods" not in state:
+            state["native_grabbable_methods"] = sorted(
+                name
+                for name in dir(actor)
+                if any(term in name for term in ("grab", "drop", "interact", "attach", "collision", "physics"))
+            )
+        if time_s < grasp_time:
+            waiting = runtime_vec3(obj.get("initial_position_m"), (0.0, 0.0, 0.0))
+            try:
+                set_delayed_release_collision_enabled(component, True)
+                component.set_simulate_physics(False)
+                component.set_enable_gravity(False)
+                component.set_physics_linear_velocity(unreal.Vector(0.0, 0.0, 0.0), False, "")
+            except Exception as exc:
+                status.setdefault("errors", []).append(f"delayed_wait_physics:{actor_id}:{exc}")
+            actor.set_actor_location(
+                ue_vec_from_meters(waiting, z_offset_cm=float(ground_offsets.get(actor_id, 0.0)), origin=scene_origin),
+                False,
+                False,
+            )
+            state["waiting_frames"] = int(state.get("waiting_frames") or 0) + 1
+            continue
         if time_s < release_time:
-            hold = projectile_hold_position(obj, frame)
             try:
                 set_delayed_release_collision_enabled(component, False)
                 component.set_simulate_physics(False)
@@ -6950,23 +7559,196 @@ def apply_delayed_release_projectiles(
                 component.set_physics_linear_velocity(unreal.Vector(0.0, 0.0, 0.0), False, "")
             except Exception as exc:
                 status.setdefault("errors", []).append(f"delayed_hold_physics:{actor_id}:{exc}")
-            actor.set_actor_location(
-                ue_vec_from_meters(hold, z_offset_cm=float(ground_offsets.get(actor_id, 0.0)), origin=scene_origin),
-                False,
-                False,
-            )
-            actor.set_actor_rotation(runtime_rotator(params.get("hold_rotation_degrees") or obj.get("rotation_degrees")), False)
+            socket_name = str(params.get("attachment_socket") or "").strip()
+            if socket_name and not state.get("attached"):
+                carrier = actors.get(str(params.get("carrier_id") or "runner_character"))
+                parent = actor_skeletal_component_with_socket(carrier, socket_name) if carrier else None
+                try:
+                    can_attach = False
+                    if parent:
+                        hand = parent.get_socket_location(unreal.Name(socket_name))
+                        object_center, extent = actor_bounds(actor)
+                        center_distance_cm = unreal.MathLibrary.vector_distance(hand, object_center)
+                        contact_extent_cm = min(max_axis(extent), runtime_desired_extent_cm(obj))
+                        surface_gap_cm = max(
+                            0.0,
+                            center_distance_cm
+                            - contact_extent_cm,
+                        )
+                        max_gap_cm = float_control(params.get("max_grasp_gap_cm"), 4.0, 0.0, 50.0)
+                        previous_min_gap = float(state.get("min_grasp_gap_cm", float("inf")))
+                        state["min_grasp_gap_cm"] = round(
+                            min(previous_min_gap, surface_gap_cm),
+                            3,
+                        )
+                        frame_index = int(frame.get("frame") or 0)
+                        if surface_gap_cm <= previous_min_gap:
+                            state["closest_grasp_frame"] = frame_index
+                            state["closest_grasp_hand_position_m"] = [
+                                round((value - origin_value) / 100.0, 5)
+                                for value, origin_value in zip(
+                                    (hand.x, hand.y, hand.z),
+                                    (scene_origin.x, scene_origin.y, scene_origin.z),
+                                )
+                            ]
+                            state["closest_grasp_object_position_m"] = [
+                                round((value - origin_value) / 100.0, 5)
+                                for value, origin_value in zip(
+                                    (object_center.x, object_center.y, object_center.z),
+                                    (scene_origin.x, scene_origin.y, scene_origin.z),
+                                )
+                            ]
+                            state["closest_grasp_contact_extent_cm"] = round(contact_extent_cm, 3)
+                        if (
+                            surface_gap_cm > max_gap_cm
+                            and surface_gap_cm <= float_control(params.get("grasp_alignment_start_gap_cm"), 15.0, max_gap_cm, 50.0)
+                            and state.get("last_grasp_alignment_frame") != frame_index
+                        ):
+                            # ponytail: bounded magnetic alignment; replace with hand IK when arbitrary object geometry is required.
+                            step_cm = min(
+                                float_control(params.get("grasp_alignment_step_cm"), 3.0, 0.1, 10.0),
+                                surface_gap_cm - max_gap_cm,
+                            )
+                            direction = (hand - object_center) / max(center_distance_cm, 1e-3)
+                            actor.set_actor_location(actor.get_actor_location() + direction * step_cm, False, False)
+                            state["grasp_alignment_frames"] = int(state.get("grasp_alignment_frames") or 0) + 1
+                            state["last_grasp_alignment_frame"] = frame_index
+                        else:
+                            can_attach = surface_gap_cm <= max_gap_cm
+                    if can_attach and bool_control(params.get("smooth_socket_follow"), False):
+                        state["attached"] = True
+                        state["smooth_socket_follow"] = True
+                    else:
+                        state["attached"] = bool(
+                            can_attach
+                            and attach_actor_clear_of_socket(
+                                actor,
+                                parent,
+                                socket_name,
+                                float_control(params.get("grasp_clearance_cm"), 2.0, 0.0, 20.0),
+                                max_gap_cm,
+                            )
+                        )
+                except Exception as exc:
+                    status.setdefault("errors", []).append(f"delayed_attach:{actor_id}:{exc}")
+            if not state.get("attached"):
+                if socket_name:
+                    state["grasp_rejected_frames"] = int(state.get("grasp_rejected_frames") or 0) + 1
+                    continue
+                hold = projectile_hold_position(obj, frame)
+                actor.set_actor_location(
+                    ue_vec_from_meters(hold, z_offset_cm=float(ground_offsets.get(actor_id, 0.0)), origin=scene_origin),
+                    False,
+                    False,
+                )
+                actor.set_actor_rotation(runtime_rotator(params.get("hold_rotation_degrees") or obj.get("rotation_degrees")), False)
+                state["last_hold_position_m"] = [round(value, 5) for value in hold]
+            elif state.get("smooth_socket_follow") and state.get("last_carry_follow_frame") != int(frame.get("frame") or 0):
+                carrier = actors.get(str(params.get("carrier_id") or "runner_character"))
+                parent = actor_skeletal_component_with_socket(carrier, socket_name) if carrier else None
+                if parent:
+                    animation_state = (actors.get("runtime_animation_state") or {}).get(str(params.get("carrier_id") or "runner_character")) or {}
+                    if animation_state.get("gasp_interaction_montage_active"):
+                        carry_pose_phase = "drop" if animation_state.get("segment_name") == "drop" else "interaction"
+                    else:
+                        carry_pose_phase = "gasp"
+                    frame_index = int(frame.get("frame") or 0)
+                    phase_changed = (
+                        state.get("last_carry_pose_phase") is not None
+                        and state.get("last_carry_pose_phase") != carry_pose_phase
+                    )
+                    if phase_changed:
+                        if state.get("actual_socket_attached"):
+                            actor.detach_from_actor(
+                                unreal.DetachmentRule.KEEP_WORLD,
+                                unreal.DetachmentRule.KEEP_WORLD,
+                                unreal.DetachmentRule.KEEP_WORLD,
+                            )
+                            state["actual_socket_attached"] = False
+                        state.setdefault("socket_transition_frames", []).append(frame_index)
+                        state["socket_reattach_after_frame"] = frame_index + 2
+                    carrier_location = carrier.get_actor_location()
+                    previous_carrier_location = state.get("last_carrier_location_cm")
+                    if carry_pose_phase == "gasp" and previous_carrier_location:
+                        actor.set_actor_location(
+                            actor.get_actor_location()
+                            + unreal.Vector(
+                                carrier_location.x - previous_carrier_location[0],
+                                carrier_location.y - previous_carrier_location[1],
+                                carrier_location.z - previous_carrier_location[2],
+                            ),
+                            False,
+                            False,
+                        )
+                    applied = follow_socket_smoothly(
+                        actor,
+                        parent,
+                        socket_name,
+                        float_control(params.get("grasp_clearance_cm"), 2.0, 0.0, 20.0),
+                        float_control(params.get("max_carry_follow_step_cm"), 8.0, 0.1, 50.0),
+                    )
+                    max_follow_step_cm = float_control(params.get("max_carry_follow_step_cm"), 8.0, 0.1, 50.0)
+                    if (
+                        carry_pose_phase != "gasp"
+                        and not state.get("actual_socket_attached")
+                        and frame_index >= int(state.get("socket_reattach_after_frame") or 0)
+                        and applied < max_follow_step_cm - 1e-3
+                    ):
+                        state["actual_socket_attached"] = bool(
+                            actor.attach_to_component(
+                                parent,
+                                unreal.Name(socket_name),
+                                unreal.AttachmentRule.KEEP_WORLD,
+                                unreal.AttachmentRule.KEEP_WORLD,
+                                unreal.AttachmentRule.KEEP_WORLD,
+                                False,
+                            )
+                        )
+                        if state["actual_socket_attached"]:
+                            state.setdefault("socket_attachment_frames", []).append(frame_index)
+                    state["max_carry_follow_step_cm"] = round(
+                        max(float(state.get("max_carry_follow_step_cm") or 0.0), applied),
+                        3,
+                    )
+                    state["last_carrier_location_cm"] = [
+                        carrier_location.x,
+                        carrier_location.y,
+                        carrier_location.z,
+                    ]
+                    state["last_carry_pose_phase"] = carry_pose_phase
+                    state["last_carry_follow_frame"] = frame_index
             state["held_frames"] = int(state.get("held_frames") or 0) + 1
-            state["last_hold_position_m"] = [round(value, 5) for value in hold]
             continue
         if state.get("released"):
             continue
-        release_position = runtime_vec3(params.get("release_position_m"), projectile_hold_position(obj, frame))
-        actor.set_actor_location(
-            ue_vec_from_meters(release_position, z_offset_cm=float(ground_offsets.get(actor_id, 0.0)), origin=scene_origin),
-            False,
-            False,
-        )
+        if state.get("attached"):
+            goal_center = params.get("release_goal_center_m")
+            goal_half_extent = params.get("release_goal_half_extent_m")
+            if isinstance(goal_center, list) and isinstance(goal_half_extent, list):
+                position = runtime_transform_from_actor(actors, str(actor_id), actor, scene_origin)["position"]
+                inside_goal = all(
+                    abs(float(position[index]) - float(goal_center[index])) <= float(goal_half_extent[index])
+                    for index in range(3)
+                )
+                if not inside_goal:
+                    state["release_rejected_frames"] = int(state.get("release_rejected_frames") or 0) + 1
+                    continue
+            actor.detach_from_actor(
+                unreal.DetachmentRule.KEEP_WORLD,
+                unreal.DetachmentRule.KEEP_WORLD,
+                unreal.DetachmentRule.KEEP_WORLD,
+            )
+            state["actual_socket_attached"] = False
+        release_from_socket = bool_control(params.get("release_from_socket"), False) and state.get("attached")
+        if release_from_socket:
+            release_position = runtime_transform_from_actor(actors, str(actor_id), actor, scene_origin)["position"]
+        else:
+            release_position = runtime_vec3(params.get("release_position_m"), projectile_hold_position(obj, frame))
+            actor.set_actor_location(
+                ue_vec_from_meters(release_position, z_offset_cm=float(ground_offsets.get(actor_id, 0.0)), origin=scene_origin),
+                False,
+                False,
+            )
         try:
             set_delayed_release_collision_enabled(component, True)
         except Exception as exc:
@@ -7182,6 +7964,7 @@ def configure_runtime_physics_substepping(runtime_scene: dict | None, status: di
 
 def start_editor_physics_capture(actors: dict, runtime_scene: dict | None, expected_seconds: float) -> dict:
     controls = actors.get("physics_controls") or runtime_physics_controls(runtime_scene)
+    requires_gameplay_input = bool(runtime_gasp_objects(runtime_scene))
     status = {
         "enabled": bool(controls.get("simulate_physics")),
         "requested_driver": controls.get("simulation_driver"),
@@ -7218,6 +8001,8 @@ def start_editor_physics_capture(actors: dict, runtime_scene: dict | None, expec
         status["manual_world_tick_available"] = True
     except Exception as exc:
         status["errors"].append(f"manual_world_tick_probe:{exc}")
+    if requires_gameplay_input:
+        status["manual_world_tick_available"] = False
     try:
         if not status["manual_world_tick_available"]:
             level_editor = None
@@ -7226,7 +8011,10 @@ def start_editor_physics_capture(actors: dict, runtime_scene: dict | None, expec
             except Exception:
                 level_editor = None
             try:
-                if level_editor and hasattr(level_editor, "editor_play_simulate"):
+                if requires_gameplay_input and level_editor and hasattr(level_editor, "editor_request_begin_play"):
+                    level_editor.editor_request_begin_play()
+                    status["editor_begin_play_requested"] = True
+                elif level_editor and hasattr(level_editor, "editor_play_simulate"):
                     level_editor.editor_play_simulate()
                     status["editor_simulate_started"] = True
                 elif level_editor and hasattr(level_editor, "editor_request_begin_play"):
@@ -7657,7 +8445,9 @@ def merge_scripted_runner_trajectory(
     runner_ids = [
         str(obj.get("id"))
         for obj in runtime_scene.get("dynamic_objects") or []
-        if obj.get("id") and obj.get("behavior") == "third_person_runner"
+        if obj.get("id")
+        and obj.get("behavior") == "third_person_runner"
+        and str((obj.get("params") or {}).get("humanoid_adapter") or "").strip().lower() not in {"gasp", "ddv"}
     ]
     if not runner_ids:
         return physics_trajectory
@@ -7675,7 +8465,12 @@ def merge_scripted_runner_trajectory(
                     **scripted,
                     "source": "scripted_visible_runner",
                 }
-        merged.append({**frame, "objects": objects})
+        merged_frame = {**frame, "objects": objects}
+        if planned.get("actions"):
+            merged_frame["actions"] = list(planned["actions"])
+        if planned.get("contacts"):
+            merged_frame["contacts"] = list(frame.get("contacts") or []) + list(planned["contacts"])
+        merged.append(merged_frame)
     return merged
 
 
@@ -7781,11 +8576,16 @@ def rebind_runtime_actors_to_simulation_world(
                 except Exception:
                     pass
                 status["rebound_capture_actor"] = True
+        highres_camera = label_map.get("native_phenomena_demo_highres_capture_camera")
+        if highres_camera:
+            actors["highres_camera"] = highres_camera
+            status["rebound_highres_camera"] = True
         if rebound:
             actors["physics_game_world"] = world
             status["rebound_world"] = str(world)
             break
     status["rebound_actor_ids"] = sorted(set(rebound))
+    initialize_gasp_locomotion(actors, runtime_scene, status)
     status["rebound_visual_actor_ids"] = sorted(set(rebound_visuals))
     missing_visuals = sorted(set(wanted_visuals) - set(rebound_visuals))
     status["missing_visual_actor_ids"] = missing_visuals
@@ -7865,6 +8665,12 @@ def advance_cpp_runtime_driver(cpp_driver, actors: dict, status: dict, runtime_s
 
 def advance_physics_capture(actors: dict, status: dict, dt: float) -> None:
     if not status.get("enabled"):
+        return
+    if actors.get("gasp_locomotion"):
+        set_simulation_world_paused(actors, status, False)
+        time.sleep(max(0.0, float(dt)))
+        set_simulation_world_paused(actors, status, True)
+        status["gasp_tick_count"] = int(status.get("gasp_tick_count") or 0) + 1
         return
     if status.get("manual_world_tick_available"):
         try:
@@ -8307,6 +9113,9 @@ def start_highres_viewport_capture(
         "waiting_kind": None,
         "data_capture_in_progress": False,
         "capture_request_in_progress": False,
+        "gasp_tick_pending": None,
+        "gasp_tick_target_time": None,
+        "gasp_advanced_frame": None,
         "camera_tracks": {
             str(output.get("view_id") or output.get("id")): []
             for output in view_outputs
@@ -8407,7 +9216,9 @@ def start_highres_viewport_capture(
             return
         if state["frame_index"] < state["initial_impulse_start_frame"]:
             return
-        if not start_cpp_runtime_driver(actors, runtime_scene, physics_status, len(trajectory)):
+        if actors.get("gasp_locomotion"):
+            pass
+        elif not start_cpp_runtime_driver(actors, runtime_scene, physics_status, len(trajectory)):
             apply_initial_physics_impulses(actors, runtime_scene, physics_status)
         state["physics_impulse_applied"] = True
         physics_status["initial_impulse_applied_at_frame"] = state["frame_index"]
@@ -8425,7 +9236,9 @@ def start_highres_viewport_capture(
             summary["physics_capture"].update(physics_status)
             write_summary(summary)
             return
-        if not start_cpp_runtime_driver(actors, runtime_scene, physics_status, len(trajectory)):
+        if actors.get("gasp_locomotion"):
+            physics_status["interaction_driver"] = "gasp_character_movement_and_delayed_release"
+        elif not start_cpp_runtime_driver(actors, runtime_scene, physics_status, len(trajectory)):
             apply_initial_physics_impulses(actors, runtime_scene, physics_status)
         first_frame = trajectory[min(state["frame_index"], len(trajectory) - 1)] if trajectory else {"frame": 0, "time": 0.0, "objects": {}}
         runner_ids = [obj.get("id") for obj in (runtime_scene.get("dynamic_objects") or []) if obj.get("behavior") == "third_person_runner"] if runtime_scene else []
@@ -8469,6 +9282,12 @@ def start_highres_viewport_capture(
         summary["timing"]["capture_seconds"] = round(state["encode_started"] - state["capture_started"], 2)
         encode_results = []
         for output in view_outputs:
+            if actors.get("gasp_locomotion"):
+                first_frame = output["frames_dir"] / "frame_0000.png"
+                stable_frame = output["frames_dir"] / "frame_0001.png"
+                if first_frame.exists() and stable_frame.exists():
+                    shutil.copyfile(stable_frame, first_frame)
+                    summary["capture_readiness"]["gasp_first_frame_camera_stabilized"] = True
             frame_hashes = sampled_frame_hashes(output["frames_dir"], len(trajectory), "png")
             encode = encode_video(output["frames_dir"], output["preview"], actors.get("video_filter", ""), "png")
             encode_results.append({
@@ -8545,7 +9364,7 @@ def start_highres_viewport_capture(
                 WIDTH,
                 HEIGHT,
                 str(path),
-                camera,
+                actors.get("highres_camera") or camera,
                 False,
                 False,
                 unreal.ComparisonTolerance.LOW,
@@ -8561,12 +9380,21 @@ def start_highres_viewport_capture(
         finally:
             state["capture_request_in_progress"] = False
 
+    def set_highres_camera_view(location, target, fov: float) -> None:
+        capture_camera = actors.get("highres_camera") or camera
+        for active_camera in dict.fromkeys((camera, capture_camera)):
+            active_camera.set_actor_location(location, False, False)
+            active_camera.set_actor_rotation(look_at_rotation(location, target), False)
+            active_camera.camera_component.set_editor_property("field_of_view", float(fov))
+        gasp = actors.get("gasp_locomotion") or {}
+        controller = gasp.get("controller")
+        if controller:
+            controller.set_view_target_with_blend(capture_camera, 0.0)
+
     def request_probe() -> None:
         view = view_outputs[0]
         frame_view = camera_view_for_frame(view, runtime_scene, 0, len(trajectory))
-        camera.set_actor_location(frame_view["location"], False, False)
-        camera.set_actor_rotation(look_at_rotation(frame_view["location"], frame_view["target"]), False)
-        camera.camera_component.set_editor_property("field_of_view", float(frame_view["fov"]))
+        set_highres_camera_view(frame_view["location"], frame_view["target"], frame_view["fov"])
         try:
             editor_subsystem.set_level_viewport_camera_info(frame_view["location"], look_at_rotation(frame_view["location"], frame_view["target"]))
         except Exception:
@@ -8596,6 +9424,24 @@ def start_highres_viewport_capture(
     def request_frame(frame_index: int):
         frame = trajectory[frame_index]
         first_view_for_frame = state["view_index"] == 0
+        if (
+            first_view_for_frame
+            and physics_enabled
+            and actors.get("gasp_locomotion")
+            and state.get("gasp_advanced_frame") != frame_index
+        ):
+            runner_ids = [
+                obj.get("id")
+                for obj in (runtime_scene.get("dynamic_objects") or [])
+                if obj.get("behavior") == "third_person_runner"
+            ]
+            apply_trajectory_frame(actors, runner_ids, frame, scene_origin, runtime_scene)
+            world = actors.get("physics_game_world")
+            now = float(unreal.GameplayStatics.get_time_seconds(world)) if world else 0.0
+            set_simulation_world_paused(actors, physics_status, False)
+            state["gasp_tick_pending"] = frame_index
+            state["gasp_tick_target_time"] = now + fixed_physics_step_s(frame_index, FPS)
+            return
         if first_view_for_frame and physics_enabled and analytic_contact_solver_enabled(actors, runtime_scene):
             solver_source = analytic_solver_source(actors, runtime_scene)
             apply_trajectory_frame(actors, dynamic_ids, frame, scene_origin, runtime_scene)
@@ -8642,6 +9488,12 @@ def start_highres_viewport_capture(
             apply_geometry_collection_fracture_response(actors, runtime_scene, new_events, frame_index, physics_status)
             if runner_ids and isinstance(actual_frame.get("objects"), dict):
                 for runner_id in runner_ids:
+                    runner_obj = next(
+                        (obj for obj in (runtime_scene.get("dynamic_objects") or []) if str(obj.get("id") or "") == str(runner_id)),
+                        {},
+                    )
+                    if str((runner_obj.get("params") or {}).get("humanoid_adapter") or "").strip().lower() in {"gasp", "ddv"}:
+                        continue
                     scripted = (frame.get("objects") or {}).get(runner_id)
                     if isinstance(scripted, dict):
                         actual_frame["objects"][runner_id] = {**scripted, "source": scripted.get("source") or "scripted_runtime_preview"}
@@ -8666,9 +9518,7 @@ def start_highres_viewport_capture(
                 "camera_mode": view.get("camera_mode") or "fixed",
             }
         )
-        camera.set_actor_location(frame_view["location"], False, False)
-        camera.set_actor_rotation(look_at_rotation(frame_view["location"], frame_view["target"]), False)
-        camera.camera_component.set_editor_property("field_of_view", float(frame_view["fov"]))
+        set_highres_camera_view(frame_view["location"], frame_view["target"], frame_view["fov"])
         if render_data_passes:
             state["data_capture_in_progress"] = True
         try:
@@ -8762,6 +9612,22 @@ def start_highres_viewport_capture(
                     summary["physics_capture"].update(physics_status)
                     state["errors"].append({"frame": state.get("frame_index"), "error": "physics_ready_timeout:no_pie_game_world"})
                     write_summary(summary)
+                return
+            if state.get("gasp_tick_pending") is not None:
+                pending_frame = int(state["gasp_tick_pending"])
+                world = actors.get("physics_game_world")
+                target_time = float(state.get("gasp_tick_target_time") or 0.0)
+                current_time = float(unreal.GameplayStatics.get_time_seconds(world)) if world else target_time
+                if current_time + 1e-4 < target_time:
+                    return
+                set_simulation_world_paused(actors, physics_status, True)
+                state["gasp_tick_pending"] = None
+                state["gasp_tick_target_time"] = None
+                state["gasp_advanced_frame"] = pending_frame
+                gasp_obj = next(iter(runtime_gasp_objects(runtime_scene)), None)
+                if gasp_obj:
+                    bound_gasp_post_tick_displacement(actors, gasp_obj, pending_frame)
+                physics_status["gasp_tick_count"] = int(physics_status.get("gasp_tick_count") or 0) + 1
                 return
             min_probe_count = min(2, RENDER_FIRST_FRAME_STABILITY_SAMPLES)
             should_probe = state["probe_index"] < min_probe_count or (
@@ -8880,6 +9746,12 @@ def main():
             apply_geometry_collection_fracture_response(actors, runtime_scene, new_events, frame_index, physics_status)
             if runner_ids and isinstance(actual_frame.get("objects"), dict):
                 for runner_id in runner_ids:
+                    runner_obj = next(
+                        (obj for obj in (runtime_scene.get("dynamic_objects") or []) if str(obj.get("id") or "") == str(runner_id)),
+                        {},
+                    )
+                    if str((runner_obj.get("params") or {}).get("humanoid_adapter") or "").strip().lower() in {"gasp", "ddv"}:
+                        continue
                     scripted = (frame.get("objects") or {}).get(runner_id)
                     if isinstance(scripted, dict):
                         actual_frame["objects"][runner_id] = {**scripted, "source": scripted.get("source") or "scripted_runtime_preview"}

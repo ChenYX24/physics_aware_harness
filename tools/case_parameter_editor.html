@@ -4,539 +4,645 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light">
-    <title>Case Parameter Plane · Physics Harness</title>
+    <title>Physics Case Studio</title>
     <style>
       :root {
-        --paper: #eaf3f7;
-        --ink: #14262e;
-        --cyan: #53b8c7;
-        --orange: #f26b38;
-        --steel: #64777f;
-        --line: rgba(20, 38, 46, 0.22);
-        --white: #f8fcfd;
-        --shadow: 7px 7px 0 rgba(20, 38, 46, 0.1);
+        --fog: #edf2f7;
+        --paper: #ffffff;
+        --ink: #16212b;
+        --muted: #667583;
+        --line: #cbd5df;
+        --soft-line: #e6ebf0;
+        --cobalt: #2458d8;
+        --cobalt-soft: #e8efff;
+        --signal: #f39a2b;
+        --signal-soft: #fff1dc;
+        --good: #14866d;
+        --shadow: 0 18px 48px rgba(36, 61, 84, 0.11);
       }
 
       * { box-sizing: border-box; }
-      html { background: var(--paper); color: var(--ink); }
+      html { min-width: 320px; color: var(--ink); background: var(--fog); }
       body {
         margin: 0;
         min-height: 100vh;
-        font-family: "Avenir Next", "Segoe UI", sans-serif;
-        background: var(--paper);
+        font-family: "Avenir Next", "Helvetica Neue", "PingFang SC", sans-serif;
+        background:
+          linear-gradient(90deg, transparent 31px, rgba(36, 88, 216, 0.045) 32px, transparent 33px),
+          linear-gradient(transparent 31px, rgba(36, 88, 216, 0.045) 32px, transparent 33px),
+          var(--fog);
+        background-size: 32px 32px;
       }
 
       button, input { font: inherit; }
       button { color: inherit; }
-      code, .micro, .eyebrow, .route, .status, .tag {
-        font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+      code, pre, .mono, .micro, .tag, .status {
+        font-family: "SFMono-Regular", "Roboto Mono", Consolas, monospace;
       }
+      [hidden] { display: none !important; }
 
       .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 8;
         display: flex;
         align-items: center;
-        min-height: 68px;
-        border-bottom: 2px solid var(--ink);
-        background: rgba(234, 243, 247, 0.96);
+        min-height: 62px;
+        border-bottom: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.92);
+        backdrop-filter: blur(18px);
       }
-
       .brand {
         align-self: stretch;
-        display: grid;
-        place-items: center;
-        width: 220px;
-        padding: 0 20px;
-        color: var(--white);
-        background: var(--ink);
-        font-family: "Avenir Next Condensed", "Arial Narrow", sans-serif;
-        font-size: 19px;
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        min-width: 248px;
+        padding: 0 22px;
+        border-right: 1px solid var(--line);
+        font-family: "DIN Alternate", "Avenir Next Condensed", sans-serif;
+        font-size: 18px;
         font-weight: 800;
-        letter-spacing: 0.08em;
+        letter-spacing: 0.035em;
       }
-
+      .brand-mark {
+        width: 17px;
+        height: 17px;
+        border: 5px solid var(--cobalt);
+        border-right-color: var(--signal);
+        border-radius: 50%;
+        transform: rotate(-20deg);
+      }
       .top-actions {
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: 9px;
         width: 100%;
-        padding: 10px 24px;
+        padding: 10px 22px;
       }
-
       .status {
         margin-left: auto;
-        font-size: 11px;
-        letter-spacing: 0.03em;
+        color: var(--muted);
+        font-size: 10px;
       }
-
       .status::before {
         content: "";
         display: inline-block;
-        width: 8px;
-        height: 8px;
-        margin-right: 8px;
+        width: 7px;
+        height: 7px;
+        margin-right: 7px;
         border-radius: 50%;
-        background: var(--steel);
+        background: var(--muted);
       }
-
-      .status[data-kind="ready"]::before { background: var(--cyan); }
-      .status[data-kind="error"] { color: #9e3017; }
-      .status[data-kind="error"]::before { background: var(--orange); }
+      .status[data-kind="ready"]::before { background: var(--good); }
+      .status[data-kind="error"] { color: #a13a26; }
+      .status[data-kind="error"]::before { background: #d9563d; }
 
       .button, .file-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
         min-height: 38px;
-        border: 1px solid var(--ink);
-        padding: 8px 14px;
-        background: transparent;
-        font-weight: 700;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 8px 13px;
+        color: var(--ink);
+        background: var(--paper);
+        font-size: 12px;
+        font-weight: 750;
         cursor: pointer;
+        text-decoration: none;
+        transition: border-color 140ms ease, transform 140ms ease, background 140ms ease;
       }
-
-      .button:hover, .file-button:hover { background: var(--white); }
-      .button.primary {
-        color: var(--white);
-        background: var(--ink);
+      .button:hover, .file-button:hover {
+        border-color: var(--cobalt);
+        transform: translateY(-1px);
       }
-      .button.primary:hover { background: #263d47; }
+      .button.primary { border-color: var(--cobalt); color: white; background: var(--cobalt); }
+      .button.primary:hover { background: #1948c1; }
       .file-button input { display: none; }
 
-      main { padding: 34px clamp(18px, 4vw, 64px) 100px; }
-
+      main { padding: 36px clamp(16px, 3.6vw, 58px) 132px; }
+      .empty-state, .editor { max-width: 1500px; margin: 0 auto; }
       .empty-state {
-        max-width: 760px;
-        margin: 12vh auto 0;
-        border: 2px solid var(--ink);
-        padding: 48px;
-        background: var(--white);
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(330px, 0.7fr);
+        min-height: 620px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 30px 30px 8px 30px;
+        background: var(--paper);
         box-shadow: var(--shadow);
       }
-
-      .empty-state h1, .case-head h1 {
+      .empty-copy { align-self: center; padding: clamp(38px, 6vw, 88px); }
+      .empty-copy h1, .case-head h1 {
+        max-width: 860px;
         margin: 0;
-        font-family: "Avenir Next Condensed", "Arial Narrow", sans-serif;
-        font-size: clamp(44px, 7vw, 92px);
+        font-family: "DIN Alternate", "Avenir Next Condensed", sans-serif;
+        font-size: clamp(48px, 7vw, 102px);
+        font-weight: 800;
         line-height: 0.88;
-        letter-spacing: -0.045em;
+        letter-spacing: -0.055em;
+      }
+      .empty-copy h1 em { color: var(--cobalt); font-style: normal; }
+      .empty-copy > p:not(.micro) {
+        max-width: 650px;
+        margin: 26px 0 0;
+        color: var(--muted);
+        font-size: 17px;
+        line-height: 1.7;
+      }
+      .micro {
+        margin: 0 0 12px;
+        color: var(--cobalt);
+        font-size: 9px;
+        font-weight: 800;
+        letter-spacing: 0.13em;
         text-transform: uppercase;
       }
-
-      .empty-state p { max-width: 560px; font-size: 18px; line-height: 1.6; }
-      .editor { max-width: 1540px; margin: 0 auto; }
+      .empty-diagram {
+        display: grid;
+        align-content: center;
+        gap: 18px;
+        padding: 48px;
+        color: white;
+        background: var(--ink);
+      }
+      .diagram-row {
+        display: grid;
+        grid-template-columns: 52px 1fr auto;
+        gap: 13px;
+        align-items: center;
+        border-bottom: 1px solid rgba(255,255,255,.16);
+        padding: 14px 0;
+      }
+      .diagram-row b { color: #9eb9ff; font: 800 11px/1 "SFMono-Regular", monospace; }
+      .diagram-row span { font-size: 14px; }
+      .diagram-row code { color: #9eb0bd; font-size: 10px; }
+      .diagram-line {
+        width: 2px;
+        height: 38px;
+        margin: -18px 0 -18px 25px;
+        background: var(--signal);
+      }
 
       .case-head {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
-        gap: 32px;
+        grid-template-columns: minmax(0, 1fr) minmax(260px, 380px);
+        gap: 42px;
         align-items: end;
-        margin-bottom: 30px;
+        margin: 12px 0 30px;
       }
-
-      .case-head h1 { max-width: 920px; }
-      .case-head p {
-        max-width: 720px;
+      .case-head h1 { font-size: clamp(48px, 6vw, 88px); }
+      .case-head p:not(.micro) {
+        max-width: 760px;
         margin: 18px 0 0;
-        color: #3e555f;
-        font-size: 17px;
-        line-height: 1.55;
+        color: var(--muted);
+        font-size: 16px;
+        line-height: 1.6;
       }
+      .route-ticket {
+        border: 1px solid var(--line);
+        border-left: 6px solid var(--cobalt);
+        border-radius: 6px 16px 16px 6px;
+        padding: 16px 18px;
+        background: rgba(255,255,255,.78);
+      }
+      .route-ticket .micro { margin-bottom: 7px; }
+      .route { font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
 
-      .route-plate {
-        width: min(340px, 100%);
-        border-left: 5px solid var(--cyan);
-        padding: 9px 0 9px 16px;
-      }
-      .eyebrow, .micro {
-        margin: 0 0 7px;
-        color: var(--steel);
-        font-size: 10px;
-        font-weight: 800;
-        letter-spacing: 0.12em;
-      }
-      .route { font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
-
-      .workbench {
+      .run-contract {
         display: grid;
-        grid-template-columns: minmax(520px, 1.55fr) minmax(310px, 0.8fr);
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        margin: -10px 0 30px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-left: 6px solid var(--signal);
+        border-radius: 6px 16px 16px 6px;
+        background: rgba(255,255,255,.88);
+      }
+      .run-contract div {
+        display: grid;
+        gap: 6px;
+        min-width: 0;
+        border-right: 1px solid var(--soft-line);
+        padding: 13px 15px;
+      }
+      .run-contract div:last-child { border-right: 0; }
+      .run-contract small {
+        color: var(--cobalt);
+        font: 800 8px/1 "SFMono-Regular", monospace;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+      }
+      .run-contract strong { overflow-wrap: anywhere; font: 800 10px/1.45 "SFMono-Regular", monospace; }
+
+      .lab-grid {
+        display: grid;
+        grid-template-columns: minmax(560px, 1.55fr) minmax(330px, .72fr);
         gap: 24px;
         align-items: start;
       }
-
-      .control-stack { display: grid; gap: 20px; }
+      .control-stack { display: grid; gap: 18px; }
       .panel {
-        border: 1px solid var(--ink);
-        background: rgba(248, 252, 253, 0.88);
-        box-shadow: var(--shadow);
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 18px 18px 7px 18px;
+        background: rgba(255,255,255,.94);
+        box-shadow: 0 8px 26px rgba(36, 61, 84, .07);
       }
       .panel-head {
         display: flex;
         align-items: center;
         gap: 12px;
-        min-height: 48px;
-        padding: 10px 16px;
-        border-bottom: 1px solid var(--ink);
+        min-height: 52px;
+        border-bottom: 1px solid var(--soft-line);
+        padding: 11px 17px;
       }
       .panel-head h2 {
         margin: 0;
-        font-family: "Avenir Next Condensed", "Arial Narrow", sans-serif;
-        font-size: 22px;
-        text-transform: uppercase;
+        font-family: "DIN Alternate", "Avenir Next Condensed", sans-serif;
+        font-size: 20px;
+        letter-spacing: -.01em;
       }
+      .panel-head p { margin: 0; color: var(--muted); font-size: 11px; }
       .tag {
         margin-left: auto;
-        padding: 3px 6px;
-        color: var(--white);
-        background: var(--steel);
-        font-size: 9px;
-        letter-spacing: 0.08em;
+        border-radius: 999px;
+        padding: 5px 8px;
+        color: var(--cobalt);
+        background: var(--cobalt-soft);
+        font-size: 8px;
+        font-weight: 800;
+        letter-spacing: .06em;
       }
-      .panel-body { padding: 18px; }
+      .panel-body { padding: 20px; }
 
-      fieldset { min-width: 0; border: 0; margin: 0; padding: 0; }
+      fieldset { min-width: 0; margin: 0; border: 0; padding: 0; }
       legend {
-        margin-bottom: 3px;
-        font-family: "Avenir Next Condensed", "Arial Narrow", sans-serif;
-        font-size: 28px;
+        margin-bottom: 4px;
+        font-family: "DIN Alternate", "Avenir Next Condensed", sans-serif;
+        font-size: 27px;
         font-weight: 800;
       }
-
       .preset-row {
         display: grid;
         grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 8px;
-        margin: 16px 0 10px;
+        gap: 10px;
+        margin: 16px 0 12px;
       }
       .preset {
         display: grid;
-        gap: 12px;
-        min-height: 84px;
+        gap: 10px;
+        min-height: 92px;
         border: 1px solid var(--line);
-        padding: 12px;
+        border-radius: 13px 13px 4px 13px;
+        padding: 13px;
         text-align: left;
-        background: transparent;
+        background: var(--paper);
         cursor: pointer;
       }
-      .preset span { font-size: 12px; }
-      .preset strong { font-family: "IBM Plex Mono", monospace; font-size: 16px; }
-      .preset:hover, .preset.selected {
-        border-color: var(--ink);
-        background: rgba(83, 184, 199, 0.17);
+      .preset span { color: var(--muted); font-size: 11px; line-height: 1.35; }
+      .preset strong { color: var(--ink); font: 800 15px/1.2 "SFMono-Regular", monospace; }
+      .preset:hover { border-color: var(--cobalt); }
+      .preset.selected {
+        border-color: var(--cobalt);
+        background: var(--cobalt-soft);
+        box-shadow: inset 0 -4px 0 var(--cobalt);
       }
-      .preset.selected { box-shadow: inset 0 -4px 0 var(--cyan); }
-
       .custom-value {
         display: grid;
-        grid-template-columns: auto auto minmax(100px, 160px) auto 1fr;
+        grid-template-columns: auto auto minmax(110px, 180px) auto;
         gap: 9px;
         align-items: center;
-        min-height: 46px;
         border-top: 1px dashed var(--line);
-        padding-top: 10px;
+        padding-top: 12px;
+        color: var(--muted);
+        font-size: 12px;
       }
-      .custom-value input[type="number"], .field-input input {
+      .custom-value input[type="number"], .field-input input, .save-row input {
         width: 100%;
-        min-height: 38px;
+        min-height: 40px;
         border: 1px solid var(--line);
-        border-radius: 0;
-        padding: 7px 9px;
+        border-radius: 9px;
+        padding: 8px 10px;
         color: var(--ink);
-        background: var(--white);
+        background: #fbfdff;
       }
-      .custom-value.active input[type="number"] { border-color: var(--orange); }
+      .custom-value.active input[type="number"] { border-color: var(--signal); background: var(--signal-soft); }
 
       .field-grid {
         display: grid;
         grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 14px;
+        gap: 15px;
       }
       .field-control {
         display: grid;
         align-content: start;
         gap: 7px;
         min-width: 0;
-        border-left: 3px solid var(--line);
-        padding-left: 12px;
+        border-top: 3px solid var(--soft-line);
+        padding-top: 11px;
       }
-      .field-control > span { font-weight: 750; }
+      .field-group {
+        width: fit-content;
+        border-radius: 999px;
+        padding: 3px 6px;
+        color: var(--cobalt);
+        background: var(--cobalt-soft);
+        font: 800 7px/1 "SFMono-Regular", monospace;
+        letter-spacing: .05em;
+        text-transform: uppercase;
+      }
+      .field-control > span { font-size: 12px; font-weight: 800; }
       .field-input { display: grid; grid-template-columns: 1fr auto; gap: 7px; align-items: center; }
-      .field-input b { color: var(--steel); font-size: 11px; }
-      .field-control code {
-        color: var(--steel);
-        font-size: 9px;
-        line-height: 1.35;
-        overflow-wrap: anywhere;
-      }
-      .field-warning {
-        margin: 0;
-        color: #963316;
-        font-size: 11px;
-        line-height: 1.4;
-      }
-
-      details.panel > summary {
+      .field-input b { color: var(--muted); font-size: 10px; }
+      .field-control code { color: #82909b; font-size: 8px; line-height: 1.45; overflow-wrap: anywhere; }
+      .field-warning { margin: 0; color: #a2472d; font-size: 10px; line-height: 1.45; }
+      details.panel > summary, details.audit-detail > summary {
         display: flex;
         align-items: center;
-        min-height: 48px;
-        border-bottom: 1px solid transparent;
-        padding: 10px 16px;
-        font-family: "Avenir Next Condensed", "Arial Narrow", sans-serif;
-        font-size: 22px;
+        min-height: 51px;
+        padding: 11px 17px;
+        font-family: "DIN Alternate", "Avenir Next Condensed", sans-serif;
+        font-size: 19px;
         font-weight: 800;
-        text-transform: uppercase;
         cursor: pointer;
       }
-      details[open] > summary { border-bottom-color: var(--ink); }
-      details > summary::after {
-        content: "NOT RECOMMENDED / EDITABLE";
+      details.panel > summary::after {
+        content: "谨慎修改";
         margin-left: auto;
-        color: var(--orange);
-        font-family: "IBM Plex Mono", monospace;
-        font-size: 9px;
-        letter-spacing: 0.08em;
+        color: #a2472d;
+        font: 800 9px/1 "SFMono-Regular", monospace;
       }
+      details[open] > summary { border-bottom: 1px solid var(--soft-line); }
 
-      .capture-grid {
+      .capture-console { border-top: 5px solid var(--cobalt); }
+      .capture-body { display: grid; gap: 20px; }
+      .capture-section { display: grid; gap: 9px; }
+      .capture-section h3 { margin: 0; font-size: 11px; }
+      .resolution-row {
         display: grid;
-        grid-template-columns: 0.75fr 1.25fr;
-        gap: 22px;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 9px;
       }
-      .capture-grid h3 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase; }
+      .resolution-card input, .check-chip input { position: absolute; opacity: 0; pointer-events: none; }
+      .resolution-card span {
+        display: grid;
+        gap: 7px;
+        min-height: 68px;
+        border: 1px solid var(--line);
+        border-radius: 11px;
+        padding: 11px;
+        background: #fbfdff;
+        cursor: pointer;
+      }
+      .resolution-card b { font-size: 11px; }
+      .resolution-card code { color: var(--muted); font-size: 9px; }
+      .resolution-card input:checked + span {
+        border-color: var(--cobalt);
+        color: var(--cobalt);
+        background: var(--cobalt-soft);
+        box-shadow: inset 0 -3px 0 var(--cobalt);
+      }
+      .capture-plan {
+        display: grid;
+        grid-template-columns: .72fr 1.28fr;
+        gap: 18px;
+        border-top: 1px solid var(--soft-line);
+        padding-top: 18px;
+      }
       .check-row { display: flex; flex-wrap: wrap; gap: 7px; }
-      .check-chip input { position: absolute; opacity: 0; pointer-events: none; }
       .check-chip span {
         display: block;
         border: 1px solid var(--line);
-        padding: 7px 9px;
-        font-family: "IBM Plex Mono", monospace;
-        font-size: 10px;
+        border-radius: 999px;
+        padding: 7px 10px;
+        color: var(--muted);
+        background: #fbfdff;
+        font: 700 9px/1.2 "SFMono-Regular", monospace;
         cursor: pointer;
       }
       .check-chip input:checked + span {
         border-color: var(--ink);
-        color: var(--ink);
-        background: var(--cyan);
+        color: white;
+        background: var(--ink);
       }
 
-      .audit-stack { display: grid; gap: 20px; position: sticky; top: 18px; }
-      .energy-body {
+      .save-row {
         display: grid;
-        grid-template-columns: 92px 1fr;
-        gap: 22px;
-        min-height: 270px;
+        grid-template-columns: minmax(180px, .7fr) auto 1fr;
+        gap: 10px;
+        align-items: end;
+        margin-bottom: 17px;
       }
+      .save-row label { display: grid; gap: 5px; font-size: 10px; font-weight: 800; }
+      .save-row p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
+      .variant-queue { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+      .variant-queue li {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        gap: 12px;
+        align-items: center;
+        border: 1px solid var(--soft-line);
+        border-radius: 11px;
+        padding: 11px 13px;
+        background: #fbfdff;
+      }
+      .variant-queue strong { font: 800 10px/1.3 "SFMono-Regular", monospace; }
+      .variant-queue p { margin: 4px 0; color: var(--muted); font-size: 10px; }
+      .variant-queue code { color: #82909b; font-size: 8px; }
+      .pipeline-track {
+        display: block;
+        margin-top: 7px;
+        color: #82909b;
+        font: 700 7px/1.45 "SFMono-Regular", monospace;
+        letter-spacing: .02em;
+      }
+      .variant-queue button { border: 0; padding: 6px; color: var(--muted); background: transparent; font-size: 19px; cursor: pointer; }
+      .queue-select input { position: absolute; opacity: 0; }
+      .queue-select span {
+        display: block;
+        width: 18px;
+        height: 18px;
+        border: 1px solid var(--ink);
+        border-radius: 5px;
+        cursor: pointer;
+      }
+      .queue-select input:checked + span {
+        border: 4px solid white;
+        outline: 1px solid var(--cobalt);
+        background: var(--cobalt);
+      }
+      .planned-badge, .custom-badge {
+        margin-left: 6px;
+        border-radius: 999px;
+        padding: 3px 5px;
+        color: var(--cobalt);
+        background: var(--cobalt-soft);
+        font: 800 7px/1 "SFMono-Regular", monospace;
+      }
+      .custom-badge { color: #9d5310; background: var(--signal-soft); }
+
+      .audit-stack { position: sticky; top: 80px; display: grid; gap: 16px; }
+      .run-ticket { border-top: 5px solid var(--signal); }
+      .energy-body { display: grid; grid-template-columns: 70px 1fr; gap: 20px; min-height: 245px; }
+      .run-ticket[data-mode="generic"] .energy-body { grid-template-columns: 1fr; min-height: 150px; }
+      .run-ticket[data-mode="generic"] .energy-ladder { display: none; }
       .energy-ladder {
         position: relative;
-        width: 38px;
-        height: 232px;
-        margin-left: 18px;
+        width: 32px;
+        height: 210px;
+        margin-left: 14px;
         border-left: 2px solid var(--ink);
       }
       .energy-marker {
         position: absolute;
-        left: -10px;
-        width: 20px;
-        height: 20px;
+        left: -9px;
+        width: 17px;
+        height: 17px;
         border: 4px solid var(--paper);
         border-radius: 50%;
-        background: var(--orange);
+        background: var(--signal);
         box-shadow: 0 0 0 1px var(--ink);
-        transition: bottom 180ms ease-out;
+        transition: bottom 160ms ease-out;
       }
-      .threshold {
-        position: absolute;
-        left: -2px;
-        width: 82px;
-        border-top: 1px solid var(--ink);
-      }
+      .threshold { position: absolute; left: -2px; width: 64px; border-top: 1px solid var(--line); }
       .threshold span {
         position: absolute;
-        top: -8px;
-        left: 46px;
-        width: 110px;
-        padding-left: 4px;
-        color: var(--steel);
-        background: var(--white);
-        font-family: "IBM Plex Mono", monospace;
-        font-size: 8px;
+        top: -7px;
+        left: 42px;
+        width: 88px;
+        color: var(--muted);
+        background: var(--paper);
+        font: 700 7px/1.3 "SFMono-Regular", monospace;
       }
-      .energy-readout { align-self: end; padding-bottom: 15px; }
+      .energy-readout { align-self: end; padding-bottom: 10px; }
       .energy-readout strong {
         display: block;
-        margin: 2px 0 14px;
-        font-family: "Avenir Next Condensed", sans-serif;
+        margin: 4px 0 13px;
+        font-family: "DIN Alternate", "Avenir Next Condensed", sans-serif;
         font-size: 42px;
         line-height: 1;
       }
       .damage-state {
         display: inline-block;
-        border: 1px solid var(--ink);
+        border-radius: 999px;
         padding: 5px 8px;
-        color: var(--white);
+        color: white;
         background: var(--ink);
-        font-family: "IBM Plex Mono", monospace;
-        font-size: 11px;
+        font: 800 9px/1 "SFMono-Regular", monospace;
         text-transform: uppercase;
       }
+      .muted { color: var(--muted); font-size: 11px; line-height: 1.5; }
 
-      .file-list, .diff-list { list-style: none; margin: 0; padding: 0; }
+      .file-list, .diff-list { margin: 0; padding: 0; list-style: none; }
       .file-list li {
         display: grid;
-        grid-template-columns: 54px 1fr;
-        gap: 4px 10px;
-        border-bottom: 1px solid var(--line);
-        padding: 11px 0;
+        grid-template-columns: 48px 1fr;
+        gap: 4px 9px;
+        border-bottom: 1px solid var(--soft-line);
+        padding: 10px 0;
       }
       .file-list li:last-child { border: 0; }
-      .file-list b { color: var(--orange); font-family: "IBM Plex Mono", monospace; font-size: 9px; }
-      .file-list code { overflow-wrap: anywhere; font-size: 10px; }
-      .file-list span { grid-column: 2; color: var(--steel); font-size: 10px; }
-
-      .diff-list {
-        max-height: 390px;
-        overflow: auto;
-        scrollbar-color: var(--steel) transparent;
+      .file-list b { color: var(--cobalt); font: 800 8px/1.4 "SFMono-Regular", monospace; }
+      .file-list code { font-size: 8px; overflow-wrap: anywhere; }
+      .file-list span { grid-column: 2; color: var(--muted); font-size: 9px; }
+      details.audit-detail {
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 15px 15px 6px 15px;
+        background: rgba(255,255,255,.94);
       }
+      .audit-detail summary .tag { margin-left: auto; }
+      .diff-list { max-height: 340px; overflow: auto; padding: 0 16px 12px; }
       .diff-list li {
         display: grid;
         grid-template-columns: 1fr auto 1fr;
-        gap: 5px 8px;
-        border-bottom: 1px solid var(--line);
-        padding: 10px 0;
-        font-family: "IBM Plex Mono", monospace;
-        font-size: 9px;
+        gap: 4px 7px;
+        border-bottom: 1px solid var(--soft-line);
+        padding: 9px 0;
+        font: 700 8px/1.4 "SFMono-Regular", monospace;
       }
-      .diff-list code { grid-column: 1 / -1; color: var(--steel); overflow-wrap: anywhere; }
-      .diff-list span { color: var(--steel); overflow-wrap: anywhere; }
+      .diff-list code { grid-column: 1 / -1; color: var(--muted); overflow-wrap: anywhere; }
+      .diff-list span { color: #8d9aa4; overflow-wrap: anywhere; }
       .diff-list i { font-style: normal; }
-      .diff-list strong { color: var(--ink); overflow-wrap: anywhere; }
-
-      .save-row {
-        display: grid;
-        grid-template-columns: minmax(160px, 0.7fr) auto 1fr;
-        gap: 10px;
-        align-items: end;
-        margin-bottom: 18px;
-      }
-      .save-row label { display: grid; gap: 5px; font-size: 11px; font-weight: 750; }
-      .save-row input {
-        min-height: 38px;
-        border: 1px solid var(--line);
-        border-radius: 0;
-        padding: 7px 9px;
-        background: var(--white);
-      }
-      .save-row p { margin: 0; color: var(--steel); font-size: 11px; line-height: 1.4; }
-      .variant-queue { display: grid; gap: 7px; list-style: none; margin: 0; padding: 0; }
-      .variant-queue li {
-        display: grid;
-        grid-template-columns: auto 1fr auto;
-        gap: 12px;
-        align-items: center;
-        border: 1px solid var(--line);
-        padding: 10px 12px;
-        background: rgba(234, 243, 247, 0.45);
-      }
-      .variant-queue strong { font-family: "IBM Plex Mono", monospace; font-size: 11px; }
-      .variant-queue p { margin: 4px 0; color: #3e555f; font-size: 11px; }
-      .variant-queue code { color: var(--steel); font-size: 9px; }
-      .variant-queue button {
-        border: 0;
-        padding: 6px 9px;
-        color: var(--steel);
-        background: transparent;
-        font-size: 20px;
-        cursor: pointer;
-      }
-      .queue-select input { position: absolute; opacity: 0; }
-      .queue-select span {
-        display: block;
-        width: 19px;
-        height: 19px;
-        border: 1px solid var(--ink);
-        cursor: pointer;
-      }
-      .queue-select input:checked + span {
-        border: 4px solid var(--white);
-        outline: 1px solid var(--ink);
-        background: var(--cyan);
-      }
-      .planned-badge, .custom-badge {
-        margin-left: 7px;
-        padding: 2px 4px;
-        color: var(--white);
-        background: var(--steel);
-        font-family: "IBM Plex Mono", monospace;
-        font-size: 7px;
-        letter-spacing: 0.06em;
-      }
-      .custom-badge { background: var(--orange); }
+      .diff-list strong { overflow-wrap: anywhere; }
 
       .command-dock {
         position: fixed;
         right: 0;
         bottom: 0;
         left: 0;
-        z-index: 4;
+        z-index: 10;
         display: grid;
-        grid-template-columns: minmax(0, 1fr) repeat(3, auto);
+        grid-template-columns: minmax(0, 1fr) repeat(4, auto);
         align-items: center;
-        gap: 12px;
-        border-top: 2px solid var(--ink);
-        padding: 12px clamp(18px, 4vw, 64px);
-        color: var(--white);
-        background: var(--ink);
+        gap: 10px;
+        border-top: 1px solid #34424d;
+        padding: 11px clamp(16px, 3.6vw, 58px);
+        color: white;
+        background: rgba(22, 33, 43, .97);
+        backdrop-filter: blur(14px);
       }
       .command-dock pre {
         min-width: 0;
-        max-height: 72px;
+        max-height: 62px;
         margin: 0;
         overflow: auto;
-        color: #c7f5fb;
-        font-size: 10px;
+        color: #bcd0ff;
+        font-size: 9px;
         white-space: pre-wrap;
       }
-      .command-dock .button { border-color: var(--white); color: var(--white); }
-      .command-dock .button.primary { color: var(--ink); background: var(--cyan); }
-      .output-meta { display: block; margin-bottom: 5px; color: #9fb1b8; font-size: 9px; }
-      .muted { color: var(--steel); font-size: 12px; }
+      .command-dock .button { border-color: #53616d; color: white; background: transparent; }
+      .command-dock .button.primary { border-color: var(--signal); color: var(--ink); background: var(--signal); }
+      .output-meta { display: block; margin-bottom: 4px; color: #8fa0ad; font-size: 8px; }
 
       input:focus-visible, button:focus-visible, summary:focus-visible {
-        outline: 3px solid var(--orange);
+        outline: 3px solid var(--signal);
         outline-offset: 2px;
       }
 
-      [hidden] { display: none !important; }
-
-      @media (max-width: 1050px) {
-        .workbench { grid-template-columns: 1fr; }
+      @media (max-width: 1080px) {
+        .lab-grid { grid-template-columns: 1fr; }
+        .run-contract { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .run-contract div:nth-child(2) { border-right: 0; }
+        .run-contract div:nth-child(-n + 2) { border-bottom: 1px solid var(--soft-line); }
         .audit-stack { position: static; grid-template-columns: 1fr 1fr; }
-        .audit-stack .panel:last-child { grid-column: 1 / -1; }
-        .case-head { grid-template-columns: 1fr; }
+        .audit-stack > :last-child { grid-column: 1 / -1; }
       }
-
-      @media (max-width: 720px) {
+      @media (max-width: 760px) {
         .topbar { align-items: stretch; flex-direction: column; }
-        .brand { width: 100%; min-height: 46px; }
-        .top-actions { flex-wrap: wrap; padding: 10px 14px; }
+        .brand { min-height: 48px; border-right: 0; border-bottom: 1px solid var(--line); }
+        .top-actions { flex-wrap: wrap; padding: 9px 13px; }
         .status { width: 100%; margin: 0; }
-        main { padding: 24px 14px 160px; }
-        .empty-state { padding: 28px 22px; }
-        .preset-row, .field-grid, .capture-grid, .audit-stack, .save-row { grid-template-columns: 1fr; }
-        .audit-stack .panel:last-child { grid-column: auto; }
-        .command-dock { grid-template-columns: 1fr 1fr; }
-        .command-dock > div { grid-column: 1 / -1; }
+        main { padding: 24px 13px 92px; }
+        .empty-state, .case-head { grid-template-columns: 1fr; }
+        .empty-diagram { display: none; }
+        .case-head { gap: 22px; }
+        .field-grid, .preset-row, .resolution-row, .capture-plan, .save-row, .audit-stack { grid-template-columns: 1fr; }
+        .audit-stack > :last-child { grid-column: auto; }
+        .command-dock {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 6px;
+          padding: 8px;
+        }
+        .command-dock > div { display: none; }
+        .command-dock .button { min-height: 42px; padding: 6px; font-size: 10px; }
       }
-
       @media (prefers-reduced-motion: reduce) {
-        *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
+        *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; }
       }
     </style>
   </head>
   <body>
     <header class="topbar">
-      <div class="brand">PHYSICS / PARAMETER PLANE</div>
+      <div class="brand"><span class="brand-mark"></span><span id="brandTitle">Physics Case Studio</span></div>
       <div class="top-actions">
-        <button id="loadSample" class="button" type="button">载入玻璃示例</button>
-        <label class="file-button">
-          选择 Plan + CaseSpec JSON
+        <a id="assetLink" class="button" href="asset_browser.html">资产台账</a>
+        <button id="loadSample" class="button" type="button">打开玻璃撞击示例</button>
+        <label id="fileLoader" class="file-button">
+          载入 Plan + CaseSpec
           <input id="jsonFiles" type="file" accept=".json,application/json" multiple>
         </label>
         <div id="status" class="status" role="status" aria-live="polite">等待 JSON</div>
@@ -545,70 +651,106 @@
 
     <main>
       <section id="emptyState" class="empty-state">
-        <p class="eyebrow">NO LLM REQUIRED AFTER PLANNING</p>
-        <h1>Case Parameter Plane</h1>
-        <p>
-          解析模型第一次规划生成的 variant plan，把主要变量、通用设置和高级设置映射为
-          可运行的 CaseSpec。选择上方玻璃示例，或同时载入 plan 与基础 CaseSpec。
-        </p>
+        <div class="empty-copy">
+          <p class="micro">Model-planned · Human-editable · Script-runnable</p>
+          <h1>一个 Case，<br><em>多组可控世界。</em></h1>
+          <p>
+            首次规划把可变参数和联动公式写进 JSON；之后直接选择默认档或输入自定义值，
+            组合机位、RGB、Depth、Segmentation 与分辨率，再导出可执行批次。
+          </p>
+        </div>
+        <div class="empty-diagram" aria-label="Case 扩展流程">
+          <div class="diagram-row"><b>01</b><span>模型声明变量空间</span><code>plan.json</code></div>
+          <div class="diagram-line"></div>
+          <div class="diagram-row"><b>02</b><span>人或模型选择参数</span><code>variant</code></div>
+          <div class="diagram-line"></div>
+          <div class="diagram-row"><b>03</b><span>组成捕获矩阵</span><code>views × passes</code></div>
+          <div class="diagram-line"></div>
+          <div class="diagram-row"><b>04</b><span>脚本直接渲染</span><code>no LLM</code></div>
+        </div>
       </section>
 
       <section id="editor" class="editor" hidden>
         <header class="case-head">
           <div>
-            <p class="eyebrow">MODEL-PLANNED / HUMAN-EDITABLE / SCRIPT-RUNNABLE</p>
+            <p class="micro">Controlled physical experiment</p>
             <h1 id="caseTitle"></h1>
             <p id="caseSummary"></p>
           </div>
-          <div class="route-plate">
-            <p class="eyebrow">WORKSPACE ROUTE</p>
-            <div id="caseRoute" class="route"></div>
+          <div class="route-ticket">
+            <p class="micro">Internal run route</p>
+            <div id="caseRoute" class="route mono"></div>
           </div>
         </header>
 
-        <div class="workbench">
+        <section id="runContract" class="run-contract" hidden aria-label="运行复现契约">
+          <div><small>Run status</small><strong id="runStatus"></strong></div>
+          <div><small>Backend</small><strong id="runBackend"></strong></div>
+          <div><small>Control mode</small><strong id="runControlMode"></strong></div>
+          <div><small>Case SHA-256</small><strong id="runCaseHash"></strong></div>
+        </section>
+
+        <div class="lab-grid">
           <div class="control-stack">
             <section class="panel">
               <div class="panel-head">
-                <h2>01 / 核心变量</h2>
-                <span class="tag">PRESET + CUSTOM</span>
+                <div>
+                  <h2>模型预设变量</h2>
+                  <p>首轮规划明确要探索的主轴；默认档和人工值都保留。</p>
+                </div>
+                <span class="tag">Preset + custom</span>
               </div>
               <div id="primaryControls" class="panel-body"></div>
             </section>
 
             <section class="panel">
               <div class="panel-head">
-                <h2>02 / 通用参数</h2>
-                <span class="tag">SAFE TO TUNE</span>
+                <div>
+                  <h2>物理、场景与事件</h2>
+                  <p>按真实 CaseSpec 指针调整；联动字段会立即重算。</p>
+                </div>
+                <span class="tag">Safe to tune</span>
               </div>
               <div id="commonControls" class="panel-body field-grid"></div>
             </section>
 
             <details class="panel">
-              <summary>03 / 高级选项</summary>
+              <summary>高级参数</summary>
               <div id="advancedControls" class="panel-body field-grid"></div>
             </details>
 
-            <section class="panel">
+            <section class="panel capture-console">
               <div class="panel-head">
-                <h2>04 / 捕获计划</h2>
-                <span class="tag">ONE COMMAND</span>
-              </div>
-              <div class="panel-body capture-grid">
                 <div>
-                  <h3>Render passes</h3>
-                  <div id="passControls" class="check-row"></div>
+                  <h2>捕获矩阵</h2>
+                  <p>一次任务可选多机位；各模态按同一 solver state 对齐。</p>
                 </div>
-                <div>
-                  <h3>Camera views</h3>
-                  <div id="viewControls" class="check-row"></div>
+                <span class="tag">Views × modalities</span>
+              </div>
+              <div class="panel-body capture-body">
+                <div class="capture-section">
+                  <h3>输出分辨率</h3>
+                  <div id="resolutionControls" class="resolution-row"></div>
+                </div>
+                <div class="capture-plan">
+                  <div class="capture-section">
+                    <h3>模态</h3>
+                    <div id="passControls" class="check-row"></div>
+                  </div>
+                  <div class="capture-section">
+                    <h3>机位</h3>
+                    <div id="viewControls" class="check-row"></div>
+                  </div>
                 </div>
               </div>
             </section>
 
             <section class="panel">
               <div class="panel-head">
-                <h2>05 / 变体队列</h2>
+                <div>
+                  <h2>变体队列</h2>
+                  <p>模型规划项默认只选 baseline；人工保存项自动选中。</p>
+                </div>
                 <span id="queueCount" class="tag"></span>
               </div>
               <div class="panel-body">
@@ -617,8 +759,8 @@
                     变体名称
                     <input id="variantLabel" type="text" autocomplete="off">
                   </label>
-                  <button id="saveVariant" class="button" type="button">保存当前参数</button>
-                  <p>模型首轮计划的变体会自动列出，但默认只勾选 baseline；人工编辑保存后自动选中。</p>
+                  <button id="saveVariant" class="button" type="button">保存当前变体</button>
+                  <p>保存后会冻结当前参数、机位、模态和分辨率；导出时只包含勾选项。</p>
                 </div>
                 <ul id="variantQueue" class="variant-queue"></ul>
               </div>
@@ -626,9 +768,9 @@
           </div>
 
           <aside class="audit-stack">
-            <section id="energyPanel" class="panel">
+            <section id="energyPanel" class="panel run-ticket">
               <div class="panel-head">
-                <h2>Energy ladder</h2>
+                <div><h2>实时结果票据</h2><p id="resultSubtitle">联动公式的可见反馈</p></div>
                 <span id="damageState" class="damage-state"></span>
               </div>
               <div class="panel-body energy-body">
@@ -638,25 +780,22 @@
                   <div id="burstMark" class="threshold"><span id="burstLabel"></span></div>
                 </div>
                 <div class="energy-readout">
-                  <p class="micro">COMPUTED INCIDENT ENERGY</p>
+                  <p id="resultEyebrow" class="micro">Computed incident energy</p>
                   <strong id="energyValue"></strong>
-                  <p class="muted">速度、质量或阈值变化会立即更新联动字段和预期破坏等级。</p>
+                  <p id="resultNote" class="muted">速度、质量和阈值变化会同步更新初态、事件能量与预期损伤。</p>
                 </div>
               </div>
             </section>
 
             <section class="panel">
-              <div class="panel-head"><h2>影响文件</h2></div>
+              <div class="panel-head"><div><h2>文件影响</h2><p>输入、输出与运行落点</p></div></div>
               <div class="panel-body"><ul id="fileList" class="file-list"></ul></div>
             </section>
 
-            <section class="panel">
-              <div class="panel-head">
-                <h2>JSON 变更</h2>
-                <span id="changeCount" class="tag"></span>
-              </div>
-              <div class="panel-body"><ul id="diffList" class="diff-list"></ul></div>
-            </section>
+            <details class="audit-detail">
+              <summary>JSON 变更 <span id="changeCount" class="tag"></span></summary>
+              <ul id="diffList" class="diff-list"></ul>
+            </details>
           </aside>
         </div>
       </section>
@@ -667,9 +806,10 @@
         <span id="outputName" class="output-meta">尚未生成 CaseSpec</span>
         <pre id="renderCommand">载入 JSON 后生成命令</pre>
       </div>
+      <button id="copyExactCommand" class="button" type="button" hidden>复制精确复现命令</button>
       <button id="copyCommand" class="button" type="button">复制当前命令</button>
-      <button id="copyBatchCommand" class="button" type="button">复制批次命令</button>
-      <button id="downloadBatch" class="button primary" type="button">下载已选批次 JSON</button>
+      <button id="copyBatchCommand" class="button" type="button">复制队列准备命令</button>
+      <button id="downloadBatch" class="button primary" type="button">下载已选批次</button>
     </footer>
 
     <script src="case_parameter_editor.js"></script>

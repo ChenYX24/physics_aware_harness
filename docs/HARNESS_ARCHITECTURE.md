@@ -139,7 +139,7 @@ python3.13 scripts/harness_generate_cases.py \
 ## Case Navigation Contract
 
 - 仓库 `cases/TREE.md` 由 `scripts/harness_case_tree.py` 从全部 JSON CaseSpec/模板生成，解释每个输入目录、Case 和应由 verifier 记住的不变量。
-- 本地 `$SIM_HARNESS_WORKSPACE/cases/TREE.md` 由同一命令加 `--workspace-root` 生成，只展示 `physics/scenario/version` 三层语义，并统一解释 `variants/runs/ue_runs/probes/overall/delivery/inputs/reference/representatives`。其中 `variants/<variant>/{rgb,depth,segmentation,overall}` 是面向人和后续自动化的规范视图，canonical run 仍由 manifest 的 `source_run` 指向。
+- 本地 `$SIM_HARNESS_WORKSPACE/cases/TREE.md` 由同一命令加 `--workspace-root` 生成，只展示 `case_id/variant_id` 两层业务语义。每个 variant 固定包含 `{rgb,depth,segmentation,overall}` 与 `variant.json`；canonical run、日志和缓存保存在 `runs/case_routes/<physics>/<scenario>/<version>/`，由 manifest 的 `source_run` 指向。
 - 时间戳、attempt 和 camera/pass 不得继续升格为 case 语义层；它们只能存在于版本内部 manifest/index。
 - `python scripts/harness_case_tree.py --check --workspace-root "$SIM_HARNESS_WORKSPACE"` 是新增、删除、keep/reject 和 probe 清理后的导航关卡。
 
@@ -165,6 +165,8 @@ PhysInOne 对照确认液体画质是完整交换链问题：其液体使用 SPH
 
 ```text
 case_spec.json
+run_control.json
+run_control.html
 artifact_manifest.json
 harness_artifact.json
 harness_verifier.json
@@ -174,6 +176,12 @@ harness_verifier.json
 <backend>_output/run_readiness.json
 <backend>_output/render_manifest.json
 ```
+
+`run_control.json` 是 `harness_run_control_v1` 可执行契约，冻结 CaseSpec 哈希、
+backend、机位、模态、分辨率和复现命令。`run_control.html` 是同一契约的自包含
+控制页：有 variant plan 时开放已声明 JSON Pointer；没有 plan 时保持 CaseSpec
+只读，只允许调整捕获配置。复现输出固定进入原 run 的 `reproductions/`，不得覆盖
+原始证据。成功和失败 run 都必须保留这两个文件。
 
 UE v002 已生成 `camera_trajectory.json`、双机位 RGB 视频、逐帧 depth/segmentation 与 pass manifest；后续还必须补 normal/audio、完整五机位 profile 与原生 Chaos substep/contact impulse trace。
 
@@ -191,4 +199,6 @@ UE v002 已生成 `camera_trajectory.json`、双机位 RGB 视频、逐帧 depth
 
 ## 为什么前端不是主线
 
-Agent-facing harness 首先需要 CLI、API、artifact schema 和 tests。前端可以作为 optional viewer 展示视频、trajectory、capability verifier 和 diagnosis，但不应该阻塞 core harness。核心验收以 CLI smoke、verifier report、case regression 和 dataset artifact 为准。
+资产/结果浏览器仍是 optional viewer。每个 run 的 `run_control.html` 不是 viewer，
+而是 `harness_run_control_v1` 的人机界面，与 `run_control.json` 一起属于 core
+artifact contract。物理验收仍以 verifier、manifest 和回归测试为准。

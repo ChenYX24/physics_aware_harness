@@ -38,7 +38,9 @@
     "target motion starts after action frame",
     "push actions have contact evidence",
     "throw actions have impulse or release metadata",
-    "post-action response exceeds minimum displacement or speed"
+    "pick/place actions have ordered grasp/release evidence",
+    "post-action response exceeds minimum displacement or speed",
+    "declared object effects verify lift, goal region, final contact, and settling"
   ],
   "negative_modes": [
     "preaction_motion",

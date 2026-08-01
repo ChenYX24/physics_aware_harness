@@ -241,9 +241,27 @@ class HarnessCliTests(unittest.TestCase):
     def test_case_tree_can_index_workspace_without_expanding_run_depth(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            version = workspace / "cases" / "rigid_collision" / "domino" / "v001_true_chaos_chain"
-            (version / "runs" / "run_01").mkdir(parents=True)
-            (version / "probes" / "smoke_01").mkdir(parents=True)
+            case_dir = workspace / "cases" / "domino__v001_true_chaos_chain"
+            (case_dir / "baseline").mkdir(parents=True)
+            (case_dir / "case.json").write_text(
+                json.dumps(
+                    {
+                        "case_route": "rigid_collision/domino/v001_true_chaos_chain",
+                        "variants": [{"id": "baseline"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            internal = (
+                workspace
+                / "runs"
+                / "case_routes"
+                / "rigid_collision"
+                / "domino"
+                / "v001_true_chaos_chain"
+            )
+            (internal / "runs" / "run_01").mkdir(parents=True)
+            (internal / "probes" / "smoke_01").mkdir(parents=True)
             result = subprocess.run(
                 [
                     sys.executable,
@@ -258,8 +276,8 @@ class HarnessCliTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             tree = (workspace / "cases" / "TREE.md").read_text(encoding="utf-8")
-            self.assertIn("rigid_collision/domino/v001_true_chaos_chain/", tree)
-            self.assertIn("`runs/` (1)", tree)
+            self.assertIn("domino__v001_true_chaos_chain/", tree)
+            self.assertIn("baseline/", tree)
             self.assertNotIn("run_01/", tree)
             check = subprocess.run(
                 [
@@ -327,6 +345,9 @@ class HarnessCliTests(unittest.TestCase):
             summary = json.loads(result.stdout)
             self.assertEqual(summary["schema_version"], "harness_smoke_summary_v1")
             self.assertEqual(summary["case_count"], summary["expectation_met_count"])
+            self.assertTrue(
+                all((Path(row["run_dir"]) / "run_control.html").is_file() for row in summary["cases"])
+            )
 
     def test_generated_cases_batch_outputs_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -390,6 +411,9 @@ class HarnessCliTests(unittest.TestCase):
             self.assertEqual(summary["schema_version"], "harness_batch_run_summary_v1")
             self.assertEqual(summary["case_count"], 4)
             self.assertEqual(summary["unexpected_count"], 0)
+            self.assertTrue(
+                all((Path(row["run_dir"]) / "run_control.json").is_file() for row in summary["cases"])
+            )
             verify = subprocess.run(
                 [
                     sys.executable,
@@ -777,6 +801,17 @@ class HarnessCliTests(unittest.TestCase):
             run_dir = Path(summary["run_dir"])
             self.assertTrue((run_dir / "views" / "overview" / "rgb.mp4").exists())
             self.assertTrue((run_dir / "views" / "top" / "depth_placeholder.json").exists())
+            self.assertTrue((run_dir / "run_control.html").is_file())
+            control = json.loads((run_dir / "run_control.json").read_text(encoding="utf-8"))
+            self.assertEqual(control["schema_version"], "harness_run_control_v1")
+            self.assertEqual(control["status"], "completed")
+            self.assertEqual(control["control_mode"], "frozen")
+            self.assertEqual(
+                control["execution"]["reproduction_output_root"],
+                str(run_dir / "reproductions"),
+            )
+            artifact = json.loads((run_dir / "artifact_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(artifact["artifacts"]["run_control_html"], "run_control.html")
             readiness = json.loads((run_dir / "run_readiness.json").read_text(encoding="utf-8"))
             self.assertTrue(readiness["camera_plan_ready"])
             self.assertTrue(readiness["multi_view_ready"])
@@ -807,7 +842,15 @@ class HarnessCliTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             run_dir = Path(json.loads(result.stdout)["run_dir"])
-            self.assertEqual(run_dir.parent, workspace.resolve() / "cases" / "rigid_collision" / "falling" / "v001_floor_contact")
+            self.assertEqual(
+                run_dir.parent,
+                workspace.resolve()
+                / "runs"
+                / "case_routes"
+                / "rigid_collision"
+                / "falling"
+                / "v001_floor_contact",
+            )
 
     def test_batch_runner_passes_multiview_options(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

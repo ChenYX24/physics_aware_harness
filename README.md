@@ -27,9 +27,15 @@ prompt / CaseSpec
 
 仓库内不再使用 `runs/` 或根目录 `videos/` 存真实输出。相对输出路径由 harness 自动解析到本地工作区；单次/批量未校验预览默认进入 `review/probes/`，`harness_iterate_case.py` 只把 hard-gate 胜者发布到 `review/inbox/`。不要把 MP4、EXR、OBJ、UE 资产、虚拟环境或缓存提交到 GitHub。
 
-正式本地 case 使用统一路由：`cases/<physics>/<scenario>/<vNNN_description>/`。例如 `--case-route rigid_collision/billiards/v002_complete_angle_matrix`；该路径由 `harness.core.workspace.case_output_root()` 校验并保证位于 Git 工作树之外。
+`--case-route <physics>/<scenario>/<vNNN_description>` 仍是内部运行标识，例如
+`rigid_collision/billiards/v002_complete_angle_matrix`；原始 run、日志和缓存写入
+`runs/case_routes/<physics>/<scenario>/<version>/`。给人和下游工具使用的目录固定为
+`cases/<case_id>/<variant_id>/`，不再重复嵌套 physics/scenario/version/variants。
 
-两份自动导航分别回答“能跑什么”和“已经跑了什么”：仓库 [cases/TREE.md](cases/TREE.md) 索引所有 CaseSpec/模板；本地 workspace 的 `cases/TREE.md` 索引实际三层 case route、版本用途和标准子目录。新增/清理 case 后执行：
+两份自动导航分别回答“能跑什么”和“已经跑了什么”：仓库 [cases/TREE.md](cases/TREE.md)
+索引所有 CaseSpec/模板；本地 workspace 的 `cases/TREE.md` 索引实际两层
+Case/Variant 目录。原 Excel 与目录的机器可读对应关系保存在
+[`config/case_runtime_map.json`](config/case_runtime_map.json)。
 
 ```bash
 python3.13 scripts/harness_case_tree.py \
@@ -38,7 +44,10 @@ python3.13 scripts/harness_case_tree.py --check \
   --workspace-root "$SIM_HARNESS_WORKSPACE"
 ```
 
-完整 Excel Case 表的仓库级索引是 [`config/case_catalog.json`](config/case_catalog.json)。它保留 22 行业务 Case、理论变量组合数、当前 capability 和已有 CaseSpec 的对应关系；没有实现的能力保持空映射，不能用相似 case 冒充完成。
+完整 Excel Case 表的仓库级索引是 [`config/case_catalog.json`](config/case_catalog.json)。
+它保留 22 行业务 Case、理论变量组合数、当前 capability 和已有 CaseSpec 的对应关系；
+`case_runtime_map.json` 再映射到内部 route 和扁平 Case 文件夹。没有实现的能力保持空映射，
+不能用相似 case 冒充完成。
 
 第一次规划变量空间时使用机器可读 variant plan。plan 记录全部 Cartesian 组合，但默认只选择 baseline 加单因素变化（OFAT）做首轮渲染。每个 level 通过 JSON Pointer 同步修改 CaseSpec 中的所有相关字段，因此后续无需 LLM，直接编辑 JSON 后即可 materialize 或渲染：
 
@@ -82,6 +91,15 @@ python3.13 -m http.server 8000
 # 浏览器打开 http://127.0.0.1:8000/tools/case_parameter_editor.html
 ```
 
+HTML 是通用壳：模型只需提供 `base_case`、`case_route` 和 `axes`；标题、机位、
+RGB、分辨率等都有安全默认值，`ui` 仅用于可选说明和高级联动。`plan` 命令会在
+JSON 旁自动生成一个可直接双击的自包含 HTML；已有 plan 可补生成：
+
+```bash
+python3.13 scripts/harness_case_library.py editor \
+  config/variant_plans/newton_cradle_release_angle.json
+```
+
 variant plan 把可编辑内容分成三层：
 
 - `axes[].tier=primary`：模型第一次规划时明确要研究的变量。`levels` 提供默认档，
@@ -98,7 +116,8 @@ variant plan 把可编辑内容分成三层：
 它预先考虑 1/2/3 m/s 三档，但页面只默认勾选 baseline；其他模型规划档和人工
 自定义档都进入“变体队列”，由用户决定哪些需要渲染。保存当前参数后，页面会把
 完整 CaseSpec、机位和 RGB/depth/segmentation 选择写入一个
-`harness_parameter_batch_v1` JSON。先检查、再直接串行渲染：
+`harness_parameter_batch_v1` JSON。分辨率也是每个变体的显式字段，默认 1920×1080，
+并提供 1280×720 快速检查与 3840×2160 正式保留档。先检查、再直接串行渲染：
 
 ```bash
 python3.13 scripts/harness_render_parameter_batch.py \
@@ -107,7 +126,7 @@ python3.13 scripts/harness_render_parameter_batch.py \
   ./glass_panel_e16_shatter__render_batch.json --execute
 ```
 
-批次脚本会验证每个内嵌 CaseSpec，把输入持久化到对应 case route 的
+批次脚本会验证每个内嵌 CaseSpec，把输入持久化到内部 case route 的
 `inputs/parameter_batches/`，再按每个变体自己的 `views × passes` 调用现有 UE
 入口；任何一项失败默认停止，避免继续消耗渲染资源。
 
@@ -119,22 +138,36 @@ UE 会复用同一份 solver state，逐机位生成各自的完整序列。`ren
 batch runner 的自定义 probe 也默认 RGB；`candidate/publish` profile 和
 `--formal` 仍强制完整传感器契约。
 
-本地历史 run 的规范化视图由 `harness_case_library.py organize` 生成。先 dry-run，再 `--apply`；它只为 canonical source 建硬链接，不复制视频/EXR，也不删除旧目录：
+本地历史 run 先用 `migrate` 把旧三层目录移入内部运行区，再用 `organize` 生成
+两层规范化视图。两步都先 dry-run，再 `--apply`；organize 只为 canonical source
+建硬链接，不复制视频/EXR：
+
+```bash
+python3.13 scripts/harness_case_library.py migrate \
+  --workspace "$SIM_HARNESS_WORKSPACE"
+python3.13 scripts/harness_case_library.py migrate \
+  --workspace "$SIM_HARNESS_WORKSPACE" --apply
+python3.13 scripts/harness_case_library.py organize \
+  --workspace "$SIM_HARNESS_WORKSPACE"
+python3.13 scripts/harness_case_library.py organize \
+  --workspace "$SIM_HARNESS_WORKSPACE" --apply
+```
 
 ```text
-cases/<physics>/<scenario>/<version>/
-  case_index.json
-  variants/<variant>/
-    variant_manifest.json
+cases/<case_id>/
+  case.json
+  <variant_id>/
+    variant.json
     rgb/<camera>.mp4
     depth/<camera>/{preview.mp4,frames/*.exr}
     segmentation/<camera>/{preview.mp4,frames/*.exr}
-    overall/{rgb,depth,segmentation}.mp4
+    overall/<available-modality>.mp4
 ```
 
-`variant_manifest.json` 和 `case_index.json` 会把每个 source 标成
+`variant.json` 和 `case.json` 会把每个 source 标成
 `hard_gate_passed`、`hard_gate_failed` 或 `legacy_unverified`。organize 只整理
-媒体，不提升质量状态；只有正式质量门和 review keep 能晋级候选。
+媒体，不提升质量状态；RGB-only 历史结果也会被整理，但 depth/segmentation 目录为空，
+只有正式质量门和 review keep 能晋级候选。
 
 ## 批量执行成本漏斗
 
@@ -142,9 +175,9 @@ cases/<physics>/<scenario>/<version>/
 
 | profile | 默认内容 | 资格 |
 |---|---|---|
-| `smoke` | 320×180、`event_closeup`、RGB | diagnostic only；先验证事件和主体可见性 |
-| `candidate` | 640×360、3 静态+2 运动、RGB/depth/segmentation | 完整 hard gate 通过后供 review |
-| `publish` | 1280×720、五机位三模态 | 仅在用户 keep candidate 后运行 |
+| `smoke` | 1280×720、`event_closeup`、RGB | diagnostic only；HD 验证事件和主体可见性 |
+| `candidate` | 1920×1080、3 静态+2 运动、RGB/depth/segmentation | Full HD 完整 hard gate 候选 |
+| `publish` | 3840×2160、五机位三模态 | 仅在用户 keep candidate 后运行 4K |
 
 ```bash
 # 先跑廉价单机位，失败立即停止
@@ -228,7 +261,7 @@ hard gate 的真实 UE smoke。完成 smoke 后再提供其 run 目录：
 python3.13 scripts/harness_workspace.py doctor \
   --ue-executable /absolute/path/to/UnrealEditor-Cmd \
   --asset-content "$SIM_HARNESS_ADP_ROOT/Content" \
-  --native-smoke-run "$SIM_HARNESS_WORKSPACE/cases/<physics>/<scenario>/<version>/<run>"
+  --native-smoke-run "$SIM_HARNESS_WORKSPACE/runs/case_routes/<physics>/<scenario>/<version>/<run>"
 ```
 
 重新生成本地资产、map 和依赖分组目录：
@@ -360,7 +393,7 @@ $SIM_HARNESS_WORKSPACE/
 使用 `--case-route <physics>/<scenario>/<version>` 时，版本、运行会话和尝试不会互相覆盖：
 
 ```text
-cases/<physics>/<scenario>/<version>/
+runs/case_routes/<physics>/<scenario>/<version>/
   run_index.json
   latest_iteration.json
   case_status.json

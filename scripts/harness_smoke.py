@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from harness.core.case_spec import load_case_spec
+from harness.core.case_library import build_run_control_execution, write_run_control_page
 from harness.core.workspace import workspace_path
 from harness.runtime.fallback_backend import FallbackBackend
 from harness.verification.physics_verifier import PhysicsVerifier
@@ -65,8 +66,44 @@ def main() -> int:
     expected_ok = 0
     for rel in DEFAULT_CASES:
         case = load_case_spec(ROOT / rel)
-        run_dir = backend.run_case(case, output_root)
+        run_dir = output_root / f"{case.case_id}_fallback"
+        execution, command = build_run_control_execution(
+            run_dir,
+            output_root,
+            backend="fallback",
+            views=["front_static", "side_static", "top_down", "tracking_subject", "event_closeup"],
+            render_passes=["rgb"],
+            mode="rgb",
+            width=1920,
+            height=1080,
+            camera_strategy="bounds_auto_v1",
+        )
+        write_run_control_page(
+            run_dir,
+            case.data,
+            execution=execution,
+            reproduce_command=command,
+            status="prepared",
+        )
+        try:
+            run_dir = backend.run_case(case, output_root)
+        except Exception:
+            write_run_control_page(
+                run_dir,
+                case.data,
+                execution=execution,
+                reproduce_command=command,
+                status="failed",
+            )
+            raise
         report = verifier.verify_run_dir(run_dir, write=True)
+        write_run_control_page(
+            run_dir,
+            case.data,
+            execution=execution,
+            reproduce_command=command,
+            status="completed",
+        )
         expectation_met = (report["status"] == "pass") == case.should_pass
         expected_ok += int(expectation_met)
         cases.append(

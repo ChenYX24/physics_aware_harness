@@ -556,6 +556,7 @@ def agent_action_trajectory(case_id: str, case_spec: dict[str, Any]) -> list[dic
     if negative_mode == "preaction_motion":
         target_initial_velocity = [0.16, 0.0, 0.0]
     coupling_type = str(expected.get("coupling_type") or "push")
+    effect = expected.get("object_effect") if isinstance(expected.get("object_effect"), dict) else {}
     action_frame = int(expected.get("action_frame") or 1)
     action_time = float(expected.get("action_time_s") or 0.2)
     action_trace = [dict(action) for action in expected.get("action_trace") or [] if isinstance(action, dict)]
@@ -589,24 +590,45 @@ def agent_action_trajectory(case_id: str, case_spec: dict[str, Any]) -> list[dic
     if coupling_type in {"throw", "release"}:
         action_velocity = [1.8, 0.0, 1.2] if negative_mode != "no_post_action_motion" else [0.0, 0.0, 0.0]
         action_position = pre_target_position if negative_mode == "no_post_action_motion" else [round(target_p0[0] + 0.22, 4), target_p0[1], round(target_p0[2] + 0.18, 4)]
+    elif coupling_type in {"pick", "pick_place"}:
+        lift = float(effect.get("minimum_lift_height_m") or 0.45)
+        action_velocity = [0.0, 0.0, 0.8] if negative_mode != "no_post_action_motion" else [0.0, 0.0, 0.0]
+        action_position = pre_target_position if negative_mode == "no_post_action_motion" else [target_p0[0], target_p0[1], round(target_p0[2] + lift + 0.05, 4)]
     action_frame_state = {
         support_id: support_state,
         actor_id: state(midpoint(actor_p0, target_p0, 0.92), [0.0, 0.0, 0.0]),
         target_id: state(action_position, action_velocity),
     }
     final_position = action_position if negative_mode == "no_post_action_motion" else [round(action_position[0] + max(abs(action_velocity[0]) * 0.18, 0.14), 4), action_position[1], round(max(0.18, action_position[2] + action_velocity[2] * 0.08 - 0.04), 4)]
+    goal = effect.get("final_goal_region") if isinstance(effect.get("final_goal_region"), dict) else {}
+    if goal and negative_mode != "no_post_action_motion":
+        final_position = vec3(goal.get("center_m"))
+        if negative_mode == "effect_outside_goal":
+            half_extent = vec3(goal.get("half_extent_m"))
+            final_position[0] = round(final_position[0] + half_extent[0] * 2.0, 4)
+    final_velocity = [round(action_velocity[0] * 0.65, 4), 0.0, round(action_velocity[2] * 0.45, 4)]
+    if "maximum_final_speed_m_s" in effect:
+        final_velocity = [0.0, 0.0, 0.0]
     final = {
         support_id: support_state,
         actor_id: action_frame_state[actor_id],
-        target_id: state(final_position, [round(action_velocity[0] * 0.65, 4), 0.0, round(action_velocity[2] * 0.45, 4)]),
+        target_id: state(final_position, final_velocity),
     }
     contacts = [] if negative_mode == "missing_contact" else [contact(actor_id, target_id, action_frame, action_time)]
+    final_contact = effect.get("required_final_contact")
+    final_frame = max([action_frame + 1, *(int(item.get("frame") or 0) for item in action_trace)])
+    final_time = max([action_time + 0.25, *(float(item.get("time_s") or 0.0) for item in action_trace)])
+    final_contacts = (
+        [contact(str(final_contact[0]), str(final_contact[1]), final_frame, round(final_time, 4))]
+        if isinstance(final_contact, list) and len(final_contact) == 2 and negative_mode != "missing_final_contact"
+        else []
+    )
     actions = [] if negative_mode == "missing_action_trace" else action_trace
     return [
         frame(0, 0.0, initial),
         frame(max(0, action_frame - 1), max(0.0, round(action_time * 0.5, 4)), pre),
         frame(action_frame, action_time, action_frame_state, contacts=contacts, actions=actions),
-        frame(action_frame + 1, round(action_time + 0.25, 4), final),
+        frame(final_frame, round(final_time, 4), final, contacts=final_contacts),
     ]
 
 

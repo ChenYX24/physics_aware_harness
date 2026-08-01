@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 from harness.core.artifact_schema import write_json
 from harness.core.artifact_manager import ArtifactManager
 from harness.core.case_spec import load_case_spec
+from harness.core.case_library import build_run_control_execution, write_run_control_page
 from harness.core.workspace import case_output_root, workspace_path
 from harness.runtime.fallback_backend import FallbackBackend
 from harness.runtime.execution_profile import EXECUTION_PROFILES, execution_profile, write_execution_reports
@@ -89,6 +90,28 @@ def run_one_case(
             os.environ.update(profile.environment())
     backend = {"fallback": FallbackBackend, "genesis_sph": GenesisSPHBackend, "ue": UEBackend}[backend_name]()
     verifier = PhysicsVerifier()
+    run_dir = output_root / f"{case.case_id}_{backend_name}"
+    width = profile.width if profile else 1920
+    height = profile.height if profile else 1080
+    execution, command = build_run_control_execution(
+        run_dir,
+        output_root,
+        backend=backend_name,
+        views=requested_views,
+        render_passes=render_passes,
+        mode=render_mode,
+        width=width,
+        height=height,
+        camera_strategy=camera_strategy,
+        profile=profile.name if profile else "custom",
+    )
+    write_run_control_page(
+        run_dir,
+        case.data,
+        execution=execution,
+        reproduce_command=command,
+        status="prepared",
+    )
     try:
         run_kwargs = {
             "requested_views": requested_views,
@@ -135,6 +158,13 @@ def run_one_case(
     elapsed = round(time.perf_counter() - started, 6)
     if profile:
         write_execution_reports(run_dir, profile, wall_seconds=elapsed, status=status)
+    write_run_control_page(
+        run_dir,
+        case.data,
+        execution=execution,
+        reproduce_command=command,
+        status="failed" if run_error else "completed",
+    )
     return {
         "index": index,
         "case_id": case.case_id,

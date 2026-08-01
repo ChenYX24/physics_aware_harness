@@ -8,12 +8,13 @@
     "runtime_artifact_collection",
     "physics_verification"
   ],
-  "description": "Validate that agent or controller actions cause rigid-body motion through an explicit action trace, contact/impulse evidence, and post-action trajectory response. Pushing a box or throwing a ball are smoke families, not separate core capabilities.",
+  "description": "Validate that agent or controller actions cause explicit, measurable rigid-body effects through action traces, contact/impulse evidence, trajectories, and terminal object state. Push, throw, pick, and place are case families, not separate core capabilities.",
   "physical_assumptions": [
     "Agent actions are structured action trace events, not hidden keyframes.",
     "Action-coupled rigid bodies start with zero unexplained motion.",
     "Rigid-body response must happen after an agent action and matching contact or impulse evidence.",
     "Push actions require contact evidence; throw/release actions require an impulse or release label.",
+    "Pick/place actions require ordered grasp/release evidence and an object-centric lift or terminal placement effect.",
     "The agent may be kinematic or skeletal, but the target rigid body must remain physics-critical."
   ],
   "required_signals": [
@@ -22,14 +23,16 @@
     "contact_events",
     "object_roles",
     "initial_velocity",
-    "post_action_velocity"
+    "post_action_velocity",
+    "final_object_state"
   ],
   "required_assets": [
     "agent controller or skeletal actor",
     "action-coupled rigid body",
     "target collider",
     "physics material",
-    "action trace export"
+    "action trace export",
+    "goal support or container collider when placement is declared"
   ],
   "verifier_rules": [
     "Action trace contains actor_id, target_id, action_type, frame, and time_s.",
@@ -37,7 +40,8 @@
     "Target displacement and velocity before first action stay below epsilon.",
     "Push actions include agent-target contact evidence near the action frame.",
     "Throw/release actions include impulse or release metadata.",
-    "Target moves after the action above the expected threshold."
+    "Target moves after the action above the expected threshold.",
+    "When declared, the target reaches its final goal region, contacts the goal support/container after release, and settles below the final-speed threshold."
   ],
   "failure_taxonomy": [
     "F1_missing_trajectory",
@@ -52,15 +56,20 @@
     "Clear target initial velocity before the action frame.",
     "Bind the target as a physics-critical rigid body with collider and collision profile.",
     "Export agent-target contact for push actions or impulse/release labels for throw actions.",
-    "Move post-action target motion into runtime physics instead of keyframing."
+    "Move post-action target motion into runtime physics instead of keyframing.",
+    "Verify the object outcome independently of the character pose or animation."
   ],
   "smoke_cases": [
     "cases/agent_action/agent_push_box_contact.json",
-    "cases/agent_action/agent_throw_ball_release.json"
+    "cases/agent_action/agent_throw_ball_release.json",
+    "cases/agent_action/agent_pick_object_lift.json",
+    "cases/agent_action/agent_pick_and_place_on_table.json",
+    "cases/agent_action/agent_throw_object_into_bin.json"
   ],
   "regression_cases": [
     "cases/agent_action/negative_target_preaction_motion.json",
     "cases/agent_action/negative_missing_action_trace.json",
-    "cases/agent_action/negative_no_post_action_motion.json"
+    "cases/agent_action/negative_no_post_action_motion.json",
+    "cases/agent_action/negative_place_outside_goal.json"
   ]
 }

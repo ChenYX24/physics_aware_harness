@@ -70,6 +70,8 @@ def validate_case_spec(data: dict[str, Any]) -> None:
         validate_domino_parameter_consistency(data)
     if data.get("capability_id") == "fluid_particle_dynamics":
         validate_fluid_initial_conditions(data)
+    if data.get("capability_id") == "agent_rigidbody_action_coupling":
+        validate_agent_action_effect(data)
     verification_rules = {str(rule) for rule in data.get("verification_rules") or []}
     if "ballistic_gravity_impact" in verification_rules:
         validate_ballistic_gravity_impact(data)
@@ -329,6 +331,31 @@ def validate_impact_centered_fracture(data: dict[str, Any]) -> None:
 
 def vector3(value: Any) -> bool:
     return isinstance(value, list) and len(value) == 3 and all(isinstance(item, (int, float)) for item in value)
+
+
+def validate_agent_action_effect(data: dict[str, Any]) -> None:
+    expected = data.get("expected_physics") if isinstance(data.get("expected_physics"), dict) else {}
+    sequence = expected.get("required_action_sequence")
+    if sequence is not None and (not isinstance(sequence, list) or not sequence or not all(isinstance(item, str) and item for item in sequence)):
+        raise ValueError("required_action_sequence must be a non-empty string list")
+    effect = expected.get("object_effect")
+    if effect is None:
+        return
+    if not isinstance(effect, dict):
+        raise ValueError("object_effect must be an object")
+    for key in ("minimum_lift_height_m", "maximum_final_speed_m_s"):
+        value = effect.get(key)
+        if value is not None and (not isinstance(value, (int, float)) or not math.isfinite(float(value)) or float(value) < 0.0):
+            raise ValueError(f"object_effect.{key} must be finite and non-negative")
+    goal = effect.get("final_goal_region")
+    if goal is not None:
+        if not isinstance(goal, dict) or not vector3(goal.get("center_m")) or not vector3(goal.get("half_extent_m")):
+            raise ValueError("object_effect.final_goal_region requires center_m and half_extent_m 3-vectors")
+        if any(not math.isfinite(float(value)) or float(value) <= 0.0 for value in goal["half_extent_m"]):
+            raise ValueError("object_effect.final_goal_region half extents must be finite and positive")
+    contact = effect.get("required_final_contact")
+    if contact is not None and (not isinstance(contact, list) or len(contact) != 2 or not all(isinstance(item, str) and item for item in contact)):
+        raise ValueError("object_effect.required_final_contact must contain two object ids")
 
 
 def fracture_center_from_contact(contact: dict[str, Any], fallback_cm: list[float]) -> tuple[list[float], str]:

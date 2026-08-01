@@ -229,7 +229,7 @@ class HarnessIterateCaseTests(unittest.TestCase):
             case = root / "case.json"
             case.write_text("{}", encoding="utf-8")
             case_route = "rigid_motion/gravity_bounce_projectile/v001_test"
-            group = workspace / "cases" / Path(case_route)
+            group = workspace / "runs" / "case_routes" / Path(case_route)
             index_path = group / "run_index.json"
             existing_run = group / "runs" / "session_existing" / "attempt_01" / "case_ue"
             write_comparison_inputs(existing_run)
@@ -603,7 +603,8 @@ class HarnessIterateCaseTests(unittest.TestCase):
                 (
                     root
                     / "workspace"
-                    / "cases"
+                    / "runs"
+                    / "case_routes"
                     / "rigid_collision"
                     / "domino"
                     / "v001_test"

@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
 from harness.core.artifact_manager import ArtifactManager, link_or_copy
 from harness.core.capability import canonical_capability_id
 from harness.core.timebase import build_timebase
+from harness.runtime.artifact_collector import extract_action_trace
 from harness.runtime.mujoco_rigid import simulate_rigid_case
 from harness.verification.render_sync_checker import depth_pixel_statistics, has_mp4_magic, has_openexr_magic
 
@@ -385,6 +386,7 @@ def build_runtime_scene(case_spec: dict[str, Any], camera_plan: dict[str, Any], 
         "map_lighting_controls": lighting_controls,
         "dynamic_objects": dynamic_objects,
         "static_objects": static_objects,
+        "action_trace": list((case_spec.get("expected_physics") or {}).get("action_trace") or []),
         "validation_targets": [],
         "precomputed_trajectory": simulation_trajectory or [],
         "asset_policy": "harness_local_ue_analytic_proxy",
@@ -392,9 +394,14 @@ def build_runtime_scene(case_spec: dict[str, Any], camera_plan: dict[str, Any], 
 
 
 def runtime_objects_for_case(case_spec: dict[str, Any], actor_placement: dict[str, Any] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    capability = canonical_capability_id(str(case_spec.get("capability_id") or ""))
+    coupling_type = str((case_spec.get("expected_physics") or {}).get("coupling_type") or "")
+    if capability == "agent_rigidbody_action_coupling" and coupling_type in {"pick", "pick_place"}:
+        return pick_place_objects(case_spec)
+    if capability == "agent_rigidbody_action_coupling" and coupling_type == "throw" and (case_spec.get("expected_physics") or {}).get("object_effect"):
+        return throw_into_bin_objects(case_spec)
     if actor_placement and actor_placement.get("actor_bindings"):
         return runtime_objects_from_actor_placement(actor_placement, case_spec)
-    capability = canonical_capability_id(str(case_spec.get("capability_id") or ""))
     if capability == "rigid_body_contact_causality":
         return billiards_objects(case_spec)
     if capability == "sequential_contact_propagation":
@@ -683,7 +690,7 @@ def billiards_objects(case_spec: dict[str, Any]) -> tuple[list[dict[str, Any]], 
                 {"material": "white" if "cue" in oid else "colored billiard ball"},
             )
         )
-    static = [
+    static = [] if is_place else [
         runtime_object(
             "billiards_tabletop",
             "/Engine/BasicShapes/Cube.Cube",
@@ -766,6 +773,314 @@ def generic_objects(case_spec: dict[str, Any]) -> tuple[list[dict[str, Any]], li
     return falling_objects(case_spec)
 
 
+def humanoid_runtime_adapter(asset_path: str, asset_kind: str, params: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
+    adapter = os.environ.get("SIM_HUMANOID_ADAPTER", "").strip().casefold()
+    if adapter not in {"gasp", "ddv"}:
+        return asset_path, asset_kind, params
+    if adapter == "ddv":
+        return (
+            "/Game/DD_Vehicles_Advanced/Blueprints/Passenger/BP_DCAdv_ThirdPChar.BP_DCAdv_ThirdPChar_C",
+            "blueprint",
+            {
+                **params,
+                "preserve_authored_scale": True,
+                "humanoid_adapter": "ddv",
+                "movement_input_action": "/Game/DD_Vehicles_Advanced/Blueprints/Passenger/Input/Actions/IA_Move.IA_Move",
+            },
+        )
+    return (
+        "/Game/Blueprints/SandboxCharacter_CMC.SandboxCharacter_CMC",
+        "blueprint",
+        {
+            **params,
+            "preserve_authored_scale": True,
+            "humanoid_adapter": "gasp",
+            "movement_input_action": "/Game/Input/IA_Move.IA_Move",
+        },
+    )
+
+
+def pick_place_objects(case_spec: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    expected = case_spec.get("expected_physics") or {}
+    is_place = str(expected.get("coupling_type") or "") == "pick_place"
+    objects = {str(obj.get("id") or obj.get("object_id")): obj for obj in case_spec.get("objects") or [] if isinstance(obj, dict)}
+    actor_id = str(expected.get("action_actor_id") or "agent")
+    target_id = str(expected.get("target_object_id") or "package")
+    actor = objects.get(actor_id) or {}
+    target = objects.get(target_id) or {}
+    actions = [item for item in expected.get("action_trace") or [] if isinstance(item, dict)]
+    grasp_time = next((float(item.get("time_s") or 0.5) for item in actions if item.get("action_type") == "grasp"), 0.5)
+    release_time = next((float(item.get("time_s") or 2.0) for item in actions if item.get("action_type") == "release"), 20.0)
+    goal = ((expected.get("object_effect") or {}).get("final_goal_region") or {})
+    goal_center = list(goal.get("center_m") or [0.8, 0.0, 0.85])
+    actor_position = list(actor.get("initial_position_m") or [-0.35, 0.0, 0.0])
+    if is_place and str(actor.get("shape") or "").strip().casefold() == "capsule":
+        actor_position[2] = float(actor_position[2]) - float(actor.get("height_m") or 1.85) / 2.0
+    target_position = list(target.get("initial_position_m") or [0.0, 0.0, 0.25])
+    target_dx = float(target_position[0]) - float(actor_position[0])
+    target_dy = float(target_position[1]) - float(actor_position[1])
+    interaction_yaw = math.degrees(math.atan2(-target_dx, target_dy)) if is_place else 0.0
+    if is_place and os.environ.get("SIM_HUMANOID_ADAPTER", "").strip().casefold() == "gasp":
+        # ponytail: measured UEFN-retarget stance calibration; replace when the interaction clip provides authored warp data.
+        actor_position[0] += 0.05
+        actor_position[1] -= 0.05
+    hold_offset = [0.8 if is_place else float(target_position[0]) - float(actor_position[0]), 0.0, 1.05]
+    run_speed = max(0.55, (float(goal_center[0]) - float(target_position[0])) / 2.56) if is_place else 0.0001
+    agent_path = str(actor.get("ue5_path") or "/Game/Characters/BoyAdventurer/Assets/Meshes/Adventurer/SK_Adventurer.SK_Adventurer")
+    agent_params: dict[str, Any] = {
+        "force_material_library_mesh": True,
+        "desired_extent_cm": 92.5,
+        "run_speed_m_s": run_speed,
+        "move_until_s": release_time,
+        "animation_ref": actor.get("animation_ref") or "/Game/Characters/BoyAdventurer/Animations/MM_Walk_Fwd.MM_Walk_Fwd",
+    }
+    if is_place:
+        grab_start = max(0.0, grasp_time - 1.05)
+        grab_end = grab_start + 1.52
+        walk_start = grab_end + 1.15
+        place_start = max(walk_start + 5.0, release_time - 1.05)
+        walk_end = place_start
+        route_y = -0.80
+        goal_stand = [
+            float(goal_center[0]) - (float(target_position[0]) - float(actor_position[0])),
+            float(goal_center[1]) - (float(target_position[1]) - float(actor_position[1])),
+            float(actor_position[2]),
+        ]
+        first_turn_end = walk_start + 1.45
+        cross_end = first_turn_end + 2.7
+        grab = "/Game/DD_Vehicles_Advanced/Animations/Mannequin_UE5/Sequences/Objects/A_GrabMid.A_GrabMid"
+        idle = "/Game/DD_Vehicles_Advanced/Animations/Mannequin_UE5/Manny/MM_Idle.MM_Idle"
+        walk = "/Game/DD_Vehicles_Advanced/Animations/Mannequin_UE5/Manny/MM_Walk_Fwd.MM_Walk_Fwd"
+        agent_path = "/Game/DD_Vehicles_Advanced/Meshes/Mannequin_UE5/SKM_Manny.SKM_Manny"
+        agent_params = {
+            "force_material_library_mesh": True,
+            "desired_extent_cm": 92.5,
+            "ground_offset_cm": 92.5,
+            "stable_root_motion": True,
+            "sweep_movement": True,
+            "gasp_max_frame_displacement_cm": 12.0,
+            "interaction_slot_name": "DefaultSlot",
+            "movement_waypoints": [
+                {"time_s": 0.0, "position_m": actor_position, "yaw_degrees": interaction_yaw},
+                {"time_s": walk_start, "position_m": actor_position, "yaw_degrees": interaction_yaw},
+                {"time_s": first_turn_end, "position_m": [float(actor_position[0]), route_y, float(actor_position[2])], "yaw_degrees": -90.0},
+                {"time_s": cross_end, "position_m": [float(goal_stand[0]), route_y, float(actor_position[2])], "yaw_degrees": 0.0},
+                {"time_s": walk_end, "position_m": goal_stand, "yaw_degrees": interaction_yaw},
+            ],
+            "animation_segments": [
+                {
+                    "name": "grab_from_floor",
+                    "start_s": grab_start,
+                    "end_s": grab_end,
+                    "animation_ref": grab,
+                    "loop": False,
+                    "warp_target_name": "HarnessInteraction",
+                    "warp_target_position_m": actor_position,
+                    "warp_target_yaw_degrees": interaction_yaw,
+                },
+                {"name": "walk_route", "start_s": walk_start, "end_s": walk_end, "animation_ref": walk, "loop": True},
+                {
+                    "name": "drop",
+                    "start_s": place_start,
+                    "end_s": place_start + 1.52,
+                    "animation_ref": grab,
+                    "loop": False,
+                    "warp_target_name": "HarnessInteraction",
+                    "warp_target_position_m": goal_stand,
+                    "warp_target_yaw_degrees": interaction_yaw,
+                },
+                {"name": "idle", "start_s": place_start + 1.52, "animation_ref": idle, "loop": True},
+            ],
+        }
+    agent_path, agent_kind, agent_params = humanoid_runtime_adapter(
+        agent_path,
+        "character" if is_place else "skeletal_mesh",
+        agent_params,
+    )
+    if agent_params.get("humanoid_adapter") == "gasp":
+        for segment in agent_params.get("animation_segments") or []:
+            if segment.get("name") in {"grab_from_floor", "drop"}:
+                segment["animation_ref"] = (
+                    "/Game/Harness/Retarget/GASP_UEFN_A_GrabMid.GASP_UEFN_A_GrabMid"
+                )
+    native_grabbable = is_place and os.environ.get("SIM_HUMANOID_ADAPTER", "").strip().casefold() in {"gasp", "ddv"}
+
+    dynamic = [
+        runtime_object(
+            actor_id,
+            agent_path,
+            "third_person_runner",
+            actor_position,
+            [1.0, 1.0, 1.0],
+            {"simulate_physics": "force_off", "enable_gravity": False, "collision_enabled": is_place, "collision_profile": "Pawn" if is_place else None},
+            agent_params,
+            asset_kind=agent_kind,
+        ),
+        runtime_object(
+            target_id,
+            (
+                "/Game/DD_Vehicles_Advanced/Blueprints/Objects/BP_GrabbableObject.BP_GrabbableObject_C"
+                if native_grabbable
+                else "/Engine/BasicShapes/Cube.Cube"
+            ),
+            "character_carry_object",
+            target_position,
+            [1.0, 1.0, 1.0],
+            {
+                "mass_kg": float(target.get("mass_kg") or 1.0),
+                "simulate_physics": "force_off_until_release",
+                "enable_gravity": True,
+                "linear_damping": 0.35,
+                "angular_damping": 0.5,
+                "restitution": 0.05,
+                "desired_extent_cm": 10.0 if is_place else 24.0,
+            },
+            {
+                "carrier_id": actor_id,
+                "grasp_time_s": grasp_time,
+                "release_time_s": release_time,
+                "hold_offset_m": hold_offset,
+                "release_position_m": [float(goal_center[0]), float(goal_center[1]), float(goal_center[2]) + 0.2],
+                "release_goal_center_m": goal_center if is_place else None,
+                "release_goal_half_extent_m": list(goal.get("half_extent_m") or [0.24, 0.24, 0.12]) if is_place else None,
+                "attachment_socket": "hand_r" if is_place else None,
+                "grasp_clearance_cm": 3.0 if is_place else None,
+                "max_grasp_gap_cm": 4.0 if is_place else None,
+                "grasp_alignment_start_gap_cm": 4.0 if is_place else None,
+                "grasp_alignment_step_cm": 3.0 if is_place else None,
+                "smooth_socket_follow": is_place,
+                "max_carry_follow_step_cm": 5.0 if is_place else None,
+                "release_from_socket": is_place,
+                "release_velocity_m_s": [0.0, 0.0, 0.0],
+                "desired_extent_cm": 10.0 if is_place else 24.0,
+                "fit_dynamic_plan": False,
+                "blueprint_mesh_override": "/Engine/BasicShapes/Cube.Cube" if native_grabbable else None,
+                "native_grabbable_blueprint": native_grabbable,
+                "native_grab_input_action": (
+                    "/Game/DD_Vehicles_Advanced/Blueprints/Objects/Input/Actions/IA_Object_Grab.IA_Object_Grab"
+                    if native_grabbable
+                    else None
+                ),
+            },
+            asset_kind="blueprint" if native_grabbable else "",
+        ),
+    ]
+    if is_place:
+        dynamic[0]["rotation_degrees"] = [0.0, interaction_yaw, 0.0]
+    static = [
+        runtime_object(
+            "floor",
+            "/Engine/BasicShapes/Cube.Cube",
+            "room_floor",
+            [0.3, 0.0, -0.05],
+            [2.5, 2.0, 0.05],
+            {"simulate_physics": "force_off"},
+            {"preserve_authored_scale": True, "material": "matte floor"},
+        ),
+    ]
+    if is_place:
+        support_top = float(goal_center[2]) - 0.05
+        table_mesh = "/Game/Maps/UrbanDowntown/Meshes/PatioFurniture_Table_A.PatioFurniture_Table_A"
+        static.append(
+            runtime_object(
+                "table",
+                table_mesh,
+                "landing_surface",
+                [float(goal_center[0]) + 0.44, float(goal_center[1]), support_top],
+                [1.0, 1.0, 1.0],
+                {"simulate_physics": "force_off"},
+                {"force_material_library_mesh": True, "preserve_material": True, "desired_extent_cm": 45.0, "support_top_m": support_top},
+            )
+        )
+        static.append(
+            runtime_object(
+                "source_table",
+                table_mesh,
+                "landing_surface",
+                [float(target_position[0]) + 0.44, float(target_position[1]), support_top],
+                [1.0, 1.0, 1.0],
+                {"simulate_physics": "force_off"},
+                {"force_material_library_mesh": True, "preserve_material": True, "desired_extent_cm": 45.0, "support_top_m": support_top},
+            )
+        )
+    return dynamic, static
+
+
+def throw_into_bin_objects(case_spec: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    expected = case_spec.get("expected_physics") or {}
+    objects = {str(obj.get("id") or obj.get("object_id")): obj for obj in case_spec.get("objects") or [] if isinstance(obj, dict)}
+    actor_id = str(expected.get("action_actor_id") or "agent")
+    target_id = str(expected.get("target_object_id") or "ball")
+    actor = objects.get(actor_id) or {}
+    target = objects.get(target_id) or {}
+    action = next((item for item in expected.get("action_trace") or [] if isinstance(item, dict)), {})
+    release_time = float(action.get("time_s") or expected.get("action_time_s") or 0.5)
+    goal = ((expected.get("object_effect") or {}).get("final_goal_region") or {})
+    goal_center = list(goal.get("center_m") or [1.4, 0.0, 0.35])
+    actor_position = list(actor.get("initial_position_m") or [-0.8, 0.0, 0.0])
+    target_position = list(target.get("initial_position_m") or [0.0, 0.0, 0.8])
+    release_velocity = list(action.get("release_velocity_m_s") or [3.2, 0.0, 1.0])
+    agent_path, agent_kind, agent_params = humanoid_runtime_adapter(
+        str(actor.get("ue5_path") or "/Game/Characters/BoyAdventurer/Assets/Meshes/Adventurer/SK_Adventurer.SK_Adventurer"),
+        "skeletal_mesh",
+        {
+            "force_material_library_mesh": True,
+            "desired_extent_cm": 92.5,
+            "run_speed_m_s": 0.0001,
+            "move_until_s": release_time,
+            "animation_ref": actor.get("animation_ref") or "/Game/Characters/BoyAdventurer/Animations/MM_Walk_Fwd.MM_Walk_Fwd",
+        },
+    )
+
+    dynamic = [
+        runtime_object(
+            actor_id,
+            agent_path,
+            "third_person_runner",
+            actor_position,
+            [1.0, 1.0, 1.0],
+            {"simulate_physics": "force_off", "enable_gravity": False, "collision_enabled": False},
+            agent_params,
+            asset_kind=agent_kind,
+        ),
+        runtime_object(
+            target_id,
+            "/Engine/BasicShapes/Sphere.Sphere",
+            "character_throw_projectile",
+            target_position,
+            [1.0, 1.0, 1.0],
+            {
+                "mass_kg": float(target.get("mass_kg") or 0.4),
+                "simulate_physics": "force_off_until_release",
+                "enable_gravity": True,
+                "linear_damping": 0.12,
+                "angular_damping": 0.25,
+                "restitution": 0.05,
+                "use_ccd": True,
+                "desired_extent_cm": 12.0,
+            },
+            {
+                "carrier_id": actor_id,
+                "grasp_time_s": release_time,
+                "release_time_s": release_time,
+                "release_position_m": target_position,
+                "release_velocity_m_s": release_velocity,
+                "desired_extent_cm": 12.0,
+                "fit_dynamic_plan": False,
+            },
+        ),
+    ]
+    gx, gy, _gz = (float(value) for value in goal_center)
+    static = [
+        runtime_object("floor", "/Engine/BasicShapes/Cube.Cube", "room_floor", [0.6, 0.0, -0.05], [2.5, 1.5, 0.05], {"simulate_physics": "force_off"}, {"preserve_authored_scale": True}),
+        runtime_object("bin", "/Engine/BasicShapes/Cube.Cube", "landing_surface", [gx, gy, 0.1], [0.3, 0.3, 0.1], {"simulate_physics": "force_off"}, {"preserve_authored_scale": True, "support_top_m": 0.2}),
+        runtime_object("bin_side_left", "/Engine/BasicShapes/Cube.Cube", "room_wall", [gx, gy - 0.32, 0.4], [0.32, 0.04, 0.4], {"simulate_physics": "force_off"}, {"preserve_authored_scale": True}),
+        runtime_object("bin_side_right", "/Engine/BasicShapes/Cube.Cube", "room_wall", [gx, gy + 0.32, 0.4], [0.32, 0.04, 0.4], {"simulate_physics": "force_off"}, {"preserve_authored_scale": True}),
+        runtime_object("bin_back", "/Engine/BasicShapes/Cube.Cube", "room_wall", [gx + 0.32, gy, 0.4], [0.04, 0.32, 0.4], {"simulate_physics": "force_off"}, {"preserve_authored_scale": True}),
+    ]
+    return dynamic, static
+
+
 def runtime_object(
     object_id: str,
     ue5_path: str,
@@ -821,6 +1136,8 @@ def native_case_type(case_spec: dict[str, Any]) -> str:
         return "bottle_domino_chain"
     if capability == "rigid_body_gravity_collision":
         return "falling_crate_collision"
+    if capability == "agent_rigidbody_action_coupling" and str((case_spec.get("expected_physics") or {}).get("coupling_type") or "") == "pick_place":
+        return "character_carry_drop"
     return "llm_object_graph"
 
 
@@ -1238,8 +1555,10 @@ def standardize_native_output(
     fragment_trajectory_path = rgb_source / "fragment_trajectory.json"
     if fragment_trajectory_path.is_file():
         shutil.copyfile(fragment_trajectory_path, run_dir / "fragment_trajectory.json")
-    contacts = extract_contacts(read_json(trajectory_path))
+    trajectory = read_json(trajectory_path)
+    contacts = extract_contacts(trajectory)
     write_json(run_dir / "contact_events.json", contacts)
+    write_json(run_dir / "action_trace.json", extract_action_trace(trajectory))
     shutil.copyfile(rgb_camera_tracks_path, run_dir / "camera_trajectory.json")
 
     camera_ids = [str(view.get("camera_id")) for view in camera_plan.get("views", []) if view.get("camera_id")]

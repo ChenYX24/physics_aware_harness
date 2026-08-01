@@ -1,0 +1,56 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "agent_pick_and_place_on_table",
+  "capability_id": "agent_rigidbody_action_coupling",
+  "prompt": "A person picks up a small package from one low table, carries it, and places it on a second table. The package must be grasped, visibly carried by the hand, released inside the target region, contact the target table, and settle.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "coupling_type": "pick_place",
+    "action_actor_id": "agent",
+    "target_object_id": "package",
+    "action_frame": 25,
+    "action_time_s": 1.05,
+    "duration_s": 10.5,
+    "expected_min_target_displacement_m": 1.4,
+    "passive_pre_action_velocity_epsilon_m_s": 0.05,
+    "required_action_sequence": ["grasp", "release"],
+    "object_effect": {
+      "minimum_lift_height_m": 0.12,
+      "final_goal_region": {
+        "center_m": [1.1656, 0.1548, 0.82],
+        "half_extent_m": [0.24, 0.24, 0.12]
+      },
+      "required_final_contact": ["package", "table"],
+      "maximum_final_speed_m_s": 0.05
+    },
+    "action_trace": [
+      {"frame": 25, "time_s": 1.05, "actor_id": "agent", "target_id": "package", "action_type": "grasp"},
+      {"frame": 232, "time_s": 9.65, "actor_id": "agent", "target_id": "package", "action_type": "release", "release": true}
+    ],
+    "support": {
+      "agent": "floor",
+      "package": "source_table"
+    }
+  },
+  "objects": [
+    {"id": "agent", "role": "active_agent", "shape": "capsule", "radius_m": 0.3, "height_m": 1.85, "initial_position_m": [-0.85, 0.0, 0.925], "initial_velocity_m_s": [0.0, 0.0, 0.0]},
+    {"id": "package", "role": "action_coupled_body", "shape": "box", "size_m": [0.1, 0.1, 0.1], "mass_kg": 1.0, "initial_position_m": [-0.52, 0.12, 0.82], "initial_velocity_m_s": [0.0, 0.0, 0.0]},
+    {"id": "floor", "role": "support", "shape": "box", "initial_position_m": [0.0, 0.0, 0.0]},
+    {"id": "source_table", "role": "source_support", "shape": "table", "initial_position_m": [-0.08, 0.12, 0.77]},
+    {"id": "table", "role": "goal_support", "shape": "table", "initial_position_m": [1.6056, 0.1548, 0.77]}
+  ],
+  "active_objects": ["agent"],
+  "passive_objects": ["package"],
+  "camera_overrides": {
+    "front_static": {
+      "location": [4.2, -5.0, 3.2],
+      "target": [0.35, 0.15, 0.95],
+      "fov": 58.0
+    }
+  },
+  "required_assets": ["agent_controller_or_skeletal_actor", "graspable_rigid_body", "target_collider", "source_support", "goal_support"],
+  "required_signals": ["trajectory", "action_trace", "contact_events", "object_roles", "final_object_state"],
+  "verifier_expectation": {"status": "pass"},
+  "should_pass": true,
+  "notes": "Embodied pick-and-place case with explicit object-centric terminal effect."
+}

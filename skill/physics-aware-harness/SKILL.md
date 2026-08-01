@@ -48,6 +48,11 @@ Custom single-run and batch probes default to RGB. For an editable variant plan,
 use one no-LLM entry point; it materializes the selected CaseSpec and renders
 all five views:
 
+- For every new parameterized CaseSpec, write one `harness_variant_plan_v1`.
+  The model only declares `base_case`, `case_route`, and `axes`; never generate
+  case-specific HTML. `harness_case_library.py plan` automatically writes the
+  standalone HTML beside its JSON, and `editor <plan>` regenerates it.
+
 ```bash
 # RGB by default
 python3.13 scripts/harness_case_library.py render \
@@ -77,7 +82,7 @@ python3.13 scripts/harness_iterate_case.py cases/domino/five_domino_chain.json \
 
 ## Enforce the complete-case contract
 
-- Store each version at `<workspace>/cases/<physics>/<scenario>/<version>/`. Keep every invocation under `runs/<unique-session-id>/attempt_N`; only the best hard-gate passing attempt from one session becomes a registered source run. Never hand-edit the index or relabel one resolved run directory as two runs.
+- Store internal source routes at `<workspace>/runs/case_routes/<physics>/<scenario>/<version>/`. Keep every invocation under `runs/<unique-session-id>/attempt_N`; only the best hard-gate passing attempt from one session becomes a registered source run. Build the user-facing hardlinked view at `<workspace>/cases/<case_id>/<variant_id>/`. Never hand-edit the index or relabel one resolved run directory as two runs.
 - Require at least three selected source runs. Identical fingerprints form `exact_repeat`; differing inputs require one stable `--condition` per exact fingerprint and form `declared_condition_matrix`. Never rank different conditions as a quality winner.
 - Require one shared acquisition fingerprint across compared runs: identical camera plan/pose, render resolution, FPS, duration, timebase, and per-view RGB frame counts. Use a new version route for a different acquisition context.
 - Require the same declared camera set for every compared run: `front_static,side_static,top_down,tracking_subject,event_closeup` (three verified fixed plus two verified moving cameras). Require matching motion/meta RGB frame counts greater than one.
@@ -91,7 +96,7 @@ python3.13 scripts/harness_iterate_case.py cases/domino/five_domino_chain.json \
 - For reference-tier UE publication, require `run_readiness.json.reference_ready=true`. A technically valid local asset run may instead declare `local_preview_ready=true` and enter review with `publication_tier=local_preview`; never call it reference-ready. Inspect `verifier_report.json`, `render_sync_report.json`, `sensor_state.json`, `map_report.json`, and `asset_resolution.json`.
 - For Genesis SPH, require `fluid_report.json.status=pass`, stable particle count, every surface frame present, topology consistency, and respected container bounds. Inspect `particle_cache.json` for solver/timebase truth.
 - Confirm MP4 integrity with `ffprobe`. Visually inspect initial, interaction, and final frames; a passing structural report does not prove a convincing render.
-- Find validated user-facing candidate bundles under `<workspace>/review/inbox/`; unvalidated one-off/batch previews default to `<workspace>/review/probes/`. Put durable case outputs under `<workspace>/cases/<physics>/<scenario>/<vNNN_description>/` via `--case-route`; reserve `<workspace>/runs/` for smoke/transient work. Never copy runtime media into the Git repository.
+- Find validated user-facing candidate bundles under `<workspace>/review/inbox/`; unvalidated one-off/batch previews default to `<workspace>/review/probes/`. Put durable source runs under `<workspace>/runs/case_routes/<physics>/<scenario>/<vNNN_description>/` via `--case-route`, then organize them into `<workspace>/cases/<case_id>/<variant_id>/`. Never copy runtime media into the Git repository.
 - Move an accepted item with `python3.13 scripts/harness_workspace.py review keep <name>`; keep verifies the complete video hashes and source EXR provenance before moving it to `review/kept`. Reject with `review reject`; both decisions reject symlinks, require bidirectional candidate/case-status binding, update the manifest and case status, and preserve canonical source runs. The CLI serializes decisions and writes a durable recovery journal; after an interrupted decision, run the review command again so it recovers before proceeding. Never move candidate folders manually. Dry-run `prune` before deleting rejected review items.
 
 Current local status, verified 2026-07-14:

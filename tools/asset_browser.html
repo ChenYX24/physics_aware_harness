@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Asset Qualification Desk · Physics Harness</title>
+    <style>
+      :root {
+        --fog: #edf2f7;
+        --paper: #fff;
+        --ink: #16212b;
+        --muted: #657483;
+        --line: #cbd5df;
+        --soft-line: #e6ebf0;
+        --cobalt: #2458d8;
+        --cobalt-soft: #e8efff;
+        --signal: #f39a2b;
+        --signal-soft: #fff1dc;
+        --good: #14866d;
+        --bad: #b74c36;
+        --shadow: 0 18px 48px rgba(36, 61, 84, .11);
+      }
+      * { box-sizing: border-box; }
+      html { min-width: 320px; color: var(--ink); background: var(--fog); }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "Avenir Next", "Helvetica Neue", "PingFang SC", sans-serif;
+        background:
+          linear-gradient(90deg, transparent 31px, rgba(36, 88, 216, .045) 32px, transparent 33px),
+          linear-gradient(transparent 31px, rgba(36, 88, 216, .045) 32px, transparent 33px),
+          var(--fog);
+        background-size: 32px 32px;
+      }
+      button, input, select { font: inherit; }
+      button { color: inherit; }
+      code, .mono, .eyebrow, .badge, .metric b {
+        font-family: "SFMono-Regular", "Roboto Mono", Consolas, monospace;
+      }
+      [hidden] { display: none !important; }
+      :focus-visible { outline: 3px solid rgba(36, 88, 216, .32); outline-offset: 2px; }
+
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        display: flex;
+        align-items: center;
+        min-height: 62px;
+        border-bottom: 1px solid var(--line);
+        background: rgba(255,255,255,.92);
+        backdrop-filter: blur(18px);
+      }
+      .brand {
+        align-self: stretch;
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        min-width: 288px;
+        border-right: 1px solid var(--line);
+        padding: 0 22px;
+        font-family: "DIN Alternate", "Avenir Next Condensed", sans-serif;
+        font-size: 18px;
+        font-weight: 800;
+        letter-spacing: .03em;
+      }
+      .brand-mark {
+        width: 18px;
+        height: 18px;
+        border: 5px solid var(--cobalt);
+        border-right-color: var(--signal);
+        border-radius: 50%;
+        transform: rotate(-20deg);
+      }
+      .topbar nav { display: flex; gap: 8px; margin-left: auto; padding: 0 22px; }
+      .topbar a {
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        padding: 8px 11px;
+        color: var(--ink);
+        background: var(--paper);
+        font-size: 11px;
+        font-weight: 750;
+        text-decoration: none;
+      }
+      .topbar a:hover { border-color: var(--cobalt); }
+
+      main { max-width: 1680px; margin: 0 auto; padding: 34px clamp(16px, 3.5vw, 58px) 80px; }
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(420px, .7fr);
+        gap: 42px;
+        align-items: end;
+        margin: 8px 0 28px;
+      }
+      .eyebrow {
+        margin: 0 0 11px;
+        color: var(--cobalt);
+        font-size: 9px;
+        font-weight: 800;
+        letter-spacing: .14em;
+        text-transform: uppercase;
+      }
+      h1, h2, h3 { font-family: "DIN Alternate", "Avenir Next Condensed", sans-serif; }
+      h1 {
+        max-width: 900px;
+        margin: 0;
+        font-size: clamp(48px, 6.4vw, 96px);
+        line-height: .9;
+        letter-spacing: -.055em;
+      }
+      h1 em { color: var(--cobalt); font-style: normal; }
+      .hero-copy > p:last-child {
+        max-width: 720px;
+        margin: 22px 0 0;
+        color: var(--muted);
+        font-size: 15px;
+        line-height: 1.65;
+      }
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 20px 20px 6px 20px;
+        background: rgba(255,255,255,.88);
+        box-shadow: var(--shadow);
+      }
+      .metric { min-height: 106px; border-right: 1px solid var(--soft-line); padding: 18px; }
+      .metric:last-child { border-right: 0; }
+      .metric b { display: block; font-size: clamp(24px, 2.6vw, 38px); letter-spacing: -.05em; }
+      .metric span { display: block; margin-top: 7px; color: var(--muted); font-size: 10px; line-height: 1.4; }
+
+      .filters {
+        display: grid;
+        grid-template-columns: minmax(260px, 1.5fr) repeat(4, minmax(140px, .55fr));
+        gap: 10px;
+        border: 1px solid var(--line);
+        border-radius: 18px 18px 6px 18px;
+        padding: 13px;
+        background: var(--paper);
+        box-shadow: 0 8px 26px rgba(36, 61, 84, .07);
+      }
+      .field { display: grid; gap: 5px; }
+      .field label { color: var(--muted); font-size: 9px; font-weight: 800; letter-spacing: .06em; }
+      .field input, .field select {
+        width: 100%;
+        min-height: 42px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 8px 10px;
+        color: var(--ink);
+        background: #fbfdff;
+      }
+      .field input:focus, .field select:focus { border-color: var(--cobalt); outline: 0; }
+
+      .workbench {
+        display: grid;
+        grid-template-columns: minmax(0, 1.45fr) minmax(360px, .62fr);
+        gap: 22px;
+        align-items: start;
+        margin-top: 18px;
+      }
+      .catalog-panel, .inspector {
+        border: 1px solid var(--line);
+        border-radius: 20px 20px 7px 20px;
+        background: rgba(255,255,255,.95);
+        box-shadow: 0 8px 26px rgba(36, 61, 84, .07);
+      }
+      .panel-head {
+        display: flex;
+        align-items: center;
+        min-height: 54px;
+        border-bottom: 1px solid var(--soft-line);
+        padding: 12px 16px;
+      }
+      .panel-head h2 { margin: 0; font-size: 20px; }
+      .panel-head p { margin: 3px 0 0; color: var(--muted); font-size: 10px; }
+      .panel-head .badge { margin-left: auto; }
+      .asset-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        padding: 14px;
+      }
+      .asset-card {
+        position: relative;
+        display: grid;
+        grid-template-rows: 150px 1fr;
+        overflow: hidden;
+        min-width: 0;
+        border: 1px solid var(--line);
+        border-radius: 14px 14px 4px 14px;
+        padding: 0;
+        text-align: left;
+        background: #fbfdff;
+        cursor: pointer;
+        transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+      }
+      .asset-card:hover, .asset-card[aria-pressed="true"] {
+        border-color: var(--cobalt);
+        transform: translateY(-2px);
+        box-shadow: 0 9px 22px rgba(36, 88, 216, .12);
+      }
+      .asset-card[aria-pressed="true"]::after {
+        content: "";
+        position: absolute;
+        inset: auto 0 0;
+        height: 4px;
+        background: var(--cobalt);
+      }
+      .thumb {
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+        border-bottom: 1px solid var(--soft-line);
+        color: #90a0ad;
+        background:
+          linear-gradient(135deg, rgba(36,88,216,.08), rgba(243,154,43,.08)),
+          #e8eef4;
+        font: 800 10px/1 "SFMono-Regular", monospace;
+      }
+      .thumb img { width: 100%; height: 100%; object-fit: cover; }
+      .card-body { min-width: 0; padding: 12px; }
+      .card-body h3 { overflow: hidden; margin: 0; font-size: 16px; text-overflow: ellipsis; white-space: nowrap; }
+      .card-body > code {
+        display: block;
+        overflow: hidden;
+        margin-top: 5px;
+        color: var(--muted);
+        font-size: 8px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        min-height: 20px;
+        border-radius: 999px;
+        padding: 4px 7px;
+        color: var(--muted);
+        background: #edf1f5;
+        font-size: 8px;
+        font-weight: 800;
+        letter-spacing: .03em;
+      }
+      .badge[data-kind="good"] { color: #0c6d57; background: #def4ed; }
+      .badge[data-kind="warn"] { color: #985b0e; background: var(--signal-soft); }
+      .badge[data-kind="bad"] { color: #943b29; background: #fee8e2; }
+      .load-more {
+        display: block;
+        width: calc(100% - 28px);
+        min-height: 42px;
+        margin: 0 14px 14px;
+        border: 1px dashed var(--line);
+        border-radius: 10px;
+        color: var(--cobalt);
+        background: transparent;
+        font-weight: 800;
+        cursor: pointer;
+      }
+      .empty { padding: 60px 24px; color: var(--muted); text-align: center; }
+
+      .inspector {
+        position: sticky;
+        top: 80px;
+        min-height: 620px;
+        overflow: hidden;
+      }
+      .inspector-placeholder {
+        display: grid;
+        min-height: 620px;
+        place-content: center;
+        padding: 50px;
+        text-align: center;
+      }
+      .inspector-placeholder b { font: 800 28px/1 "DIN Alternate", sans-serif; }
+      .inspector-placeholder p { max-width: 270px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+      .detail-hero {
+        position: relative;
+        min-height: 240px;
+        overflow: hidden;
+        background: #dfe7ee;
+      }
+      .detail-hero img { width: 100%; height: 240px; object-fit: cover; }
+      .detail-hero::after {
+        content: "";
+        position: absolute;
+        inset: auto 0 0;
+        height: 58%;
+        background: linear-gradient(transparent, rgba(22,33,43,.75));
+        pointer-events: none;
+      }
+      .detail-title { position: absolute; z-index: 1; inset: auto 20px 18px; color: white; }
+      .detail-title h2 { margin: 0; font-size: 30px; line-height: 1; }
+      .detail-title code { display: block; margin-top: 6px; color: #d5e0e8; font-size: 8px; overflow-wrap: anywhere; }
+      .detail-body { display: grid; gap: 22px; padding: 20px; }
+      .detail-body > p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
+      .binding-spine { display: grid; gap: 0; }
+      .spine-row {
+        position: relative;
+        display: grid;
+        grid-template-columns: 20px 1fr auto;
+        gap: 10px;
+        align-items: center;
+        min-height: 46px;
+      }
+      .spine-row:not(:last-child)::before {
+        content: "";
+        position: absolute;
+        top: 29px;
+        bottom: -17px;
+        left: 8px;
+        width: 2px;
+        background: var(--line);
+      }
+      .node { z-index: 1; width: 18px; height: 18px; border: 4px solid white; border-radius: 50%; background: var(--line); box-shadow: 0 0 0 1px var(--line); }
+      .spine-row[data-state="good"] .node { background: var(--good); }
+      .spine-row[data-state="warn"] .node { background: var(--signal); }
+      .spine-row[data-state="bad"] .node { background: var(--bad); }
+      .spine-row strong { font-size: 11px; }
+      .spine-row code { color: var(--muted); font-size: 8px; }
+      .facts { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; overflow: hidden; border: 1px solid var(--soft-line); border-radius: 11px; background: var(--soft-line); }
+      .fact { min-width: 0; padding: 11px; background: #fbfdff; }
+      .fact b { display: block; color: var(--muted); font-size: 8px; text-transform: uppercase; }
+      .fact span, .fact code { display: block; overflow-wrap: anywhere; margin-top: 5px; font-size: 10px; }
+      details { border-top: 1px solid var(--soft-line); padding-top: 13px; }
+      summary { font-size: 11px; font-weight: 800; cursor: pointer; }
+      .evidence-list { display: grid; gap: 8px; margin: 10px 0 0; padding: 0; list-style: none; }
+      .evidence-list li { border-left: 3px solid var(--cobalt); padding: 6px 0 6px 10px; font-size: 9px; line-height: 1.5; }
+
+      @media (max-width: 1180px) {
+        .hero { grid-template-columns: 1fr; }
+        .filters { grid-template-columns: repeat(3, 1fr); }
+        .field:first-child { grid-column: span 2; }
+        .asset-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      }
+      @media (max-width: 820px) {
+        .brand { min-width: 0; border: 0; }
+        .topbar nav a:first-child { display: none; }
+        .workbench { grid-template-columns: 1fr; }
+        .inspector { position: static; min-height: 0; }
+        .filters { grid-template-columns: 1fr 1fr; }
+      }
+      @media (max-width: 560px) {
+        .brand { font-size: 14px; }
+        .topbar nav { padding-left: 0; }
+        main { padding-top: 24px; }
+        .metrics { grid-template-columns: 1fr; }
+        .metric { min-height: 74px; border-right: 0; border-bottom: 1px solid var(--soft-line); }
+        .filters, .asset-grid { grid-template-columns: 1fr; }
+        .field:first-child { grid-column: auto; }
+        .asset-card { grid-template-rows: 200px 1fr; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark"></span>Asset Qualification Desk</div>
+      <nav>
+        <a href="/asset_browser.html" aria-current="page">资产台账</a>
+        <a href="/case_parameter_editor.html">Case Studio</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Search · Preview · Qualification · Runtime evidence</p>
+          <h1>从“能看”到<em>“能绑定”。</em></h1>
+          <p>浏览本地 UE 资产，分开检查缩略图、目录物化、物理元数据、许可与真实 runtime binding 证据。资格结论沿用 Harness gate，不凭预览图猜测。</p>
+        </div>
+        <div class="metrics" aria-label="资产统计">
+          <div class="metric"><b id="totalMetric">—</b><span>目录资产</span></div>
+          <div class="metric"><b id="filteredMetric">—</b><span>当前结果</span></div>
+          <div class="metric"><b id="verifiedMetric">—</b><span>带 runtime evidence</span></div>
+        </div>
+      </section>
+
+      <section class="filters" aria-label="资产筛选">
+        <div class="field">
+          <label for="search">搜索名称、标签、路径或用途</label>
+          <input id="search" type="search" autocomplete="off" placeholder="例如 glass panel / character / basin">
+        </div>
+        <div class="field"><label for="category">类别</label><select id="category"><option value="">全部类别</option></select></div>
+        <div class="field"><label for="qualification">资格</label><select id="qualification"><option value="">全部资格</option></select></div>
+        <div class="field"><label for="binding">Binding</label><select id="binding"><option value="">全部状态</option></select></div>
+        <div class="field"><label for="source">来源</label><select id="source"><option value="">全部来源</option></select></div>
+      </section>
+
+      <div class="workbench">
+        <section class="catalog-panel">
+          <div class="panel-head">
+            <div><h2>资产目录</h2><p id="catalogMeta">正在读取 registry…</p></div>
+            <span id="status" class="badge" role="status" aria-live="polite">LOADING</span>
+          </div>
+          <div id="assetGrid" class="asset-grid"></div>
+          <div id="empty" class="empty" hidden>没有符合当前条件的资产。清空一个筛选项再试。</div>
+          <button id="loadMore" class="load-more" type="button" hidden>加载更多</button>
+        </section>
+
+        <aside class="inspector" aria-live="polite">
+          <div id="placeholder" class="inspector-placeholder">
+            <b>选择一个资产</b>
+            <p>右侧会显示资格门、runtime binding 证据、依赖闭包和 UE 路径。</p>
+          </div>
+          <div id="detail" hidden></div>
+        </aside>
+      </div>
+    </main>
+
+    <script src="/asset_browser.js"></script>
+  </body>
+</html>

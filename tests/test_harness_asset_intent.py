@@ -60,8 +60,10 @@ class HarnessAssetIntentTests(unittest.TestCase):
     def test_agent_action_roles_are_physics_critical(self) -> None:
         agent = intent_from_object({"id": "agent", "role": "active_agent", "shape": "capsule"})
         target = intent_from_object({"id": "box", "role": "action_coupled_body", "shape": "box"})
+        goal = intent_from_object({"id": "bin", "role": "goal_container", "shape": "open_box"})
         self.assertTrue(agent.physics_critical)
         self.assertTrue(target.physics_critical)
+        self.assertTrue(goal.physics_critical)
         self.assertIn("collision_profile", target.required_properties)
 
     def test_constraint_roles_are_physics_critical(self) -> None:

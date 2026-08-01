@@ -2,20 +2,25 @@
 
 > 生成命令：`python scripts/harness_case_tree.py`；CI/本地检查：`python scripts/harness_case_tree.py --check`。请勿手改本文件。
 
-## 两类位置
+## 三类位置
 
 - `repo/cases/`：可维护的 CaseSpec 与模板，是输入契约；不放 MP4、EXR、OBJ 或临时 run。
-- `$SIM_HARNESS_WORKSPACE/cases/<physics>/<scenario>/<version>/`：真实执行产物；版本下再分 `runs/`、`overall/`、`delivery/`、`probes/`。用户 keep 后才进入 `review/kept/`。
+- `$SIM_HARNESS_WORKSPACE/cases/<case_id>/<variant_id>/`：给人和下游工具使用的两层媒体目录；变体内固定为 `rgb/`、`depth/`、`segmentation/`、`overall/` 和 `variant.json`。
+- `$SIM_HARNESS_WORKSPACE/runs/case_routes/<physics>/<scenario>/<version>/`：内部 source run、日志、缓存与质量证据；不再混入对外 Case 目录。
 
 ## 目录树
 
 ```text
 cases/
 ├── agent_action/
+│   ├── agent_pick_and_place_on_table.json
+│   ├── agent_pick_object_lift.json
 │   ├── agent_push_box_contact.json
 │   ├── agent_throw_ball_release.json
+│   ├── agent_throw_object_into_bin.json
 │   ├── negative_missing_action_trace.json
 │   ├── negative_no_post_action_motion.json
+│   ├── negative_place_outside_goal.json
 │   └── negative_target_preaction_motion.json
 ├── billiards/
 │   ├── angled_grazing_contact.json
@@ -252,10 +257,14 @@ cases/
 
 | Case | 类型 | 能力 | 说明 | Harness 必须记住 |
 |---|---|---|---|---|
+| [`agent_action/agent_pick_and_place_on_table.json`](agent_action/agent_pick_and_place_on_table.json) | 正向 | `agent_rigidbody_action_coupling` | A person picks up a small package from one low table, carries it, and places it on a second table. The package must be grasped, visibly carried by the hand, released inside the target region, contact the target table, and settle. | trajectory, action_trace, contact_events, object_roles, final_object_state |
+| [`agent_action/agent_pick_object_lift.json`](agent_action/agent_pick_object_lift.json) | 正向 | `agent_rigidbody_action_coupling` | A person grasps a package that starts at rest and lifts it clear of the floor. The package, not only the hand animation, must rise and finish held still. | trajectory, action_trace, contact_events, object_roles, final_object_state |
 | [`agent_action/agent_push_box_contact.json`](agent_action/agent_push_box_contact.json) | 正向 | `agent_rigidbody_action_coupling` | An agent pushes a box from rest. The box must remain still before the agent push action and move only after contact/action evidence. | trajectory, action_trace, contact_events, object_roles, post_action_velocity |
 | [`agent_action/agent_throw_ball_release.json`](agent_action/agent_throw_ball_release.json) | 正向 | `agent_rigidbody_action_coupling` | An agent throws a ball. The ball starts still, then receives a release impulse from the agent action and moves after the action frame. | trajectory, action_trace, contact_events, object_roles, post_action_velocity |
+| [`agent_action/agent_throw_object_into_bin.json`](agent_action/agent_throw_object_into_bin.json) | 正向 | `agent_rigidbody_action_coupling` | A person throws a ball into a bin. The ball must start still, be released with an impulse, enter the bin target region, contact the bin, and settle. | trajectory, action_trace, contact_events, object_roles, final_object_state |
 | [`agent_action/negative_missing_action_trace.json`](agent_action/negative_missing_action_trace.json) | 负向/边界 | `agent_rigidbody_action_coupling` | A box moves as if pushed, but there is no structured action trace proving which agent action caused the motion. | trajectory, action_trace, contact_events, object_roles, post_action_velocity |
 | [`agent_action/negative_no_post_action_motion.json`](agent_action/negative_no_post_action_motion.json) | 负向/边界 | `agent_rigidbody_action_coupling` | An agent push action is recorded, but the target rigid body never responds after the action. | trajectory, action_trace, contact_events, object_roles, post_action_velocity |
+| [`agent_action/negative_place_outside_goal.json`](agent_action/negative_place_outside_goal.json) | 负向/边界 | `agent_rigidbody_action_coupling` | A person performs grasp and release actions, but the package is released outside the table target region. | trajectory, action_trace, contact_events, object_roles, final_object_state |
 | [`agent_action/negative_target_preaction_motion.json`](agent_action/negative_target_preaction_motion.json) | 负向/边界 | `agent_rigidbody_action_coupling` | A target box starts moving before the agent action occurs, which must be rejected as hidden pre-action motion. | trajectory, action_trace, contact_events, object_roles, post_action_velocity |
 | [`billiards/angled_grazing_contact.json`](billiards/angled_grazing_contact.json) | 正向 | `rigid_body_contact_causality` | Cue ball approaches at a shallow angle and grazes the first passive target ball. Passive targets must not move before contact. | passive_initial_velocity_zero, no_precontact_passive_motion |
 | [`billiards/low_speed_single_contact.json`](billiards/low_speed_single_contact.json) | 正向 | `rigid_body_contact_causality` | A low-speed cue ball hits one passive target ball on a flat low-friction table. | trajectory, contact_events, camera_trajectory |
@@ -376,7 +385,7 @@ cases/
 | [`spin/negative_missing_angular_velocity_label.json`](spin/negative_missing_angular_velocity_label.json) | 负向/边界 | `angular_damping_spin_decay` | A body rotates visually, but the case spec does not declare initial angular velocity or damping labels. | trajectory, rotation_trace, angular_velocity, angular_damping_label |
 | [`spin/negative_no_spin_decay.json`](spin/negative_no_spin_decay.json) | 负向/边界 | `angular_damping_spin_decay` | A spinning body declares angular damping but the runtime angular velocity barely decays. | trajectory, rotation_trace, angular_velocity, angular_damping_label |
 | [`spin/negative_spin_gain.json`](spin/negative_spin_gain.json) | 负向/边界 | `angular_damping_spin_decay` | A spinning body has positive damping but its angular speed increases without an external torque label. | trajectory, rotation_trace, angular_velocity, angular_damping_label |
-| [`templates/agent_rigidbody_action.template.json`](templates/agent_rigidbody_action.template.json) | 模板 | `agent_rigidbody_action_coupling` | - | agent action trace is explicit, target rigid body starts still, target motion starts after action frame, push actions have contact evidence, throw actions have impulse or release metadata, post-action response exceeds minimum displacement or speed |
+| [`templates/agent_rigidbody_action.template.json`](templates/agent_rigidbody_action.template.json) | 模板 | `agent_rigidbody_action_coupling` | - | agent action trace is explicit, target rigid body starts still, target motion starts after action frame, push actions have contact evidence, throw actions have impulse or release metadata, pick/place actions have ordered grasp/release evidence, … |
 | [`templates/angular_damping_spin.template.json`](templates/angular_damping_spin.template.json) | 模板 | `angular_damping_spin_decay` | - | initial angular velocity is explicit, angular damping is explicit, angular speed decays over time, rotation trace shows non-trivial spin, spin speed cannot increase without external torque |
 | [`templates/billiards_collision.template.json`](templates/billiards_collision.template.json) | 模板 | `rigid_body_contact_causality` | Parameterized rigid-body billiards-style collision. Passive balls must remain still until contact. | no_passive_object_moves_before_contact, collision_response_occurs_after_contact, expected_collision_graph_edges_have_contact_events |
 | [`templates/bounce_restitution.template.json`](templates/bounce_restitution.template.json) | 模板 | `bounce_restitution_ball` | Runnable template for restitution-controlled rigid-body rebound after ground contact. | descends_before_contact, impact_contact_required, rebound_after_contact, restitution_bounded_rebound_height |
@@ -406,5 +415,5 @@ cases/
 1. 新增/删除/移动 CaseSpec 后必须重新生成本文件并运行 `--check`。
 2. `negative_*` 是 verifier 负例，不是待交付视频；它们必须失败才能证明关卡有效。
 3. 参数矩阵只做因果方向判断，不把不同参数条件评为画质 winner。
-4. 任何完整 run 都应有多机位 RGB/depth/segmentation、三个 run overall；case 根有三个跨 run overall。Canonical depth/segmentation 是逐帧数值文件，MP4 只供评审。
+4. 每个整理后的变体固定四个媒体目录；RGB-only 历史结果允许 depth/segmentation 为空，但 manifest 必须明确。正式完整 run 仍要求多机位 RGB/depth/segmentation 和三个 overall。
 5. CaseSpec 只定义初态、物理参数和期望事件；不得逐帧注入物体轨迹。

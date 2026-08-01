@@ -1,0 +1,59 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "agent_throw_object_into_bin",
+  "capability_id": "agent_rigidbody_action_coupling",
+  "prompt": "A person throws a ball into a bin. The ball must start still, be released with an impulse, enter the bin target region, contact the bin, and settle.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "coupling_type": "throw",
+    "action_actor_id": "agent",
+    "target_object_id": "ball",
+    "action_frame": 12,
+    "action_time_s": 0.5,
+    "duration_s": 3.0,
+    "expected_min_target_displacement_m": 0.8,
+    "expected_min_post_action_speed_m_s": 0.8,
+    "passive_pre_action_velocity_epsilon_m_s": 0.05,
+    "required_action_sequence": ["throw"],
+    "object_effect": {
+      "final_goal_region": {
+        "center_m": [1.4, 0.0, 0.35],
+        "half_extent_m": [0.2, 0.2, 0.2]
+      },
+      "required_final_contact": ["ball", "bin"],
+      "maximum_final_speed_m_s": 0.08
+    },
+    "action_trace": [
+      {
+        "frame": 12,
+        "time_s": 0.5,
+        "actor_id": "agent",
+        "target_id": "ball",
+        "action_type": "throw",
+        "release": true,
+        "impulse_n_s": [1.28, 0.0, 0.4],
+        "release_velocity_m_s": [3.2, 0.0, 1.0]
+      }
+    ]
+  },
+  "objects": [
+    {"id": "agent", "role": "active_agent", "shape": "capsule", "initial_position_m": [-0.8, 0.0, 0.0], "initial_velocity_m_s": [0.0, 0.0, 0.0]},
+    {"id": "ball", "role": "action_coupled_body", "shape": "sphere", "radius_m": 0.1, "mass_kg": 0.4, "initial_position_m": [0.0, 0.0, 0.8], "initial_velocity_m_s": [0.0, 0.0, 0.0]},
+    {"id": "bin", "role": "goal_container", "shape": "open_box", "initial_position_m": [1.4, 0.0, 0.2]},
+    {"id": "floor", "role": "support", "shape": "box", "initial_position_m": [0.0, 0.0, 0.0]}
+  ],
+  "active_objects": ["agent"],
+  "passive_objects": ["ball"],
+  "camera_overrides": {
+    "front_static": {
+      "location": [3.8, -3.8, 2.8],
+      "target": [0.7, 0.0, 0.7],
+      "fov": 55.0
+    }
+  },
+  "required_assets": ["agent_controller_or_skeletal_actor", "throwable_rigid_body", "target_container", "physics_colliders"],
+  "required_signals": ["trajectory", "action_trace", "contact_events", "object_roles", "final_object_state"],
+  "verifier_expectation": {"status": "pass"},
+  "should_pass": true,
+  "notes": "Throwing is accepted only when the ball reaches and settles in the intended target region."
+}

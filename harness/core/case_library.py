@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import math
 import os
 import re
+import shlex
 import sys
 from pathlib import Path
 from typing import Any, Iterable
@@ -20,6 +22,8 @@ VARIANT_PLAN_SCHEMA_VERSION = "harness_variant_plan_v1"
 VARIANT_MANIFEST_SCHEMA_VERSION = "harness_case_variant_v1"
 CASE_INDEX_SCHEMA_VERSION = "harness_case_index_v1"
 CATALOG_PLAN_SCHEMA_VERSION = "harness_catalog_case_plan_v1"
+RUN_CONTROL_SCHEMA_VERSION = "harness_run_control_v1"
+FROZEN_RUN_CONTROL_PLAN_SCHEMA_VERSION = "harness_frozen_run_control_plan_v1"
 MODALITY_FILES = {
     "rgb": "rgb.mp4",
     "depth": "depth_preview.mp4",
@@ -116,6 +120,267 @@ def load_variant_plan(plan_path: str | Path) -> dict[str, Any]:
     return _load_variant_plan(Path(plan_path).expanduser().resolve(strict=True))
 
 
+def write_case_editor(
+    plan_path: str | Path,
+    output_path: str | Path | None = None,
+) -> Path:
+    """Write one standalone editor containing its validated plan and base CaseSpec."""
+    plan_path = Path(plan_path).expanduser().resolve(strict=True)
+    plan = _load_variant_plan(plan_path)
+    base_case = read_json(_plan_base_case(plan, plan_path))
+    validate_case_spec(base_case)
+    output = (
+        Path(output_path).expanduser().resolve(strict=False)
+        if output_path
+        else plan_path.with_suffix(".html")
+    )
+    if output == plan_path:
+        raise CaseLibraryError("editor output must not overwrite the variant plan")
+    return _write_case_editor_document(
+        output,
+        plan=plan,
+        base_case=base_case,
+        plan_name=_portable_plan_reference(plan_path),
+    )
+
+
+def write_run_control_page(
+    run_dir: str | Path,
+    case_spec: dict[str, Any],
+    *,
+    execution: dict[str, Any],
+    reproduce_command: str,
+    status: str,
+) -> Path:
+    """Write the machine-readable and standalone per-run reproduction contract."""
+    validate_case_spec(case_spec)
+    if status not in {"prepared", "completed", "failed"}:
+        raise CaseLibraryError(f"invalid run control status: {status}")
+    if not reproduce_command.strip():
+        raise CaseLibraryError("run control requires a reproduction command")
+    run_dir = Path(run_dir).expanduser().resolve(strict=False)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    write_json(run_dir / "case_spec.json", case_spec)
+    plan, plan_name, plan_record = _run_control_plan(case_spec, execution)
+    control = {
+        "schema_version": RUN_CONTROL_SCHEMA_VERSION,
+        "status": status,
+        "case_id": case_spec["case_id"],
+        "case_sha256": _json_sha256(case_spec),
+        "control_mode": "variable" if plan_record["status"] == "resolved" else "frozen",
+        "plan": plan_record,
+        "execution": copy.deepcopy(execution),
+        "reproduce_command": reproduce_command,
+        "paths": {
+            "case_spec": "case_spec.json",
+            "run_control": "run_control.json",
+            "html": "run_control.html",
+            "reproductions": "reproductions/",
+        },
+    }
+    write_json(run_dir / "run_control.json", control)
+    output = _write_case_editor_document(
+        run_dir / "run_control.html",
+        plan=plan,
+        base_case=case_spec,
+        plan_name=plan_name,
+        run_control=control,
+    )
+    _declare_run_control_artifacts(run_dir)
+    return output
+
+
+def build_run_control_execution(
+    run_dir: str | Path,
+    output_root: str | Path,
+    *,
+    backend: str,
+    views: list[str],
+    render_passes: list[str],
+    mode: str,
+    width: int,
+    height: int,
+    camera_strategy: str,
+    profile: str = "custom",
+    case_route: str | None = None,
+    lighting_preset: str | None = None,
+) -> tuple[dict[str, Any], str]:
+    run_dir = Path(run_dir).expanduser().resolve(strict=False)
+    reproduction_root = run_dir / "reproductions"
+    execution = {
+        "backend": backend,
+        "case_route": case_route,
+        "output_root": str(Path(output_root).expanduser().resolve(strict=False)),
+        "reproduction_output_root": str(reproduction_root),
+        "views": list(views),
+        "render_passes": list(render_passes),
+        "mode": mode,
+        "width": int(width),
+        "height": int(height),
+        "camera_strategy": camera_strategy,
+        "profile": profile,
+        "python": sys.executable,
+        "runner": str(REPO_ROOT / "scripts" / "harness_run_case.py"),
+        "lighting_preset": lighting_preset,
+    }
+    command = [
+        sys.executable,
+        execution["runner"],
+        str(run_dir / "case_spec.json"),
+        "--backend",
+        backend,
+        "--output-root",
+        str(reproduction_root),
+        "--video-root",
+        str(reproduction_root / "review"),
+        "--camera-strategy",
+        camera_strategy,
+    ]
+    if profile != "custom":
+        command.extend(("--profile", profile))
+    else:
+        command.extend(
+            (
+                "--views",
+                ",".join(views),
+                "--render-passes",
+                ",".join(render_passes),
+                "--mode",
+                mode,
+                "--width",
+                str(width),
+                "--height",
+                str(height),
+            )
+        )
+    if lighting_preset:
+        command = ["env", f"SIM_STUDIO_UE_LIGHTING_PRESET={lighting_preset}", *command]
+    return execution, shlex.join(command)
+
+
+def _write_case_editor_document(
+    output: Path,
+    *,
+    plan: dict[str, Any],
+    base_case: dict[str, Any],
+    plan_name: str,
+    run_control: dict[str, Any] | None = None,
+) -> Path:
+    marker = '<script src="case_parameter_editor.js"></script>'
+    template = (REPO_ROOT / "tools" / "case_parameter_editor.html").read_text(
+        encoding="utf-8"
+    )
+    if template.count(marker) != 1:
+        raise CaseLibraryError("case parameter editor script marker is missing or duplicated")
+    data = json.dumps(
+        {
+            "plan": plan,
+            "base_case": base_case,
+            "plan_name": plan_name,
+            "run_control": run_control,
+        },
+        ensure_ascii=False,
+    ).replace("</", "<\\/")
+    script = (REPO_ROOT / "tools" / "case_parameter_editor.js").read_text(encoding="utf-8")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        template.replace(
+            marker,
+            f'<script id="case-editor-data" type="application/json">{data}</script>\n'
+            f"<script>{script}</script>",
+        ),
+        encoding="utf-8",
+    )
+    return output
+
+
+def _run_control_plan(
+    case_spec: dict[str, Any],
+    execution: dict[str, Any],
+) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    variant = case_spec.get("variant_plan")
+    reference = str(variant.get("plan") or "") if isinstance(variant, dict) else ""
+    candidate = (REPO_ROOT / reference).resolve(strict=False) if reference else None
+    if candidate and candidate.is_file() and candidate.is_relative_to(REPO_ROOT):
+        actual_hash = file_sha256(candidate)
+        expected_hash = str(variant.get("plan_sha256") or "")
+        if not expected_hash or expected_hash == actual_hash:
+            return (
+                _load_variant_plan(candidate),
+                _portable_plan_reference(candidate),
+                {
+                    "status": "resolved",
+                    "path": _portable_plan_reference(candidate),
+                    "sha256": actual_hash,
+                },
+            )
+        issue = "plan_sha256_mismatch"
+    else:
+        issue = "plan_missing" if reference else "plan_not_declared"
+    width = int(execution["width"])
+    height = int(execution["height"])
+    frozen = {
+        "schema_version": FROZEN_RUN_CONTROL_PLAN_SCHEMA_VERSION,
+        "case_route": execution.get("case_route")
+        or "reproduction/exact/v001_run_control",
+        "base_case": "case_spec.json",
+        "axes": [],
+        "selected_variants": [],
+        "ui": {
+            "title": case_spec["case_id"],
+            "summary": case_spec["prompt"],
+            "fields": [],
+            "render": {
+                "resolution": {
+                    "id": "exact_run",
+                    "width": width,
+                    "height": height,
+                },
+                "passes": list(execution["render_passes"]),
+                "available_passes": ["rgb", "depth", "segmentation"],
+                "views": list(execution["views"]),
+            },
+        },
+    }
+    return frozen, "frozen exact CaseSpec", {
+        "status": "unavailable",
+        "path": reference or None,
+        "sha256": None,
+        "issue": issue,
+    }
+
+
+def _json_sha256(payload: Any) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _declare_run_control_artifacts(run_dir: Path) -> None:
+    for name, key in (
+        ("harness_artifact.json", "paths"),
+        ("artifact_manifest.json", "artifacts"),
+        ("manifest.json", "intermediates"),
+    ):
+        path = run_dir / name
+        if not path.is_file():
+            continue
+        payload = read_json(path)
+        if not isinstance(payload, dict):
+            continue
+        payload.setdefault(key, {}).update(
+            {
+                "run_control": "run_control.json",
+                "run_control_html": "run_control.html",
+            }
+        )
+        write_json(path, payload)
+
+
 def variant_render_command(
     plan_path: str | Path,
     variant_id: str,
@@ -171,7 +436,7 @@ def organize_workspace_cases(
     routes: Iterable[str] | None = None,
     apply: bool = False,
 ) -> dict[str, Any]:
-    """Build a non-destructive, hardlinked case/variant/media view over canonical runs."""
+    """Build ``cases/<case>/<variant>`` as a hardlinked view over internal runs."""
     raw_root = Path(workspace).expanduser()
     if raw_root.is_symlink():
         raise CaseLibraryError(f"workspace root must not be a symlink: {raw_root}")
@@ -179,9 +444,17 @@ def organize_workspace_cases(
         root = workspace_root(raw_root)
     except WorkspaceError as exc:
         raise CaseLibraryError(str(exc)) from exc
-    if not root.is_dir() or root.is_symlink() or not (root / "cases").is_dir():
-        raise CaseLibraryError(f"initialized harness workspace with a real cases directory is required: {root}")
-    versions = _case_versions(root, routes)
+    source_root = root / "runs" / "case_routes"
+    if (
+        not root.is_dir()
+        or root.is_symlink()
+        or not (root / "cases").is_dir()
+        or not source_root.is_dir()
+    ):
+        raise CaseLibraryError(
+            f"initialized harness workspace with real cases and runs/case_routes directories is required: {root}"
+        )
+    versions = _case_versions(source_root, routes)
     cases: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
     organized_count = 0
@@ -189,23 +462,21 @@ def organize_workspace_cases(
     overall_generation_count = 0
     qualification_counts: dict[str, int] = {}
     for version in versions:
-        route = version.relative_to(root / "cases").as_posix()
+        route = version.relative_to(source_root).as_posix()
+        case_id = flat_case_id(route)
+        case_root = root / "cases" / case_id
         variants: list[dict[str, Any]] = []
         labels: set[str] = set()
         indexed_labels = _indexed_run_labels(version)
         for run in _discover_run_dirs(version):
-            views = _complete_run_views(run)
-            if not views:
-                skipped.append({"run": str(run), "reason": "incomplete RGB/depth/segmentation view contract"})
+            view_modalities = _run_view_modalities(run)
+            if not view_modalities:
+                skipped.append({"run": str(run), "reason": "no real RGB camera view"})
                 continue
+            views = list(view_modalities)
             overall = _run_overall(run, apply=apply)
-            missing_overall = [
-                modality for modality, path in overall.items() if not is_mp4(path)
-            ]
-            if missing_overall and apply:
-                skipped.append({"run": str(run), "reason": "missing RGB/depth/segmentation overall videos"})
-                continue
-            if missing_overall:
+            expected_overall = set().union(*view_modalities.values())
+            if any(modality not in overall for modality in expected_overall):
                 overall_generation_count += 1
             label = _unique_variant_label(
                 version,
@@ -218,9 +489,12 @@ def organize_workspace_cases(
             qualification_counts[qualification["status"]] = (
                 qualification_counts.get(qualification["status"], 0) + 1
             )
-            target = version / "variants" / label
+            target = case_root / label
             artifacts: dict[str, Any] = {"rgb": {}, "depth": {}, "segmentation": {}, "overall": {}}
-            for view in views:
+            if apply:
+                for modality in ("rgb", "depth", "segmentation", "overall"):
+                    (target / modality).mkdir(parents=True, exist_ok=True)
+            for view, available_modalities in view_modalities.items():
                 view_dir = run / "views" / view
                 rgb_target = target / "rgb" / f"{safe_filename(view)}.mp4"
                 file_count += _organize_file(
@@ -234,6 +508,8 @@ def organize_workspace_cases(
                     ("depth", "depth_preview.mp4", "depth_frames"),
                     ("segmentation", "segmentation_preview.mp4", "segmentation_frames"),
                 ):
+                    if modality not in available_modalities:
+                        continue
                     modality_root = target / modality / safe_filename(view)
                     preview_target = modality_root / "preview.mp4"
                     file_count += _organize_file(
@@ -270,34 +546,45 @@ def organize_workspace_cases(
                 artifacts["overall"][modality] = overall_target.relative_to(target).as_posix()
             manifest = {
                 "schema_version": VARIANT_MANIFEST_SCHEMA_VERSION,
+                "case_id": case_id,
                 "case_route": route,
                 "variant": label,
                 "source_run": str(run),
                 "views": views,
+                "modalities": {
+                    modality: sorted(
+                        view
+                        for view, available in view_modalities.items()
+                        if modality in available
+                    )
+                    for modality in ("rgb", "depth", "segmentation")
+                },
                 "artifacts": artifacts,
                 "storage": "hardlink_view_over_canonical_run",
                 "qualification": qualification,
             }
             if apply:
-                write_json(target / "variant_manifest.json", manifest)
+                write_json(target / "variant.json", manifest)
             variants.append(manifest)
             organized_count += 1
         case_index = {
             "schema_version": CASE_INDEX_SCHEMA_VERSION,
+            "case_id": case_id,
             "case_route": route,
             "variants": [
                 {
                     "id": row["variant"],
-                    "path": f"variants/{row['variant']}",
+                    "path": row["variant"],
                     "source_run": row["source_run"],
                     "views": row["views"],
+                    "modalities": row["modalities"],
                     "qualification": row["qualification"],
                 }
                 for row in variants
             ],
         }
         if apply and variants:
-            write_json(version / "case_index.json", case_index)
+            write_json(case_root / "case.json", case_index)
         cases.append(case_index)
     return {
         "schema_version": "harness_case_organization_report_v1",
@@ -311,6 +598,76 @@ def organize_workspace_cases(
         "skipped_run_count": len(skipped),
         "skipped_runs": skipped,
         "cases": cases,
+    }
+
+
+def flat_case_id(route: str) -> str:
+    """Return the stable two-level library folder for a three-part run route."""
+    _validate_case_route(route)
+    _, scenario, version = Path(route).parts
+    return f"{safe_filename(scenario)}__{safe_filename(version)}"
+
+
+def migrate_workspace_case_layout(
+    workspace: str | Path,
+    *,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Move legacy route trees from ``cases`` into internal ``runs/case_routes``."""
+    root = workspace_root(Path(workspace).expanduser())
+    cases_root = root / "cases"
+    source_root = root / "runs" / "case_routes"
+    if not cases_root.is_dir() or cases_root.is_symlink():
+        raise CaseLibraryError(f"workspace cases must be a real directory: {cases_root}")
+    if not source_root.is_dir():
+        if not apply:
+            raise CaseLibraryError(
+                f"workspace runs/case_routes must exist before migration dry-run: {source_root}"
+            )
+        source_root.mkdir(parents=True, exist_ok=True)
+    legacy_versions = _case_versions(cases_root, routes=None)
+    moves: list[dict[str, str]] = []
+    for version in legacy_versions:
+        route = version.relative_to(cases_root).as_posix()
+        target = source_root / route
+        if target.exists():
+            raise CaseLibraryError(f"internal case route already exists: {target}")
+        moves.append(
+            {
+                "case_route": route,
+                "flat_case_id": flat_case_id(route),
+                "source": str(version),
+                "target": str(target),
+            }
+        )
+    if apply:
+        for row in moves:
+            source = Path(row["source"])
+            target = Path(row["target"])
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source.rename(target)
+        for scenario in sorted(cases_root.glob("*/*"), reverse=True):
+            if scenario.is_dir() and not scenario.is_symlink() and not any(scenario.iterdir()):
+                scenario.rmdir()
+        for physics in sorted(cases_root.iterdir(), reverse=True):
+            if physics.is_dir() and not physics.is_symlink() and not any(physics.iterdir()):
+                physics.rmdir()
+        write_json(
+            root / "catalog" / "case_layout_migration.json",
+            {
+                "schema_version": "harness_case_layout_migration_v1",
+                "layout": "cases/<case_id>/<variant_id>",
+                "internal_run_root": str(source_root),
+                "moved_route_count": len(moves),
+                "moves": moves,
+            },
+        )
+    return {
+        "schema_version": "harness_case_layout_migration_report_v1",
+        "workspace": str(root),
+        "dry_run": not apply,
+        "moved_route_count": len(moves),
+        "moves": moves,
     }
 
 
@@ -603,32 +960,31 @@ def _numeric_value(value: Any, *, operator: str) -> int | float:
     return value
 
 
-def _case_versions(root: Path, routes: Iterable[str] | None) -> list[Path]:
+def _case_versions(source_root: Path, routes: Iterable[str] | None) -> list[Path]:
     if routes is not None:
         versions = []
         for route in routes:
             _validate_case_route(route)
-            version = root / "cases" / Path(route)
+            version = source_root / Path(route)
             if (
                 not version.is_dir()
-                or _contains_symlink(root, version)
-                or not version.resolve(strict=False).is_relative_to(root / "cases")
+                or _contains_symlink(source_root, version)
+                or not version.resolve(strict=False).is_relative_to(source_root)
             ):
                 raise CaseLibraryError(f"case route does not exist in workspace: {route}")
             versions.append(version.resolve(strict=False))
         return sorted(set(versions))
-    cases_root = root / "cases"
     return sorted(
         version
-        for physics in cases_root.iterdir() if physics.is_dir()
+        for physics in source_root.iterdir() if physics.is_dir()
         for scenario in physics.iterdir() if scenario.is_dir()
         for version in scenario.iterdir()
         if (
             version.is_dir()
             and version.name.startswith("v")
-            and not _contains_symlink(root, version)
+            and not _contains_symlink(source_root, version)
         )
-    ) if cases_root.is_dir() else []
+    ) if source_root.is_dir() else []
 
 
 def _validate_case_route(route: str) -> None:
@@ -656,35 +1012,42 @@ def _discover_run_dirs(version: Path) -> list[Path]:
     return sorted(runs)
 
 
-def _complete_run_views(run: Path) -> list[str]:
-    views = []
+def _run_view_modalities(run: Path) -> dict[str, set[str]]:
+    views: dict[str, set[str]] = {}
     for view in sorted((run / "views").iterdir()):
         if not view.is_dir():
             continue
         if _contains_symlink(run, view):
-            return []
-        if not all(is_mp4(view / filename) for filename in MODALITY_FILES.values()):
-            return []
-        if any(
-            not directory.is_dir()
-            or _contains_symlink(run, directory)
-            or not any(directory.glob("*.exr"))
-            for directory in (view / "depth_frames", view / "segmentation_frames")
+            return {}
+        if not is_mp4(view / "rgb.mp4"):
+            continue
+        modalities = {"rgb"}
+        for modality, preview_name, frames_name in (
+            ("depth", "depth_preview.mp4", "depth_frames"),
+            ("segmentation", "segmentation_preview.mp4", "segmentation_frames"),
         ):
-            return []
-        views.append(view.name)
+            frames = view / frames_name
+            if frames.is_symlink() or (view / preview_name).is_symlink():
+                return {}
+            if (
+                is_mp4(view / preview_name)
+                and frames.is_dir()
+                and not _contains_symlink(run, frames)
+                and any(frames.glob("*.exr"))
+            ):
+                modalities.add(modality)
+        views[view.name] = modalities
     return views
 
 
 def _run_overall(run: Path, *, apply: bool) -> dict[str, Path]:
     if (run / "overall").is_symlink():
         raise CaseLibraryError(f"run overall directory must not be a symlink: {run / 'overall'}")
-    overall = {
-        modality: run / "overall" / f"{modality}.mp4"
-        for modality in MODALITY_FILES
-    }
-    if apply and not all(is_mp4(path) for path in overall.values()):
-        ArtifactManager(run).publish_run_overall()
+    overall = ArtifactManager(run).publish_run_overall() if apply else {}
+    for modality in MODALITY_FILES:
+        path = run / "overall" / f"{modality}.mp4"
+        if is_mp4(path):
+            overall[modality] = path
     return overall
 
 

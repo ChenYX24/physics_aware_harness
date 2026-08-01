@@ -826,13 +826,35 @@ def spin_case(template: dict[str, Any], params: dict[str, Any], *, index: int, s
 def agent_action_case(template: dict[str, Any], params: dict[str, Any], *, index: int, seed: int, should_pass: bool, negative_mode: str | None) -> dict[str, Any]:
     action_time = float(params["action_time_s"])
     action_frame = 1
-    coupling_type = "throw" if index % 3 == 1 and negative_mode != "no_post_action_motion" else "push"
-    target_id = "ball" if coupling_type == "throw" else "box"
+    coupling_type = ("push", "throw", "pick", "pick_place")[index % 4]
+    target_id = "ball" if coupling_type == "throw" else ("package" if coupling_type in {"pick", "pick_place"} else "box")
     target_shape = "sphere" if coupling_type == "throw" else "box"
     target_z = 0.8 if coupling_type == "throw" else 0.25
     impulse = [round(float(params["throw_speed_m_s"]) * 0.75, 4), 0.0, round(float(params["throw_speed_m_s"]) * 0.5, 4)] if coupling_type == "throw" else [round(float(params["push_impulse_n_s"]), 4), 0.0, 0.0]
-    min_speed = max(0.2, float(params["throw_speed_m_s"]) * 0.35) if coupling_type == "throw" else max(0.12, float(params["push_impulse_n_s"]) * 0.22)
-    min_displacement = 0.28 if coupling_type == "throw" else 0.14
+    min_speed = max(0.2, float(params["throw_speed_m_s"]) * 0.35) if coupling_type == "throw" else (0.0 if coupling_type in {"pick", "pick_place"} else max(0.12, float(params["push_impulse_n_s"]) * 0.22))
+    min_displacement = {"push": 0.14, "throw": 0.28, "pick": 0.4, "pick_place": 0.5}[coupling_type]
+    action_trace = [
+        {
+            "frame": action_frame,
+            "time_s": round(action_time, 4),
+            "actor_id": "agent",
+            "target_id": target_id,
+            "action_type": "grasp" if coupling_type in {"pick", "pick_place"} else coupling_type,
+            "release": coupling_type == "throw",
+            "impulse_n_s": impulse,
+        }
+    ]
+    if coupling_type == "pick_place":
+        action_trace.append(
+            {
+                "frame": action_frame + 1,
+                "time_s": round(action_time + 0.25, 4),
+                "actor_id": "agent",
+                "target_id": target_id,
+                "action_type": "release",
+                "release": True,
+            }
+        )
     expected = {
         "coordinate_system": "z_up",
         "coupling_type": coupling_type,
@@ -845,18 +867,28 @@ def agent_action_case(template: dict[str, Any], params: dict[str, Any], *, index
         "expected_min_target_displacement_m": round(min_displacement, 4),
         "expected_min_post_action_speed_m_s": round(min_speed, 4),
         "passive_pre_action_velocity_epsilon_m_s": 0.05,
-        "action_trace": [
-            {
-                "frame": action_frame,
-                "time_s": round(action_time, 4),
-                "actor_id": "agent",
-                "target_id": target_id,
-                "action_type": coupling_type,
-                "release": coupling_type == "throw",
-                "impulse_n_s": impulse,
-            }
-        ],
+        "action_trace": action_trace,
     }
+    if coupling_type in {"pick", "pick_place"}:
+        expected["required_action_sequence"] = ["grasp", "release"] if coupling_type == "pick_place" else ["grasp"]
+        expected["object_effect"] = {
+            "minimum_lift_height_m": 0.45,
+            "maximum_final_speed_m_s": 0.05,
+        }
+    if coupling_type == "throw":
+        expected["required_action_sequence"] = ["throw"]
+        expected["object_effect"] = {
+            "final_goal_region": {"center_m": [1.4, 0.0, 0.35], "half_extent_m": [0.2, 0.2, 0.2]},
+            "required_final_contact": [target_id, "bin"],
+            "maximum_final_speed_m_s": 0.08,
+        }
+    if coupling_type == "pick_place":
+        expected["object_effect"].update(
+            {
+                "final_goal_region": {"center_m": [0.8, 0.0, 0.85], "half_extent_m": [0.18, 0.18, 0.08]},
+                "required_final_contact": [target_id, "table"],
+            }
+        )
     if negative_mode == "missing_action_trace":
         expected.pop("action_trace", None)
     objects = [
@@ -879,6 +911,9 @@ def agent_action_case(template: dict[str, Any], params: dict[str, Any], *, index
     ]
     if target_shape == "sphere":
         objects[1]["radius_m"] = 0.12
+        objects.append({"id": "bin", "role": "goal_container", "shape": "open_box", "initial_position_m": [1.4, 0.0, 0.2]})
+    if coupling_type == "pick_place":
+        objects.append({"id": "table", "role": "goal_support", "shape": "box", "initial_position_m": [0.8, 0.0, 0.7]})
     case = base_case(template, params, index=index, seed=seed, should_pass=should_pass, negative_mode=negative_mode)
     case.update(
         {

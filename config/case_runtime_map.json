@@ -1,0 +1,79 @@
+{
+  "schema_version": "harness_case_runtime_map_v1",
+  "workspace_layout": "cases/<case_id>/<variant_id>",
+  "internal_run_layout": "runs/case_routes/<physics>/<scenario>/<version>",
+  "catalog_cases": {
+    "static_meeting_room_layout": [],
+    "billiards_break": [
+      "rigid_collision/billiards/v001_approach_angle_matrix_rgb_reference",
+      "rigid_collision/billiards/v002_complete_angle_matrix",
+      "rigid_collision/billiards/v003_speed_matrix",
+      "rigid_collision/billiards/v004_mass_restitution_friction",
+      "rigid_collision/billiards/v005_angle_extension"
+    ],
+    "domino_chain": [
+      "rigid_collision/domino/v001_true_chaos_chain",
+      "rigid_collision/domino/v002_six_domino_terminal_propagation"
+    ],
+    "bowling_pin_collision": [],
+    "newton_cradle": [
+      "rigid_collision/newton_cradle/v001_release_angle_ofat"
+    ],
+    "gravity_bounce_projectile": [],
+    "ramp_roll_slide": [
+      "rigid_motion/ramp_roll_slide/v001_friction_regime_ofat"
+    ],
+    "agent_push_throw": [],
+    "steel_ball_wood_board": [
+      "brittle_fracture/steel_ball_board/v001_energy_matrix"
+    ],
+    "steel_ball_glass_panel": [
+      "brittle_fracture/glass_panel/v001_energy_response",
+      "brittle_fracture/glass_panel/v002_native_gc_energy_response",
+      "brittle_fracture/glass_panel/v003_impact_centered_ballistic",
+      "brittle_fracture/glass_panel/v004_impact_position_matrix"
+    ],
+    "wine_glass_to_bowl": [
+      "fluid_dynamics/container_to_container_transfer/v001_spout_release",
+      "fluid_dynamics/container_to_container_transfer/v002_wine_glass_to_teacup",
+      "fluid_dynamics/container_to_container_transfer/v002_wine_glass_to_tumbler"
+    ],
+    "rubber_lead_ball_water": [
+      "fluid_dynamics/drop_in_liquid/v001_rubber_vs_lead",
+      "fluid_dynamics/drop_in_liquid/v002_deep_tank",
+      "fluid_dynamics/drop_in_liquid/v003_stone_planter"
+    ],
+    "container_stirring": [
+      "fluid_dynamics/container_fill_stirring/v001_swirl_release"
+    ],
+    "continuous_fountain": [
+      "fluid_dynamics/fountain/v001_jet_pulse"
+    ],
+    "spring_rope_bungee": [
+      "elastic_constraint/bungee_rebound/v001_mujoco_tendon_ue",
+      "elastic_constraint/bungee_rebound/v002_height_mass_ofat",
+      "elastic_constraint/bungee_rebound/v003_rope_length_ofat",
+      "elastic_constraint/bungee_rebound/v004_rope_length_extreme_profile"
+    ],
+    "wind_force": [],
+    "cloth_drape": [
+      "soft_body/cloth_drape/v001_taichi_cloth_over_sphere"
+    ],
+    "flag_wind": [
+      "soft_body/flag_wind/v001_taichi_pinned_flag_wind",
+      "soft_body/flag_wind/v002_wind_speed_ofat"
+    ],
+    "soft_ball_ground": [
+      "soft_body/elastic_collision/v001_youngs_modulus_ofat"
+    ],
+    "human_motion": [],
+    "vehicle_dynamics": [],
+    "magnetic_force": [
+      "field_force/magnetic/v001_attract_repel"
+    ]
+  },
+  "unmapped_runtime_routes": [
+    "fluid_dynamics/fluid_drop_in_basin/v001_genesis_surface_reconstruction",
+    "fluid_dynamics/fluid_drop_in_basin/v002_genesis_native_render"
+  ]
+}

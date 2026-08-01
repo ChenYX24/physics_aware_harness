@@ -75,6 +75,7 @@
         "id": "impactor_mass",
         "label": "钢球质量",
         "tier": "common",
+        "group": "physics",
         "type": "number",
         "unit": "kg",
         "min": 4.0,
@@ -89,6 +90,7 @@
         "id": "duration",
         "label": "仿真时长",
         "tier": "common",
+        "group": "event",
         "type": "number",
         "unit": "s",
         "min": 1.0,
@@ -103,6 +105,7 @@
         "id": "render_fps",
         "label": "渲染 FPS",
         "tier": "common",
+        "group": "render",
         "type": "number",
         "unit": "fps",
         "min": 12,
@@ -113,9 +116,48 @@
         ]
       },
       {
+        "id": "scene_center_z",
+        "label": "构图中心高度",
+        "tier": "common",
+        "group": "camera",
+        "type": "number",
+        "unit": "m",
+        "min": 0.1,
+        "max": 2.5,
+        "step": 0.05,
+        "pointers": [
+          "/scene/scene_bounds/center/2"
+        ]
+      },
+      {
+        "id": "scene_extent_x",
+        "label": "构图横向范围",
+        "tier": "common",
+        "group": "camera",
+        "type": "number",
+        "unit": "m",
+        "min": 0.5,
+        "max": 6.0,
+        "step": 0.1,
+        "pointers": [
+          "/scene/scene_bounds/extent/0"
+        ]
+      },
+      {
+        "id": "lighting",
+        "label": "灯光预设",
+        "tier": "common",
+        "group": "scene",
+        "type": "text",
+        "pointers": [
+          "/scene/lighting_preset"
+        ]
+      },
+      {
         "id": "physics_hz",
         "label": "物理解算频率",
         "tier": "advanced",
+        "group": "physics",
         "type": "number",
         "unit": "Hz",
         "min": 60,
@@ -130,6 +172,7 @@
         "id": "ballistic_time",
         "label": "计划撞击时间",
         "tier": "advanced",
+        "group": "event",
         "type": "number",
         "unit": "s",
         "min": 0.1,
@@ -144,6 +187,7 @@
         "id": "shatter_threshold",
         "label": "破碎能量阈值",
         "tier": "advanced",
+        "group": "event",
         "type": "number",
         "unit": "J",
         "min": 2.0,
@@ -159,6 +203,7 @@
         "id": "burst_threshold",
         "label": "爆裂能量阈值",
         "tier": "advanced",
+        "group": "event",
         "type": "number",
         "unit": "J",
         "min": 10.0,
@@ -174,6 +219,7 @@
         "id": "map",
         "label": "UE Map",
         "tier": "advanced",
+        "group": "scene",
         "type": "text",
         "warning": "只能填写当前 workspace UE 工程中真实存在的 /Game package。",
         "pointers": [
@@ -250,6 +296,31 @@
       }
     },
     "render": {
+      "resolution": {
+        "width": 1920,
+        "height": 1080,
+        "id": "full_hd"
+      },
+      "available_resolutions": [
+        {
+          "id": "hd",
+          "label": "HD · 快速检查",
+          "width": 1280,
+          "height": 720
+        },
+        {
+          "id": "full_hd",
+          "label": "Full HD · 默认",
+          "width": 1920,
+          "height": 1080
+        },
+        {
+          "id": "4k",
+          "label": "4K · 正式保留",
+          "width": 3840,
+          "height": 2160
+        }
+      ],
       "passes": [
         "rgb"
       ],

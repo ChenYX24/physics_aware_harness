@@ -1,0 +1,50 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "agent_pick_object_lift",
+  "capability_id": "agent_rigidbody_action_coupling",
+  "prompt": "A person grasps a package that starts at rest and lifts it clear of the floor. The package, not only the hand animation, must rise and finish held still.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "coupling_type": "pick",
+    "action_actor_id": "agent",
+    "target_object_id": "package",
+    "action_frame": 12,
+    "action_time_s": 0.5,
+    "duration_s": 2.0,
+    "expected_min_target_displacement_m": 0.4,
+    "passive_pre_action_velocity_epsilon_m_s": 0.05,
+    "required_action_sequence": ["grasp"],
+    "object_effect": {
+      "minimum_lift_height_m": 0.45,
+      "maximum_final_speed_m_s": 0.05
+    },
+    "action_trace": [
+      {
+      "frame": 12,
+      "time_s": 0.5,
+        "actor_id": "agent",
+        "target_id": "package",
+        "action_type": "grasp"
+      }
+    ]
+  },
+  "objects": [
+    {"id": "agent", "role": "active_agent", "shape": "capsule", "initial_position_m": [-0.8, 0.0, 0.0], "initial_velocity_m_s": [0.0, 0.0, 0.0]},
+    {"id": "package", "role": "action_coupled_body", "shape": "box", "mass_kg": 1.0, "initial_position_m": [0.0, 0.0, 0.25], "initial_velocity_m_s": [0.0, 0.0, 0.0]},
+    {"id": "floor", "role": "support", "shape": "box", "initial_position_m": [0.0, 0.0, 0.0]}
+  ],
+  "active_objects": ["agent"],
+  "passive_objects": ["package"],
+  "camera_overrides": {
+    "front_static": {
+      "location": [2.5, -3.0, 2.4],
+      "target": [0.0, 0.0, 0.9],
+      "fov": 55.0
+    }
+  },
+  "required_assets": ["agent_controller_or_skeletal_actor", "graspable_rigid_body", "target_collider", "support_surface"],
+  "required_signals": ["trajectory", "action_trace", "contact_events", "object_roles", "final_object_state"],
+  "verifier_expectation": {"status": "pass"},
+  "should_pass": true,
+  "notes": "Embodied pick case: acceptance depends on package lift height and final stability, not pose appearance."
+}

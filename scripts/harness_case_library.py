@@ -19,8 +19,10 @@ from harness.core.case_library import (
     create_variant_plan,
     load_variant_plan,
     materialize_variant,
+    migrate_workspace_case_layout,
     organize_workspace_cases,
     variant_render_command,
+    write_case_editor,
 )
 from harness.core.workspace import case_output_root
 
@@ -42,6 +44,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     show = commands.add_parser("show", help="Print one validated variant plan.")
     show.add_argument("plan")
+
+    editor = commands.add_parser("editor", help="Build a standalone HTML editor for one variant plan.")
+    editor.add_argument("plan")
+    editor.add_argument("--output", help="Defaults to the plan path with an .html suffix.")
 
     materialize = commands.add_parser("materialize", help="Write selected CaseSpecs without rendering.")
     materialize.add_argument("plan")
@@ -74,7 +80,17 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--lighting-presets")
     render.add_argument("--stop-on-first-pass", action="store_true")
 
-    organize = commands.add_parser("organize", help="Build case/variants media views using hardlinks.")
+    migrate = commands.add_parser(
+        "migrate",
+        help="Move legacy nested runtime routes into internal runs/case_routes storage.",
+    )
+    migrate.add_argument("--workspace", required=True)
+    migrate.add_argument("--apply", action="store_true", help="Move routes; default is dry-run.")
+
+    organize = commands.add_parser(
+        "organize",
+        help="Build flat cases/<case>/<variant> media views using hardlinks.",
+    )
     organize.add_argument("--workspace", required=True)
     organize.add_argument("--route", action="append", help="Repeat to limit organization to exact case routes.")
     organize.add_argument("--apply", action="store_true", help="Create the hardlinked view; default is dry-run.")
@@ -96,9 +112,18 @@ def main(argv: list[str] | None = None) -> int:
                 axes=axes,
             )
             write_json(args.output, plan)
-            result = {"action": "plan", "output": str(Path(args.output).resolve()), **plan}
+            editor_output = write_case_editor(args.output)
+            result = {
+                "action": "plan",
+                "output": str(Path(args.output).resolve()),
+                "editor": str(editor_output),
+                **plan,
+            }
         elif args.command == "show":
             result = load_variant_plan(args.plan)
+        elif args.command == "editor":
+            output = write_case_editor(args.plan, args.output)
+            result = {"action": "editor", "plan": str(Path(args.plan).resolve()), "output": str(output)}
         elif args.command == "materialize":
             plan = load_variant_plan(args.plan)
             variants = args.variant or [row["id"] for row in plan["selected_variants"]]
@@ -162,6 +187,8 @@ def main(argv: list[str] | None = None) -> int:
             }
             print(json.dumps(result, indent=2, ensure_ascii=False))
             return completed.returncode
+        elif args.command == "migrate":
+            result = migrate_workspace_case_layout(args.workspace, apply=args.apply)
         else:
             result = organize_workspace_cases(
                 args.workspace,

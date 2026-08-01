@@ -136,10 +136,11 @@ def render_tree() -> str:
         "",
         "> 生成命令：`python scripts/harness_case_tree.py`；CI/本地检查：`python scripts/harness_case_tree.py --check`。请勿手改本文件。",
         "",
-        "## 两类位置",
+        "## 三类位置",
         "",
         "- `repo/cases/`：可维护的 CaseSpec 与模板，是输入契约；不放 MP4、EXR、OBJ 或临时 run。",
-        "- `$SIM_HARNESS_WORKSPACE/cases/<physics>/<scenario>/<version>/`：真实执行产物；版本下再分 `runs/`、`overall/`、`delivery/`、`probes/`。用户 keep 后才进入 `review/kept/`。",
+        "- `$SIM_HARNESS_WORKSPACE/cases/<case_id>/<variant_id>/`：给人和下游工具使用的两层媒体目录；变体内固定为 `rgb/`、`depth/`、`segmentation/`、`overall/` 和 `variant.json`。",
+        "- `$SIM_HARNESS_WORKSPACE/runs/case_routes/<physics>/<scenario>/<version>/`：内部 source run、日志、缓存与质量证据；不再混入对外 Case 目录。",
         "",
         "## 目录树",
         "",
@@ -177,7 +178,7 @@ def render_tree() -> str:
             "1. 新增/删除/移动 CaseSpec 后必须重新生成本文件并运行 `--check`。",
             "2. `negative_*` 是 verifier 负例，不是待交付视频；它们必须失败才能证明关卡有效。",
             "3. 参数矩阵只做因果方向判断，不把不同参数条件评为画质 winner。",
-            "4. 任何完整 run 都应有多机位 RGB/depth/segmentation、三个 run overall；case 根有三个跨 run overall。Canonical depth/segmentation 是逐帧数值文件，MP4 只供评审。",
+            "4. 每个整理后的变体固定四个媒体目录；RGB-only 历史结果允许 depth/segmentation 为空，但 manifest 必须明确。正式完整 run 仍要求多机位 RGB/depth/segmentation 和三个 overall。",
             "5. CaseSpec 只定义初态、物理参数和期望事件；不得逐帧注入物体轨迹。",
             "",
         ]
@@ -187,7 +188,7 @@ def render_tree() -> str:
 
 def render_workspace_tree(workspace_root: Path) -> str:
     cases_root = workspace_root / "cases"
-    versions = workspace_case_versions(cases_root)
+    cases = workspace_cases(cases_root)
     lines = [
         "# 本地 Case 产出导航（自动生成）",
         "",
@@ -196,23 +197,21 @@ def render_workspace_tree(workspace_root: Path) -> str:
         "",
         "## 怎么读路径",
         "",
-        "`cases/<物理性质>/<场景>/<版本>/` 只保留三层语义；版本下面的技术目录有固定含义：",
+        "`cases/<case_id>/<variant_id>/` 只保留两层业务语义；每个变体的子目录固定：",
         "",
-        "| 子目录 | 含义 | 是否应长期保留 |",
+        "| 子目录 | 含义 | 规则 |",
         "|---|---|---|",
-        "| `runs/` / `ue_runs/` | 正式或可登记的 source run；含 solver state、传感器真值和报告。 | 只保留 keep/source-truth 所需 run。 |",
-        "| `probes/` | 低成本 smoke、故障定位和视觉预览。 | 成功候选确定后清理被替代 probe。 |",
-        "| `overall/` | case 级跨 run 单视角对比。 | 保留当前有效版本。 |",
-        "| `delivery/` | Harness 打包的 review candidate、manifest 与 overall。 | keep/reject 决定后按 review 状态维护。 |",
-        "| `inputs/` | 冻结的 CaseSpec、相机和场景输入。 | 只要对应证据存在就保留。 |",
-        "| `reference/` | 用户认可的历史参考，不等于公开 reference-ready。 | 不自动删除。 |",
-        "| `representatives/` | 参数矩阵代表项或占位索引。 | 被真实 run 替代后清理。 |",
+        "| `rgb/` | 每个机位一个 RGB MP4。 | 任何可整理变体都必须有。 |",
+        "| `depth/` | 每个机位的 preview MP4 与 metric EXR frames。 | RGB-only 变体可为空；正式候选必须完整。 |",
+        "| `segmentation/` | 每个机位的 preview MP4 与 instance EXR frames。 | RGB-only 变体可为空；正式候选必须完整。 |",
+        "| `overall/` | 当前变体按模态合成的多机位总体视频。 | 只生成实际存在的模态。 |",
+        "| `variant.json` | source run、route、机位、模态、质量门和 hardlink provenance。 | 不得省略。 |",
         "",
-        "## 三层 Case 树",
+        "## 两层 Case 树",
         "",
         "```text",
         "cases/",
-        *workspace_route_tree(versions),
+        *workspace_case_tree(cases),
         "```",
         "",
         "## 每个本地 Case",
@@ -220,24 +219,25 @@ def render_workspace_tree(workspace_root: Path) -> str:
         "| 路径 | 是什么 / 体现什么 | 当前内容 | Harness 必须记住 |",
         "|---|---|---|---|",
     ]
-    for version in versions:
-        route = version.relative_to(cases_root).as_posix()
-        description = WORKSPACE_CASE_DESCRIPTIONS.get(route, version.name.replace("_", " "))
-        contents = workspace_version_contents(version)
+    for case_dir, manifest in cases:
+        route = str(manifest.get("case_route") or "")
+        description = WORKSPACE_CASE_DESCRIPTIONS.get(route, case_dir.name.replace("_", " "))
+        variants = manifest.get("variants") if isinstance(manifest.get("variants"), list) else []
+        contents = f"`{len(variants)}` 个变体"
         family = "/".join(route.split("/")[:2])
         memory = WORKSPACE_FAMILY_MEMORY.get(
             family,
             "CaseSpec 只定义初态；正式产物必须可追溯、可验证，并按 keep/reject 清理。",
         )
-        lines.append(f"| `{route}/` | {description} | {contents} | {memory} |")
+        lines.append(f"| `{case_dir.name}/` | {description} | {contents} | {memory} |")
     lines.extend(
         [
             "",
             "## Harness 维护规则",
             "",
             "1. 每次正式 run、probe 清理、keep/reject 或新增版本后，重新生成本文件。",
-            "2. 不把每个时间戳 run 提升为新的 case 层级；参数差异记录在 Condition/CaseSpec/manifest。",
-            "3. smoke 只验证最小事件和可见性，不能进入正式 delivery；candidate 才生成五机位三模态，publish 只在用户 keep 后运行。",
+            "2. 不把 physics/scenario/version 重新展开到 `cases/`；内部 route 只保存在 `runs/case_routes/` 和 manifest。",
+            "3. smoke 默认 1280×720；candidate 默认 1920×1080 五机位三模态；publish 只在用户 keep 后以 3840×2160 运行。",
             "4. 破碎的 `fracture_center_source`、流体的 solver/cache/surface lineage、刚体的 contact provenance 都必须在 run 内有机器可读证据。",
             "5. 本文件只做导航，不替代 CaseSpec、manifest、verifier 或 review 状态。",
             "",
@@ -246,49 +246,33 @@ def render_workspace_tree(workspace_root: Path) -> str:
     return "\n".join(lines)
 
 
-def workspace_case_versions(cases_root: Path) -> list[Path]:
+def workspace_cases(cases_root: Path) -> list[tuple[Path, dict]]:
     if not cases_root.is_dir():
         return []
-    versions: list[Path] = []
-    for physics in sorted(path for path in cases_root.iterdir() if path.is_dir()):
-        for scenario in sorted(path for path in physics.iterdir() if path.is_dir()):
-            versions.extend(
-                sorted(
-                    path
-                    for path in scenario.iterdir()
-                    if path.is_dir() and path.name.startswith("v")
-                )
-            )
-    return versions
+    rows = []
+    for case_dir in sorted(path for path in cases_root.iterdir() if path.is_dir()):
+        manifest_path = case_dir / "case.json"
+        if not manifest_path.is_file():
+            continue
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            rows.append((case_dir, payload))
+    return rows
 
 
-def workspace_route_tree(versions: list[Path]) -> list[str]:
-    routes = [version.parts[-3:] for version in versions]
-    root: dict[str, dict] = {}
-    for parts in routes:
-        node = root
-        for part in parts:
-            node = node.setdefault(part, {})
+def workspace_case_tree(cases: list[tuple[Path, dict]]) -> list[str]:
     result: list[str] = []
-
-    def visit(node: dict[str, dict], prefix: str) -> None:
-        entries = sorted(node.items())
-        for index, (name, children) in enumerate(entries):
-            last = index == len(entries) - 1
-            result.append(f"{prefix}{'└── ' if last else '├── '}{name}/")
-            if children:
-                visit(children, prefix + ("    " if last else "│   "))
-
-    visit(root, "")
+    for case_index, (case_dir, manifest) in enumerate(cases):
+        last_case = case_index == len(cases) - 1
+        result.append(f"{'└── ' if last_case else '├── '}{case_dir.name}/")
+        variants = manifest.get("variants") if isinstance(manifest.get("variants"), list) else []
+        prefix = "    " if last_case else "│   "
+        for variant_index, row in enumerate(variants):
+            last_variant = variant_index == len(variants) - 1
+            result.append(
+                f"{prefix}{'└── ' if last_variant else '├── '}{row.get('id')}/"
+            )
     return result
-
-
-def workspace_version_contents(version: Path) -> str:
-    entries: list[str] = []
-    for child in sorted(path for path in version.iterdir() if path.is_dir()):
-        count = sum(1 for path in child.iterdir() if path.is_dir() or path.is_file())
-        entries.append(f"`{child.name}/` ({count})")
-    return "、".join(entries) if entries else "尚无子目录"
 
 
 def tree_lines(files: list[Path]) -> list[str]:

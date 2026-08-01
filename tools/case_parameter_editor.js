@@ -1,6 +1,13 @@
 (function (root) {
   "use strict";
 
+  const DEFAULT_VIEWS = [
+    "front_static",
+    "side_static",
+    "top_down",
+    "tracking_subject",
+    "event_closeup",
+  ];
   function clone(value) {
     return JSON.parse(JSON.stringify(value));
   }
@@ -116,10 +123,17 @@
   }
 
   function validateInputs(plan, baseCase) {
-    if (!plan || plan.schema_version !== "harness_variant_plan_v1") {
-      throw new Error("Parameter plan must use schema harness_variant_plan_v1");
+    const schemas = new Set([
+      "harness_variant_plan_v1",
+      "harness_frozen_run_control_plan_v1",
+    ]);
+    if (!plan || !schemas.has(plan.schema_version)) {
+      throw new Error("Unsupported Harness control plan schema");
     }
-    if (!Array.isArray(plan.axes) || !plan.axes.length) {
+    if (
+      !Array.isArray(plan.axes) ||
+      (!plan.axes.length && plan.schema_version === "harness_variant_plan_v1")
+    ) {
       throw new Error("Parameter plan needs at least one axis");
     }
     if (!baseCase || baseCase.schema_version !== "harness_case_spec_v1") {
@@ -129,25 +143,44 @@
 
   function levelValue(axis, level, baseCase) {
     if ("value" in level) return level.value;
-    if (axis.value_pointer && level.edits && axis.value_pointer in level.edits) {
-      return level.edits[axis.value_pointer];
+    const pointer =
+      axis.value_pointer ||
+      Object.keys(
+        axis.levels.find((item) => item.id === axis.baseline)?.edits ||
+          axis.levels[0]?.edits ||
+          {},
+      )[0];
+    if (pointer && level.edits && pointer in level.edits) {
+      return level.edits[pointer];
     }
-    return axis.value_pointer ? getPointer(baseCase, axis.value_pointer) : null;
+    return pointer ? getPointer(baseCase, pointer) : level.id;
   }
 
   function initialChoices(plan, baseCase) {
     validateInputs(plan, baseCase);
     const axes = {};
     for (const axis of plan.axes) {
-      const current = axis.value_pointer
-        ? getPointer(baseCase, axis.value_pointer)
+      const pointer =
+        axis.value_pointer ||
+        Object.keys(
+          axis.levels.find((item) => item.id === axis.baseline)?.edits ||
+            axis.levels[0]?.edits ||
+            {},
+        )[0];
+      const current = pointer
+        ? getPointer(baseCase, pointer)
         : undefined;
-      const match = axis.levels.find(
-        (level) => levelValue(axis, level, baseCase) === current,
-      );
-      axes[axis.id] = match
-        ? { kind: "preset", levelId: match.id, customValue: current }
-        : { kind: "custom", customValue: current };
+      const match =
+        axis.levels.find(
+          (level) => levelValue(axis, level, baseCase) === current,
+        ) ||
+        axis.levels.find((level) => level.id === axis.baseline) ||
+        axis.levels[0];
+      axes[axis.id] = {
+        kind: "preset",
+        levelId: match.id,
+        customValue: levelValue(axis, match, baseCase),
+      };
     }
     const fields = {};
     for (const field of plan.ui?.fields || []) {
@@ -157,7 +190,14 @@
       axes,
       fields,
       passes: clone(plan.ui?.render?.passes || ["rgb"]),
-      views: clone(plan.ui?.render?.views || []),
+      views: clone(plan.ui?.render?.views || DEFAULT_VIEWS),
+      resolution: clone(
+        plan.ui?.render?.resolution || {
+          id: "full_hd",
+          width: 1920,
+          height: 1080,
+        },
+      ),
     };
   }
 
@@ -171,7 +211,7 @@
           .replace(/\./g, "p");
         return `${axis.id}-${value}`;
       })
-      .join("__");
+      .join("__") || "exact_reproduction";
   }
 
   function materialize(baseCase, plan, choices) {
@@ -250,9 +290,15 @@
     return rows;
   }
 
-  function renderCommand(plan, filename, choices) {
+  function renderCommand(plan, filename, choices, runControl = null) {
     if (!choices.passes.length) throw new Error("Select at least one render pass");
     if (!choices.views.length) throw new Error("Select at least one camera");
+    if (
+      !Number.isInteger(choices.resolution?.width) ||
+      !Number.isInteger(choices.resolution?.height)
+    ) {
+      throw new Error("Select a valid render resolution");
+    }
     const passes = choices.passes.join(",");
     const mode =
       choices.passes.includes("rgb") && choices.passes.length > 1
@@ -260,14 +306,20 @@
         : choices.passes.length === 1 && choices.passes[0] === "rgb"
           ? "rgb"
           : "data";
+    const execution = runControl?.execution || {};
+    const output = execution.reproduction_output_root
+      ? `--output-root ${shellQuote(execution.reproduction_output_root)}`
+      : `--case-route ${shellQuote(plan.case_route)}`;
     return [
-      "python3.13 scripts/harness_run_case.py",
+      `${shellQuote(execution.python || "python3.13")} ${shellQuote(execution.runner || "scripts/harness_run_case.py")}`,
       shellQuote(`./${filename}`),
-      "--backend ue",
-      `--case-route ${shellQuote(plan.case_route)}`,
+      `--backend ${shellQuote(execution.backend || "ue")}`,
+      output,
       `--views ${shellQuote(choices.views.join(","))}`,
       `--render-passes ${shellQuote(passes)}`,
       `--mode ${mode}`,
+      `--width ${choices.resolution.width}`,
+      `--height ${choices.resolution.height}`,
     ].join(" \\\n  ");
   }
 
@@ -303,6 +355,7 @@
       planName: "parameter-plan.json",
       savedVariants: [],
       lastAutoLabel: "",
+      runControl: null,
     };
     const byId = (id) => document.getElementById(id);
     const status = byId("status");
@@ -328,13 +381,12 @@
     }
 
     async function loadSample() {
+      const planName = "config/variant_plans/glass_panel_impact_speed.json";
       showStatus("正在载入玻璃撞击参数计划…");
       try {
-        const plan = await fetchJson(
-          "../config/variant_plans/glass_panel_impact_speed.json",
-        );
+        const plan = await fetchJson(`../${planName}`);
         const baseCase = await fetchJson(`../${plan.base_case}`);
-        useInputs(plan, baseCase, "config/variant_plans/glass_panel_impact_speed.json");
+        useInputs(plan, baseCase, planName);
       } catch (error) {
         showStatus(
           `示例载入失败：${error.message}。请从仓库根目录启动 HTTP server，或选择两个 JSON 文件。`,
@@ -343,7 +395,7 @@
       }
     }
 
-    function useInputs(plan, baseCase, planName) {
+    function useInputs(plan, baseCase, planName, runControl = null) {
       try {
         plan.__sourceName = planName;
         state.plan = plan;
@@ -352,6 +404,16 @@
         state.choices = core.initialChoices(plan, baseCase);
         state.savedVariants = [];
         state.lastAutoLabel = "";
+        state.runControl = runControl;
+        if (runControl?.execution) {
+          state.choices.views = clone(runControl.execution.views);
+          state.choices.passes = clone(runControl.execution.render_passes);
+          state.choices.resolution = {
+            id: "exact_run",
+            width: runControl.execution.width,
+            height: runControl.execution.height,
+          };
+        }
         byId("variantLabel").value = "";
         renderShell();
         recompute();
@@ -395,23 +457,29 @@
       byId("editor").hidden = false;
       byId("caseTitle").textContent = plan.ui?.title || state.baseCase.case_id;
       byId("caseSummary").textContent = plan.ui?.summary || state.baseCase.prompt;
-      byId("caseRoute").textContent = plan.case_route;
-      byId("primaryControls").innerHTML = plan.axes
-        .map((axis) => axisMarkup(axis))
-        .join("");
+      byId("caseRoute").textContent =
+        plan.case_route || state.runControl?.execution?.output_root || "custom output";
+      byId("primaryControls").innerHTML = plan.axes.length
+        ? plan.axes.map((axis) => axisMarkup(axis)).join("")
+        : '<p class="muted">本次运行没有声明可变 JSON Pointer；CaseSpec 保持冻结，仍可复现或调整捕获配置。</p>';
       byId("commonControls").innerHTML = fieldsMarkup("common");
       byId("advancedControls").innerHTML = fieldsMarkup("advanced");
       byId("passControls").innerHTML = checksMarkup(
-        plan.ui?.render?.available_passes || ["rgb", "depth", "segmentation"],
+        [...new Set([
+          ...(plan.ui?.render?.available_passes || ["rgb", "depth", "segmentation"]),
+          ...state.choices.passes,
+        ])],
         state.choices.passes,
         "pass",
       );
       byId("viewControls").innerHTML = checksMarkup(
-        plan.ui?.render?.views || [],
+        [...new Set([...(plan.ui?.render?.views || DEFAULT_VIEWS), ...state.choices.views])],
         state.choices.views,
         "view",
       );
+      byId("resolutionControls").innerHTML = resolutionMarkup();
       bindControls();
+      renderRunContract();
       renderFiles();
       renderQueue();
     }
@@ -436,7 +504,7 @@
           <p class="micro">PRIMARY AXIS · ${h(axis.value_pointer || "")}</p>
           <div class="preset-row">${buttons}</div>
           ${
-            input.allow_custom
+            input.allow_custom && axis.value_pointer
               ? `<label class="custom-value ${custom ? "active" : ""}">
                   <input type="radio" name="axis-${h(axis.id)}" data-custom-axis="${h(axis.id)}"
                     ${custom ? "checked" : ""}>
@@ -462,6 +530,7 @@
             : "";
           return `
             <label class="field-control">
+              <small class="field-group">${h(field.group || "case")}</small>
               <span>${h(field.label || field.id)}</span>
               <div class="field-input">
                 <input data-field="${h(field.id)}" type="${field.type === "text" ? "text" : "number"}"
@@ -485,6 +554,40 @@
               <input type="checkbox" data-${kind}="${h(item)}"
                 ${selected.includes(item) ? "checked" : ""}>
               <span>${h(item.replaceAll("_", " "))}</span>
+            </label>`,
+        )
+        .join("");
+    }
+
+    function resolutionMarkup() {
+      const options = clone(state.plan.ui?.render?.available_resolutions || [
+        { id: "hd", label: "HD · 快速检查", width: 1280, height: 720 },
+        { id: "full_hd", label: "Full HD · 默认", width: 1920, height: 1080 },
+        { id: "4k", label: "4K · 正式保留", width: 3840, height: 2160 },
+      ]);
+      if (
+        !options.some(
+          (option) =>
+            option.width === state.choices.resolution.width &&
+            option.height === state.choices.resolution.height,
+        )
+      ) {
+        options.unshift({
+          ...state.choices.resolution,
+          label: "本次运行",
+        });
+      }
+      return options
+        .map(
+          (option) => `
+            <label class="resolution-card">
+              <input type="radio" name="resolution" data-resolution="${h(option.id)}"
+                data-width="${h(option.width)}" data-height="${h(option.height)}"
+                ${state.choices.resolution.id === option.id ? "checked" : ""}>
+              <span>
+                <b>${h(option.label)}</b>
+                <code>${h(option.width)} × ${h(option.height)}</code>
+              </span>
             </label>`,
         )
         .join("");
@@ -541,6 +644,16 @@
           recompute();
         });
       });
+      document.querySelectorAll("[data-resolution]").forEach((input) => {
+        input.addEventListener("change", () => {
+          state.choices.resolution = {
+            id: input.dataset.resolution,
+            width: Number(input.dataset.width),
+            height: Number(input.dataset.height),
+          };
+          recompute();
+        });
+      });
     }
 
     function checkedValues(kind) {
@@ -562,7 +675,12 @@
           state.choices,
         );
         const filename = `${state.output.case_id}.json`;
-        const command = core.renderCommand(state.plan, filename, state.choices);
+        const command = core.renderCommand(
+          state.plan,
+          filename,
+          state.choices,
+          state.runControl,
+        );
         byId("renderCommand").textContent = command;
         byId("outputName").textContent = filename;
         const labelInput = byId("variantLabel");
@@ -571,7 +689,7 @@
         }
         state.lastAutoLabel = state.output.variant_plan.variant;
         renderDiff();
-        renderEnergy();
+        renderResultTicket();
         showStatus("参数有效，可以导出并渲染。", "ready");
       } catch (error) {
         state.output = null;
@@ -605,7 +723,7 @@
       return JSON.stringify(value);
     }
 
-    function renderEnergy() {
+    function renderResultTicket() {
       try {
         const energy = core.getPointer(
           state.output,
@@ -629,15 +747,53 @@
         byId("burstMark").style.bottom = `${Math.min(98, (burst / ceiling) * 100)}%`;
         byId("energyValue").textContent = `${Number(energy.toFixed(3))} J`;
         byId("damageState").textContent = damage;
+        byId("resultSubtitle").textContent = "联动公式的可见反馈";
+        byId("resultEyebrow").textContent = "Computed incident energy";
+        byId("resultNote").textContent =
+          "速度、质量和阈值变化会同步更新初态、事件能量与预期损伤。";
         byId("shatterLabel").textContent = `SHATTER ${shatter} J`;
         byId("burstLabel").textContent = `BURST ${burst} J`;
+        byId("energyPanel").dataset.mode = "energy";
         byId("energyPanel").hidden = false;
       } catch (_error) {
-        byId("energyPanel").hidden = true;
+        const axis = state.plan.axes[0];
+        const pointer =
+          axis?.value_pointer ||
+          Object.keys(
+            axis?.levels.find((item) => item.id === axis.baseline)?.edits ||
+              axis?.levels[0]?.edits ||
+              {},
+          )[0];
+        const value = pointer ? core.getPointer(state.output, pointer) : "ready";
+        byId("energyValue").textContent =
+          `${formatValue(value)} ${axis?.input?.unit || ""}`.trim();
+        byId("damageState").textContent = "CASE READY";
+        byId("resultSubtitle").textContent = "当前案例的主变量与验证契约";
+        byId("resultEyebrow").textContent = axis?.label || axis?.id || "Exact CaseSpec";
+        byId("resultNote").textContent =
+          `${state.output.capability_id} · ${state.output.objects.length} objects · ${state.output.required_signals.length} signals`;
+        byId("energyPanel").dataset.mode = "generic";
+        byId("energyPanel").hidden = false;
       }
     }
 
     function renderFiles() {
+      if (state.runControl) {
+        const rows = [
+          ["CONTROL", "run_control.json", "复现命令、运行配置与输入哈希"],
+          ["CASE", "case_spec.json", "本次运行的精确 CaseSpec"],
+          ["PLAN", state.planName, state.runControl.control_mode === "variable" ? "可控变量与联动公式" : "未声明变量，输入冻结"],
+          ["OUTPUT", "reproductions/", "复现运行写入独立目录，不覆盖原证据"],
+          ["HTML", "run_control.html", "自包含复现控制页"],
+        ];
+        byId("fileList").innerHTML = rows
+          .map(
+            ([kind, path, note]) => `
+              <li><b>${h(kind)}</b><code>${h(path)}</code><span>${h(note)}</span></li>`,
+          )
+          .join("");
+        return;
+      }
       const rows = [
         ["PLAN", state.planName, "参数轴、默认档和联动公式"],
         ["BASE", state.plan.base_case, "作为输入读取，不覆盖"],
@@ -651,6 +807,21 @@
             <li><b>${h(kind)}</b><code>${h(path)}</code><span>${h(note)}</span></li>`,
         )
         .join("");
+    }
+
+    function renderRunContract() {
+      const control = state.runControl;
+      byId("runContract").hidden = !control;
+      byId("copyExactCommand").hidden = !control;
+      byId("brandTitle").textContent = control ? "Physics Run Control" : "Physics Case Studio";
+      for (const id of ["assetLink", "loadSample", "fileLoader"]) {
+        byId(id).hidden = Boolean(control);
+      }
+      if (!control) return;
+      byId("runStatus").textContent = control.status;
+      byId("runBackend").textContent = control.execution.backend;
+      byId("runControlMode").textContent = control.control_mode;
+      byId("runCaseHash").textContent = control.case_sha256;
     }
 
     function seedPlannedVariants() {
@@ -675,6 +846,7 @@
           render: {
             views: clone(choices.views),
             passes: clone(choices.passes),
+            resolution: clone(choices.resolution),
           },
         });
       }
@@ -707,6 +879,7 @@
         render: {
           views: clone(state.choices.views),
           passes: clone(state.choices.passes),
+          resolution: clone(state.choices.resolution),
         },
       };
       const index = state.savedVariants.findIndex((item) => item.id === label);
@@ -722,7 +895,16 @@
     function variantSummary(row) {
       return state.plan.axes
         .map((axis) => {
-          const value = core.getPointer(row.case_spec, axis.value_pointer);
+          const pointer =
+            axis.value_pointer ||
+            Object.keys(
+              axis.levels.find((item) => item.id === axis.baseline)?.edits ||
+                axis.levels[0]?.edits ||
+                {},
+            )[0];
+          const value = pointer
+            ? core.getPointer(row.case_spec, pointer)
+            : row.case_spec.variant_plan.levels[axis.id];
           return `${axis.label || axis.id} ${value}${axis.input?.unit || ""}`;
         })
         .join(" · ");
@@ -745,7 +927,8 @@
                 <strong>${h(row.label)}</strong>
                 ${row.planned ? '<b class="planned-badge">MODEL PLANNED</b>' : '<b class="custom-badge">SAVED EDIT</b>'}
                 <p>${h(variantSummary(row))}</p>
-                <code>${h(row.render.views.length)} views × ${h(row.render.passes.join("+"))}</code>
+                <code>${h(row.render.views.length)} views × ${h(row.render.passes.join("+"))} · ${h(row.render.resolution.width)}×${h(row.render.resolution.height)}</code>
+                <small class="pipeline-track">FILE READY → RENDER PENDING → VALIDATE BLOCKED → REGENERATE —</small>
               </div>
               <button type="button" data-queue-remove="${h(row.id)}" aria-label="移除 ${h(row.label)}">×</button>
             </li>`,
@@ -827,13 +1010,18 @@
       showStatus("当前单变体渲染命令已复制。", "ready");
     }
 
+    async function copyExactCommand() {
+      await copyText(state.runControl.reproduce_command);
+      showStatus("本次运行的精确复现命令已复制。", "ready");
+    }
+
     async function copyBatchCommand() {
       try {
         const payload = batchPayload();
         const command =
-          `python3.13 scripts/harness_render_parameter_batch.py './${batchFilename()}' --execute`;
+          `python3.13 scripts/harness_render_parameter_batch.py './${batchFilename()}' --prepare`;
         await copyText(command);
-        showStatus(`已复制 ${payload.entries.length} 个变体的批次渲染命令。`, "ready");
+        showStatus(`已复制 ${payload.entries.length} 个变体的队列准备命令；不会触发渲染。`, "ready");
       } catch (error) {
         showStatus(error.message, "error");
       }
@@ -848,9 +1036,25 @@
     });
     byId("saveVariant").addEventListener("click", saveCurrentVariant);
     byId("downloadBatch").addEventListener("click", downloadBatch);
+    byId("copyExactCommand").addEventListener("click", copyExactCommand);
     byId("copyCommand").addEventListener("click", copyCurrentCommand);
     byId("copyBatchCommand").addEventListener("click", copyBatchCommand);
-    loadSample();
+    const embedded = byId("case-editor-data");
+    if (embedded) {
+      try {
+        const payload = JSON.parse(embedded.textContent);
+        useInputs(
+          payload.plan,
+          payload.base_case,
+          payload.plan_name,
+          payload.run_control || null,
+        );
+      } catch (error) {
+        showStatus(`内嵌 Case 载入失败：${error.message}`, "error");
+      }
+    } else {
+      loadSample();
+    }
   }
 
   if (
@@ -879,6 +1083,18 @@
       api.renderCommand(plan, `${output.case_id}.json`, choices),
       /--views 'front_static,side_static,top_down,tracking_subject,event_closeup'/,
     );
+    const genericPlan = JSON.parse(
+      fs.readFileSync(
+        path.join(repo, "config/variant_plans/newton_cradle_release_angle.json"),
+      ),
+    );
+    const genericCase = JSON.parse(
+      fs.readFileSync(path.join(repo, genericPlan.base_case)),
+    );
+    const genericChoices = api.initialChoices(genericPlan, genericCase);
+    const genericOutput = api.materialize(genericCase, genericPlan, genericChoices);
+    assert.equal(genericOutput.expected_physics.active_release_angle_degrees, 35);
+    assert.equal(genericChoices.views.length, 5);
     process.stdout.write("case_parameter_editor self-test: ok\n");
   }
 })(typeof globalThis !== "undefined" ? globalThis : this);

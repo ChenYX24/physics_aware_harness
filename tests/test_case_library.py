@@ -9,9 +9,13 @@ from harness.core.case_library import (
     CaseLibraryError,
     catalog_case_plan,
     create_variant_plan,
+    flat_case_id,
     materialize_variant,
+    migrate_workspace_case_layout,
     organize_workspace_cases,
     variant_render_command,
+    write_case_editor,
+    write_run_control_page,
 )
 
 
@@ -39,6 +43,51 @@ def base_case() -> dict:
 
 
 class VariantPlanTests(unittest.TestCase):
+    def test_run_control_page_embeds_exact_case_plan_and_reproduction_contract(self) -> None:
+        plan = ROOT / "config" / "variant_plans" / "glass_panel_impact_speed.json"
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            case_path = Path(tmp) / "case.json"
+            case = materialize_variant(plan, "baseline", case_path)
+            output = write_run_control_page(
+                run_dir,
+                case,
+                execution={
+                    "backend": "ue",
+                    "case_route": "brittle_fracture/glass_panel/v001",
+                    "output_root": str(Path(tmp) / "outputs"),
+                    "reproduction_output_root": str(run_dir / "reproductions"),
+                    "views": ["front_static"],
+                    "render_passes": ["rgb"],
+                    "mode": "rgb",
+                    "width": 1280,
+                    "height": 720,
+                    "camera_strategy": "bounds_auto_v1",
+                    "profile": "custom",
+                    "python": "/python",
+                    "runner": "/repo/scripts/harness_run_case.py",
+                    "lighting_preset": None,
+                },
+                reproduce_command="/python /repo/scripts/harness_run_case.py case_spec.json",
+                status="completed",
+            )
+            control = read_json(run_dir / "run_control.json")
+            html = output.read_text(encoding="utf-8")
+            self.assertEqual(control["schema_version"], "harness_run_control_v1")
+            self.assertEqual(control["control_mode"], "variable")
+            self.assertEqual(len(control["case_sha256"]), 64)
+            self.assertIn('"run_control": {"schema_version": "harness_run_control_v1"', html)
+            self.assertNotIn('<script src="case_parameter_editor.js"></script>', html)
+
+    def test_standalone_editor_embeds_generic_plan_and_case(self) -> None:
+        plan = ROOT / "config" / "variant_plans" / "newton_cradle_release_angle.json"
+        with tempfile.TemporaryDirectory() as tmp:
+            output = write_case_editor(plan, Path(tmp) / "newton.html")
+            html = output.read_text(encoding="utf-8")
+            self.assertIn('id="case-editor-data"', html)
+            self.assertIn("newton_cradle_release_angle", html)
+            self.assertNotIn('<script src="case_parameter_editor.js"></script>', html)
+
     def test_glass_speed_plan_recomputes_coupled_case_fields(self) -> None:
         plan = ROOT / "config" / "variant_plans" / "glass_panel_impact_speed.json"
         expected = {
@@ -222,7 +271,8 @@ class CaseOrganizationTests(unittest.TestCase):
     def test_complete_runs_gain_idempotent_hardlinked_variant_view(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            version = workspace / "cases" / "rigid_collision" / "demo" / "v001_parameter_space"
+            version = workspace / "runs" / "case_routes" / "rigid_collision" / "demo" / "v001_parameter_space"
+            (workspace / "cases").mkdir(parents=True)
             run = version / "runs" / "speed_fast" / "demo_ue"
             view = run / "views" / "front_static"
             (view / "depth_frames").mkdir(parents=True)
@@ -253,7 +303,7 @@ class CaseOrganizationTests(unittest.TestCase):
             )
             self.assertEqual(dry_run["organized_variant_count"], 1)
             self.assertEqual(dry_run["overall_generation_count"], 1)
-            self.assertFalse((version / "variants").exists())
+            self.assertFalse((workspace / "cases" / "demo__v001_parameter_space").exists())
 
             for modality in ("rgb", "depth", "segmentation"):
                 path = run / "overall" / f"{modality}.mp4"
@@ -271,7 +321,7 @@ class CaseOrganizationTests(unittest.TestCase):
                 apply=True,
             )
 
-            target = version / "variants" / "speed-fast"
+            target = workspace / "cases" / "demo__v001_parameter_space" / "speed-fast"
             self.assertEqual(first["organized_variant_count"], 1)
             self.assertEqual(second["organized_variant_count"], 1)
             self.assertEqual(first["overall_generation_count"], 0)
@@ -288,7 +338,7 @@ class CaseOrganizationTests(unittest.TestCase):
                 )
             )
             self.assertTrue((target / "overall" / "rgb.mp4").samefile(run / "overall" / "rgb.mp4"))
-            manifest = read_json(target / "variant_manifest.json")
+            manifest = read_json(target / "variant.json")
             self.assertEqual(manifest["source_run"], str(run.resolve()))
             self.assertEqual(manifest["views"], ["front_static"])
             self.assertEqual(manifest["qualification"]["status"], "legacy_unverified")
@@ -296,7 +346,8 @@ class CaseOrganizationTests(unittest.TestCase):
     def test_organizer_uses_run_index_condition_and_rejects_git_or_symlink_workspaces(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
-            version = workspace / "cases" / "rigid_collision" / "demo" / "v001_parameter_space"
+            version = workspace / "runs" / "case_routes" / "rigid_collision" / "demo" / "v001_parameter_space"
+            (workspace / "cases").mkdir(parents=True)
             run = version / "runs" / "opaque_session" / "attempt_01" / "demo_ue"
             view = run / "views" / "front_static"
             (view / "depth_frames").mkdir(parents=True)
@@ -344,7 +395,8 @@ class CaseOrganizationTests(unittest.TestCase):
             workspace = base / "workspace"
             run = (
                 workspace
-                / "cases"
+                / "runs"
+                / "case_routes"
                 / "rigid_collision"
                 / "demo"
                 / "v001_parameter_space"
@@ -353,6 +405,7 @@ class CaseOrganizationTests(unittest.TestCase):
                 / "demo_ue"
             )
             view = run / "views" / "front_static"
+            (workspace / "cases").mkdir(parents=True)
             view.mkdir(parents=True)
             outside = base / "outside_depth"
             outside.mkdir()
@@ -372,10 +425,50 @@ class CaseOrganizationTests(unittest.TestCase):
             self.assertEqual(report["organized_variant_count"], 0)
             self.assertEqual(report["skipped_run_count"], 1)
 
+    def test_migration_moves_legacy_routes_out_of_flat_case_library(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            legacy = workspace / "cases" / "rigid_collision" / "demo" / "v001_parameter_space"
+            legacy.mkdir(parents=True)
+            (workspace / "runs" / "case_routes").mkdir(parents=True)
+            (workspace / "catalog").mkdir()
+            (legacy / "marker.txt").write_text("legacy", encoding="utf-8")
+
+            dry_run = migrate_workspace_case_layout(workspace, apply=False)
+            self.assertEqual(dry_run["moved_route_count"], 1)
+            self.assertTrue(legacy.is_dir())
+
+            applied = migrate_workspace_case_layout(workspace, apply=True)
+            target = (
+                workspace
+                / "runs"
+                / "case_routes"
+                / "rigid_collision"
+                / "demo"
+                / "v001_parameter_space"
+            )
+            self.assertEqual(applied["moved_route_count"], 1)
+            self.assertEqual((target / "marker.txt").read_text(encoding="utf-8"), "legacy")
+            self.assertEqual(flat_case_id("rigid_collision/demo/v001_parameter_space"), "demo__v001_parameter_space")
+            self.assertEqual(list((workspace / "cases").iterdir()), [])
+
     def test_case_catalog_preserves_all_excel_rows_and_only_links_existing_repo_artifacts(self) -> None:
         catalog = read_json(ROOT / "config" / "case_catalog.json")
+        runtime_map = read_json(ROOT / "config" / "case_runtime_map.json")
         self.assertEqual(catalog["source"]["record_count"], 22)
         self.assertEqual(len(catalog["cases"]), 22)
+        self.assertEqual(
+            set(runtime_map["catalog_cases"]),
+            {case["id"] for case in catalog["cases"]},
+        )
+        routes = [
+            route
+            for values in runtime_map["catalog_cases"].values()
+            for route in values
+        ] + runtime_map["unmapped_runtime_routes"]
+        self.assertEqual(len(routes), len(set(routes)))
+        for route in routes:
+            self.assertNotIn("/", flat_case_id(route))
         for case in catalog["cases"]:
             for case_spec in case["case_specs"]:
                 self.assertTrue((ROOT / case_spec).is_file(), case_spec)

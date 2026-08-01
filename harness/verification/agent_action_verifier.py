@@ -26,6 +26,14 @@ def verify_agent_action(case_spec: dict[str, Any], trajectory: list[dict[str, An
     action = first_action_for_target(action_trace, target_id)
     if action is None:
         return "F7_runtime_artifact_incomplete", failure(target_id, 0, 0, "target_action_count", 0), evidence
+    required_actions = [str(item) for item in expected.get("required_action_sequence") or []]
+    target_actions = [
+        str(item.get("action_type") or "")
+        for item in sorted(action_trace, key=lambda item: (int(item.get("frame") or 0), float(item.get("time_s") or 0.0)))
+        if str(item.get("target_id") or item.get("object_id") or "") == target_id
+    ]
+    if required_actions and not is_subsequence(required_actions, target_actions):
+        return "F7_runtime_artifact_incomplete", failure(target_id, 0, 0, "required_action_sequence", {"expected": required_actions, "actual": target_actions}), evidence
     action_frame = int(action.get("frame") if action.get("frame") is not None else expected.get("action_frame") or 0)
     action_time = float(action.get("time_s") if action.get("time_s") is not None else expected.get("action_time_s") or 0.0)
     pre_eps = float(expected.get("passive_pre_action_velocity_epsilon_m_s") or DEFAULT_EPS)
@@ -35,13 +43,13 @@ def verify_agent_action(case_spec: dict[str, Any], trajectory: list[dict[str, An
     if norm(initial_state.get("velocity_m_s")) > pre_eps:
         return "F5_passive_precontact_motion", failure(target_id, frame_id(first), frame_time(first), "preaction_velocity_m_s", round(norm(initial_state.get("velocity_m_s")), 6)), evidence
 
-    initial_position = vec3(initial_state.get("position_m"))
+    initial_position = state_position(initial_state)
     for frame in trajectory:
         if frame_id(frame) >= action_frame:
             break
         state = frame_objects(frame).get(target_id) or {}
         speed = norm(state.get("velocity_m_s"))
-        displacement = distance(vec3(state.get("position_m")), initial_position)
+        displacement = distance(state_position(state), initial_position)
         if speed > pre_eps or displacement > DISPLACEMENT_EPS:
             detail = failure(target_id, frame_id(frame), frame_time(frame), "preaction_velocity_m_s", round(speed, 6))
             detail["displacement_m"] = round(displacement, 6)
@@ -49,7 +57,7 @@ def verify_agent_action(case_spec: dict[str, Any], trajectory: list[dict[str, An
             return "F5_passive_precontact_motion", detail, evidence
 
     coupling_type = str(expected.get("coupling_type") or action.get("action_type") or "")
-    if coupling_type == "push":
+    if coupling_type in {"push", "pick", "pick_place"}:
         contacts = all_contacts(trajectory)
         if not contact_pair_exists(contacts, actor_id, target_id):
             return "F2_missing_contact_events", failure(f"{actor_id}:{target_id}", action_frame, action_time, "missing_expected_action_contact", [actor_id, target_id]), evidence
@@ -62,7 +70,7 @@ def verify_agent_action(case_spec: dict[str, Any], trajectory: list[dict[str, An
     if not post_series:
         return "F1_missing_trajectory", failure(target_id, action_frame, action_time, "post_action_series_length", 0), evidence
     final_frame, final_state = post_series[-1]
-    final_position = vec3(final_state.get("position_m"))
+    final_position = state_position(final_state)
     final_speed = norm(final_state.get("velocity_m_s"))
     displacement = distance(final_position, initial_position)
     min_displacement = float(expected.get("expected_min_target_displacement_m") or 0.0)
@@ -71,6 +79,26 @@ def verify_agent_action(case_spec: dict[str, Any], trajectory: list[dict[str, An
         detail = failure(target_id, frame_id(final_frame), frame_time(final_frame), "post_action_response", {"displacement_m": round(displacement, 6), "speed_m_s": round(final_speed, 6)})
         detail["action_frame"] = action_frame
         return "F4_causality_violation", detail, evidence
+
+    effect = expected.get("object_effect") if isinstance(expected.get("object_effect"), dict) else {}
+    minimum_lift = float(effect.get("minimum_lift_height_m") or 0.0)
+    lift_height = max((state_position(state)[2] - initial_position[2] for _, state in post_series), default=0.0)
+    if lift_height < minimum_lift:
+        return "F4_causality_violation", failure(target_id, frame_id(final_frame), frame_time(final_frame), "object_lift_height_m", round(lift_height, 6)), evidence
+
+    goal = effect.get("final_goal_region") if isinstance(effect.get("final_goal_region"), dict) else {}
+    if goal and not inside_box(final_position, vec3(goal.get("center_m")), vec3(goal.get("half_extent_m"))):
+        return "F4_causality_violation", failure(target_id, frame_id(final_frame), frame_time(final_frame), "final_goal_region", {"position_m": final_position, "goal": goal}), evidence
+
+    maximum_final_speed = effect.get("maximum_final_speed_m_s")
+    if maximum_final_speed is not None and final_speed > float(maximum_final_speed):
+        return "F4_causality_violation", failure(target_id, frame_id(final_frame), frame_time(final_frame), "final_speed_m_s", round(final_speed, 6)), evidence
+
+    final_contact = effect.get("required_final_contact")
+    if isinstance(final_contact, list) and len(final_contact) == 2:
+        release_frame = max((int(item.get("frame") or action_frame) for item in action_trace if item.get("release") or item.get("action_type") == "release"), default=action_frame)
+        if not contact_pair_exists(all_contacts(trajectory), str(final_contact[0]), str(final_contact[1]), minimum_frame=release_frame):
+            return "F2_missing_contact_events", failure(target_id, frame_id(final_frame), frame_time(final_frame), "missing_final_contact", final_contact), evidence
 
     evidence.append(
         {
@@ -82,6 +110,8 @@ def verify_agent_action(case_spec: dict[str, Any], trajectory: list[dict[str, An
             "target_displacement_m": round(displacement, 6),
             "target_final_speed_m_s": round(final_speed, 6),
             "coupling_type": coupling_type,
+            "object_lift_height_m": round(lift_height, 6),
+            "object_effect": effect,
         }
     )
     return None, None, evidence
@@ -133,14 +163,31 @@ def all_contacts(trajectory: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [contact for frame in trajectory for contact in frame.get("contacts") or [] if isinstance(contact, dict)]
 
 
-def contact_pair_exists(contacts: list[dict[str, Any]], a: str, b: str) -> bool:
+def contact_pair_exists(contacts: list[dict[str, Any]], a: str, b: str, *, minimum_frame: int = 0) -> bool:
     expected = {a, b}
-    return any(expected.issubset({str(item) for item in contact.get("objects") or []}) for contact in contacts)
+    return any(
+        int(contact.get("frame") or 0) >= minimum_frame
+        and expected.issubset({str(item) for item in contact.get("objects") or []})
+        for contact in contacts
+    )
+
+
+def is_subsequence(expected: list[str], actual: list[str]) -> bool:
+    remaining = iter(actual)
+    return all(any(item == required for item in remaining) for required in expected)
+
+
+def inside_box(position: list[float], center: list[float], half_extent: list[float]) -> bool:
+    return all(abs(position[idx] - center[idx]) <= half_extent[idx] for idx in range(3))
 
 
 def frame_objects(frame: dict[str, Any]) -> dict[str, dict[str, Any]]:
     objects = frame.get("objects")
     return objects if isinstance(objects, dict) else {}
+
+
+def state_position(state: dict[str, Any]) -> list[float]:
+    return vec3(state.get("position_m") or state.get("position"))
 
 
 def frame_id(frame: dict[str, Any]) -> int:

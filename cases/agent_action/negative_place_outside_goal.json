@@ -1,0 +1,44 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "negative_place_outside_goal",
+  "capability_id": "agent_rigidbody_action_coupling",
+  "prompt": "A person performs grasp and release actions, but the package is released outside the table target region.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "coupling_type": "pick_place",
+    "action_actor_id": "agent",
+    "target_object_id": "package",
+    "action_frame": 1,
+    "action_time_s": 0.2,
+    "expected_min_target_displacement_m": 0.5,
+    "passive_pre_action_velocity_epsilon_m_s": 0.05,
+    "required_action_sequence": ["grasp", "release"],
+    "object_effect": {
+      "minimum_lift_height_m": 0.45,
+      "final_goal_region": {
+        "center_m": [0.8, 0.0, 0.85],
+        "half_extent_m": [0.18, 0.18, 0.08]
+      },
+      "required_final_contact": ["package", "table"],
+      "maximum_final_speed_m_s": 0.05
+    },
+    "action_trace": [
+      {"frame": 1, "time_s": 0.2, "actor_id": "agent", "target_id": "package", "action_type": "grasp"},
+      {"frame": 2, "time_s": 0.45, "actor_id": "agent", "target_id": "package", "action_type": "release", "release": true}
+    ]
+  },
+  "objects": [
+    {"id": "agent", "role": "active_agent", "shape": "capsule", "initial_position_m": [-0.35, 0.0, 0.55], "initial_velocity_m_s": [0.0, 0.0, 0.0]},
+    {"id": "package", "role": "action_coupled_body", "shape": "box", "mass_kg": 1.0, "initial_position_m": [0.0, 0.0, 0.25], "initial_velocity_m_s": [0.0, 0.0, 0.0]},
+    {"id": "floor", "role": "support", "shape": "box", "initial_position_m": [0.0, 0.0, 0.0]},
+    {"id": "table", "role": "goal_support", "shape": "box", "initial_position_m": [0.8, 0.0, 0.7]}
+  ],
+  "active_objects": ["agent"],
+  "passive_objects": ["package"],
+  "required_assets": ["agent_controller_or_skeletal_actor", "graspable_rigid_body", "target_collider", "source_support", "goal_support"],
+  "required_signals": ["trajectory", "action_trace", "contact_events", "object_roles", "final_object_state"],
+  "verifier_expectation": {"status": "fail", "failure_type": "F4_causality_violation"},
+  "should_pass": false,
+  "negative_mode": "effect_outside_goal",
+  "notes": "Regression: correct-looking grasp/release actions do not pass when the package misses the intended placement region."
+}

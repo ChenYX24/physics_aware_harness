@@ -253,13 +253,21 @@ class HarnessWorkspaceTests(unittest.TestCase):
             with self.assertRaisesRegex(WorkspaceError, "must stay inside the workspace"):
                 workspace_path("escape_link/output", default_relative="runs/default", workspace=root)
 
-    def test_case_route_resolves_to_physics_scenario_version(self) -> None:
+    def test_case_route_resolves_to_internal_run_storage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"
 
             resolved = case_output_root("rigid_collision/billiards/v002_complete_angle_matrix", root)
 
-            self.assertEqual(resolved, root.resolve() / "cases" / "rigid_collision" / "billiards" / "v002_complete_angle_matrix")
+            self.assertEqual(
+                resolved,
+                root.resolve()
+                / "runs"
+                / "case_routes"
+                / "rigid_collision"
+                / "billiards"
+                / "v002_complete_angle_matrix",
+            )
             with self.assertRaises(WorkspaceError):
                 case_output_root("rigid_collision/../escape", root)
 
@@ -354,7 +362,7 @@ class HarnessWorkspaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = init_workspace(Path(tmp) / "workspace")
             case_route = "rigid_collision/billiards/v002_angle_matrix"
-            status_path = root / "cases" / "rigid_collision" / "billiards" / "v002_angle_matrix" / "case_status.json"
+            status_path = case_output_root(case_route, root) / "case_status.json"
             status_path.parent.mkdir(parents=True)
             bundle = root / "review" / "inbox" / "v002_angle_matrix"
             bundle.mkdir()
@@ -665,7 +673,7 @@ class HarnessWorkspaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = init_workspace(Path(tmp) / "workspace")
             case_route = "rigid_collision/billiards/v004_binding_check"
-            status_path = root / "cases" / "rigid_collision" / "billiards" / "v004_binding_check" / "case_status.json"
+            status_path = case_output_root(case_route, root) / "case_status.json"
             status_path.parent.mkdir(parents=True)
             bundle = root / "review" / "inbox" / "binding_candidate"
             bundle.mkdir()
@@ -698,7 +706,7 @@ class HarnessWorkspaceTests(unittest.TestCase):
     def bound_review_bundle(self, workspace: Path) -> tuple[Path, Path, Path, Path]:
         root = init_workspace(workspace)
         case_route = "rigid_collision/billiards/v002_angle_matrix"
-        status_path = root / "cases" / "rigid_collision" / "billiards" / "v002_angle_matrix" / "case_status.json"
+        status_path = case_output_root(case_route, root) / "case_status.json"
         status_path.parent.mkdir(parents=True)
         bundle = root / "review" / "inbox" / "v002_angle_matrix"
         bundle.mkdir()
