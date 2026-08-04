@@ -1,0 +1,505 @@
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import mimetypes
+import os
+import re
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Mapping, Protocol
+
+from harness.core.artifact_schema import write_json
+from harness.core.case_spec_v2 import (
+    CAMERA_ROLES,
+    CASE_SPEC_V2_SCHEMA_VERSION,
+    OBSERVATION_MODALITIES,
+    VERIFICATION_ASSERTION_TYPES,
+    CaseSpecV2,
+    CaseSpecV2ValidationError,
+    case_spec_v2_from_dict,
+    normalize_case_spec_v2,
+    stable_case_spec_digest,
+)
+
+
+REQUEST_SCHEMA_VERSION = "harness_case_request_v1"
+EXPANSION_SCHEMA_VERSION = "harness_expansion_v1"
+EXPANSION_FIELDS = (
+    "request_summary",
+    "capability_analysis",
+    "scene_analysis",
+    "object_analysis",
+    "event_and_relation_analysis",
+    "asset_analysis",
+    "expected_behavior_analysis",
+    "observation_analysis",
+    "backend_constraints",
+    "ambiguities",
+    "assumptions",
+)
+
+
+@dataclass(frozen=True)
+class LLMJSONResponse:
+    payload: dict[str, Any]
+    receipt: dict[str, Any]
+
+
+class JSONCompletionClient(Protocol):
+    def complete_json(
+        self,
+        *,
+        system_prompt: str,
+        user_payload: Mapping[str, Any],
+        images: list[dict[str, Any]] | None = None,
+        purpose: str,
+    ) -> LLMJSONResponse:
+        ...
+
+
+@dataclass(frozen=True)
+class CaseGenerationResult:
+    request: dict[str, Any]
+    expansion: dict[str, Any]
+    case_spec: CaseSpecV2
+    llm_trace: dict[str, Any]
+
+    @property
+    def repair_count(self) -> int:
+        return int(self.llm_trace.get("repair_count") or 0)
+
+
+class OpenAICompatibleJSONClient:
+    def __init__(
+        self,
+        *,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+        timeout_seconds: int = 180,
+    ) -> None:
+        self.base_url = str(
+            base_url
+            or os.environ.get("SIM_HARNESS_LLM_BASE_URL")
+            or os.environ.get("OPENAI_BASE_URL")
+            or "https://api.openai.com/v1"
+        ).rstrip("/")
+        self.api_key = api_key or os.environ.get("SIM_HARNESS_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        self.model = str(model or os.environ.get("SIM_HARNESS_LLM_MODEL") or os.environ.get("OPENAI_MODEL") or "").strip()
+        self.timeout_seconds = int(timeout_seconds)
+
+    def complete_json(
+        self,
+        *,
+        system_prompt: str,
+        user_payload: Mapping[str, Any],
+        images: list[dict[str, Any]] | None = None,
+        purpose: str,
+    ) -> LLMJSONResponse:
+        if not self.model:
+            raise RuntimeError("Set SIM_HARNESS_LLM_MODEL (or OPENAI_MODEL) for CaseSpec V2 generation.")
+        if self.base_url.startswith("https://api.openai.com/") and not self.api_key:
+            raise RuntimeError("Set SIM_HARNESS_LLM_API_KEY (or OPENAI_API_KEY) for the configured LLM endpoint.")
+        content: str | list[dict[str, Any]] = json.dumps(user_payload, ensure_ascii=False)
+        if images:
+            content = [{"type": "text", "text": content}]
+            for image in images:
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": _image_data_url(image)},
+                    }
+                )
+        body = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": content},
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0,
+        }
+        encoded = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        endpoint = f"{self.base_url}/chat/completions"
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        request = urllib.request.Request(endpoint, data=encoded, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                raw = response.read()
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:2000]
+            raise RuntimeError(f"LLM {purpose} request failed with HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"LLM {purpose} request failed: {exc.reason}") from exc
+        decoded = json.loads(raw.decode("utf-8"))
+        if not isinstance(decoded, dict):
+            raise RuntimeError(f"LLM {purpose} response must be a JSON object")
+        payload = _completion_payload(decoded)
+        receipt = {
+            "schema_version": "harness_llm_call_receipt_v1",
+            "purpose": purpose,
+            "response_id": decoded.get("id"),
+            "model": decoded.get("model") or self.model,
+            "usage": decoded.get("usage") or {},
+            "request_sha256": hashlib.sha256(encoded).hexdigest(),
+            "response_sha256": hashlib.sha256(raw).hexdigest(),
+            "endpoint_kind": "openai_compatible_chat_completions",
+        }
+        return LLMJSONResponse(payload=payload, receipt=receipt)
+
+
+def build_case_request(
+    *,
+    case_id: str,
+    text: str | None = None,
+    image_paths: list[str | Path] | None = None,
+    allow_image_upload: bool = False,
+) -> dict[str, Any]:
+    normalized_text = " ".join(str(text or "").split())
+    paths = [Path(value).expanduser().resolve() for value in image_paths or []]
+    if not normalized_text and not paths:
+        raise ValueError("CaseSpec V2 generation requires text, at least one image, or both")
+    if paths and not allow_image_upload:
+        raise ValueError("Uploading reference images to an LLM requires --allow-image-upload")
+    images: list[dict[str, Any]] = []
+    for index, path in enumerate(paths):
+        if not path.is_file():
+            raise FileNotFoundError(f"reference image does not exist: {path}")
+        mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        if not mime_type.startswith("image/"):
+            raise ValueError(f"reference input is not a recognized image: {path}")
+        images.append(
+            {
+                "input_id": f"request_image_{index}",
+                "kind": "image",
+                "local_path": str(path),
+                "mime_type": mime_type,
+                "sha256": _sha256_file(path),
+                "byte_size": path.stat().st_size,
+                "external_upload_authorized": True,
+            }
+        )
+    return {
+        "schema_version": REQUEST_SCHEMA_VERSION,
+        "case_id": str(case_id),
+        "text": normalized_text,
+        "inputs": images,
+    }
+
+
+def generate_case_spec_v2(
+    request: Mapping[str, Any],
+    *,
+    client: JSONCompletionClient | None = None,
+    artifact_dir: str | Path | None = None,
+) -> CaseGenerationResult:
+    validated_request = _validate_request(request)
+    client = client or OpenAICompatibleJSONClient()
+    destination = Path(artifact_dir) if artifact_dir is not None else None
+    if destination is not None:
+        write_json(destination / "request.json", validated_request)
+    images = [dict(item) for item in validated_request.get("inputs") or [] if item.get("kind") == "image"]
+    expansion_response = client.complete_json(
+        system_prompt=_expansion_system_prompt(),
+        user_payload={
+            "request": _request_for_model(validated_request),
+            "planning_contract": {
+                "executable_primary_capabilities": _executable_primary_capabilities(),
+            },
+        },
+        images=images,
+        purpose="expansion",
+    )
+    expansion = _normalize_expansion(expansion_response.payload)
+    if destination is not None:
+        write_json(destination / "expansion.json", expansion)
+    generation_response = client.complete_json(
+        system_prompt=_case_spec_system_prompt(),
+        user_payload={
+            "request": _request_for_model(validated_request),
+            "expansion": expansion,
+            "case_spec_contract": _case_spec_contract(),
+        },
+        images=None,
+        purpose="case_spec_generation",
+    )
+    raw_case_spec = _unwrap_case_spec(generation_response.payload)
+    raw_case_spec = _apply_request_identity(raw_case_spec, validated_request)
+    receipts = [expansion_response.receipt, generation_response.receipt]
+    repair_count = 0
+    try:
+        case_spec = case_spec_v2_from_dict(
+            raw_case_spec,
+            available_input_ids=[str(item["input_id"]) for item in validated_request.get("inputs") or []],
+        )
+    except CaseSpecV2ValidationError as validation_error:
+        repair_response = client.complete_json(
+            system_prompt=_repair_system_prompt(),
+            user_payload={
+                "invalid_case_spec": normalize_case_spec_v2(raw_case_spec),
+                "validation_errors": validation_error.to_dict(),
+                "repair_constraints": {
+                    "maximum_repairs": 1,
+                    "preserve_user_intent": True,
+                    "do_not_change_valid_fields_unless_required_by_an_error": True,
+                },
+                "case_spec_contract": _case_spec_contract(),
+            },
+            images=None,
+            purpose="case_spec_validation_repair",
+        )
+        repair_count = 1
+        receipts.append(repair_response.receipt)
+        repaired = _apply_request_identity(_unwrap_case_spec(repair_response.payload), validated_request)
+        case_spec = case_spec_v2_from_dict(
+            repaired,
+            available_input_ids=[str(item["input_id"]) for item in validated_request.get("inputs") or []],
+        )
+    provenance = case_spec.data.setdefault("provenance", {})
+    provenance["case_generation"] = {
+        "workflow": "expansion_then_single_case_spec_with_one_bounded_repair_v1",
+        "expansion_digest": stable_case_spec_digest(expansion),
+        "llm_calls": receipts,
+        "repair_count": repair_count,
+    }
+    if destination is not None:
+        write_json(destination / "case_spec_v2.json", case_spec.data)
+        write_json(
+            destination / "case_generation_trace.json",
+            {
+                "schema_version": "harness_case_generation_trace_v1",
+                "normal_call_count": 2,
+                "repair_count": repair_count,
+                "calls": receipts,
+            },
+        )
+    return CaseGenerationResult(
+        request=validated_request,
+        expansion=expansion,
+        case_spec=case_spec,
+        llm_trace={
+            "schema_version": "harness_case_generation_trace_v1",
+            "normal_call_count": 2,
+            "repair_count": repair_count,
+            "calls": receipts,
+        },
+    )
+
+
+def _validate_request(request: Mapping[str, Any]) -> dict[str, Any]:
+    data = dict(request)
+    if data.get("schema_version") != REQUEST_SCHEMA_VERSION:
+        raise ValueError(f"request schema_version must be {REQUEST_SCHEMA_VERSION}")
+    if not str(data.get("case_id") or "").strip():
+        raise ValueError("request case_id must be non-empty")
+    inputs = data.get("inputs") or []
+    if not isinstance(inputs, list) or any(not isinstance(item, dict) for item in inputs):
+        raise ValueError("request inputs must be a list of objects")
+    input_ids = [str(item.get("input_id") or "") for item in inputs]
+    if any(not value for value in input_ids) or len(input_ids) != len(set(input_ids)):
+        raise ValueError("request input_id values must be non-empty and unique")
+    if not str(data.get("text") or "").strip() and not inputs:
+        raise ValueError("request requires text or inputs")
+    return data
+
+
+def _request_for_model(request: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": request.get("schema_version"),
+        "case_id": request.get("case_id"),
+        "text": request.get("text"),
+        "inputs": [
+            {
+                "input_id": item.get("input_id"),
+                "kind": item.get("kind"),
+                "mime_type": item.get("mime_type"),
+                "sha256": item.get("sha256"),
+            }
+            for item in request.get("inputs") or []
+        ],
+    }
+
+
+def _normalize_expansion(payload: Mapping[str, Any]) -> dict[str, Any]:
+    raw = payload.get("expansion") if isinstance(payload.get("expansion"), Mapping) else payload
+    expansion = dict(raw)
+    expansion["schema_version"] = EXPANSION_SCHEMA_VERSION
+    for field in EXPANSION_FIELDS:
+        if field not in expansion:
+            expansion[field] = [] if field in {"object_analysis", "event_and_relation_analysis", "asset_analysis", "ambiguities", "assumptions"} else {}
+    if not isinstance(expansion.get("request_summary"), str):
+        raise ValueError("expansion.request_summary must be a string")
+    for field in ("object_analysis", "event_and_relation_analysis", "asset_analysis", "ambiguities", "assumptions"):
+        if not isinstance(expansion.get(field), list):
+            raise ValueError(f"expansion.{field} must be a list")
+    for field in (
+        "capability_analysis",
+        "scene_analysis",
+        "expected_behavior_analysis",
+        "observation_analysis",
+        "backend_constraints",
+    ):
+        if not isinstance(expansion.get(field), dict):
+            raise ValueError(f"expansion.{field} must be an object")
+    return expansion
+
+
+def _apply_request_identity(case_spec: Mapping[str, Any], request: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(case_spec)
+    result["schema_version"] = CASE_SPEC_V2_SCHEMA_VERSION
+    identity = dict(result.get("identity")) if isinstance(result.get("identity"), Mapping) else {}
+    identity["case_id"] = str(request["case_id"])
+    identity["source_request"] = str(request.get("text") or identity.get("source_request") or "")
+    result["identity"] = identity
+    return result
+
+
+def _unwrap_case_spec(payload: Mapping[str, Any]) -> dict[str, Any]:
+    value = payload.get("case_spec") if isinstance(payload.get("case_spec"), Mapping) else payload
+    return dict(value)
+
+
+def _completion_payload(response: Mapping[str, Any]) -> dict[str, Any]:
+    choices = response.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], Mapping):
+        raise RuntimeError("LLM response has no choices[0]")
+    message = choices[0].get("message")
+    if not isinstance(message, Mapping):
+        raise RuntimeError("LLM response has no message")
+    content = message.get("content")
+    if isinstance(content, list):
+        content = "".join(
+            str(item.get("text") or "")
+            for item in content
+            if isinstance(item, Mapping) and item.get("type") in {"text", "output_text"}
+        )
+    if isinstance(content, Mapping):
+        return dict(content)
+    if not isinstance(content, str):
+        raise RuntimeError("LLM response message.content must be JSON text")
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.IGNORECASE)
+    payload = json.loads(cleaned)
+    if not isinstance(payload, dict):
+        raise RuntimeError("LLM JSON content must be an object")
+    return payload
+
+
+def _image_data_url(image: Mapping[str, Any]) -> str:
+    if image.get("external_upload_authorized") is not True:
+        raise ValueError(f"image upload is not authorized: {image.get('input_id')}")
+    path = Path(str(image.get("local_path") or ""))
+    if not path.is_file() or _sha256_file(path) != image.get("sha256"):
+        raise ValueError(f"image input changed after request capture: {path}")
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{image.get('mime_type')};base64,{encoded}"
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _expansion_system_prompt() -> str:
+    return """You are the Expansion stage of a physics-simulation case compiler. Return one JSON object only.
+Analyze the request into request_summary, capability_analysis, scene_analysis, object_analysis,
+event_and_relation_analysis, asset_analysis, expected_behavior_analysis, observation_analysis,
+backend_constraints, ambiguities, and assumptions. Do not emit runtime coordinates, UE paths,
+backend stages, verifier implementations, or downloaded/generated files. For every text or image
+asset reference, distinguish similarity retrieval from local catalog, external acquisition,
+procedural generation, and model/API generation. Explicitly record when a reference image is a
+generation condition and must not be used for similarity search. Never infer permission to upload
+images, spend money, or use an unlicensed source."""
+
+
+def _case_spec_system_prompt() -> str:
+    return """Generate exactly one harness_case_spec_v2 JSON object from the request and expansion.
+Use semantic objects, relations, events, expected behavior, observation requirements, and verification
+assertions; do not generate runtime files, UE paths, exact camera poses, verifier code, or backend stages.
+Each object asset may contain acquisition.route with one of default, local_catalog, external_site,
+procedural_generation, or model_generation. acquisition.requirement is required only when the user
+explicitly demanded that route; LLM-inferred routes must be preferred. Text and image requests use the
+same route field. Reference inputs must name request input_id values and state their usages. Set
+allow_similarity_search=false when an image is a generation/geometry/style condition rather than a
+retrieval query. Make asset_policy permissions consistent with requested routes. Use only registered
+capability vocabulary and z_up coordinates. Output JSON only."""
+
+
+def _repair_system_prompt() -> str:
+    return """Repair one CaseSpec V2 using only the supplied structured validation errors. Return one
+complete harness_case_spec_v2 JSON object. Preserve user intent and every valid field unless changing it
+is necessary to fix a listed error. Do not redesign the scene, add providers, add UE paths, relax a
+required acquisition route, or perform a second free-form generation."""
+
+
+def _executable_primary_capabilities() -> list[str]:
+    # Local import avoids making the schema layer depend on verifier modules.
+    from harness.planning.verification_compiler import VERIFIER_BY_CAPABILITY
+
+    return sorted(VERIFIER_BY_CAPABILITY)
+
+
+def _case_spec_contract() -> dict[str, Any]:
+    return {
+        "schema_version": CASE_SPEC_V2_SCHEMA_VERSION,
+        "required_top_level_fields": [
+            "identity",
+            "capabilities",
+            "scene",
+            "timebase",
+            "backend_constraints",
+            "asset_policy",
+            "objects",
+            "relations",
+            "events",
+            "expected_behavior",
+            "observation_requirements",
+            "verification_requirements",
+            "variant",
+            "provenance",
+        ],
+        "object_shape": {
+            "required": ["id", "role"],
+            "semantic_sections": ["asset", "geometry", "physics", "initial_state", "behavior"],
+            "asset_cardinality": "zero_or_one_direct_request",
+        },
+        "enums": {
+            "primary_capability": _executable_primary_capabilities(),
+            "coordinate_system": ["z_up"],
+            "body_type": ["dynamic", "static", "kinematic"],
+            "backend": ["fallback", "genesis_fem", "genesis_sph", "taichi_cloth", "ue"],
+            "acquisition_route": [
+                "default",
+                "local_catalog",
+                "external_site",
+                "procedural_generation",
+                "model_generation",
+            ],
+            "acquisition_requirement": ["preferred", "required"],
+            "acquisition_origin": ["user_explicit", "llm_inferred", "system_default"],
+            "reference_usage": [
+                "similarity_search",
+                "generation_condition",
+                "geometry_reference",
+                "style_reference",
+                "texture_source",
+            ],
+            "camera_role": sorted(CAMERA_ROLES),
+            "observation_modality": sorted(OBSERVATION_MODALITIES),
+            "verification_assertion": sorted(VERIFICATION_ASSERTION_TYPES),
+        },
+        "hard_rules": [
+            "required acquisition is legal only when origin=user_explicit and route is specific",
+            "LLM inferred acquisition must use requirement=preferred",
+            "reference input_id must come from request.inputs",
+            "do not emit UE paths, runtime stages, exact camera poses, or verifier implementations",
+        ],
+    }

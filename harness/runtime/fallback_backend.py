@@ -6,7 +6,9 @@ import math
 
 from harness.core.capability import canonical_capability_id
 from harness.core.case_spec import CaseSpec
+from harness.planning.runtime_compiler import RuntimeCompilation, compile_runtime_case
 from harness.runtime.artifact_collector import write_runtime_artifacts
+from harness.runtime.observation_planner import camera_ids_from_observation_plan, render_passes_from_observation_plan
 
 
 class FallbackBackend:
@@ -20,18 +22,31 @@ class FallbackBackend:
         requested_views: list[str] | None = None,
         render_passes: list[str] | None = None,
         camera_strategy: str = "bounds_auto_v1",
+        compilation: RuntimeCompilation | None = None,
     ) -> Path:
         run_id = f"{case.case_id}_fallback"
         run_dir = Path(output_root) / run_id
+        compilation = compilation or compile_runtime_case(
+            case,
+            requested_backend="fallback",
+            requested_views=requested_views,
+            render_passes=render_passes,
+            camera_strategy=camera_strategy,
+        )
+        compilation.write(run_dir)
+        observation_plan = compilation.artifacts["observation_plan"]
+        effective_views = requested_views or camera_ids_from_observation_plan(observation_plan)
+        effective_passes = render_passes or render_passes_from_observation_plan(observation_plan)
         trajectory = trajectory_for_case(case.data)
         return write_runtime_artifacts(
             run_dir,
             case_spec=case.data,
             trajectory=trajectory,
             backend=self.name,
-            requested_views=requested_views,
-            render_passes=render_passes,
+            requested_views=effective_views,
+            render_passes=effective_passes,
             camera_strategy=camera_strategy,
+            camera_plan=compilation.artifacts["camera_plan"],
         )
 
 

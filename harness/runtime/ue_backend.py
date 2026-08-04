@@ -10,13 +10,10 @@ from typing import Any
 from harness.core.case_spec import CaseSpec
 from harness.core.artifact_schema import read_json, write_json
 from harness.core.artifact_manager import ArtifactManager
-from harness.assets.asset_resolver import requested_map_reference, resolve_asset_intents
-from harness.planning.static_scene_builder import build_static_scene_layout
-from harness.runtime.actor_placement import compile_runtime_actor_placement
-from harness.runtime.camera_planner import camera_plan_from_case_spec
+from harness.assets.asset_resolver import requested_map_reference
+from harness.planning.runtime_compiler import RuntimeCompilation, compile_runtime_case
+from harness.runtime.observation_planner import camera_ids_from_observation_plan, render_passes_from_observation_plan
 from harness.runtime.render_pass_contract import enforce_ue_render_passes, normalize_passes, verify_render_observability, write_render_contract_artifacts
-from harness.verification.runtime_actor_placement_verifier import verify_runtime_actor_placement
-from harness.verification.static_scene_verifier import verify_static_scene_layout
 from harness.verification.render_sync_checker import ARTIFACT_SCHEMA_VERSION, check_render_sync
 
 
@@ -43,27 +40,43 @@ class UEBackend:
         render_passes: list[str] | None = None,
         camera_strategy: str = "bounds_auto_v1",
         complete_sensor_contract: bool = True,
+        compilation: RuntimeCompilation | None = None,
     ) -> Path:
         run_id = f"{case.case_id}_ue"
         run_dir = Path(output_root) / run_id
         output_dir = run_dir / "ue_output"
         output_dir.mkdir(parents=True, exist_ok=True)
-        write_json(run_dir / "case_spec.json", case.data)
-        ue_requested_views = requested_views or DEFAULT_UE_VIEWS
-        ue_render_passes = (
-            enforce_ue_render_passes(render_passes)
-            if complete_sensor_contract
-            else normalize_passes(render_passes)
-        )
-        camera_plan = camera_plan_from_case_spec(case.data, requested_views=ue_requested_views, camera_strategy=camera_strategy)
-        write_json(run_dir / "camera_plan.json", camera_plan_to_json(camera_plan))
-        actor_contract = prepare_runtime_actor_contract(
+        compilation = compilation or compile_runtime_case(
             case,
-            run_dir,
-            requested_views=ue_requested_views,
+            requested_backend="ue",
+            requested_views=requested_views,
+            render_passes=render_passes,
             camera_strategy=camera_strategy,
         )
-        asset_resolution = actor_contract.get("asset_resolution") if isinstance(actor_contract.get("asset_resolution"), dict) else {}
+        compilation.write(run_dir)
+        observation_plan = compilation.artifacts["observation_plan"]
+        planned_views = camera_ids_from_observation_plan(observation_plan)
+        planned_passes = render_passes_from_observation_plan(observation_plan)
+        ue_requested_views = requested_views or planned_views or DEFAULT_UE_VIEWS
+        ue_render_passes = (
+            enforce_ue_render_passes(render_passes or planned_passes)
+            if complete_sensor_contract
+            else normalize_passes(render_passes or planned_passes)
+        )
+        camera_plan = compilation.artifacts["camera_plan"]
+        asset_resolution = compilation.artifacts["asset_resolution"]
+        static_report = compilation.artifacts["static_scene_report"]
+        placement_report = compilation.artifacts["runtime_actor_placement_report"]
+        scene_map = asset_resolution.get("scene_map") if isinstance(asset_resolution.get("scene_map"), dict) else None
+        actor_contract = {
+            "status": "pass"
+            if static_report.get("status") == "pass" and placement_report.get("status") == "pass"
+            else "fail",
+            "failure_type": static_report.get("failure_type") or placement_report.get("failure_type"),
+            "failure_message": "Runtime compilation failed static-scene or actor-placement verification.",
+            "asset_resolution": asset_resolution,
+            "map_resolution_failed": scene_map is not None and not scene_map.get("selected_asset"),
+        }
         scene_spec = compile_minimal_scene_spec(case.data, asset_resolution=asset_resolution)
         write_json(run_dir / "scene_spec.json", scene_spec)
         if actor_contract["status"] != "pass":
@@ -90,6 +103,22 @@ class UEBackend:
                 real_ue_invoked=False,
                 failure_code="F3_UE_MAP_UNRESOLVED",
                 failure_message="Requested UE Map did not pass Catalog qualification and Asset Resolve.",
+                failure_category="preflight_failure",
+            )
+            write_json(run_dir / "ue_preflight_report.json", preflight)
+            write_failed_ue_artifacts(run_dir, output_dir, case, run_id, report, camera_plan=camera_plan, render_passes=ue_render_passes, requested_view_count=len(ue_requested_views))
+            raise UEBackendUnavailable(report["failure_message"], run_dir, str(report["failure_code"]), report)
+        if compilation.status != "pass":
+            first_error = compilation.errors[0] if compilation.errors else {}
+            preflight = empty_preflight(case.case_id)
+            report = build_backend_report(
+                case,
+                run_id,
+                preflight,
+                phase="runtime_compilation",
+                real_ue_invoked=False,
+                failure_code=str(first_error.get("code") or "F7_RUNTIME_COMPILATION_FAILED"),
+                failure_message=str(first_error.get("message") or "Runtime Compiler rejected the case."),
                 failure_category="preflight_failure",
             )
             write_json(run_dir / "ue_preflight_report.json", preflight)
@@ -376,26 +405,16 @@ def prepare_runtime_actor_contract(
     requested_views: list[str],
     camera_strategy: str,
 ) -> dict[str, Any]:
-    asset_resolution = resolve_asset_intents(case.data)
-    scene_layout = build_static_scene_layout(
-        case.data,
-        asset_resolution=asset_resolution,
+    compilation = compile_runtime_case(
+        case,
+        requested_backend="ue",
         requested_views=requested_views,
         camera_strategy=camera_strategy,
     )
-    static_report = verify_static_scene_layout(case.data, scene_layout)
-    runtime_actor_placement = compile_runtime_actor_placement(
-        case.data,
-        scene_layout,
-        asset_resolution=asset_resolution,
-        target_backend="UE",
-    )
-    runtime_actor_placement_report = verify_runtime_actor_placement(case.data, runtime_actor_placement)
-    write_json(run_dir / "asset_resolution.json", asset_resolution)
-    write_json(run_dir / "scene_layout.json", scene_layout)
-    write_json(run_dir / "static_scene_report.json", static_report)
-    write_json(run_dir / "runtime_actor_placement.json", runtime_actor_placement)
-    write_json(run_dir / "runtime_actor_placement_report.json", runtime_actor_placement_report)
+    compilation.write(run_dir)
+    asset_resolution = compilation.artifacts["asset_resolution"]
+    static_report = compilation.artifacts["static_scene_report"]
+    runtime_actor_placement_report = compilation.artifacts["runtime_actor_placement_report"]
     scene_map = asset_resolution.get("scene_map") if isinstance(asset_resolution.get("scene_map"), dict) else None
     map_resolution_failed = scene_map is not None and not scene_map.get("selected_asset")
     if static_report.get("status") != "pass":
@@ -1042,6 +1061,8 @@ def infer_fps_from_views(run_dir: Path) -> int:
 
 
 def camera_plan_to_json(camera_plan: Any) -> dict[str, Any]:
+    if isinstance(camera_plan, dict):
+        return camera_plan
     from harness.runtime.camera_planner import camera_plan_to_dict
 
     return camera_plan_to_dict(camera_plan)

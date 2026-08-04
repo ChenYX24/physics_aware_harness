@@ -1,0 +1,312 @@
+from __future__ import annotations
+
+import copy
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Mapping
+
+from harness.assets.asset_intent_compiler import CompiledAssetIntent, compile_v2_asset_intents
+from harness.assets.asset_registry import AssetRegistry
+from harness.assets.asset_resolver import resolve_asset_intents
+from harness.core.artifact_schema import write_json
+from harness.core.case_spec import CaseSpec
+from harness.core.case_spec_v2 import CaseSpecV2, project_case_spec_v2_to_v1
+from harness.planning.backend_planner import plan_backend
+from harness.planning.static_scene_builder import build_static_scene_layout
+from harness.planning.verification_compiler import compile_verification_plan
+from harness.runtime.actor_placement import compile_runtime_actor_placement
+from harness.runtime.observation_planner import camera_plan_from_observation_plan, compile_observation_plan
+from harness.verification.runtime_actor_placement_verifier import verify_runtime_actor_placement
+from harness.verification.static_scene_verifier import verify_static_scene_layout
+
+
+ARTIFACT_FILENAMES = {
+    "asset_resolution": "asset_resolution.json",
+    "scene_layout": "scene_layout.json",
+    "static_scene_report": "static_scene_report.json",
+    "verification_plan": "verification_plan.json",
+    "observation_plan": "observation_plan.json",
+    "camera_plan": "camera_plan.json",
+    "runtime_actor_placement": "runtime_actor_placement.json",
+    "runtime_actor_placement_report": "runtime_actor_placement_report.json",
+    "runtime_plan": "runtime_plan.json",
+}
+COMPILATION_STAGE_ORDER = [
+    "backend_planner",
+    "asset_intent_compiler_and_resolver",
+    "scene_layout_compiler",
+    "verification_compiler",
+    "observation_planner",
+    "runtime_binding_and_stage_compiler",
+]
+
+
+@dataclass(frozen=True)
+class RuntimeCompilation:
+    source_case_spec: dict[str, Any]
+    runtime_case: CaseSpec
+    backend_selection: dict[str, Any]
+    compiled_asset_intents: tuple[CompiledAssetIntent, ...]
+    artifacts: dict[str, dict[str, Any]]
+    report: dict[str, Any]
+
+    @property
+    def status(self) -> str:
+        return str(self.report.get("status") or "fail")
+
+    @property
+    def selected_backend(self) -> str:
+        return str(self.backend_selection["selected_backend"])
+
+    @property
+    def errors(self) -> list[dict[str, Any]]:
+        return [dict(item) for item in self.report.get("errors") or [] if isinstance(item, dict)]
+
+    def write(self, run_dir: str | Path) -> Path:
+        destination = Path(run_dir)
+        destination.mkdir(parents=True, exist_ok=True)
+        write_json(destination / "case_spec.json", self.runtime_case.data)
+        write_json(destination / "runtime_case_spec_v1.json", self.runtime_case.data)
+        if self.source_case_spec.get("schema_version") == "harness_case_spec_v2":
+            write_json(destination / "case_spec_v2.json", self.source_case_spec)
+        for key, filename in ARTIFACT_FILENAMES.items():
+            write_json(destination / filename, self.artifacts[key])
+        write_json(destination / "runtime_compilation_report.json", self.report)
+        return destination
+
+
+def compile_runtime_case(
+    case_spec: CaseSpec | CaseSpecV2,
+    *,
+    requested_backend: str | None = None,
+    requested_views: list[str] | None = None,
+    render_passes: list[str] | None = None,
+    camera_strategy: str = "bounds_auto_v1",
+    registry: AssetRegistry | None = None,
+) -> RuntimeCompilation:
+    source_v2 = case_spec if isinstance(case_spec, CaseSpecV2) else None
+    runtime_case = project_case_spec_v2_to_v1(source_v2) if source_v2 else case_spec
+    source_data = copy.deepcopy(source_v2.data if source_v2 else runtime_case.data)
+
+    backend_selection = plan_backend(
+        runtime_case.data,
+        source_case_spec=source_v2,
+        requested_backend=requested_backend,
+    )
+    target_asset_backend = str(backend_selection.get("target_asset_backend") or backend_selection["render_backend"])
+    compiled_intents = tuple(
+        compile_v2_asset_intents(
+            source_v2,
+            runtime_case.data,
+            target_backend=target_asset_backend,
+        )
+        if source_v2
+        else []
+    )
+    asset_resolution = resolve_asset_intents(
+        runtime_case.data,
+        registry=registry,
+        compiled_intents=list(compiled_intents) if source_v2 else None,
+        target_backend=target_asset_backend,
+    )
+    scene_layout = build_static_scene_layout(
+        runtime_case.data,
+        asset_resolution=asset_resolution,
+        requested_views=requested_views,
+        camera_strategy=camera_strategy,
+        camera_plan={},
+    )
+    verification_plan = compile_verification_plan(runtime_case.data, source_case_spec=source_v2)
+    observation_plan = compile_observation_plan(
+        runtime_case.data,
+        scene_layout,
+        verification_plan,
+        source_case_spec=source_v2,
+        requested_views=requested_views,
+        render_passes=render_passes,
+        camera_strategy=camera_strategy,
+    )
+    camera_plan = camera_plan_from_observation_plan(observation_plan)
+    scene_layout["camera_plan"] = copy.deepcopy(camera_plan)
+    static_scene_report = verify_static_scene_layout(runtime_case.data, scene_layout)
+    runtime_actor_placement = compile_runtime_actor_placement(
+        runtime_case.data,
+        scene_layout,
+        asset_resolution=asset_resolution,
+        target_backend=str(backend_selection.get("render_backend") or backend_selection["selected_backend"]),
+    )
+    actor_report = verify_runtime_actor_placement(runtime_case.data, runtime_actor_placement)
+    runtime_plan = _compile_runtime_plan(
+        runtime_case.data,
+        backend_selection,
+        verification_plan,
+        observation_plan,
+    )
+    errors = _compilation_errors(
+        source_v2,
+        asset_resolution,
+        static_scene_report,
+        actor_report,
+        verification_plan,
+        backend_selection,
+    )
+    artifacts = {
+        "asset_resolution": asset_resolution,
+        "scene_layout": scene_layout,
+        "static_scene_report": static_scene_report,
+        "verification_plan": verification_plan,
+        "observation_plan": observation_plan,
+        "camera_plan": camera_plan,
+        "runtime_actor_placement": runtime_actor_placement,
+        "runtime_actor_placement_report": actor_report,
+        "runtime_plan": runtime_plan,
+    }
+    report = {
+        "schema_version": "harness_runtime_compilation_report_v1",
+        "case_id": runtime_case.case_id,
+        "source_schema_version": source_data.get("schema_version"),
+        "runtime_projection_schema_version": runtime_case.data.get("schema_version"),
+        "status": "fail" if errors else "pass",
+        "stage_order": list(COMPILATION_STAGE_ORDER),
+        "completed_stages": list(COMPILATION_STAGE_ORDER),
+        "asset_resolve_invocation_count": 1,
+        "backend_selection": copy.deepcopy(backend_selection),
+        "artifact_schemas": {
+            ARTIFACT_FILENAMES[key]: value.get("schema_version")
+            for key, value in artifacts.items()
+        },
+        "errors": errors,
+    }
+    return RuntimeCompilation(
+        source_case_spec=source_data,
+        runtime_case=runtime_case,
+        backend_selection=backend_selection,
+        compiled_asset_intents=compiled_intents,
+        artifacts=artifacts,
+        report=report,
+    )
+
+
+def _compile_runtime_plan(
+    case_spec: Mapping[str, Any],
+    backend_selection: Mapping[str, Any],
+    verification_plan: Mapping[str, Any],
+    observation_plan: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": "harness_runtime_plan_v1",
+        "case_id": case_spec.get("case_id"),
+        "backend_selection": {
+            "selected_backend": backend_selection.get("selected_backend"),
+            "solver_backend": backend_selection.get("solver_backend"),
+            "render_backend": backend_selection.get("render_backend"),
+            "required_capabilities": list(backend_selection.get("required_capabilities") or []),
+            "selection_policy": backend_selection.get("selection_policy"),
+            "reason": backend_selection.get("selection_reason"),
+            "multi_backend": bool(backend_selection.get("multi_backend")),
+            "execution_supported": bool(backend_selection.get("execution_supported")),
+        },
+        "stages": copy.deepcopy(backend_selection.get("stages") or []),
+        "artifacts": {
+            "asset_resolution": "asset_resolution.json",
+            "scene_layout": "scene_layout.json",
+            "actor_placement": "runtime_actor_placement.json",
+            "observation_plan": "observation_plan.json",
+            "verification_plan": "verification_plan.json",
+        },
+        "evidence_contract": {
+            "signals": list(observation_plan.get("signals") or []),
+            "modalities": list(observation_plan.get("modalities") or []),
+            "assertion_count": len(verification_plan.get("assertions") or []),
+        },
+    }
+
+
+def _compilation_errors(
+    source_v2: CaseSpecV2 | None,
+    asset_resolution: Mapping[str, Any],
+    static_scene_report: Mapping[str, Any],
+    actor_report: Mapping[str, Any],
+    verification_plan: Mapping[str, Any],
+    backend_selection: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    errors: list[dict[str, Any]] = []
+    if source_v2:
+        policy = source_v2.data.get("asset_policy") if isinstance(source_v2.data.get("asset_policy"), dict) else {}
+        for row in asset_resolution.get("assets") or []:
+            if not isinstance(row, Mapping):
+                continue
+            acquisition = row.get("acquisition") if isinstance(row.get("acquisition"), Mapping) else {}
+            requested = acquisition.get("requested") if isinstance(acquisition.get("requested"), Mapping) else {}
+            requirement = str(requested.get("requirement") or "preferred")
+            if requirement == "required" and acquisition.get("status") != "resolved_local_catalog":
+                errors.append(
+                    {
+                        "stage": "asset_resolution",
+                        "code": "provider_required" if acquisition.get("status") == "provider_required" else "required_asset_route_unresolved",
+                        "object_id": (row.get("intent") or {}).get("object_id"),
+                        "message": str(row.get("fallback_reason") or "required acquisition route did not resolve"),
+                    }
+                )
+            if not row.get("selected_asset") and not policy.get("allow_analytic_proxy", True):
+                errors.append(
+                    {
+                        "stage": "asset_resolution",
+                        "code": "analytic_proxy_disallowed",
+                        "object_id": (row.get("intent") or {}).get("object_id"),
+                        "message": "no selected asset and CaseSpec V2 disallows analytic proxy fallback",
+                    }
+                )
+    scene_map = asset_resolution.get("scene_map") if isinstance(asset_resolution.get("scene_map"), Mapping) else None
+    if scene_map is not None and not scene_map.get("selected_asset"):
+        errors.append(
+            {
+                "stage": "asset_resolution",
+                "code": "F3_UE_MAP_UNRESOLVED",
+                "message": "requested map did not pass Catalog qualification",
+            }
+        )
+    if static_scene_report.get("status") != "pass":
+        errors.append(
+            {
+                "stage": "scene_layout",
+                "code": static_scene_report.get("failure_type") or "static_scene_invalid",
+                "message": "static scene verification failed",
+            }
+        )
+    if verification_plan.get("status") != "ready":
+        errors.append(
+            {
+                "stage": "verification",
+                "code": verification_plan.get("failure_code") or "verification_plan_invalid",
+                "message": "no registered verifier can satisfy the CaseSpec capability",
+            }
+        )
+    if actor_report.get("status") != "pass":
+        errors.append(
+            {
+                "stage": "runtime_binding",
+                "code": actor_report.get("failure_type") or "runtime_actor_placement_invalid",
+                "message": "runtime actor placement verification failed",
+            }
+        )
+    if not backend_selection.get("execution_supported"):
+        errors.append(
+            {
+                "stage": "runtime_plan",
+                "code": backend_selection.get("execution_blocker") or "backend_execution_unsupported",
+                "message": "runtime plan is valid but its multi-backend stage executor is not implemented",
+            }
+        )
+    return _dedupe_errors(errors)
+
+
+def _dedupe_errors(errors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[Any, Any, Any]] = set()
+    for error in errors:
+        identity = (error.get("stage"), error.get("code"), error.get("object_id"))
+        if identity not in seen:
+            seen.add(identity)
+            result.append(error)
+    return result

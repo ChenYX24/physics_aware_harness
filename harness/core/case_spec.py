@@ -39,6 +39,19 @@ def load_case_spec(path: str | Path) -> CaseSpec:
     return CaseSpec(data)
 
 
+def load_case_spec_document(path: str | Path) -> Any:
+    """Explicitly dispatch a persisted CaseSpec by schema_version without changing the V1 loader."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"case spec must be a JSON object: {path}")
+    if data.get("schema_version") == "harness_case_spec_v2":
+        from harness.core.case_spec_v2 import case_spec_v2_from_dict
+
+        return case_spec_v2_from_dict(data)
+    validate_case_spec(data)
+    return CaseSpec(data)
+
+
 def validate_case_spec(data: dict[str, Any]) -> None:
     if data.get("schema_version") != CASE_SPEC_SCHEMA_VERSION:
         raise ValueError("case spec schema_version must be harness_case_spec_v1")

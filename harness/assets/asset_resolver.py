@@ -7,26 +7,49 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from harness.assets.asset_intent_compiler import CompiledAssetIntent, local_catalog_allowed, provider_route_required
 from harness.assets.asset_intent import intent_from_object
 from harness.assets.asset_registry import AssetRegistry
 from harness.assets.search_intent import SearchIntent, analytic_search_intent_from_asset_intent, search_intent_from_asset_intent
 from harness.assets.sqlite_catalog import effective_license_tier, reference_license_authorized
 
 
-def resolve_asset_intents(case_spec: dict[str, Any], *, top_k: int = 5, registry: AssetRegistry | None = None) -> dict[str, Any]:
+def resolve_asset_intents(
+    case_spec: dict[str, Any],
+    *,
+    top_k: int = 5,
+    registry: AssetRegistry | None = None,
+    compiled_intents: list[CompiledAssetIntent] | None = None,
+    target_backend: str = "unreal",
+) -> dict[str, Any]:
     registry = registry or AssetRegistry()
     allow_local_preview = os.environ.get("SIM_HARNESS_ALLOW_LOCAL_PREVIEW_ASSETS", "").casefold() in {"1", "true", "yes"}
     objects = [obj for obj in case_spec.get("objects", []) if isinstance(obj, dict)]
-    intents = [intent_from_object(obj) for obj in objects]
+    compiled_by_id = {item.object_id: item for item in compiled_intents or []}
+    intents = [
+        compiled_by_id[str(obj.get("id") or "")].legacy_intent
+        if str(obj.get("id") or "") in compiled_by_id
+        else intent_from_object(obj)
+        for obj in objects
+    ]
     rows = []
     for obj, intent in zip(objects, intents):
+        compiled = compiled_by_id.get(str(obj.get("id") or ""))
+        acquisition = compiled.acquisition if compiled else None
+        provider_pending = bool(acquisition and provider_route_required(acquisition))
         explicit_proxy = bool(obj.get("force_analytic_proxy") or obj.get("asset_policy") == "analytic_proxy")
         search_intent = (
-            analytic_search_intent_from_asset_intent(intent, obj, backend="unreal")
+            compiled.search_intent
+            if compiled
+            else analytic_search_intent_from_asset_intent(intent, obj, backend=target_backend)
             if explicit_proxy
-            else search_intent_from_asset_intent(intent, backend="unreal")
+            else search_intent_from_asset_intent(intent, backend=target_backend)
         )
-        ranked = registry.search_intent(search_intent, top_k=max(top_k * 4, top_k))
+        ranked = (
+            registry.search_intent(search_intent, top_k=max(top_k * 4, top_k))
+            if acquisition is None or local_catalog_allowed(acquisition)
+            else []
+        )
         if explicit_proxy:
             ranked = [resolved_analytic_recipe(candidate, obj, intent.to_dict()) for candidate in ranked]
         evaluated = [
@@ -42,32 +65,66 @@ def resolve_asset_intents(case_spec: dict[str, Any], *, top_k: int = 5, registry
         ]
         selected = next((candidate for candidate in evaluated if str(candidate["quality_gate"]["status"]).startswith("pass")), None)
         rejected = [candidate for candidate in evaluated if candidate["quality_gate"]["status"] == "fail"][:top_k]
-        rows.append(
-            {
-                "intent": intent.to_dict(),
-                "candidates": evaluated[:top_k],
-                "rejected_candidates": rejected,
-                "selected_asset": selected,
-                "selection_reason": (
-                    "explicit_analytic_recipe_policy"
-                    if explicit_proxy and selected
-                    else "first_reference_approved_candidate"
-                    if selected and selected["quality_gate"]["status"] == "pass"
-                    else "first_explicit_local_preview_candidate"
+        row = {
+            "intent": intent.to_dict(),
+            "candidates": evaluated[:top_k],
+            "rejected_candidates": rejected,
+            "selected_asset": selected,
+            "selection_reason": (
+                "explicit_analytic_recipe_policy"
+                if explicit_proxy and selected
+                else "first_reference_approved_candidate"
+                if selected and selected["quality_gate"]["status"] == "pass"
+                else "first_explicit_local_preview_candidate"
+                if selected
+                else "provider_route_not_implemented"
+                if provider_pending
+                else "no_quality_approved_candidate"
+            ),
+            "runtime_binding_requirements": intent.required_properties,
+            "fallback_reason": (
+                None
+                if selected
+                else f"requested acquisition route requires next-stage Provider: {acquisition['route']}"
+                if provider_pending and acquisition
+                else "no quality-approved analytic recipe candidate"
+                if explicit_proxy
+                else "no quality-approved registry candidate; use analytic/proxy asset"
+            ),
+            "fallback_mode": (
+                "provider_required"
+                if provider_pending and not selected
+                else "harness_generate_analytic"
+                if explicit_proxy and not selected
+                else "automatic_proxy"
+                if not selected
+                else None
+            ),
+        }
+        if acquisition is not None:
+            row["acquisition"] = {
+                "requested": dict(acquisition),
+                "status": (
+                    "resolved_local_fallback"
+                    if selected and provider_pending
+                    else "resolved_local_catalog"
                     if selected
-                    else "no_quality_approved_candidate"
+                    else "provider_required"
+                    if provider_pending
+                    else "local_catalog_unresolved"
                 ),
-                "runtime_binding_requirements": intent.required_properties,
-                "fallback_reason": (
-                    None
-                    if selected
-                    else "no quality-approved analytic recipe candidate"
-                    if explicit_proxy
-                    else "no quality-approved registry candidate; use analytic/proxy asset"
+                "actual_route": "local_catalog" if selected else None,
+                "route_honored": bool(
+                    selected and str(acquisition.get("route")) in {"default", "local_catalog"}
                 ),
-                "fallback_mode": "harness_generate_analytic" if explicit_proxy and not selected else "automatic_proxy" if not selected else None,
+                "provider_execution": "deferred_to_provider_phase" if provider_pending else "not_required",
             }
-        )
+            row["intent"] = {
+                **row["intent"],
+                "compiled_search_intent": search_intent.to_dict(),
+                "slot": compiled.slot if compiled else "primary",
+            }
+        rows.append(row)
     scene_map = resolve_scene_map(
         case_spec,
         registry=registry,
@@ -101,6 +158,17 @@ def resolve_asset_intents(case_spec: dict[str, Any], *, top_k: int = 5, registry
         },
         "assets": rows,
     }
+    if compiled_intents is not None:
+        result["asset_intent_compiler"] = {
+            "schema_version": "harness_compiled_asset_intents_v1",
+            "target_backend": target_backend,
+            "intent_count": len(compiled_intents),
+            "provider_required_count": sum(
+                1
+                for row in rows
+                if (row.get("acquisition") or {}).get("status") == "provider_required"
+            ),
+        }
     if scene_map:
         result["scene_map"] = scene_map
     return result

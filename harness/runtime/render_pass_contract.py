@@ -5,7 +5,7 @@ from typing import Any
 
 from harness.core.artifact_manager import link_or_copy
 from harness.core.artifact_schema import read_json, write_json
-from harness.runtime.camera_planner import CameraPlan, camera_plan_to_dict
+from harness.runtime.camera_planner import CameraPlan, camera_plan_from_dict, camera_plan_to_dict
 from harness.verification.render_sync_checker import ARTIFACT_SCHEMA_VERSION, check_render_sync, detect_image_format, has_mp4_magic, has_openexr_magic
 
 
@@ -20,13 +20,15 @@ def write_render_contract_artifacts(
     *,
     backend: str,
     case_id: str,
-    camera_plan: CameraPlan,
+    camera_plan: CameraPlan | dict[str, Any],
     render_passes: list[str],
     allow_placeholders: bool,
     source: str,
 ) -> dict[str, Any]:
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
+    if isinstance(camera_plan, dict):
+        camera_plan = camera_plan_from_dict(camera_plan)
     camera_plan_data = camera_plan_to_dict(camera_plan)
     write_json(run_dir / "camera_plan.json", camera_plan_data)
     normalized_passes = normalize_passes(render_passes)

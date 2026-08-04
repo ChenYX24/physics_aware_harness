@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from harness.core.artifact_schema import runtime_summary, write_json
-from harness.runtime.camera_planner import camera_plan_from_case_spec
+from harness.runtime.camera_planner import CameraPlan, camera_plan_from_case_spec, camera_plan_from_dict
 from harness.runtime.render_pass_contract import verify_render_observability, write_render_contract_artifacts
 
 
@@ -17,6 +17,7 @@ def write_runtime_artifacts(
     requested_views: list[str] | None = None,
     render_passes: list[str] | None = None,
     camera_strategy: str = "bounds_auto_v1",
+    camera_plan: CameraPlan | dict[str, Any] | None = None,
 ) -> Path:
     run_dir = Path(run_dir)
     output_dir = run_dir / "fallback_output" if backend == "fallback" else run_dir / f"{backend}_output"
@@ -68,7 +69,13 @@ def write_runtime_artifacts(
             "runtime_boundary": "deterministic toy backend; not proof of native UE physics",
         },
     )
-    camera_plan = camera_plan_from_case_spec(case_spec, requested_views=requested_views, camera_strategy=camera_strategy)
+    if isinstance(camera_plan, dict):
+        camera_plan = camera_plan_from_dict(camera_plan)
+    camera_plan = camera_plan or camera_plan_from_case_spec(
+        case_spec,
+        requested_views=requested_views,
+        camera_strategy=camera_strategy,
+    )
     manifest = write_render_contract_artifacts(
         run_dir,
         backend=backend,

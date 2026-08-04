@@ -19,10 +19,21 @@ def build_static_scene_layout(
     asset_resolution: dict[str, Any] | None = None,
     requested_views: list[str] | None = None,
     camera_strategy: str = "bounds_auto_v1",
+    camera_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     asset_rows = asset_rows_by_object_id(asset_resolution)
     nodes = [build_object_node(obj, asset_rows.get(str(obj.get("id")))) for obj in case_spec.get("objects", []) if isinstance(obj, dict)]
-    camera_plan = camera_plan_to_dict(camera_plan_from_case_spec(case_spec, requested_views=requested_views, camera_strategy=camera_strategy))
+    compiled_camera_plan = (
+        camera_plan
+        if camera_plan is not None
+        else camera_plan_to_dict(
+            camera_plan_from_case_spec(
+                case_spec,
+                requested_views=requested_views,
+                camera_strategy=camera_strategy,
+            )
+        )
+    )
     expected_physics = case_spec.get("expected_physics") or {}
     collision_edges = normalize_edges(expected_physics.get("collision_graph") or expected_physics.get("contact_order") or [])
     if not collision_edges:
@@ -43,7 +54,7 @@ def build_static_scene_layout(
             "nodes": [node["object_id"] for node in nodes if node.get("physics_graph_member")],
             "collision_edges": collision_edges,
         },
-        "camera_plan": camera_plan,
+        "camera_plan": compiled_camera_plan,
         "asset_resolution_summary": summarize_asset_resolution(asset_resolution),
         "expected_invariants": [
             "unique_object_ids",

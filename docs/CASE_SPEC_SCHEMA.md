@@ -1,10 +1,14 @@
 # Case Spec Schema
 
-当前 schema version：
+当前支持两个显式 schema version：
 
 ```text
 harness_case_spec_v1
+harness_case_spec_v2
 ```
+
+V1 继续作为兼容默认。文件输入按 `schema_version` 分派；自然语言输入只有显式传入
+`--case-spec-version v2` 才调用 Expansion/CaseSpec 两阶段 LLM planner。
 
 必填字段：
 
@@ -48,3 +52,66 @@ Case spec 是可执行 contract，不是 prompt 模板。
 | `brittle_impact_fracture` | `impactor_object_id`, `brittle_object_id`, `fracture_threshold_j`, `impact_energy_j`, `expected_min_fragment_count`, `expected_contact_pair` |
 
 物理参数必须结构化放在 `expected_physics` 或 object 字段里；不要只写在 prompt 文本中。
+
+## CaseSpec V2
+
+V2 是语义 contract，主字段为：
+
+```text
+identity / capabilities / scene / timebase / backend_constraints
+asset_policy / objects / relations / events / expected_behavior
+observation_requirements / verification_requirements / variant / provenance
+```
+
+V2 经 schema 与跨字段校验后，通过内存 adapter 投影到现有 V1 runtime contract。原始
+V2 保存为 `case_spec_v2.json`；`runtime_case_spec_v1.json` 和 `case_spec.json` 是迁移期
+runner 兼容投影。
+
+对象的 `asset.acquisition.route` 可由文字或图片请求明确指定：
+
+```text
+default / local_catalog / external_site / procedural_generation / model_generation
+```
+
+`requirement` 为 `preferred` 或 `required`。LLM 自行推断的路线只能是 `preferred`；
+只有用户明确要求、并记录 `origin: user_explicit` 时才能设为 `required`。图片输入还需用
+`reference_inputs[].usage` 区分
+`similarity_search`、`generation_condition`、`geometry_reference`、`style_reference` 和
+`texture_source`。Provider 尚未接入时，要求外部获取或生成的 V2 会在 compilation 阶段以
+`provider_required` 明确阻断，不会静默改用本地相似素材。
+
+```json
+{
+  "description": "按用户文字设计生成一个破碎木板",
+  "resource_kind": "geometry_collection",
+  "acquisition": {
+    "route": "model_generation",
+    "requirement": "required",
+    "origin": "user_explicit",
+    "reference_inputs": [],
+    "fallback_order": []
+  }
+}
+```
+
+本地检索 Catalog 与旧 UE runner JSON registry 分开配置：前者使用
+`SIM_HARNESS_ASSET_CATALOG`，后者继续使用 `SIM_STUDIO_ASSET_REGISTRY`。
+
+## V2 LLM 配置
+
+两次正常调用依次生成 `expansion.json` 和 CaseSpec V2；schema/跨字段失败时至多追加一次
+受限修复。使用 OpenAI-compatible `chat/completions` 接口：
+
+```bash
+export SIM_HARNESS_LLM_BASE_URL="https://provider.example/v1"
+export SIM_HARNESS_LLM_API_KEY="..."
+export SIM_HARNESS_LLM_MODEL="provider-model-id"
+
+python scripts/harness_run_case.py \
+  --prompt "一颗球撞击另一颗球" \
+  --case-spec-version v2 \
+  --backend auto
+```
+
+图片需要重复传入 `--image`，并显式增加 `--allow-image-upload`。凭据、原图和模型缓存均不
+进入源码仓库。

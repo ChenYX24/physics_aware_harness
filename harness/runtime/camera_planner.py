@@ -259,3 +259,38 @@ def camera_plan_to_dict(plan: CameraPlan) -> dict[str, Any]:
         "views": [asdict(view) for view in plan.views],
         "warnings": list(plan.warnings),
     }
+
+
+def camera_plan_from_dict(data: dict[str, Any]) -> CameraPlan:
+    bounds = data.get("scene_bounds") if isinstance(data.get("scene_bounds"), dict) else {}
+    center = vec3(bounds.get("center")) or [0.0, 0.0, 0.0]
+    extent = vec3(bounds.get("extent")) or [1.0, 1.0, 1.0]
+    views: list[CameraViewSpec] = []
+    for raw in data.get("views") or []:
+        if not isinstance(raw, dict):
+            continue
+        location = vec3(raw.get("location")) or [0.0, -2.0, 1.0]
+        rotation = vec3(raw.get("rotation")) or [0.0, 0.0, 0.0]
+        target = vec3(raw.get("target")) or center
+        views.append(
+            CameraViewSpec(
+                camera_id=str(raw.get("camera_id") or raw.get("role") or f"camera_{len(views):02d}"),
+                role=str(raw.get("role") or raw.get("camera_id") or "planned_view"),
+                location=tuple(location),
+                rotation=tuple(rotation),
+                fov=float(raw.get("fov") or 60.0),
+                target=tuple(target),
+                near_clip=float(raw["near_clip"]) if raw.get("near_clip") is not None else None,
+                far_clip=float(raw["far_clip"]) if raw.get("far_clip") is not None else None,
+                dynamic_camera_profile=str(raw["dynamic_camera_profile"]) if raw.get("dynamic_camera_profile") else None,
+                subject_follow_location_gain=float(raw["subject_follow_location_gain"]) if raw.get("subject_follow_location_gain") is not None else None,
+                subject_follow_target_gain=float(raw["subject_follow_target_gain"]) if raw.get("subject_follow_target_gain") is not None else None,
+                camera_mode=str(raw.get("camera_mode") or "fixed"),
+            )
+        )
+    return CameraPlan(
+        scene_bounds=SceneBounds(center=tuple(center), extent=tuple(extent)),
+        views=views,
+        strategy=str(data.get("strategy") or "bounds_auto_v1"),
+        warnings=[str(value) for value in data.get("warnings") or []],
+    )

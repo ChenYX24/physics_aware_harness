@@ -22,7 +22,11 @@ class AssetRegistry:
         embedding_provider: EmbeddingProvider | None = None,
         retrieval_config_path: str | Path | None = None,
     ) -> None:
-        explicit = path or os.environ.get("SIM_STUDIO_ASSET_REGISTRY")
+        explicit = (
+            path
+            or os.environ.get("SIM_HARNESS_ASSET_CATALOG")
+            or os.environ.get("SIM_STUDIO_ASSET_REGISTRY")
+        )
         workspace_catalog = default_catalog_path()
         configured = explicit or (workspace_catalog if workspace_catalog.is_file() else ROOT / "assets" / "asset_physics_index.json")
         self.path = Path(configured)
