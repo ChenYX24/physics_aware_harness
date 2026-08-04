@@ -10,7 +10,7 @@ from typing import Any
 from harness.core.case_spec import CaseSpec
 from harness.core.artifact_schema import read_json, write_json
 from harness.core.artifact_manager import ArtifactManager
-from harness.assets.asset_resolver import resolve_asset_intents
+from harness.assets.asset_resolver import requested_map_reference, resolve_asset_intents
 from harness.planning.static_scene_builder import build_static_scene_layout
 from harness.runtime.actor_placement import compile_runtime_actor_placement
 from harness.runtime.camera_planner import camera_plan_from_case_spec
@@ -48,9 +48,7 @@ class UEBackend:
         run_dir = Path(output_root) / run_id
         output_dir = run_dir / "ue_output"
         output_dir.mkdir(parents=True, exist_ok=True)
-        scene_spec = compile_minimal_scene_spec(case.data)
         write_json(run_dir / "case_spec.json", case.data)
-        write_json(run_dir / "scene_spec.json", scene_spec)
         ue_requested_views = requested_views or DEFAULT_UE_VIEWS
         ue_render_passes = (
             enforce_ue_render_passes(render_passes)
@@ -65,6 +63,9 @@ class UEBackend:
             requested_views=ue_requested_views,
             camera_strategy=camera_strategy,
         )
+        asset_resolution = actor_contract.get("asset_resolution") if isinstance(actor_contract.get("asset_resolution"), dict) else {}
+        scene_spec = compile_minimal_scene_spec(case.data, asset_resolution=asset_resolution)
+        write_json(run_dir / "scene_spec.json", scene_spec)
         if actor_contract["status"] != "pass":
             report = build_backend_report(
                 case,
@@ -79,7 +80,26 @@ class UEBackend:
             write_json(run_dir / "ue_preflight_report.json", empty_preflight(case.case_id))
             write_failed_ue_artifacts(run_dir, output_dir, case, run_id, report, camera_plan=camera_plan, render_passes=ue_render_passes, requested_view_count=len(ue_requested_views))
             raise UEBackendUnavailable(report["failure_message"], run_dir, str(report["failure_code"]), report)
-        preflight = build_ue_preflight_report(case.case_id, case.data)
+        if actor_contract.get("map_resolution_failed"):
+            preflight = empty_preflight(case.case_id)
+            report = build_backend_report(
+                case,
+                run_id,
+                preflight,
+                phase="asset_resolution",
+                real_ue_invoked=False,
+                failure_code="F3_UE_MAP_UNRESOLVED",
+                failure_message="Requested UE Map did not pass Catalog qualification and Asset Resolve.",
+                failure_category="preflight_failure",
+            )
+            write_json(run_dir / "ue_preflight_report.json", preflight)
+            write_failed_ue_artifacts(run_dir, output_dir, case, run_id, report, camera_plan=camera_plan, render_passes=ue_render_passes, requested_view_count=len(ue_requested_views))
+            raise UEBackendUnavailable(report["failure_message"], run_dir, str(report["failure_code"]), report)
+        preflight = build_ue_preflight_report(
+            case.case_id,
+            case.data,
+            resolved_map_package=str((scene_spec.get("map") or {}).get("requested_package") or ""),
+        )
         write_json(run_dir / "ue_preflight_report.json", preflight)
         if preflight["failure_code"]:
             report = build_backend_report(case, run_id, preflight, phase="preflight", real_ue_invoked=False)
@@ -376,28 +396,43 @@ def prepare_runtime_actor_contract(
     write_json(run_dir / "static_scene_report.json", static_report)
     write_json(run_dir / "runtime_actor_placement.json", runtime_actor_placement)
     write_json(run_dir / "runtime_actor_placement_report.json", runtime_actor_placement_report)
+    scene_map = asset_resolution.get("scene_map") if isinstance(asset_resolution.get("scene_map"), dict) else None
+    map_resolution_failed = scene_map is not None and not scene_map.get("selected_asset")
     if static_report.get("status") != "pass":
         return {
             "status": "fail",
             "failure_type": static_report.get("failure_type") or "F3_invalid_initial_physics_state",
             "failure_message": f"Static scene placement failed: {static_report.get('failure_type')}",
+            "asset_resolution": asset_resolution,
         }
     if runtime_actor_placement_report.get("status") != "pass":
         return {
             "status": "fail",
             "failure_type": runtime_actor_placement_report.get("failure_type") or "F7_runtime_artifact_incomplete",
             "failure_message": f"Runtime actor placement failed: {runtime_actor_placement_report.get('failure_type')}",
+            "asset_resolution": asset_resolution,
         }
-    return {"status": "pass", "failure_type": None, "failure_message": None}
+    return {
+        "status": "pass",
+        "failure_type": None,
+        "failure_message": None,
+        "asset_resolution": asset_resolution,
+        "map_resolution_failed": map_resolution_failed,
+    }
 
 
-def build_ue_preflight_report(case_id: str, case_spec: dict[str, Any] | None = None) -> dict[str, Any]:
+def build_ue_preflight_report(
+    case_id: str,
+    case_spec: dict[str, Any] | None = None,
+    *,
+    resolved_map_package: str = "",
+) -> dict[str, Any]:
     explicit_project = os.environ.get("SIM_STUDIO_UE_PROJECT", "").strip()
     workspace_project = initialized_workspace_project() if not explicit_project else ""
     env = {
         "SIM_STUDIO_UE_PROJECT": explicit_project or workspace_project,
         "SIM_STUDIO_UE_EXECUTABLE": os.environ.get("SIM_STUDIO_UE_EXECUTABLE", ""),
-        "SIM_STUDIO_UE_MAP": requested_map_package(case_spec),
+        "SIM_STUDIO_UE_MAP": resolved_map_package,
         "SIM_STUDIO_UE_ACTOR_CLASS": os.environ.get("SIM_STUDIO_UE_ACTOR_CLASS", ""),
         "SIM_STUDIO_ASSET_REGISTRY": os.environ.get("SIM_STUDIO_ASSET_REGISTRY", ""),
         "SIM_STUDIO_UE_CONTACT_EXPORT": os.environ.get("SIM_STUDIO_UE_CONTACT_EXPORT", ""),
@@ -791,7 +826,10 @@ def standardize_runner_outputs(run_dir: Path, output_dir: Path, case: CaseSpec, 
     artifact_manager = ArtifactManager(run_dir)
     artifact_manager.write_inputs(
         case_spec=case.data,
-        scene_spec=compile_minimal_scene_spec(case.data),
+        scene_spec=compile_minimal_scene_spec(
+            case.data,
+            asset_resolution=read_json(run_dir / "asset_resolution.json"),
+        ),
         camera_plan=camera_plan_dict,
         render_config=render_config,
     )
@@ -1009,8 +1047,16 @@ def camera_plan_to_json(camera_plan: Any) -> dict[str, Any]:
     return camera_plan_to_dict(camera_plan)
 
 
-def compile_minimal_scene_spec(case_spec: dict[str, Any]) -> dict[str, Any]:
-    map_package = requested_map_package(case_spec)
+def compile_minimal_scene_spec(
+    case_spec: dict[str, Any],
+    asset_resolution: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    scene_map = asset_resolution.get("scene_map") if isinstance(asset_resolution, dict) and isinstance(asset_resolution.get("scene_map"), dict) else {}
+    selected_map = scene_map.get("selected_asset") if isinstance(scene_map.get("selected_asset"), dict) else {}
+    selected_map_ue = selected_map.get("ue") if isinstance(selected_map.get("ue"), dict) else {}
+    selected_object_path = str(selected_map.get("ue_path") or selected_map_ue.get("object_path") or "")
+    requested_reference = str(scene_map.get("requested_reference") or "")
+    map_package = requested_reference if selected_map and requested_reference.startswith("/Game/") else selected_object_path
     return {
         "schema_version": "harness_scene_spec_v1",
         "case_id": case_spec.get("case_id"),
@@ -1024,6 +1070,9 @@ def compile_minimal_scene_spec(case_spec: dict[str, Any]) -> dict[str, Any]:
         "camera_policy": (case_spec.get("expected_physics") or {}).get("camera", {"mode": "unspecified"}),
         "map": {
             "requested_package": map_package,
+            "requested_reference": requested_reference or None,
+            "selected_asset_id": selected_map.get("asset_id"),
+            "selection_reason": scene_map.get("selection_reason"),
             "require_opened": True,
             "minimum_actor_count": 1,
             "dependency_policy": "runtime_load_success",
@@ -1036,8 +1085,4 @@ def compile_minimal_scene_spec(case_spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def requested_map_package(case_spec: dict[str, Any] | None = None) -> str:
-    explicit = os.environ.get("SIM_STUDIO_UE_MAP", "").strip()
-    if explicit:
-        return explicit
-    scene = case_spec.get("scene") if isinstance(case_spec, dict) and isinstance(case_spec.get("scene"), dict) else {}
-    return str(scene.get("map_preference") or scene.get("map_package") or "").strip()
+    return requested_map_reference(case_spec)

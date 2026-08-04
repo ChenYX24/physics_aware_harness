@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -31,15 +32,51 @@ def ue_env_without_config() -> dict[str, str]:
 def ue_env_with_fake_config(tmp: str, *, project: Path | None = None, runner_cmd: str | None = None) -> dict[str, str]:
     root = Path(tmp)
     fake_project = project or (root / "HarnessSmoke.uproject")
+    fake_map = root / "Content" / "Maps" / "HarnessSmoke.umap"
     if project is None:
         fake_project.write_text("{}", encoding="utf-8")
-        fake_map = root / "Content" / "Maps" / "HarnessSmoke.umap"
-        fake_map.parent.mkdir(parents=True, exist_ok=True)
-        fake_map.write_bytes(b"fake umap")
+    fake_map.parent.mkdir(parents=True, exist_ok=True)
+    fake_map.write_bytes(b"fake umap")
     fake_executable = root / "UnrealEditor-Cmd"
     fake_executable.write_text("#!/bin/sh\n", encoding="utf-8")
     fake_asset_registry = root / "asset_registry.json"
-    fake_asset_registry.write_text("{}", encoding="utf-8")
+    map_materialized = fake_map.is_file()
+    fake_asset_registry.write_text(
+        json.dumps(
+            {
+                "assets": [
+                    {
+                        "asset_id": "harness_smoke_map",
+                        "name": "HarnessSmoke",
+                        "category_l1": "map",
+                        "type": "World",
+                        "ue_path": "/Game/Maps/HarnessSmoke.HarnessSmoke",
+                        "source_kind": "harness_generated",
+                        "source_uri": "harness://tests/maps/harness_smoke",
+                        "license": "CC0-1.0",
+                        "quality_status": "approved" if map_materialized else "discovered",
+                        "materialized": map_materialized,
+                        "sha256": hashlib.sha256(fake_map.read_bytes()).hexdigest() if map_materialized else None,
+                        "paths": {"local_file": str(fake_map)},
+                        "ue": {
+                            "object_path": "/Game/Maps/HarnessSmoke.HarnessSmoke",
+                            "class_name": "World",
+                            "dependencies": [],
+                        },
+                        "backend_bindings": {
+                            "unreal": {
+                                "object_path": "/Game/Maps/HarnessSmoke.HarnessSmoke",
+                                "class_name": "World",
+                                "materialized": map_materialized,
+                                "runtime_ready": map_materialized,
+                            }
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
     env = ue_env_without_config()
     env.update(
         {
@@ -497,7 +534,42 @@ class HarnessCliTests(unittest.TestCase):
             executable = root / "UnrealEditor-Cmd"
             executable.write_text("#!/bin/sh\n", encoding="utf-8")
             asset_registry = root / "asset_registry.json"
-            asset_registry.write_text("{}", encoding="utf-8")
+            asset_registry.write_text(
+                json.dumps(
+                    {
+                        "assets": [
+                            {
+                                "asset_id": "harness_smoke_map",
+                                "name": "HarnessSmoke",
+                                "category_l1": "map",
+                                "type": "World",
+                                "ue_path": "/Game/Maps/HarnessSmoke.HarnessSmoke",
+                                "source_kind": "harness_generated",
+                                "source_uri": "harness://tests/maps/harness_smoke",
+                                "license": "CC0-1.0",
+                                "quality_status": "approved",
+                                "materialized": True,
+                                "sha256": hashlib.sha256(map_file.read_bytes()).hexdigest(),
+                                "paths": {"local_file": str(map_file)},
+                                "ue": {
+                                    "object_path": "/Game/Maps/HarnessSmoke.HarnessSmoke",
+                                    "class_name": "World",
+                                    "dependencies": [],
+                                },
+                                "backend_bindings": {
+                                    "unreal": {
+                                        "object_path": "/Game/Maps/HarnessSmoke.HarnessSmoke",
+                                        "class_name": "World",
+                                        "materialized": True,
+                                        "runtime_ready": True,
+                                    }
+                                },
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
             fake_runner = root / "fake_runner.py"
             write_fake_ue_runner(fake_runner)
             env = ue_env_without_config()
@@ -631,7 +703,7 @@ class HarnessCliTests(unittest.TestCase):
                     self.assertEqual(summary["failure_type"], "F1_UPROJECT_INVALID")
                     self.assertFalse(summary["real_ue_invoked"])
 
-    def test_ue_map_must_be_game_package_path(self) -> None:
+    def test_unregistered_ue_map_path_is_rejected_before_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env = ue_env_with_fake_config(tmp)
             env["SIM_STUDIO_UE_MAP"] = "Maps/HarnessSmoke"
@@ -645,9 +717,13 @@ class HarnessCliTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 2)
-            self.assertEqual(json.loads(result.stdout)["failure_type"], "F3_UE_MAP_INVALID")
+            summary = json.loads(result.stdout)
+            self.assertEqual(summary["failure_type"], "F3_UE_MAP_UNRESOLVED")
+            run_dir = Path(summary["run_dir"])
+            self.assertEqual(json.loads((run_dir / "scene_spec.json").read_text())["map"]["requested_package"], "")
+            self.assertEqual(json.loads((run_dir / "ue_preflight_report.json").read_text())["raw_env"], {})
 
-    def test_ue_map_package_must_exist_in_current_project(self) -> None:
+    def test_project_content_does_not_rescue_an_unregistered_map(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env = ue_env_with_fake_config(tmp)
             env["SIM_STUDIO_UE_MAP"] = "/Game/Maps/NotMaterialized.NotMaterialized"
@@ -662,7 +738,7 @@ class HarnessCliTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 2)
             summary = json.loads(result.stdout)
-            self.assertEqual(summary["failure_type"], "F3_UE_MAP_PACKAGE_MISSING")
+            self.assertEqual(summary["failure_type"], "F3_UE_MAP_UNRESOLVED")
             self.assertFalse(summary["real_ue_invoked"])
 
     def test_fake_ue_runner_success_writes_full_artifact_contract(self) -> None:

@@ -221,5 +221,9 @@ def summarize_asset_resolution(asset_resolution: dict[str, Any] | None) -> dict[
         "available": True,
         "physics_critical_count": asset_resolution.get("physics_critical_count", 0),
         "resolved_count": sum(1 for row in rows if row.get("selected_asset")),
-        "proxy_or_fallback_count": sum(1 for row in rows if row.get("fallback_reason")),
+        "proxy_or_fallback_count": sum(
+            1
+            for row in rows
+            if row.get("fallback_reason") or bool((row.get("selected_asset") or {}).get("proxy"))
+        ),
     }

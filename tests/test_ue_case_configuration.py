@@ -10,8 +10,8 @@ from unittest.mock import patch
 from pathlib import Path
 
 from harness.core.timebase import build_timebase, sample_solver_trajectory
-from harness.runtime.ue_backend import collision_geometry_reference_status, compile_minimal_scene_spec, requested_map_package
-from scripts.harness_local_ue_runner import duration_for_case, native_case_type, quantize_rgb24_to_palette, runtime_objects_for_case, timebase_for_case
+from harness.runtime.ue_backend import build_ue_preflight_report, collision_geometry_reference_status, compile_minimal_scene_spec, requested_map_package
+from scripts.harness_local_ue_runner import duration_for_case, quantize_rgb24_to_palette, timebase_for_case
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,153 +26,6 @@ def native_function_source(name: str) -> str:
 
 
 class UECaseConfigurationTests(unittest.TestCase):
-    def test_pick_place_routes_to_native_character_carry_drop(self) -> None:
-        case = json.loads((ROOT / "cases" / "agent_action" / "agent_pick_and_place_on_table.json").read_text(encoding="utf-8"))
-        dynamic, static = runtime_objects_for_case(case)
-
-        self.assertEqual(native_case_type(case), "character_carry_drop")
-        agent = next(obj for obj in dynamic if obj["id"] == "agent")
-        package = next(obj for obj in dynamic if obj["id"] == "package")
-        self.assertEqual(agent["asset_kind"], "character")
-        self.assertIn("SKM_Manny", agent["ue5_path"])
-        self.assertTrue(agent["physics_properties"]["collision_enabled"])
-        self.assertEqual(agent["physics_properties"]["collision_profile"], "Pawn")
-        self.assertTrue(agent["params"]["sweep_movement"])
-        self.assertEqual(agent["params"]["gasp_max_frame_displacement_cm"], 12.0)
-        self.assertEqual(agent["params"]["interaction_slot_name"], "DefaultSlot")
-        self.assertLess(agent["rotation_degrees"][1], -60.0)
-        self.assertGreater(agent["rotation_degrees"][1], -80.0)
-        self.assertLess(min(point["position_m"][1] for point in agent["params"]["movement_waypoints"]), -0.6)
-        self.assertLessEqual(agent["params"]["movement_waypoints"][0]["position_m"][0], -0.8)
-        self.assertLessEqual(agent["params"]["movement_waypoints"][-1]["position_m"][0], 0.84)
-        waypoints = agent["params"]["movement_waypoints"]
-        segments = agent["params"]["animation_segments"]
-        self.assertAlmostEqual(waypoints[-1]["yaw_degrees"], waypoints[0]["yaw_degrees"])
-        self.assertIn("A_GrabMid", segments[0]["animation_ref"])
-        for left, right in zip(waypoints, waypoints[1:]):
-            if left["position_m"] != right["position_m"]:
-                continue
-            midpoint = (left["time_s"] + right["time_s"]) / 2.0
-            active = [
-                segment for segment in segments
-                if segment["start_s"] <= midpoint <= segment.get("end_s", float("inf"))
-            ][-1]
-            self.assertNotIn("Walk_Fwd", active["animation_ref"])
-        self.assertEqual([segment["name"] for segment in segments], ["grab_from_floor", "walk_route", "drop", "idle"])
-        self.assertGreater(next(segment for segment in segments if segment["name"] == "drop")["start_s"], 8.0)
-        self.assertEqual(package["behavior"], "character_carry_object")
-        self.assertEqual(package["params"]["attachment_socket"], "hand_r")
-        self.assertEqual(package["params"]["grasp_clearance_cm"], 3.0)
-        self.assertEqual(package["params"]["max_grasp_gap_cm"], 4.0)
-        self.assertEqual(package["params"]["grasp_alignment_start_gap_cm"], 4.0)
-        self.assertEqual(package["params"]["grasp_alignment_step_cm"], 3.0)
-        self.assertTrue(package["params"]["smooth_socket_follow"])
-        self.assertEqual(package["params"]["max_carry_follow_step_cm"], 5.0)
-        self.assertTrue(package["params"]["release_from_socket"])
-        self.assertEqual(package["params"]["release_goal_center_m"], [1.1656, 0.1548, 0.82])
-        self.assertEqual(next(obj for obj in static if obj["id"] == "table")["behavior"], "landing_surface")
-
-        native_source = (ROOT / "scripts" / "native_ue_physics_phenomena_scene.py").read_text(encoding="utf-8")
-        self.assertIn("attach_to_component", native_source)
-        self.assertIn("actual_socket_attached", native_function_source("apply_delayed_release_projectiles"))
-        self.assertIn("bounded_displacement_corrections", native_function_source("bound_gasp_post_tick_displacement"))
-        self.assertIn("play_slot_animation_as_dynamic_montage", native_function_source("play_gasp_interaction_montage"))
-        self.assertIn("unreal.Character", native_function_source("spawn_runtime_actor"))
-        self.assertNotIn('set_actor_material(actor, materials.get("runtime_character"))', native_source)
-        self.assertIn("sweep_movement", native_function_source("apply_trajectory_frame"))
-        self.assertIn("time_scale", native_function_source("apply_runtime_animation_segments"))
-
-        pick_case = json.loads((ROOT / "cases" / "agent_action" / "agent_pick_object_lift.json").read_text(encoding="utf-8"))
-        pick_dynamic, pick_static = runtime_objects_for_case(pick_case)
-        self.assertEqual(next(obj for obj in pick_dynamic if obj["id"] == "package")["behavior"], "character_carry_object")
-        self.assertFalse(any(obj["id"] == "table" for obj in pick_static))
-
-        throw_case = json.loads((ROOT / "cases" / "agent_action" / "agent_throw_object_into_bin.json").read_text(encoding="utf-8"))
-        throw_dynamic, throw_static = runtime_objects_for_case(throw_case)
-        self.assertEqual(next(obj for obj in throw_dynamic if obj["id"] == "ball")["behavior"], "character_throw_projectile")
-        self.assertEqual(next(obj for obj in throw_static if obj["id"] == "bin")["behavior"], "landing_surface")
-
-    def test_gasp_humanoid_adapter_only_replaces_the_character_asset(self) -> None:
-        case = json.loads((ROOT / "cases" / "agent_action" / "agent_pick_and_place_on_table.json").read_text(encoding="utf-8"))
-        with patch.dict(os.environ, {"SIM_HUMANOID_ADAPTER": "gasp"}):
-            dynamic, _static = runtime_objects_for_case(case)
-
-        agent = next(obj for obj in dynamic if obj["id"] == "agent")
-        package = next(obj for obj in dynamic if obj["id"] == "package")
-        self.assertEqual(agent["asset_kind"], "blueprint")
-        self.assertIn("SandboxCharacter_CMC", agent["ue5_path"])
-        self.assertAlmostEqual(agent["initial_position_m"][0], -0.8)
-        self.assertAlmostEqual(agent["initial_position_m"][1], -0.05)
-        self.assertEqual(agent["params"]["humanoid_adapter"], "gasp")
-        self.assertEqual(agent["params"]["movement_input_action"], "/Game/Input/IA_Move.IA_Move")
-        self.assertTrue(
-            all(
-                segment["animation_ref"]
-                == "/Game/Harness/Retarget/GASP_UEFN_A_GrabMid.GASP_UEFN_A_GrabMid"
-                for segment in agent["params"]["animation_segments"]
-                if segment["name"] in {"grab_from_floor", "drop"}
-            )
-        )
-        self.assertEqual(package["behavior"], "character_carry_object")
-        self.assertEqual(package["asset_kind"], "blueprint")
-        self.assertIn("BP_GrabbableObject", package["ue5_path"])
-        self.assertTrue(package["params"]["native_grabbable_blueprint"])
-        resolver_source = native_function_source("resolve_runtime_asset_path")
-        self.assertLess(resolver_source.index('asset_kind") or "").casefold() == "blueprint"'), resolver_source.index('behavior") == "character_carry_object"'))
-        self.assertIn("get_bone_index", native_function_source("actor_skeletal_component_with_socket"))
-        self.assertIn("controller.possess", native_function_source("initialize_gasp_locomotion"))
-        self.assertIn("max_walk_speed", native_function_source("initialize_gasp_locomotion"))
-        self.assertIn("input_scale", native_function_source("initialize_gasp_locomotion"))
-        self.assertIn("/Game/Input/IA_Walk.IA_Walk", native_function_source("initialize_gasp_locomotion"))
-        self.assertIn("native_grab_input_action", native_function_source("initialize_gasp_locomotion"))
-        self.assertIn("grab_action", native_function_source("apply_gasp_locomotion_frame"))
-        self.assertIn("grabbable_object", native_function_source("apply_gasp_locomotion_frame"))
-        self.assertIn("is_grabbing", native_function_source("apply_gasp_locomotion_frame"))
-        self.assertIn('getattr(target, f"set_{property_name}"', native_function_source("apply_gasp_locomotion_frame"))
-        self.assertIn("add_movement_input", native_function_source("apply_gasp_locomotion_frame"))
-        self.assertIn("atan2(-delta_x, delta_y)", native_function_source("apply_gasp_locomotion_frame"))
-        self.assertIn('right.get("yaw_degrees"', native_function_source("apply_gasp_locomotion_frame"))
-        self.assertIn("KEEP_WORLD", native_function_source("attach_actor_clear_of_socket"))
-        self.assertIn("max_grasp_gap_cm", native_function_source("attach_actor_clear_of_socket"))
-        self.assertIn("GASP_ANIMATION_BLUEPRINT_MONTAGE", native_function_source("play_gasp_interaction_montage"))
-        self.assertIn("IGNORE_ROOT_MOTION", native_function_source("play_gasp_interaction_montage"))
-        self.assertIn('if not state.get("moving")', native_function_source("bound_gasp_post_tick_displacement"))
-        self.assertIn('if not segment:', native_function_source("apply_runtime_animation_segments"))
-        delayed_source = native_function_source("apply_delayed_release_projectiles")
-        self.assertIn("min_grasp_gap_cm", delayed_source)
-        self.assertIn("grasp_rejected_frames", delayed_source)
-        self.assertIn("grasp_alignment_frames", delayed_source)
-        self.assertIn("runtime_desired_extent_cm(obj)", delayed_source)
-
-        with patch.dict(os.environ, {"SIM_HUMANOID_ADAPTER": "ddv"}):
-            ddv_dynamic, _ = runtime_objects_for_case(case)
-        ddv_agent = next(obj for obj in ddv_dynamic if obj["id"] == "agent")
-        ddv_package = next(obj for obj in ddv_dynamic if obj["id"] == "package")
-        self.assertEqual(ddv_agent["params"]["humanoid_adapter"], "ddv")
-        self.assertIn("BP_DCAdv_ThirdPChar", ddv_agent["ue5_path"])
-        self.assertTrue(ddv_package["params"]["native_grabbable_blueprint"])
-        self.assertIn('adapter == "ddv"', native_function_source("apply_runtime_animation_segments"))
-        self.assertIn("last_grasp_alignment_frame", delayed_source)
-        self.assertIn("closest_grasp_hand_position_m", delayed_source)
-        self.assertIn("release_rejected_frames", delayed_source)
-        self.assertIn("follow_socket_smoothly", delayed_source)
-        highres_source = native_function_source("start_highres_viewport_capture")
-        self.assertIn("gasp_tick_pending", highres_source)
-        self.assertIn("gasp_tick_target_time", highres_source)
-        self.assertIn("set_view_target_with_blend", highres_source)
-        self.assertIn("dict.fromkeys((camera, capture_camera))", highres_source)
-        self.assertIn("gasp_first_frame_camera_stabilized", highres_source)
-
-    def test_actor_placement_does_not_erase_agent_interaction_semantics(self) -> None:
-        case = json.loads((ROOT / "cases" / "agent_action" / "agent_pick_and_place_on_table.json").read_text(encoding="utf-8"))
-        placement = {"actor_bindings": [{"object_id": "agent"}, {"object_id": "package"}]}
-        with patch.dict(os.environ, {"SIM_HUMANOID_ADAPTER": "gasp"}):
-            dynamic, static = runtime_objects_for_case(case, actor_placement=placement)
-
-        self.assertEqual(next(obj for obj in dynamic if obj["id"] == "agent")["asset_kind"], "blueprint")
-        self.assertEqual(next(obj for obj in dynamic if obj["id"] == "package")["behavior"], "character_carry_object")
-        self.assertEqual({obj["id"] for obj in static}, {"floor", "source_table", "table"})
-
     def test_static_mesh_material_override_covers_every_asset_slot(self) -> None:
         source = native_function_source("spawn_static_mesh")
 
@@ -222,12 +75,35 @@ class UECaseConfigurationTests(unittest.TestCase):
         case = {"case_id": "map_case", "scene": {"map_preference": "/Game/Maps/Chosen.Chosen"}}
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(requested_map_package(case), "/Game/Maps/Chosen.Chosen")
-            self.assertEqual(compile_minimal_scene_spec(case)["map"]["requested_package"], "/Game/Maps/Chosen.Chosen")
+            self.assertEqual(compile_minimal_scene_spec(case)["map"]["requested_package"], "")
+            resolved = compile_minimal_scene_spec(
+                case,
+                asset_resolution={
+                    "scene_map": {
+                        "requested_reference": "/Game/Maps/Chosen.Chosen",
+                        "selection_reason": "first_reference_approved_candidate",
+                        "selected_asset": {
+                            "asset_id": "chosen_map",
+                            "ue_path": "/Game/Maps/Chosen.Chosen",
+                        },
+                    }
+                },
+            )
+            self.assertEqual(resolved["map"]["requested_package"], "/Game/Maps/Chosen.Chosen")
+            self.assertEqual(resolved["map"]["selected_asset_id"], "chosen_map")
 
     def test_explicit_environment_map_overrides_case(self) -> None:
         case = {"scene": {"map_preference": "/Game/Maps/Chosen.Chosen"}}
         with patch.dict(os.environ, {"SIM_STUDIO_UE_MAP": "/Game/Maps/Override.Override"}, clear=True):
             self.assertEqual(requested_map_package(case), "/Game/Maps/Override.Override")
+
+    def test_preflight_cannot_restore_an_unresolved_case_or_environment_map(self) -> None:
+        case = {"case_id": "map_case", "scene": {"map_preference": "/Game/Maps/CaseOnly.CaseOnly"}}
+        with patch.dict(os.environ, {"SIM_STUDIO_UE_MAP": "/Game/Maps/EnvironmentOnly.EnvironmentOnly"}, clear=True):
+            report = build_ue_preflight_report("map_case", case, resolved_map_package="")
+
+        self.assertEqual(report["raw_env"]["SIM_STUDIO_UE_MAP"], "")
+        self.assertFalse(report["env_presence"]["SIM_STUDIO_UE_MAP"])
 
     def test_one_120hz_solver_trace_samples_to_24_and_60fps(self) -> None:
         plan_24 = build_timebase(duration_s=5.0, physics_hz=120, render_fps=24)

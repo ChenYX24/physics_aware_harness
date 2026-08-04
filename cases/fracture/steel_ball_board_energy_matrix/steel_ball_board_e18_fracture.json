@@ -7,7 +7,7 @@
     "layout": "steel_ball_destructible_board_energy_probe",
     "duration_s": 2.5,
     "coordinate_system": "z_up",
-    "map_preference": "/Game/Maps/MarketEnvironment/Maps/Day.Day",
+    "map_preference": "/Game/HarnessGenerated/Maps/BallBoardSmoke.BallBoardSmoke",
     "lighting_preset": "map_lights_balanced_fill",
     "scene_bounds": {"center": [0.0, -0.35, 0.7], "extent": [1.2, 1.8, 1.0]}
   },

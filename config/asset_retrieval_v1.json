@@ -1,0 +1,44 @@
+{
+  "schema_version": "asset_retrieval_config_v1",
+  "embedding": {
+    "provider": "open_clip",
+    "model_name": "xlm-roberta-base-ViT-B-32",
+    "pretrained": "laion5b_s13b_b90k",
+    "source_uri": "https://huggingface.co/laion/CLIP-ViT-B-32-xlm-roberta-base-laion5B-s13B-b90k",
+    "license": "MIT",
+    "dimension": 512,
+    "document_version": "asset_semantic_document_v1",
+    "device": "cpu",
+    "batch_size": 32,
+    "model_cache": "${SIM_HARNESS_WORKSPACE}/models/openclip",
+    "allow_download": false
+  },
+  "vector_index": {
+    "table_name": "asset_embedding_vec_v1",
+    "distance_metric": "cosine",
+    "sqlite_vec_package_version": "0.1.10a4",
+    "sqlite_vec_runtime_version": "v0.1.10-alpha.4"
+  },
+  "rrf": {
+    "k": 60,
+    "weights": {
+      "exact": 2.0,
+      "alias": 1.8,
+      "fts": 1.0,
+      "text_vector": 1.0,
+      "image_vector": 1.0
+    }
+  },
+  "abstention": {
+    "enabled": true,
+    "require_no_lexical_hits": true,
+    "minimum_vector_similarity": 0.55,
+    "minimum_top1_margin": 0.01
+  },
+  "rules": {
+    "exact_priority": true,
+    "materialized_bonus": 0.001,
+    "taxonomy_match_bonus": 0.002,
+    "preference_scale": 0.001
+  }
+}

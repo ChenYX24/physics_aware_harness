@@ -6,35 +6,105 @@ import re
 from pathlib import Path
 from typing import Any
 
+from harness.assets.embedding_index import EmbeddingProvider
+from harness.assets.search_intent import SearchIntent, asset_matches_approx_size, taxonomy_relaxation_values
+from harness.assets.sqlite_catalog import SQLiteCatalog, default_catalog_path, effective_license_tier
+
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 class AssetRegistry:
-    def __init__(self, path: str | Path | None = None) -> None:
-        configured = path or os.environ.get("SIM_STUDIO_ASSET_REGISTRY") or ROOT / "assets" / "asset_physics_index.json"
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        *,
+        embedding_provider: EmbeddingProvider | None = None,
+        retrieval_config_path: str | Path | None = None,
+    ) -> None:
+        explicit = path or os.environ.get("SIM_STUDIO_ASSET_REGISTRY")
+        workspace_catalog = default_catalog_path()
+        configured = explicit or (workspace_catalog if workspace_catalog.is_file() else ROOT / "assets" / "asset_physics_index.json")
         self.path = Path(configured)
-        self.assets = self._load()
+        self._sqlite = (
+            SQLiteCatalog(
+                self.path,
+                embedding_provider=embedding_provider,
+                retrieval_config_path=retrieval_config_path,
+            )
+            if self.path.suffix.casefold() in {".sqlite", ".sqlite3", ".db"} and self.path.is_file()
+            else None
+        )
+        self.assets = self._load_path(ROOT / "assets" / "asset_registry.example.json") if self._sqlite else self._load()
 
     def search(self, query: str, *, top_k: int = 5) -> list[dict[str, Any]]:
-        if not self.assets:
+        if not str(query).strip():
             return []
-        q = query.casefold().strip()
-        tokens = [token for token in re.split(r"[^a-z0-9_]+", q) if token]
+        return self.search_intent(SearchIntent(raw_query=query, semantic_text=query), top_k=top_k)
+
+    def search_intent(self, intent: SearchIntent, *, top_k: int = 5) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        if self._sqlite:
+            results.extend(self._sqlite.search(intent, top_k=top_k))
+            if len(results) >= top_k:
+                return results
+        if not self.assets:
+            return results
+        for requested_category in taxonomy_relaxation_values(intent):
+            fallback = self._search_json(intent, top_k=top_k, requested_category=requested_category)
+            if fallback:
+                seen = {asset_identity(item) for item in results}
+                results.extend(item for item in fallback if asset_identity(item) not in seen)
+                return results[:top_k]
+        return results[:top_k]
+
+    def search_detailed(self, intent: SearchIntent, *, top_k: int = 5) -> dict[str, Any]:
+        if self._sqlite:
+            return self._sqlite.search_detailed(intent, top_k=top_k)
+        assets = self.search_intent(intent, top_k=top_k)
+        return {
+            "results": [
+                {
+                    "asset": asset,
+                    "score": {
+                        "asset_id": asset_identity(asset),
+                        "channels": {"legacy_json": {"rank": index + 1}},
+                    },
+                }
+                for index, asset in enumerate(assets)
+            ],
+            "retrieval": {"backend": "legacy_json", "eligible_count": len(assets)},
+        }
+
+    def _search_json(
+        self,
+        intent: SearchIntent,
+        *,
+        top_k: int,
+        requested_category: str | None,
+    ) -> list[dict[str, Any]]:
+        q = intent.raw_query.casefold().strip()
+        tokens = [token for token in re.split(r"[^\w]+", q) if token]
         scored = []
         for item in self.assets:
+            if not candidate_matches_search_intent(item, intent, requested_category=requested_category):
+                continue
             text = searchable_text(item)
             exact_values = {
                 str(item.get(key) or "").casefold()
                 for key in ("id", "asset_id", "name", "ue_path")
             }
+            aliases = {str(value).casefold() for value in item.get("aliases") or []}
             score = sum(1 for token in tokens if token in text)
             if q in exact_values:
                 score += 20
+            elif q in aliases:
+                score += 18
             elif q and q in text:
                 score += 4
             if item.get("materialized"):
                 score += 1
+            score += preference_score(item, intent)
             if score:
                 scored.append((score, item))
         scored.sort(key=lambda pair: (-pair[0], str(pair[1].get("id") or pair[1].get("name") or "")))
@@ -44,6 +114,9 @@ class AssetRegistry:
         path = self.path
         if not path.exists() and self.path.name == "asset_physics_index.json":
             path = ROOT / "assets" / "asset_registry.example.json"
+        return self._load_path(path)
+
+    def _load_path(self, path: Path) -> list[dict[str, Any]]:
         if not path.exists():
             return []
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -105,3 +178,125 @@ def searchable_text(item: dict[str, Any]) -> str:
         elif value is not None:
             values.append(str(value))
     return " ".join(values).casefold()
+
+
+def asset_identity(item: dict[str, Any]) -> str:
+    return str(item.get("asset_id") or item.get("id") or item.get("ue_path") or item.get("name") or "")
+
+
+def candidate_matches_search_intent(
+    item: dict[str, Any],
+    intent: SearchIntent,
+    *,
+    requested_category: str | None = None,
+) -> bool:
+    must = intent.must
+    ue = item.get("ue") if isinstance(item.get("ue"), dict) else {}
+    asset_type = str(item.get("type") or item.get("asset_kind") or ue.get("class_name") or "").casefold()
+    category_values = {
+        str(item.get(key) or "").casefold()
+        for key in ("category", "category_l1", "category_l2")
+        if item.get(key)
+    }
+    source_kind = str(item.get("source_kind") or "").casefold()
+    ue_path = item.get("ue_path") or ue.get("object_path")
+    backend_values = _backend_values(must.get("backend"))
+    if backend_values and "unreal" in backend_values and not ue_path:
+        return False
+    if "collision" in must and bool(must["collision"]) != bool(item.get("collider") and item.get("collision_profile")):
+        return False
+    if "materialized" in must and bool(must["materialized"]) != bool(item.get("materialized")):
+        return False
+    if "runtime_ready" in must and bool(must["runtime_ready"]) != _runtime_ready(item):
+        return False
+    if bool(must.get("real_3d_geometry")) and asset_type in {"image", "texture", "material", "material_only", "decal"}:
+        return False
+    if not _matches_value(source_kind, must.get("source_kind")):
+        return False
+    if not asset_matches_approx_size(item, intent):
+        return False
+    if not _matches_value(asset_type, must.get("asset_type", must.get("geometry_type", must.get("class_name")))):
+        return False
+    inferred_license_tier = effective_license_tier(
+        str(item.get("license") or ""),
+        item.get("quality_status"),
+        declared_tier=item.get("license_tier"),
+        source_kind=item.get("source_kind"),
+        redistribution=item.get("redistribution") or (item.get("release_audit") or {}).get("redistribution"),
+    )
+    if not _matches_value(inferred_license_tier, must.get("license_tier")):
+        return False
+    if requested_category and str(requested_category).casefold() not in {"physics_critical", "visual_only"}:
+        if str(requested_category).casefold() not in category_values:
+            return False
+    if must.get("physics_role") is not None:
+        roles = {
+            str(value).casefold()
+            for value in [*(item.get("tags") or []), *(item.get("usage_groups") or [])]
+        }
+        if not any(value in roles for value in _expected_values(must["physics_role"])):
+            return False
+    excluded_type = intent.must_not.get("asset_type", intent.must_not.get("geometry_type", intent.must_not.get("class_name")))
+    if excluded_type is not None and _matches_value(asset_type, excluded_type):
+        return False
+    if intent.must_not.get("license_tier") is not None and _matches_value(
+        inferred_license_tier,
+        intent.must_not["license_tier"],
+    ):
+        return False
+    if intent.must_not.get("source_kind") is not None and _matches_value(source_kind, intent.must_not["source_kind"]):
+        return False
+    excluded_backends = _backend_values(intent.must_not.get("backend"))
+    if "unreal" in excluded_backends and ue_path:
+        return False
+    excluded_categories = _expected_values(intent.must_not.get("category"))
+    if excluded_categories.intersection(category_values):
+        return False
+    return True
+
+
+def preference_score(item: dict[str, Any], intent: SearchIntent) -> float:
+    text = searchable_text(item)
+    score = 0.0
+    for preference in intent.should:
+        value = preference.value
+        values = value if isinstance(value, list) else [value]
+        if any(str(candidate).casefold() in text for candidate in values):
+            score += preference.weight * preference.confidence
+    return score
+
+
+def _runtime_ready(item: dict[str, Any]) -> bool:
+    bindings = item.get("backend_bindings")
+    if isinstance(bindings, dict):
+        unreal = next(
+            (
+                value
+                for backend, value in bindings.items()
+                if str(backend).casefold() == "ue"
+                or str(backend).casefold().startswith("ue_")
+                or str(backend).casefold().startswith("unreal")
+            ),
+            None,
+        )
+        if isinstance(unreal, dict) and "runtime_ready" in unreal:
+            return bool(unreal["runtime_ready"])
+    source_kind = str(item.get("source_kind") or "")
+    return bool(item.get("ue_path") and (item.get("materialized") or source_kind in {"engine_builtin", "analytic_proxy"}))
+
+
+def _matches_value(actual: str, expected: Any) -> bool:
+    if expected is None:
+        return True
+    return actual in _expected_values(expected)
+
+
+def _expected_values(value: Any) -> set[str]:
+    if value is None:
+        return set()
+    values = value if isinstance(value, (list, tuple, set)) else [value]
+    return {str(item).casefold() for item in values}
+
+
+def _backend_values(value: Any) -> set[str]:
+    return {"unreal" if item == "ue" else item for item in _expected_values(value)}

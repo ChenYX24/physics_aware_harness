@@ -1,0 +1,76 @@
+{
+  "schema_version": "asset_retrieval_benchmark_queries_v1",
+  "catalog_fixture": "adp_release_audit_2909_v1",
+  "queries": [
+    {
+      "query_id": "exact_asset_id",
+      "search_intent": {
+        "raw_query": "Map_BallBoardSmoke",
+        "must": {"backend": "unreal", "real_3d_geometry": true}
+      },
+      "expected_asset_ids": ["Map_BallBoardSmoke"]
+    },
+    {
+      "query_id": "explicit_alias",
+      "search_intent": {
+        "raw_query": "breakable board",
+        "must": {"backend": "unreal", "real_3d_geometry": true, "collision": true}
+      },
+      "expected_asset_ids": ["BP_BoardDestructible"]
+    },
+    {
+      "query_id": "fts_traffic_cone",
+      "search_intent": {
+        "raw_query": "traffic cone",
+        "must": {"backend": "unreal", "real_3d_geometry": true}
+      },
+      "expected_asset_ids": [
+        "game_maps_urbandowntown_meshes_trafficcone_a",
+        "game_maps_urbandowntown_meshes_trafficcone_b",
+        "game_maps_urbandowntown_meshes_trafficcone_c"
+      ]
+    },
+    {
+      "query_id": "map_name",
+      "search_intent": {
+        "raw_query": "MarketEnvironment Day",
+        "taxonomy": {"category": "map"},
+        "must": {"backend": "unreal", "class_name": "World", "real_3d_geometry": true},
+        "relaxation_policy": {"allow_parent_category": false}
+      },
+      "expected_asset_ids": ["game_maps_marketenvironment_maps_day"]
+    },
+    {
+      "query_id": "semantic_furniture_en",
+      "search_intent": {
+        "raw_query": "a wooden chair for a modern market",
+        "semantic_text": "a wooden chair for a modern market",
+        "taxonomy": {"category": "furniture", "subcategory": "chair"},
+        "must": {"backend": "unreal", "real_3d_geometry": true},
+        "relaxation_policy": {"allow_parent_category": true}
+      },
+      "expected_asset_ids": ["game_maps_marketenvironment_mesh_sm_chair_02"]
+    },
+    {
+      "query_id": "semantic_furniture_zh",
+      "search_intent": {
+        "raw_query": "市场中的木椅",
+        "semantic_text": "市场中的木椅",
+        "taxonomy": {"category": "furniture", "subcategory": "chair"},
+        "must": {"backend": "unreal", "real_3d_geometry": true},
+        "relaxation_policy": {"allow_parent_category": true}
+      },
+      "expected_asset_ids": ["game_maps_marketenvironment_mesh_sm_chair_02"]
+    },
+    {
+      "query_id": "no_match_axolotl",
+      "search_intent": {
+        "raw_query": "axolotl",
+        "semantic_text": "axolotl",
+        "must": {"backend": "unreal", "real_3d_geometry": true}
+      },
+      "expect_no_results": true,
+      "expected_match_status": "no_relevant_asset"
+    }
+  ]
+}

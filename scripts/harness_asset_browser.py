@@ -151,7 +151,7 @@ def build_asset_view(
         "reference_ready"
         if reference_gate["status"] == "pass"
         else "local_preview"
-        if catalog_ready and execution_gate["status"] in {"pass", "pass_local_preview"}
+        if catalog_ready
         else "blocked"
     )
     thumbnail = asset.get("thumbnail") or (

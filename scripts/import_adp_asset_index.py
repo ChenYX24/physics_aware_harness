@@ -4,11 +4,20 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from harness.assets.sqlite_catalog import default_catalog_path, initialize_catalog
 
 SOURCE_NAME = "agenticdataplatform_asset_index"
 DEFAULT_WORKSPACE = Path.home() / "SimulatorWorkspace" / "physics_aware_harness"
@@ -71,7 +80,19 @@ def package_file_path(repo_root: Path | None, package_name: str, class_name: str
 def is_materialized(path: Path | None) -> bool:
     if not path or not path.is_file():
         return False
-    return not path.read_bytes()[:80].startswith(b"version https://git-lfs.github.com/spec/v1")
+    with path.open("rb") as stream:
+        return not stream.read(80).startswith(b"version https://git-lfs.github.com/spec/v1")
+
+
+def sha256_file(path: Path | None) -> str | None:
+    if not is_materialized(path):
+        return None
+    assert path is not None
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def category_pair(item: dict[str, Any]) -> tuple[str, str]:
@@ -181,13 +202,37 @@ def bbox_size_m(item: dict[str, Any]) -> list[float] | None:
     return [round(float(value) / 100.0, 5) for value in bbox]
 
 
-def dependency_file_paths(repo_root: Path | None, dependencies: list[str]) -> list[str]:
+def dependency_file_paths(
+    repo_root: Path | None,
+    dependencies: list[str],
+    raw: dict[str, dict[str, Any]] | None = None,
+) -> list[str]:
     paths: list[str] = []
+    raw = raw or {}
     for dependency in dependencies:
-        dep_file = package_file_path(repo_root, dependency, None)
+        dep_file = package_file_path(repo_root, dependency, (raw.get(dependency) or {}).get("ue_class"))
         if dep_file:
             paths.append(str(dep_file))
     return paths
+
+
+def dependency_record(
+    dependency: str,
+    raw: dict[str, dict[str, Any]],
+    materialize_repo_root: Path | None,
+) -> dict[str, Any]:
+    class_name = (raw.get(dependency) or {}).get("ue_class")
+    local_path = package_file_path(materialize_repo_root, dependency, class_name)
+    materialized = is_materialized(local_path)
+    return {
+        "package": dependency,
+        "class_name": class_name,
+        "kind": dependency_kind(dependency, raw),
+        "local_path": str(local_path) if local_path else None,
+        "materialized": materialized,
+        "sha256": sha256_file(local_path) if materialized else None,
+        "byte_size": local_path.stat().st_size if materialized and local_path else None,
+    }
 
 
 def convert_asset(
@@ -206,19 +251,17 @@ def convert_asset(
     local_file = package_file_path(materialize_repo_root, asset_id, class_name)
     metadata_file = package_file_path(metadata_repo_root or materialize_repo_root, asset_id, class_name)
     dependency_materialized_count = sum(
-        1 for dependency in dependencies if is_materialized(package_file_path(materialize_repo_root, dependency, None))
+        1
+        for dependency in dependencies
+        if is_materialized(
+            package_file_path(materialize_repo_root, dependency, (raw.get(dependency) or {}).get("ue_class"))
+        )
     )
     material_category = material_guess(item)
     materialized = is_materialized(local_file)
+    runtime_ready = materialized and dependency_materialized_count == len(dependencies)
     interaction = item.get("interaction") if isinstance(item.get("interaction"), dict) else {}
-    dependency_records = [
-        {
-            "package": dependency,
-            "class_name": (raw.get(dependency) or {}).get("ue_class"),
-            "kind": dependency_kind(dependency, raw),
-        }
-        for dependency in dependencies
-    ]
+    dependency_records = [dependency_record(dependency, raw, materialize_repo_root) for dependency in dependencies]
     aliases = sorted(
         {
             str(value).strip()
@@ -238,6 +281,7 @@ def convert_asset(
     collider = "mesh" if class_name in {"StaticMesh", "SkeletalMesh"} else "actor"
     mass_kg = item.get("estimated_mass_kg")
     preview_path = thumbnail_path(index_path, item.get("thumbnail"), asset_id) if index_path else None
+    content_hash = sha256_file(local_file)
     return {
         "asset_id": asset_key(asset_id),
         "name": item.get("asset_name") or asset_id.rsplit("/", 1)[-1],
@@ -253,7 +297,11 @@ def convert_asset(
         "source_kind": "local_ue_project" if materialized else "catalog_candidate",
         "source_uri": f"ue://{asset_id.lstrip('/')}",
         "license": "UNVERIFIED_LOCAL_ENTITLEMENT",
+        "license_tier": "local_preview" if materialized else "blocked",
         "quality_status": "local_preview" if materialized else "discovered",
+        "lifecycle_status": "runtime_bound" if runtime_ready else "materialized" if materialized else "discovered",
+        "sha256": content_hash,
+        "byte_size": local_file.stat().st_size if materialized and local_file else None,
         "ue_path": object_path(asset_id),
         "collider": collider,
         "mass_kg": mass_kg,
@@ -266,7 +314,21 @@ def convert_asset(
             "collider": collider,
             "collision_profile": collision_profile,
         },
-        "paths": {"ue5": object_path(asset_id), "thumbnail": preview_path},
+        "paths": {
+            "ue5": object_path(asset_id),
+            "thumbnail": preview_path,
+            "local_file": str(local_file) if local_file else None,
+        },
+        "files": [
+            {
+                "role": "primary",
+                "local_path": str(local_file),
+                "format": local_file.suffix.casefold().lstrip("."),
+                "sha256": content_hash,
+                "byte_size": local_file.stat().st_size if materialized else None,
+                "materialized": materialized,
+            }
+        ] if local_file else [],
         "ue": {
             "object_path": object_path(asset_id),
             "package_name": asset_id,
@@ -274,6 +336,14 @@ def convert_asset(
             "class_name": class_name,
             "dependencies": dependencies,
             "material_paths": [dep for dep in dependencies if "/Material" in dep or "/Materials" in dep],
+        },
+        "backend_bindings": {
+            "unreal": {
+                "object_path": object_path(asset_id),
+                "class_name": class_name,
+                "materialized": materialized,
+                "runtime_ready": runtime_ready,
+            }
         },
         "bundle": {
             "bundle_id": f"ue_bundle:{asset_id}",
@@ -294,7 +364,7 @@ def convert_asset(
             "interaction": item.get("interaction"),
             "estimated_mass_kg": item.get("estimated_mass_kg"),
             "repo_file": str(metadata_file) if metadata_file else None,
-            "dependency_files": dependency_file_paths(metadata_repo_root or materialize_repo_root, dependencies),
+            "dependency_files": dependency_file_paths(metadata_repo_root or materialize_repo_root, dependencies, raw),
             "dependency_materialized_count": dependency_materialized_count,
         },
         "source": SOURCE_NAME,
@@ -595,6 +665,12 @@ def parse_args() -> argparse.Namespace:
         help="Local catalog output directory outside Git.",
     )
     parser.add_argument("--top-k", type=int, default=8)
+    parser.add_argument(
+        "--catalog-path",
+        default=str(default_catalog_path()),
+        help="SQLite Asset Catalog path; defaults to $SIM_HARNESS_WORKSPACE/catalog/assets/catalog.sqlite.",
+    )
+    parser.add_argument("--skip-sqlite", action="store_true", help="Write legacy JSON outputs without updating SQLite.")
     return parser.parse_args()
 
 
@@ -614,6 +690,9 @@ def main() -> None:
     write_json(output_dir / "scenario_manifest.json", scenario_manifest)
     write_json(output_dir / "map_catalog.json", scenario_manifest)
     write_json(output_dir / "asset_group_index.json", group_index)
+    catalog_stats = None
+    if not args.skip_sqlite:
+        catalog_stats = initialize_catalog(args.catalog_path).import_registry(registry)
     print(
         json.dumps(
             {
@@ -622,6 +701,7 @@ def main() -> None:
                 "materialized_counts": registry["materialized_counts"],
                 "map_count": scenario_manifest["map_count"],
                 "missing_required_keys": manifest["missing_required_keys"],
+                "sqlite_catalog": catalog_stats,
             },
             indent=2,
             ensure_ascii=False,

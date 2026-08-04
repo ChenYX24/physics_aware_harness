@@ -1,0 +1,148 @@
+{
+  "assets": [
+    {
+      "candidates": [
+        {
+          "aliases": [
+            "ball"
+          ],
+          "asset_id": "analytic_sphere",
+          "category": "physics_critical",
+          "collider": "sphere",
+          "collision_profile": "PhysicsActor",
+          "license": "Unreal Engine EULA",
+          "mass_kg": 1.0,
+          "material": {
+            "dynamic_friction": 0.1,
+            "restitution": 0.5,
+            "static_friction": 0.2
+          },
+          "name": "Analytic Sphere",
+          "quality_gate": {
+            "content_identity": "ue://Engine/BasicShapes/Sphere.Sphere",
+            "dependency_status": {
+              "complete": true,
+              "declared_count": 0,
+              "materialized_count": 0,
+              "missing_dependencies": []
+            },
+            "execution_failure_codes": [],
+            "failure_codes": [],
+            "hash_required": false,
+            "license_tier": "reference",
+            "local_file": null,
+            "materialized": true,
+            "reference_approved": true,
+            "reference_blockers": [],
+            "status": "pass",
+            "ue_binding_ready": true
+          },
+          "quality_status": "approved_proxy",
+          "source_kind": "engine_builtin",
+          "source_uri": "ue://Engine/BasicShapes/Sphere.Sphere",
+          "tags": [
+            "passive_target",
+            "sphere"
+          ],
+          "thumbnail": null,
+          "type": "StaticMesh",
+          "ue_path": "/Engine/BasicShapes/Sphere.Sphere"
+        }
+      ],
+      "fallback_mode": null,
+      "fallback_reason": null,
+      "intent": {
+        "category": "physics_critical",
+        "object_id": "ball",
+        "physics_critical": true,
+        "query": "passive_target sphere",
+        "required_properties": [
+          "collider",
+          "mass",
+          "rigid_body",
+          "collision_profile"
+        ],
+        "role": "passive_target"
+      },
+      "rejected_candidates": [],
+      "runtime_binding_requirements": [
+        "collider",
+        "mass",
+        "rigid_body",
+        "collision_profile"
+      ],
+      "selected_asset": {
+        "aliases": [
+          "ball"
+        ],
+        "asset_id": "analytic_sphere",
+        "category": "physics_critical",
+        "collider": "sphere",
+        "collision_profile": "PhysicsActor",
+        "license": "Unreal Engine EULA",
+        "mass_kg": 1.0,
+        "material": {
+          "dynamic_friction": 0.1,
+          "restitution": 0.5,
+          "static_friction": 0.2
+        },
+        "name": "Analytic Sphere",
+        "quality_gate": {
+          "content_identity": "ue://Engine/BasicShapes/Sphere.Sphere",
+          "dependency_status": {
+            "complete": true,
+            "declared_count": 0,
+            "materialized_count": 0,
+            "missing_dependencies": []
+          },
+          "execution_failure_codes": [],
+          "failure_codes": [],
+          "hash_required": false,
+          "license_tier": "reference",
+          "local_file": null,
+          "materialized": true,
+          "reference_approved": true,
+          "reference_blockers": [],
+          "status": "pass",
+          "ue_binding_ready": true
+        },
+        "quality_status": "approved_proxy",
+        "source_kind": "engine_builtin",
+        "source_uri": "ue://Engine/BasicShapes/Sphere.Sphere",
+        "tags": [
+          "passive_target",
+          "sphere"
+        ],
+        "thumbnail": null,
+        "type": "StaticMesh",
+        "ue_path": "/Engine/BasicShapes/Sphere.Sphere"
+      },
+      "selection_reason": "first_reference_approved_candidate"
+    }
+  ],
+  "capability_id": "asset_intent_resolution",
+  "case_id": "asset_golden",
+  "invocation_contract": {
+    "next_capability_id": "asset_runtime_binding_invocation",
+    "physics_critical_required_properties": [
+      "collider",
+      "mass",
+      "rigid_body",
+      "collision_profile"
+    ],
+    "requires_selected_asset_or_fallback": true
+  },
+  "physics_critical_count": 1,
+  "quality_gate": {
+    "approved_count": 1,
+    "fallback_count": 0,
+    "local_preview_count": 0,
+    "local_preview_enabled": false,
+    "reference_assets_ready": true,
+    "rejected_candidate_count": 0
+  },
+  "schema_version": "harness_asset_resolution_v1",
+  "stage_id": "asset_resolution",
+  "top_k": 1,
+  "visual_only_count": 0
+}
