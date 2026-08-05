@@ -94,6 +94,7 @@ def main() -> int:
         or args.height > 4320
     ):
         raise SystemExit("custom resolution must be within 320x180 and 7680x4320")
+    requested_backend = None if args.backend in {None, "auto"} else args.backend
     generation = None
     if has_generation_input:
         if args.case_spec_version == "v1":
@@ -108,6 +109,7 @@ def main() -> int:
                 text=args.prompt,
                 image_paths=args.image,
                 allow_image_upload=args.allow_image_upload,
+                requested_backend=requested_backend,
             )
             planning_dir = Path(output_root) / "_planning" / args.case_id
             generation = generate_case_spec_v2(request, artifact_dir=planning_dir)
@@ -122,7 +124,6 @@ def main() -> int:
         requested_views = parse_csv(args.views) if args.views else None if is_v2 else ["front_static"]
         render_passes = parse_csv(args.render_passes) if args.render_passes else None if is_v2 else ["rgb"]
     render_mode = profile.render_mode if profile else args.mode
-    requested_backend = None if args.backend in {None, "auto"} else args.backend
     if not is_v2 and requested_backend is None:
         requested_backend = "fallback"
     compilation = compile_runtime_case(

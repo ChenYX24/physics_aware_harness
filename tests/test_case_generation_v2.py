@@ -120,6 +120,32 @@ class CaseGenerationV2Tests(unittest.TestCase):
         errors = client.calls[-1]["payload"]["validation_errors"]["issues"]
         self.assertIn("/timebase", {item["path"] for item in errors})
 
+    def test_explicit_requested_backend_is_authoritative_for_generated_case(self) -> None:
+        generated = case_spec_v2_fixture()
+        generated["backend_constraints"]["allowed_solvers"] = ["fallback"]
+        generated["backend_constraints"]["render_backend"] = "fallback"
+        request = build_case_request(
+            case_id="generated_for_ue",
+            text="Render a collision in UE.",
+            requested_backend="ue",
+        )
+        client = FakeJSONClient([expansion_fixture(), generated])
+
+        result = generate_case_spec_v2(request, client=client)
+
+        constraints = result.case_spec.data["backend_constraints"]
+        self.assertEqual(constraints["allowed_solvers"], ["ue"])
+        self.assertEqual(constraints["render_backend"], "ue")
+        self.assertFalse(constraints["allow_multi_backend"])
+        self.assertEqual(
+            result.case_spec.data["provenance"]["case_generation"]["execution_constraints"],
+            {"requested_backend": "ue"},
+        )
+        self.assertEqual(
+            client.calls[0]["payload"]["request"]["execution_constraints"],
+            {"requested_backend": "ue"},
+        )
+
     def test_image_upload_requires_explicit_authorization(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             image = Path(temporary) / "reference.png"

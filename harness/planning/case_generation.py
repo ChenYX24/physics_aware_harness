@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import mimetypes
@@ -41,6 +42,7 @@ EXPANSION_FIELDS = (
     "ambiguities",
     "assumptions",
 )
+REQUESTED_BACKENDS = {"fallback", "genesis_fem", "genesis_sph", "taichi_cloth", "ue"}
 
 
 @dataclass(frozen=True)
@@ -160,6 +162,7 @@ def build_case_request(
     text: str | None = None,
     image_paths: list[str | Path] | None = None,
     allow_image_upload: bool = False,
+    requested_backend: str | None = None,
 ) -> dict[str, Any]:
     normalized_text = " ".join(str(text or "").split())
     paths = [Path(value).expanduser().resolve() for value in image_paths or []]
@@ -185,11 +188,15 @@ def build_case_request(
                 "external_upload_authorized": True,
             }
         )
+    backend = str(requested_backend or "").strip()
+    if backend and backend not in REQUESTED_BACKENDS:
+        raise ValueError(f"requested_backend must be one of {sorted(REQUESTED_BACKENDS)}")
     return {
         "schema_version": REQUEST_SCHEMA_VERSION,
         "case_id": str(case_id),
         "text": normalized_text,
         "inputs": images,
+        "execution_constraints": {"requested_backend": backend or None},
     }
 
 
@@ -284,6 +291,7 @@ def generate_case_spec_v2(
         "expansion_digest": stable_case_spec_digest(expansion),
         "llm_calls": receipts,
         "repair_count": repair_count,
+        "execution_constraints": copy.deepcopy(validated_request.get("execution_constraints") or {}),
     }
     if destination is not None:
         write_json(destination / "case_spec_v2.json", case_spec.data)
@@ -323,6 +331,13 @@ def _validate_request(request: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("request input_id values must be non-empty and unique")
     if not str(data.get("text") or "").strip() and not inputs:
         raise ValueError("request requires text or inputs")
+    constraints = data.get("execution_constraints") or {}
+    if not isinstance(constraints, Mapping):
+        raise ValueError("request execution_constraints must be an object")
+    requested_backend = constraints.get("requested_backend")
+    if requested_backend is not None and requested_backend not in REQUESTED_BACKENDS:
+        raise ValueError(f"request requested_backend must be one of {sorted(REQUESTED_BACKENDS)}")
+    data["execution_constraints"] = dict(constraints)
     return data
 
 
@@ -340,6 +355,7 @@ def _request_for_model(request: Mapping[str, Any]) -> dict[str, Any]:
             }
             for item in request.get("inputs") or []
         ],
+        "execution_constraints": dict(request.get("execution_constraints") or {}),
     }
 
 
@@ -393,6 +409,15 @@ def _apply_request_identity(case_spec: Mapping[str, Any], request: Mapping[str, 
     identity["case_id"] = str(request["case_id"])
     identity["source_request"] = str(request.get("text") or identity.get("source_request") or "")
     result["identity"] = identity
+    requested_backend = str(
+        (request.get("execution_constraints") or {}).get("requested_backend") or ""
+    ).strip()
+    if requested_backend:
+        backend = dict(result.get("backend_constraints")) if isinstance(result.get("backend_constraints"), Mapping) else {}
+        backend["allowed_solvers"] = [requested_backend]
+        backend["render_backend"] = requested_backend
+        backend["allow_multi_backend"] = False
+        result["backend_constraints"] = backend
     return result
 
 
