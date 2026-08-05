@@ -1,0 +1,197 @@
+{
+  "schema_version": "harness_case_spec_v2",
+  "identity": {
+    "case_id": "upward_throw_arc",
+    "title": "Forward and upward ballistic throw",
+    "source_request": "A rigid ball is thrown upward and forward. It rises to an apex, descends under gravity, and lands on the ground."
+  },
+  "capabilities": {
+    "primary": "projectile_gravity_motion",
+    "required": [
+      "projectile_gravity_motion"
+    ]
+  },
+  "scene": {
+    "environment_intent": "minimal ground plane for a ballistic arc",
+    "coordinate_system": "z_up",
+    "duration_s": 2.0,
+    "bounds_hint_m": [
+      3.0,
+      2.0,
+      2.0
+    ]
+  },
+  "timebase": {
+    "physics_hz": 120,
+    "observation_fps": 24,
+    "deterministic_seed": 42
+  },
+  "backend_constraints": {
+    "required_solver_capabilities": [
+      "rigid_body",
+      "contact_events",
+      "trajectory"
+    ],
+    "allowed_solvers": [
+      "fallback",
+      "ue"
+    ],
+    "render_backend": null,
+    "allow_multi_backend": true
+  },
+  "asset_policy": {
+    "allow_local": true,
+    "allow_external": false,
+    "allow_generation": false,
+    "allow_analytic_proxy": true,
+    "required_license_tier": "local_preview"
+  },
+  "objects": [
+    {
+      "id": "projectile",
+      "role": "projectile",
+      "geometry": {
+        "shape_hint": "sphere",
+        "approx_size_m": [
+          0.2,
+          0.2,
+          0.2
+        ]
+      },
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.4,
+        "collision_required": true,
+        "enable_gravity": true
+      },
+      "initial_state": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.18
+        ],
+        "rotation_deg": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          2.2258,
+          0.0,
+          3.5618
+        ]
+      },
+      "behavior": {}
+    },
+    {
+      "id": "ground",
+      "role": "ground",
+      "geometry": {
+        "shape_hint": "floor"
+      },
+      "physics": {
+        "body_type": "static",
+        "collision_required": true,
+        "enable_gravity": false
+      },
+      "initial_state": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation_deg": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "behavior": {}
+    }
+  ],
+  "relations": [
+    {
+      "type": "impacts",
+      "source": "projectile",
+      "target": "ground"
+    }
+  ],
+  "events": [
+    {
+      "type": "initial_launch",
+      "object": "projectile"
+    }
+  ],
+  "expected_behavior": {
+    "gravity_m_s2": 9.81,
+    "launch_angle_deg": 58.0,
+    "launch_speed_m_s": 4.2,
+    "expected_min_forward_displacement_m": 0.55,
+    "support": "ground"
+  },
+  "observation_requirements": {
+    "cameras": [
+      {
+        "role": "side_static",
+        "target_objects": [
+          "projectile",
+          "ground"
+        ]
+      },
+      {
+        "role": "tracking_subject",
+        "target_objects": [
+          "projectile"
+        ]
+      }
+    ],
+    "modalities": [
+      "rgb"
+    ],
+    "signals": [
+      "trajectory",
+      "contact_events",
+      "gravity_label",
+      "initial_velocity"
+    ]
+  },
+  "verification_requirements": {
+    "assertions": [
+      {
+        "type": "ballistic_gravity_impact",
+        "objects": [
+          "projectile",
+          "ground"
+        ]
+      }
+    ],
+    "thresholds": {}
+  },
+  "variant": {
+    "should_pass": true,
+    "physical_parameters": {
+      "ballistic_time_to_impact_s": 0.7735943114651106,
+      "target_impact_point_m": [
+        1.7218662184590432,
+        0.0,
+        0.0
+      ],
+      "gravity_m_s2": [
+        0.0,
+        0.0,
+        -9.81
+      ],
+      "gravity_enabled": true
+    }
+  },
+  "provenance": {
+    "migrated_from": "cases/projectile/upward_throw_arc.json",
+    "migration_kind": "v1_to_v2_representative"
+  },
+  "notes": "V2 migration preserves the V1 launch state; the verifier impact point is analytically derived from that state."
+}
