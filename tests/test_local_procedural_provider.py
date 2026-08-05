@@ -108,10 +108,13 @@ class LocalProceduralProviderTests(unittest.TestCase):
         fallback_order: list[str] | None = None,
         route: str = "procedural_generation",
         license_tier: str = "local_preview",
+        include_size: bool = True,
     ):
         data = case_spec_v2_fixture()
         data["asset_policy"]["required_license_tier"] = license_tier
-        data["objects"][0]["geometry"] = {"shape_hint": shape, "approx_size_m": [0.4, 0.6, 0.8]}
+        data["objects"][0]["geometry"] = {"shape_hint": shape}
+        if include_size:
+            data["objects"][0]["geometry"]["approx_size_m"] = [0.4, 0.6, 0.8]
         data["objects"][0]["initial_state"]["position_m"][2] = 0.4
         data["objects"][0]["asset"] = {
             "description": "deterministic generated box",
@@ -160,6 +163,9 @@ class LocalProceduralProviderTests(unittest.TestCase):
         self.assertEqual(row["acquisition"]["status"], "resolved_provider")
         self.assertEqual(row["acquisition"]["actual_route"], "procedural_generation")
         self.assertIsNotNone(self.registry.get_asset_by_id(selected_id))
+        request_path = self.workspace / "providers" / "local_procedural_mesh_v1" / compilation.provider_receipts[0]["request_digest"] / "backend_import_request.json"
+        import_request = json.loads(request_path.read_text(encoding="utf-8"))
+        self.assertEqual(import_request["expected_size_m"], [0.4, 0.6, 0.8])
         receipt = compilation.provider_receipts[0]
         self.assertEqual(receipt["lifecycle_transitions"][-1], "runtime_bound")
         for output in receipt["output_files"]:
@@ -200,6 +206,23 @@ class LocalProceduralProviderTests(unittest.TestCase):
         self.assertEqual(context.exception.failure_type, "backend_importer_unavailable")
         preflight.assert_not_called()
         runner.assert_not_called()
+
+    def test_real_importer_launcher_reports_missing_ue_as_structured_blocker(self) -> None:
+        launcher = ROOT / "scripts" / "harness_ue_asset_importer.py"
+        importer = UECommandImporterAdapter(
+            [sys.executable, str(launcher), "--ue-executable", str(self.root / "missing-UnrealEditor")],
+            timeout_s=10,
+        )
+        compilation = compile_runtime_case(
+            self.provider_case(),
+            requested_backend="ue",
+            registry=self.registry,
+            provider_orchestrator=AssetProviderOrchestrator(workspace=self.workspace, importer=importer),
+        )
+        result = compilation.artifacts["asset_provider_batch"]["results"][0]
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["failure"]["code"], "backend_importer_unavailable")
+        self.assertEqual(compilation.report["asset_resolve_invocation_count"], 1)
 
     def test_importer_tamper_hash_path_dependency_and_lfs_fail_closed(self) -> None:
         expected_fragments = {
@@ -331,6 +354,44 @@ class LocalProceduralProviderTests(unittest.TestCase):
         self.assertEqual(result["status"], "blocked")
         self.assertEqual(result["failure"]["code"], "catalog_not_writable")
         self.assertFalse((self.workspace / "providers").exists())
+
+    def test_readonly_sqlite_catalog_returns_catalog_not_writable_without_generation(self) -> None:
+        self.catalog_path.chmod(0o444)
+        direct_registration = self.registry.register_asset(
+            {"asset_id": "readonly.probe", "name": "readonly probe"}
+        )
+        self.assertEqual(direct_registration["status"], "blocked")
+        self.assertEqual(direct_registration["code"], "catalog_not_writable")
+        compilation = compile_runtime_case(
+            self.provider_case(),
+            requested_backend="ue",
+            registry=self.registry,
+            provider_orchestrator=self.orchestrator(),
+        )
+        result = compilation.artifacts["asset_provider_batch"]["results"][0]
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["failure"]["code"], "catalog_not_writable")
+        self.assertEqual(compilation.report["asset_resolve_invocation_count"], 1)
+        self.assertFalse((self.workspace / "providers").exists())
+
+    def test_missing_optional_size_is_structured_for_every_provider_route(self) -> None:
+        expected = {
+            "external_site": "unsupported_provider_route",
+            "model_generation": "unsupported_provider_route",
+            "procedural_generation": "invalid_generation_spec",
+        }
+        for route, code in expected.items():
+            with self.subTest(route=route):
+                compilation = compile_runtime_case(
+                    self.provider_case(route=route, include_size=False),
+                    requested_backend="ue",
+                    registry=self.registry,
+                    provider_orchestrator=self.orchestrator(),
+                )
+                result = compilation.artifacts["asset_provider_batch"]["results"][0]
+                self.assertIn(result["status"], {"blocked", "failed"})
+                self.assertEqual(result["failure"]["code"], code)
+                self.assertEqual(compilation.report["asset_resolve_invocation_count"], 1)
 
     def test_external_and_model_routes_are_structured_blockers(self) -> None:
         for route in ("external_site", "model_generation"):

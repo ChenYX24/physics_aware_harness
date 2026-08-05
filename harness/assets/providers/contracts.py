@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -99,18 +98,7 @@ class ProviderRequest:
         if data["requirement"] not in {"preferred", "required"}:
             raise ValueError("requirement is invalid")
         _mapping(data, "search_intent")
-        generation = _mapping(data, "generation_spec")
-        for field in ("recipe_id", "recipe_version", "shape"):
-            _required_text(generation, field)
-        size = generation.get("size_m")
-        if not isinstance(size, list) or len(size) != 3 or any(
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(float(value))
-            or float(value) <= 0.0
-            for value in size
-        ):
-            raise ValueError("generation_spec.size_m must contain three positive finite numbers")
+        _mapping(data, "generation_spec")
         _dict_list(data, "reference_inputs")
         return cls(data)
 

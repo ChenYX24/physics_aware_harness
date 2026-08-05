@@ -96,7 +96,10 @@ default / local_catalog / external_site / procedural_generation / model_generati
 recipe），并从对象的 `geometry.shape_hint: box` 与三个正有限数
 `geometry.approx_size_m` 构造版本化 generation spec。UE importer 命令通过
 `SIM_HARNESS_UE_ASSET_IMPORTER_CMD` 显式配置；未配置时返回
-`backend_importer_unavailable`，不会触发普通 UE runner。
+`backend_importer_unavailable`，不会触发普通 UE runner。仓库提供的真实命令入口为
+`python3.13 scripts/harness_ue_asset_importer.py`；它启动 UE 内部
+`native_ue_asset_importer.py`，执行米→厘米单位转换、StaticMesh bounds、LOD0 section、简单碰撞、
+保存后 package 文件与 SHA-256 校验，成功后才允许注册为 runtime-ready。
 
 下一阶段的本地 Provider 实现边界、数据契约、负向测试和验收命令见
 [`LOCAL_PROVIDER_IMPLEMENTATION_PLAN.md`](LOCAL_PROVIDER_IMPLEMENTATION_PLAN.md)。

@@ -45,6 +45,13 @@ class AssetProviderContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported schema_version"):
             ProviderRequest.from_dict(request)
 
+    def test_route_neutral_request_allows_provider_specific_generation_fields_to_be_absent(self) -> None:
+        request = self.request()
+        request["route"] = "external_site"
+        request["generation_spec"] = {}
+        parsed = ProviderRequest.from_dict(request)
+        self.assertEqual(parsed.data["generation_spec"], {})
+
     def test_invalid_result_state_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "invalid Provider result status"):
             ProviderResult.from_dict(

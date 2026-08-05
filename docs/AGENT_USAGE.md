@@ -78,6 +78,7 @@ Required for UE:
 | `SIM_STUDIO_ASSET_REGISTRY` | JSON asset registry with physics-critical metadata. |
 | `SIM_STUDIO_UE_CONTACT_EXPORT` | Must be `1` for UE verification. |
 | `SIM_STUDIO_UE_RUNNER_CMD` | Usually `python3.13 scripts/harness_local_ue_runner.py`. |
+| `SIM_HARNESS_UE_ASSET_IMPORTER_CMD` | Provider importer launcher, normally `python3.13 scripts/harness_ue_asset_importer.py`. |
 
 Optional:
 

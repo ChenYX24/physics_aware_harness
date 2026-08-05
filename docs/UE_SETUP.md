@@ -98,9 +98,36 @@ export SIM_STUDIO_UE_ACTOR_CLASS="/Script/Engine.StaticMeshActor"
 export SIM_STUDIO_ASSET_REGISTRY="$PWD/assets/asset_registry.example.json"
 export SIM_STUDIO_UE_CONTACT_EXPORT=1
 export SIM_STUDIO_UE_RUNNER_CMD="python3.13 scripts/harness_local_ue_runner.py"
+export SIM_HARNESS_UE_ASSET_IMPORTER_CMD="python3.13 scripts/harness_ue_asset_importer.py"
 ```
 
 When `SIM_HARNESS_WORKSPACE` is explicitly set and its initialized `ue/SimulatorWorkspace.uproject` exists, the Harness resolves that project automatically. Set `SIM_STUDIO_UE_PROJECT=/absolute/path/Other.uproject` only to override it. An explicit override wins; missing or invalid projects still fail preflight.
+
+The Provider importer command receives `--request` and `--result` from the Harness. The repository launcher starts a separate Unreal Editor process and imports the deterministic OBJ into
+`$SIM_HARNESS_WORKSPACE/ue/Content/Generated/Provider`. It validates the saved StaticMesh dimensions,
+LOD0 render sections, generated simple collision, package existence, and SHA-256 before returning a
+runtime-ready binding. The generated package remains outside Git.
+
+For a natural-language V2 smoke, configure the planning LLM variables as well, then run:
+
+```bash
+python3.13 scripts/harness_run_case.py \
+  --prompt "Generate a 0.4 by 0.6 by 0.8 meter rigid box, drop it onto a floor, and render the collision." \
+  --case-spec-version v2 \
+  --case-id local_provider_box_smoke \
+  --backend ue \
+  --width 320 --height 180 \
+  --views front_static \
+  --render-passes rgb \
+  --output-root runs/provider_ue_smoke \
+  --video-root review/provider_ue_smoke
+```
+
+Acceptance requires the Provider batch to be fulfilled, the receipt lifecycle to end in
+`runtime_bound`, `runtime_compilation_report.json` to report one Asset Resolve invocation, the selected
+asset ID to start with `generated.local.box_mesh_v1.`, the UE backend report to record a real UE
+invocation, and at least one non-empty published video. A compilation-only or fake-importer result does
+not satisfy this smoke.
 
 Optional render controls:
 

@@ -27,13 +27,13 @@ def normalize_generation_spec(value: Mapping[str, Any]) -> dict[str, Any]:
     recipe_version = str(value.get("recipe_version") or "v1").strip()
     shape = str(value.get("shape") or "").strip().casefold()
     size = value.get("size_m")
+    if not isinstance(size, list) or len(size) != 3:
+        raise ProceduralGenerationError("invalid_generation_spec", "size_m must contain three positive finite numbers")
     if recipe_id != "box_mesh_v1" or recipe_version != "v1" or shape != "box":
         raise ProceduralGenerationError(
             "unsupported_generation_recipe",
             f"local provider supports only box_mesh_v1/v1 shape=box, got {recipe_id}/{recipe_version} shape={shape}",
         )
-    if not isinstance(size, list) or len(size) != 3:
-        raise ProceduralGenerationError("invalid_generation_spec", "size_m must contain three positive finite numbers")
     normalized_size: list[float] = []
     for component in size:
         if isinstance(component, bool) or not isinstance(component, (int, float)):

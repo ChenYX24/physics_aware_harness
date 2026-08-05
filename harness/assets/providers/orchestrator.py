@@ -121,7 +121,7 @@ class AssetProviderOrchestrator:
             "recipe_id": str(intent.acquisition.get("provider_hint") or "box_mesh_v1"),
             "recipe_version": "v1",
             "shape": str(geometry.get("shape_hint") or "").strip().casefold(),
-            "size_m": [float(value) for value in geometry.get("approx_size_m") or []],
+            "size_m": copy.deepcopy(geometry.get("approx_size_m")),
         }
         identity = {
             "case_id": case_id,
@@ -224,6 +224,7 @@ class AssetProviderOrchestrator:
             "class_name": "StaticMesh",
             "source_files": [self._file_record(generated["path"], role="generated_source", file_format="obj")],
             "desired_name": asset_id.replace(".", "_"),
+            "expected_size_m": list(normalized["size_m"]),
         }
         import_request_payload["request_digest"] = stable_digest(import_request_payload)
         import_request = BackendImportRequest.from_dict(import_request_payload)

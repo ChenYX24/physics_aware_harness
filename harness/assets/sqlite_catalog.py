@@ -84,6 +84,16 @@ class SQLiteCatalog:
             _load_sqlite_vec(connection)
         return connection
 
+    def is_writable(self) -> bool:
+        try:
+            with closing(self.connect()) as connection:
+                version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+                connection.execute(f"PRAGMA user_version = {version}")
+                connection.rollback()
+        except (OSError, sqlite3.Error):
+            return False
+        return True
+
     def import_registry(self, payload: Mapping[str, Any] | list[dict[str, Any]]) -> dict[str, int]:
         rows = _registry_rows(payload)
         imported = 0

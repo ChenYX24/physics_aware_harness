@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import os
 import re
 from pathlib import Path
@@ -48,7 +49,7 @@ class AssetRegistry:
 
     @property
     def writable(self) -> bool:
-        return self._sqlite is not None
+        return self._sqlite is not None and self._sqlite.is_writable()
 
     def register_asset(self, asset: dict[str, Any]) -> dict[str, Any]:
         asset_id = str(asset.get("asset_id") or "").strip()
@@ -61,8 +62,28 @@ class AssetRegistry:
                 "message": f"Provider registration requires a writable SQLite Catalog: {self.path}",
                 "asset_id": asset_id,
             }
-        stats = self._sqlite.import_registry([asset])
-        registered = self._sqlite.get_asset(asset_id)
+        try:
+            stats = self._sqlite.import_registry([asset])
+            registered = self._sqlite.get_asset(asset_id)
+        except (OSError, sqlite3.Error) as exc:
+            readonly_codes = {
+                sqlite3.SQLITE_READONLY,
+                sqlite3.SQLITE_PERM,
+                sqlite3.SQLITE_CANTOPEN,
+            }
+            error_code = getattr(exc, "sqlite_errorcode", None)
+            is_readonly = (
+                isinstance(error_code, int) and error_code & 0xFF in readonly_codes
+            ) or any(
+                fragment in str(exc).casefold()
+                for fragment in ("readonly", "read-only", "permission denied", "attempt to write")
+            )
+            return {
+                "status": "blocked" if is_readonly else "failed",
+                "code": "catalog_not_writable" if is_readonly else "catalog_registration_failed",
+                "message": f"Catalog registration failed for {self.path}: {exc}",
+                "asset_id": asset_id,
+            }
         if registered is None:
             return {
                 "status": "failed",
