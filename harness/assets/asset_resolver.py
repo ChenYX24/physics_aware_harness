@@ -45,11 +45,15 @@ def resolve_asset_intents(
             if explicit_proxy
             else search_intent_from_asset_intent(intent, backend=target_backend)
         )
-        ranked = (
-            registry.search_intent(search_intent, top_k=max(top_k * 4, top_k))
-            if acquisition is None or local_catalog_allowed(acquisition)
-            else []
+        can_search_catalog = (
+            explicit_proxy
+            or acquisition is None
+            or local_catalog_allowed(
+                acquisition,
+                allow_local=compiled.allow_local if compiled else True,
+            )
         )
+        ranked = registry.search_intent(search_intent, top_k=max(top_k * 4, top_k)) if can_search_catalog else []
         if explicit_proxy:
             ranked = [resolved_analytic_recipe(candidate, obj, intent.to_dict()) for candidate in ranked]
         evaluated = [

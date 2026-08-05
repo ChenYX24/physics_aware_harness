@@ -17,6 +17,14 @@ CAPABILITY_BACKEND_RESTRICTIONS = {
     "fluid_particle_dynamics": {"fallback", "genesis_sph"},
     "soft_body_deformation": {"fallback", "genesis_fem", "taichi_cloth"},
 }
+DEFAULT_CAPABILITY_BACKENDS = {"fallback", "ue"}
+BACKEND_SOLVER_CAPABILITIES = {
+    "fallback": {"rigid_body", "contact_events", "trajectory"},
+    "ue": {"rigid_body", "contact_events", "trajectory", "fracture_events", "geometry_collection"},
+    "genesis_sph": {"particle_dynamics", "fluid_dynamics", "particle_cache", "surface_mesh_cache", "trajectory"},
+    "genesis_fem": {"soft_body", "finite_element", "mesh_cache", "deformable_mesh_cache", "trajectory"},
+    "taichi_cloth": {"soft_body", "cloth", "mesh_cache", "trajectory"},
+}
 
 
 @dataclass(frozen=True)
@@ -46,6 +54,11 @@ def plan_backend(
         for value in constraints.get("allowed_solvers") or []
         if str(value).strip()
     }
+    required_solver_capabilities = {
+        str(value).strip()
+        for value in constraints.get("required_solver_capabilities") or []
+        if str(value).strip()
+    }
     if requested == "auto":
         requested = None
     if requested and requested not in EXECUTION_BACKENDS:
@@ -55,9 +68,9 @@ def plan_backend(
             "backend_constraint_conflict",
             f"requested backend {requested} is not in allowed_solvers={sorted(allowed)}",
         )
-    selected = requested or _default_backend(capability_id, allowed)
-    supported = CAPABILITY_BACKEND_RESTRICTIONS.get(capability_id)
-    if supported and selected not in supported:
+    selected = requested or _default_backend(capability_id, allowed, required_solver_capabilities)
+    supported = CAPABILITY_BACKEND_RESTRICTIONS.get(capability_id, DEFAULT_CAPABILITY_BACKENDS)
+    if selected not in supported:
         raise BackendPlanningError(
             "unsupported_capability_backend",
             f"{capability_id} cannot execute on {selected}; supported={sorted(supported)}",
@@ -66,6 +79,14 @@ def plan_backend(
         raise BackendPlanningError(
             "no_legal_backend",
             f"no registered backend satisfies allowed_solvers={sorted(allowed)} for {capability_id}",
+        )
+    missing_solver_capabilities = sorted(
+        required_solver_capabilities - BACKEND_SOLVER_CAPABILITIES.get(selected, set())
+    )
+    if missing_solver_capabilities:
+        raise BackendPlanningError(
+            "unsupported_solver_capabilities",
+            f"backend {selected} does not provide required solver capabilities: {missing_solver_capabilities}",
         )
     # A solver remains its own capture backend unless V2 explicitly requests a
     # separate renderer. This preserves the existing standalone Genesis/Taichi
@@ -83,7 +104,12 @@ def plan_backend(
     return {
         "schema_version": "harness_backend_selection_v1",
         "capability_id": capability_id,
-        "required_capabilities": [str(value) for value in constraints.get("required_solver_capabilities") or []],
+        "required_capabilities": sorted(required_solver_capabilities),
+        "provided_solver_capabilities": sorted(BACKEND_SOLVER_CAPABILITIES[selected]),
+        "required_case_capabilities": [
+            canonical_capability_id(str(value))
+            for value in ((source_case_spec.data.get("capabilities") or {}).get("required") or [])
+        ] if source_case_spec else [capability_id],
         "selected_backend": selected,
         "solver_backend": selected,
         "render_backend": render_backend,
@@ -124,17 +150,23 @@ def normalize_backend(value: Any) -> str:
     return aliases.get(normalized, normalized)
 
 
-def _default_backend(capability_id: str, allowed: set[str]) -> str:
+def _default_backend(capability_id: str, allowed: set[str], required_capabilities: set[str]) -> str:
     preferred = CAPABILITY_DEFAULT_BACKEND.get(capability_id, "ue")
-    if not allowed or preferred in allowed:
+    supported = CAPABILITY_BACKEND_RESTRICTIONS.get(capability_id, DEFAULT_CAPABILITY_BACKENDS)
+    candidates = EXECUTION_BACKENDS.intersection(allowed or EXECUTION_BACKENDS).intersection(supported)
+    capable = {
+        backend
+        for backend in candidates
+        if required_capabilities.issubset(BACKEND_SOLVER_CAPABILITIES.get(backend, set()))
+    }
+    if preferred in capable:
         return preferred
-    legal = sorted(EXECUTION_BACKENDS.intersection(allowed))
-    if not legal:
+    if not capable:
         raise BackendPlanningError(
             "no_legal_backend",
-            f"allowed_solvers contains no registered execution backend: {sorted(allowed)}",
+            f"no backend satisfies allowed_solvers={sorted(allowed)} and required_solver_capabilities={sorted(required_capabilities)}",
         )
-    return legal[0]
+    return sorted(capable)[0]
 
 
 def _stages(solver_backend: str, render_backend: str) -> list[dict[str, Any]]:

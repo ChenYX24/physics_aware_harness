@@ -136,6 +136,60 @@ class CaseSpecV2Tests(unittest.TestCase):
             case_spec_v2_from_dict(data)
         self.assertIn("unsupported_capability_backend", {issue.code for issue in context.exception.issues})
 
+    def test_rigid_primary_cannot_be_routed_to_a_specialized_solver_by_omission(self) -> None:
+        data = case_spec_v2_fixture()
+        data["backend_constraints"]["required_solver_capabilities"] = []
+        data["backend_constraints"]["allowed_solvers"] = ["genesis_sph"]
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("unsupported_capability_backend", {issue.code for issue in context.exception.issues})
+
+    def test_every_required_capability_must_be_registered(self) -> None:
+        data = case_spec_v2_fixture()
+        data["capabilities"]["required"].append("nonexistent_required_capability")
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        issue = next(issue for issue in context.exception.issues if issue.code == "unsupported_capability")
+        self.assertEqual(issue.path, "/capabilities/required/1")
+
+    def test_additional_registered_required_capability_fails_closed(self) -> None:
+        data = case_spec_v2_fixture()
+        data["capabilities"]["required"].append("physics_property_constraint_validation")
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        issue = next(
+            issue
+            for issue in context.exception.issues
+            if issue.code == "additional_required_capability_unsupported"
+        )
+        self.assertEqual(issue.path, "/capabilities/required/1")
+
+    def test_primary_compatibility_alias_may_use_canonical_required_id(self) -> None:
+        data = case_spec_v2_fixture()
+        data["capabilities"] = {
+            "primary": "billiard_causality_compiler",
+            "required": ["rigid_body_contact_causality"],
+        }
+        case = case_spec_v2_from_dict(data)
+        self.assertEqual(case.capability_id, "rigid_body_contact_causality")
+
+    def test_asset_policy_applies_to_every_fallback_route(self) -> None:
+        data = case_spec_v2_fixture()
+        data["asset_policy"]["allow_local"] = False
+        data["objects"][0]["asset"] = {
+            "description": "a generated ball with a local fallback",
+            "acquisition": {
+                "route": "model_generation",
+                "requirement": "preferred",
+                "origin": "user_explicit",
+                "fallback_order": ["local_catalog"],
+            },
+        }
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        issue = next(issue for issue in context.exception.issues if issue.code == "route_disallowed")
+        self.assertEqual(issue.path, "/objects/0/asset/acquisition/fallback_order/0")
+
     def test_asset_intent_is_required_when_analytic_proxy_is_disabled(self) -> None:
         data = case_spec_v2_fixture()
         data["asset_policy"]["allow_analytic_proxy"] = False

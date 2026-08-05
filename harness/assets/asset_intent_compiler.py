@@ -31,6 +31,7 @@ class CompiledAssetIntent:
     search_intent: SearchIntent
     acquisition: dict[str, Any]
     slot: str = "primary"
+    allow_local: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -39,6 +40,7 @@ class CompiledAssetIntent:
             "legacy_intent": self.legacy_intent.to_dict(),
             "search_intent": self.search_intent.to_dict(),
             "acquisition": dict(self.acquisition),
+            "allow_local": self.allow_local,
         }
 
 
@@ -83,6 +85,7 @@ def compile_v2_asset_intents(
                 legacy_intent=legacy_intent,
                 search_intent=search_intent,
                 acquisition=acquisition,
+                allow_local=bool(policy.get("allow_local", True)),
             )
         )
     return compiled
@@ -101,7 +104,9 @@ def normalized_acquisition(value: Any) -> dict[str, Any]:
     }
 
 
-def local_catalog_allowed(acquisition: Mapping[str, Any]) -> bool:
+def local_catalog_allowed(acquisition: Mapping[str, Any], *, allow_local: bool = True) -> bool:
+    if not allow_local:
+        return False
     route = str(acquisition.get("route") or "default")
     if route in {"default", "local_catalog"}:
         return True

@@ -57,11 +57,14 @@ class UEBackend:
         observation_plan = compilation.artifacts["observation_plan"]
         planned_views = camera_ids_from_observation_plan(observation_plan)
         planned_passes = render_passes_from_observation_plan(observation_plan)
-        ue_requested_views = requested_views or planned_views or DEFAULT_UE_VIEWS
+        # Runtime overrides are already folded into observation_plan.  Do not
+        # reuse the raw values here or verifier evidence merged by the planner
+        # can be dropped at execution time.
+        ue_requested_views = planned_views or DEFAULT_UE_VIEWS
         ue_render_passes = (
-            enforce_ue_render_passes(render_passes or planned_passes)
+            enforce_ue_render_passes(planned_passes)
             if complete_sensor_contract
-            else normalize_passes(render_passes or planned_passes)
+            else normalize_passes(planned_passes)
         )
         camera_plan = compilation.artifacts["camera_plan"]
         asset_resolution = compilation.artifacts["asset_resolution"]

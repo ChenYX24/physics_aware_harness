@@ -67,6 +67,14 @@ V2 经 schema 与跨字段校验后，通过内存 adapter 投影到现有 V1 ru
 V2 保存为 `case_spec_v2.json`；`runtime_case_spec_v1.json` 和 `case_spec.json` 是迁移期
 runner 兼容投影。
 
+当前 Runtime Compiler 每次 compilation 只执行一个 `capabilities.primary`。因此
+`capabilities.required` 必须只包含该 primary（允许其兼容 alias）；额外 capability 即使已经
+登记，也会以 `additional_required_capability_unsupported` fail closed，直到有明确的多 capability
+compiler、verifier 和证据合并契约。`backend_constraints.required_solver_capabilities` 则是 backend
+选择的硬条件，所选 backend 必须逐项提供，否则 compilation 在执行前失败。除明确登记的
+fluid/soft-body specialized solver 外，当前通用 physics capability 只允许 `fallback` 或 `ue`，
+不能通过省略 `required_solver_capabilities` 绕过该能力门。
+
 对象的 `asset.acquisition.route` 可由文字或图片请求明确指定：
 
 ```text
@@ -79,6 +87,9 @@ default / local_catalog / external_site / procedural_generation / model_generati
 `similarity_search`、`generation_condition`、`geometry_reference`、`style_reference` 和
 `texture_source`。Provider 尚未接入时，要求外部获取或生成的 V2 会在 compilation 阶段以
 `provider_required` 明确阻断，不会静默改用本地相似素材。
+
+下一阶段的本地 Provider 实现边界、数据契约、负向测试和验收命令见
+[`LOCAL_PROVIDER_IMPLEMENTATION_PLAN.md`](LOCAL_PROVIDER_IMPLEMENTATION_PLAN.md)。
 
 ```json
 {

@@ -35,8 +35,11 @@ class FallbackBackend:
         )
         compilation.write(run_dir)
         observation_plan = compilation.artifacts["observation_plan"]
-        effective_views = requested_views or camera_ids_from_observation_plan(observation_plan)
-        effective_passes = render_passes or render_passes_from_observation_plan(observation_plan)
+        # Runtime overrides are inputs to compilation.  Once compiled, the
+        # observation plan is the sole execution contract because it also
+        # contains verifier-required cameras and modalities.
+        effective_views = camera_ids_from_observation_plan(observation_plan)
+        effective_passes = render_passes_from_observation_plan(observation_plan)
         trajectory = trajectory_for_case(case.data)
         return write_runtime_artifacts(
             run_dir,

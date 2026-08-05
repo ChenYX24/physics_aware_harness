@@ -201,6 +201,8 @@ def _compile_runtime_plan(
             "solver_backend": backend_selection.get("solver_backend"),
             "render_backend": backend_selection.get("render_backend"),
             "required_capabilities": list(backend_selection.get("required_capabilities") or []),
+            "provided_solver_capabilities": list(backend_selection.get("provided_solver_capabilities") or []),
+            "required_case_capabilities": list(backend_selection.get("required_case_capabilities") or []),
             "selection_policy": backend_selection.get("selection_policy"),
             "reason": backend_selection.get("selection_reason"),
             "multi_backend": bool(backend_selection.get("multi_backend")),

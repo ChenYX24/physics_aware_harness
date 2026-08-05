@@ -12,9 +12,12 @@ from unittest.mock import patch
 
 from harness.assets.asset_registry import AssetRegistry
 from harness.assets.asset_resolver import resolve_asset_intents
+from harness.core.artifact_schema import read_json
 from harness.core.case_spec_v2 import case_spec_v2_from_dict
+from harness.planning.backend_planner import BackendPlanningError, plan_backend
 from harness.planning.runtime_compiler import compile_runtime_case
-from harness.planning.backend_planner import plan_backend
+from harness.runtime.fallback_backend import FallbackBackend
+from harness.runtime.ue_backend import UEBackend, UEBackendUnavailable, empty_preflight
 from tests.case_spec_v2_fixture import case_spec_v2_fixture
 
 
@@ -60,6 +63,15 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
             compilation.artifacts["camera_plan"],
         )
         self.assertEqual(compilation.artifacts["runtime_plan"]["backend_selection"]["selected_backend"], "fallback")
+        self.assertEqual(
+            compilation.artifacts["runtime_plan"]["backend_selection"]["required_case_capabilities"],
+            ["rigid_body_contact_causality"],
+        )
+        self.assertTrue(
+            {"rigid_body", "contact_events"}.issubset(
+                compilation.artifacts["runtime_plan"]["backend_selection"]["provided_solver_capabilities"]
+            )
+        )
         self.assertEqual(compilation.compiled_asset_intents[0].search_intent.must["backend"], "fallback")
         self.assertEqual(
             compilation.compiled_asset_intents[0].search_intent.must["source_kind"],
@@ -89,6 +101,7 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
             "primary": "soft_body_deformation",
             "required": ["soft_body_deformation"],
         }
+        data["backend_constraints"]["required_solver_capabilities"] = ["soft_body", "mesh_cache"]
         case = case_spec_v2_from_dict(data)
 
         standalone = plan_backend(
@@ -110,6 +123,94 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
         self.assertTrue(staged["multi_backend"])
         self.assertFalse(staged["execution_supported"])
         self.assertEqual([stage["id"] for stage in staged["stages"]], ["solve", "render"])
+
+    def test_required_solver_capability_must_be_provided_by_selected_backend(self) -> None:
+        data = case_spec_v2_fixture()
+        data["backend_constraints"]["required_solver_capabilities"].append("quantum_entanglement")
+        case = case_spec_v2_from_dict(data)
+        with self.assertRaises(BackendPlanningError) as context:
+            compile_runtime_case(case, requested_backend="fallback", registry=self.registry())
+        self.assertEqual(context.exception.code, "unsupported_solver_capabilities")
+
+    def test_fallback_execution_consumes_merged_observation_plan(self) -> None:
+        case = case_spec_v2_from_dict(case_spec_v2_fixture())
+        compilation = compile_runtime_case(
+            case,
+            requested_backend="fallback",
+            render_passes=["depth"],
+            registry=self.registry(),
+        )
+        self.assertEqual(compilation.artifacts["observation_plan"]["modalities"], ["depth", "rgb"])
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = FallbackBackend().run_case(
+                compilation.runtime_case,
+                temporary,
+                render_passes=["depth"],
+                compilation=compilation,
+            )
+            manifest = read_json(run_dir / "render_pass_manifest.json")
+        self.assertEqual(manifest["passes"], ["depth", "rgb"])
+        self.assertIn(
+            "event_closeup",
+            {view["camera_id"] for view in manifest["camera_plan"]["views"]},
+        )
+
+    def test_ue_execution_consumes_merged_observation_plan(self) -> None:
+        case = case_spec_v2_from_dict(case_spec_v2_fixture())
+        compilation = compile_runtime_case(
+            case,
+            requested_backend="ue",
+            render_passes=["depth"],
+            registry=self.registry(),
+        )
+        preflight = empty_preflight(case.case_id)
+        preflight.update(
+            failure_code="F1_UPROJECT_MISSING",
+            failure_message="test preflight stop",
+            next_required_action="test only",
+        )
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "harness.runtime.ue_backend.build_ue_preflight_report",
+            return_value=preflight,
+        ):
+            with self.assertRaises(UEBackendUnavailable) as context:
+                UEBackend().run_case(
+                    compilation.runtime_case,
+                    temporary,
+                    render_passes=["depth"],
+                    complete_sensor_contract=False,
+                    compilation=compilation,
+                )
+            manifest = read_json(context.exception.run_dir / "render_pass_manifest.json")
+        self.assertEqual(manifest["passes"], ["depth", "rgb"])
+        self.assertIn(
+            "event_closeup",
+            {view["camera_id"] for view in manifest["camera_plan"]["views"]},
+        )
+
+    def test_default_route_does_not_search_local_catalog_when_policy_disallows_it(self) -> None:
+        data = case_spec_v2_fixture()
+        data["asset_policy"]["allow_local"] = False
+        data["objects"][0]["asset"] = {
+            "description": "sphere ball",
+            "resource_kind": "mesh_3d",
+            "acquisition": {
+                "route": "default",
+                "requirement": "preferred",
+                "origin": "system_default",
+                "fallback_order": [],
+            },
+        }
+        compilation = compile_runtime_case(
+            case_spec_v2_from_dict(data),
+            requested_backend="fallback",
+            registry=self.registry(),
+        )
+        row = compilation.artifacts["asset_resolution"]["assets"][0]
+        self.assertEqual(row["candidates"], [])
+        self.assertIsNone(row["selected_asset"])
+        self.assertEqual(row["acquisition"]["status"], "local_catalog_unresolved")
+        self.assertTrue(compilation.artifacts["asset_resolution"]["assets"][1]["selected_asset"])
 
     def test_required_model_generation_is_structurally_blocked_until_provider_phase(self) -> None:
         data = case_spec_v2_fixture()

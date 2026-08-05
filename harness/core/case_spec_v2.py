@@ -71,6 +71,7 @@ CAPABILITY_ALLOWED_SOLVERS = {
     "fluid_particle_dynamics": {"fallback", "genesis_sph"},
     "soft_body_deformation": {"fallback", "genesis_fem", "taichi_cloth"},
 }
+DEFAULT_CAPABILITY_ALLOWED_SOLVERS = {"fallback", "ue"}
 RESOURCE_KINDS = {
     "mesh_3d",
     "skeletal_mesh",
@@ -286,13 +287,34 @@ def collect_case_spec_v2_issues(
     capabilities = _mapping(data.get("capabilities"), "/capabilities", issues)
     primary = _nonempty_string(capabilities.get("primary"), "/capabilities/primary", issues)
     required_capabilities = _string_list(capabilities.get("required"), "/capabilities/required", issues)
-    if primary and primary not in required_capabilities:
+    canonical_primary = canonical_capability_id(primary)
+    if primary and canonical_primary not in {canonical_capability_id(value) for value in required_capabilities}:
         _issue(issues, "/capabilities/required", "primary_missing", "must contain the primary capability")
     if primary:
         try:
-            CapabilityStore().get(canonical_capability_id(primary))
+            CapabilityStore().get(canonical_primary)
         except FileNotFoundError:
             _issue(issues, "/capabilities/primary", "unsupported_capability", f"capability is not registered: {primary}")
+    for index, capability_id in enumerate(required_capabilities):
+        canonical_required = canonical_capability_id(capability_id)
+        try:
+            CapabilityStore().get(canonical_required)
+        except FileNotFoundError:
+            _issue(
+                issues,
+                f"/capabilities/required/{index}",
+                "unsupported_capability",
+                f"capability is not registered: {capability_id}",
+            )
+            continue
+        if primary and canonical_required != canonical_primary:
+            _issue(
+                issues,
+                f"/capabilities/required/{index}",
+                "additional_required_capability_unsupported",
+                "the current Runtime Compiler executes exactly one primary capability; "
+                "additional required capabilities must wait for an explicit multi-capability compiler",
+            )
 
     scene = _mapping(data.get("scene"), "/scene", issues)
     _nonempty_string(scene.get("environment_intent"), "/scene/environment_intent", issues)
@@ -321,11 +343,14 @@ def collect_case_spec_v2_issues(
             "unsupported_backend",
             f"unregistered solvers: {', '.join(unsupported_solvers)}",
         )
-    capability_solvers = CAPABILITY_ALLOWED_SOLVERS.get(canonical_capability_id(primary))
+    capability_solvers = CAPABILITY_ALLOWED_SOLVERS.get(
+        canonical_primary,
+        DEFAULT_CAPABILITY_ALLOWED_SOLVERS,
+    )
     incompatible_solvers = [
         value
         for value in allowed_solvers
-        if value in BACKEND_SOLVERS and capability_solvers is not None and value not in capability_solvers
+        if value in BACKEND_SOLVERS and value not in capability_solvers
     ]
     if incompatible_solvers:
         _issue(
@@ -718,12 +743,7 @@ def _validate_asset_request(
             "required_default_route",
             "a required acquisition route must name a specific method",
         )
-    if route == "local_catalog" and not policy.get("allow_local"):
-        _issue(issues, f"{path}/acquisition/route", "route_disallowed", "local_catalog conflicts with asset_policy.allow_local=false")
-    if route == "external_site" and not policy.get("allow_external"):
-        _issue(issues, f"{path}/acquisition/route", "route_disallowed", "external_site requires asset_policy.allow_external=true")
-    if route in {"procedural_generation", "model_generation"} and not policy.get("allow_generation"):
-        _issue(issues, f"{path}/acquisition/route", "route_disallowed", f"{route} requires asset_policy.allow_generation=true")
+    _validate_route_policy(route, policy, f"{path}/acquisition/route", issues)
     for field in ("provider_hint", "source_uri_hint"):
         if acquisition.get(field) is not None and not isinstance(acquisition.get(field), str):
             _issue(issues, f"{path}/acquisition/{field}", "invalid_type", "must be null or a string")
@@ -739,6 +759,13 @@ def _validate_asset_request(
             f"{path}/acquisition/fallback_order",
             "invalid_fallback_order",
             "fallback routes must be unique and must not repeat the primary route",
+        )
+    for index, fallback_route in enumerate(fallback):
+        _validate_route_policy(
+            fallback_route,
+            policy,
+            f"{path}/acquisition/fallback_order/{index}",
+            issues,
         )
     reference_inputs = acquisition.get("reference_inputs") or []
     if not isinstance(reference_inputs, list):
@@ -761,6 +788,20 @@ def _validate_asset_request(
             _issue(issues, f"{reference_path}/allow_similarity_search", "invalid_type", "must be boolean")
         if "similarity_search" in usage and allow_search is False:
             _issue(issues, reference_path, "contradictory_image_use", "similarity_search usage conflicts with allow_similarity_search=false")
+
+
+def _validate_route_policy(
+    route: str,
+    policy: Mapping[str, Any],
+    path: str,
+    issues: list[ValidationIssue],
+) -> None:
+    if route == "local_catalog" and not policy.get("allow_local"):
+        _issue(issues, path, "route_disallowed", "local_catalog conflicts with asset_policy.allow_local=false")
+    if route == "external_site" and not policy.get("allow_external"):
+        _issue(issues, path, "route_disallowed", "external_site requires asset_policy.allow_external=true")
+    if route in {"procedural_generation", "model_generation"} and not policy.get("allow_generation"):
+        _issue(issues, path, "route_disallowed", f"{route} requires asset_policy.allow_generation=true")
 
 
 def _validate_references(
