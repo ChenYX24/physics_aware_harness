@@ -88,6 +88,8 @@ V1 缺少这些结构化字段时才继续使用既有 role 兼容分类。
 `local_procedural`、`generated_procedural` 规范化到该 token，不放宽其他 source-kind 硬条件。
 资产硬条件 `physics_role` 使用 `dynamic_rigid_body`、`static_rigid_body` 或
 `kinematic_rigid_body`；编译器会把对应的 `physics.body_type` 短值规范化到这些 token。
+确定性 procedural Provider 生成的居中网格以 Catalog `authored_size_m` 作为 Scene bounds 真值，
+并在 UE runtime 保留 authored scale；解析代理仍按其受控 collider 尺寸独立缩放。
 
 对象的 `asset.acquisition.route` 可由文字或图片请求明确指定：
 

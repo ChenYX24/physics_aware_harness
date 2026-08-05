@@ -457,6 +457,12 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
             "intact_visual_material_path": case_object.get("intact_visual_material_path"),
             "intact_visual_scale": case_object.get("intact_visual_scale"),
         }
+        preserve_authored_scale = asset.get("preserve_authored_scale") is True
+        runtime_usage = str(asset.get("runtime_usage") or "")
+        if preserve_authored_scale and runtime_usage == "collision_and_visual":
+            params["preserve_authored_scale"] = True
+        elif preserve_authored_scale and runtime_usage == "visual_proxy":
+            params["preserve_visual_authored_scale"] = True
         role = str(binding.get("role") or "").casefold()
         runtime_scale = scale_for_binding(binding)
         if (
@@ -628,7 +634,7 @@ def is_runtime_mesh_path(ue_path: str) -> bool:
 
 def scale_for_binding(binding: dict[str, Any]) -> list[float]:
     asset = binding.get("asset") if isinstance(binding.get("asset"), dict) else {}
-    if asset.get("preserve_authored_scale"):
+    if asset.get("preserve_authored_scale") and asset.get("runtime_usage") == "collision_and_visual":
         return [1.0, 1.0, 1.0]
     bounds = binding.get("bounds") if isinstance(binding.get("bounds"), dict) else {}
     extents = bounds.get("extents_m")

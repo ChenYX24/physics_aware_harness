@@ -198,6 +198,13 @@ class LocalProceduralProviderTests(unittest.TestCase):
                 self.assertEqual(provider_result["status"], "fulfilled")
                 selected = compilation.artifacts["asset_resolution"]["assets"][0]["selected_asset"]
                 self.assertTrue(selected["asset_id"].startswith(f"generated.local.{recipe_id}."))
+                self.assertTrue(selected["preserve_authored_scale"])
+                node = next(
+                    row
+                    for row in compilation.artifacts["scene_layout"]["object_nodes"]
+                    if row["object_id"] == compilation.compiled_asset_intents[0].object_id
+                )
+                self.assertEqual(node["bounds"]["extents_m"], [value / 2.0 for value in size])
                 self.assertEqual(compilation.provider_receipts[0]["recipe_parameters"]["shape"], canonical_shape)
 
     def test_provider_candidate_honors_canonical_source_and_geometry_hard_filters(self) -> None:

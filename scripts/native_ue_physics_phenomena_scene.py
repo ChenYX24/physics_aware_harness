@@ -6086,7 +6086,9 @@ def setup_scene(runtime_scene: dict | None = None):
                     or (obj.get("params") or {}).get("visual_material_path"),
                     physics_actor.get_actor_rotation(),
                 )
-                if not (isinstance(visual_scale, list) and len(visual_scale) >= 3):
+                if not (
+                    isinstance(visual_scale, list) and len(visual_scale) >= 3
+                ) and not (obj.get("params") or {}).get("preserve_visual_authored_scale"):
                     normalize_runtime_actor(visual, obj)
                 visual.set_actor_enable_collision(False)
                 component = actor_runtime_component(visual)

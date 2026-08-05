@@ -388,6 +388,44 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual(dynamic[0]["params"]["intact_visual_scale"], [1.6, 0.12, 1.0])
         self.assertEqual(dynamic[0]["params"]["intact_visual_material_path"], "/Game/Materials/M_Glass.M_Glass")
 
+    def test_authored_scale_is_preserved_only_for_the_selected_runtime_mesh(self) -> None:
+        from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement
+
+        binding = {
+            "object_id": "rod",
+            "runtime_actor_id": "actor_rod",
+            "role": "falling rigid cylinder",
+            "asset": {
+                "ue_path": "/Game/Generated/Rod.Rod",
+                "runtime_usage": "collision_and_visual",
+                "preserve_authored_scale": True,
+            },
+            "bounds": {"extents_m": [0.06, 0.06, 0.6]},
+            "transform": {"position_m": [0.0, 0.0, 0.61], "rotation_deg": [0.0, 20.0, 0.0]},
+            "physics": {"simulate_physics": True, "collider": "cylinder"},
+        }
+        dynamic, _ = runtime_objects_from_actor_placement(
+            {"actor_bindings": [binding]},
+            {"objects": [{"id": "rod"}]},
+        )
+        self.assertEqual(dynamic[0]["scale"], [1.0, 1.0, 1.0])
+        self.assertTrue(dynamic[0]["params"]["preserve_authored_scale"])
+        self.assertEqual(dynamic[0]["params"]["desired_extent_cm"], 60.0)
+
+        visual_binding = deepcopy(binding)
+        visual_binding["asset"]["runtime_usage"] = "visual_proxy"
+        visual_binding["bounds"]["extents_m"] = [0.15, 0.15, 0.15]
+        visual_binding["physics"]["collider"] = "sphere"
+        visual, _ = runtime_objects_from_actor_placement(
+            {"actor_bindings": [visual_binding]},
+            {"objects": [{"id": "rod"}]},
+        )
+        self.assertEqual(visual[0]["scale"], [0.15, 0.15, 0.15])
+        self.assertNotIn("preserve_authored_scale", visual[0]["params"])
+        self.assertTrue(visual[0]["params"]["preserve_visual_authored_scale"])
+        native_source = (ROOT / "scripts" / "native_ue_physics_phenomena_scene.py").read_text(encoding="utf-8")
+        self.assertIn('get("preserve_visual_authored_scale")', native_source)
+
     def test_dynamic_sphere_uses_controlled_collision_geometry(self) -> None:
         from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement, ue_path_for_binding
 

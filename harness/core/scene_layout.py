@@ -58,7 +58,17 @@ def build_object_node(obj: dict[str, Any], asset_row: dict[str, Any] | None = No
         collider = collider if collider is not None else defaults["collider"]
         collision_profile = collision_profile if collision_profile is not None else defaults["collision_profile"]
         material = material if material is not None else defaults["material"]
-    bounds = bounds_for_position(position, extents, intent.role)
+    bounds = bounds_for_position(
+        position,
+        extents,
+        intent.role,
+        centered=bool(
+            isinstance(selected_asset, dict)
+            and selected_asset.get("source_kind") == "procedural_generation"
+            and selected_asset.get("preserve_authored_scale") is True
+            and selected_asset.get("authored_size_m")
+        ),
+    )
     shape = obj.get("shape")
     if shape is None and isinstance(selected_asset, dict):
         shape = selected_asset.get("shape") or selected_asset.get("collider")
@@ -142,8 +152,14 @@ def analytic_physics_defaults(obj: dict[str, Any], role: str) -> dict[str, Any]:
     }
 
 
-def bounds_for_position(position: list[float], extents: list[float], role: str) -> dict[str, float]:
-    if is_support_role(role):
+def bounds_for_position(
+    position: list[float],
+    extents: list[float],
+    role: str,
+    *,
+    centered: bool = False,
+) -> dict[str, float]:
+    if is_support_role(role) and not centered:
         return {
             "bottom_z": round(position[2] - extents[2] * 2.0, 6),
             "top_z": round(position[2], 6),
@@ -156,6 +172,15 @@ def bounds_for_position(position: list[float], extents: list[float], role: str) 
 
 def estimate_shape_extents(obj: dict[str, Any], selected_asset: dict[str, Any] | None = None) -> list[float]:
     shape = str(obj.get("shape") or (selected_asset or {}).get("collider") or "").casefold()
+    for size in (
+        (selected_asset or {}).get("authored_size_m"),
+        (selected_asset or {}).get("bbox_size_m"),
+        obj.get("size_m"),
+    ):
+        if isinstance(size, list) and len(size) >= 3:
+            dimensions = vec3(size)
+            if all(value > 0.0 for value in dimensions):
+                return [max(value / 2.0, 0.001) for value in dimensions]
     if "capsule" in shape or "pin" in shape or "cylinder" in shape:
         radius = safe_float(obj.get("radius_m") or (selected_asset or {}).get("radius_m"), 0.06)
         height = safe_float(obj.get("height_m") or obj.get("pin_height_m"), 0.36)
@@ -166,9 +191,6 @@ def estimate_shape_extents(obj: dict[str, Any], selected_asset: dict[str, Any] |
     if selected_asset and "radius_m" in selected_asset:
         radius = safe_float(selected_asset.get("radius_m"), 0.09)
         return [radius, radius, radius]
-    if "size_m" in obj and isinstance(obj.get("size_m"), list):
-        size = vec3(obj.get("size_m"))
-        return [max(value / 2.0, 0.001) for value in size]
     if "thin_box" in shape or "panel" in shape or "glass" in shape:
         return [0.04, 0.5, 0.5]
     if "sphere" in shape or "ball" in shape:

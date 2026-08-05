@@ -462,6 +462,7 @@ class AssetProviderOrchestrator:
             "byte_size": int(primary.get("byte_size") or Path(str(primary["local_path"])).stat().st_size),
             "bbox_size_m": size,
             "authored_size_m": size,
+            "preserve_authored_scale": True,
             "collider": shape,
             "collision_profile": "PhysicsActor",
             "mass_kg": mass,
