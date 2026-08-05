@@ -524,6 +524,8 @@ FIELD-BY-FIELD INSTRUCTIONS
 6. asset_analysis: an array with one entry per asset need. Separate the logical object from its asset.
    State whether the need is satisfied by default/local Catalog retrieval, external_site acquisition,
    procedural_generation, or model_generation. Preserve explicit routes; inferred routes are soft.
+   Prefer procedural_generation for simple rule-based primitives that can be described exactly as a
+   box, sphere, or z-axis cylinder; plates/walls are thin boxes and rods/poles/columns/discs are cylinders.
 7. expected_behavior_analysis: an object describing observable preconditions, event ordering, causal
    response, and postconditions without claiming that the run passed.
 8. observation_analysis: an object describing useful camera roles, modalities (RGB/depth/segmentation),
@@ -540,6 +542,9 @@ TEXT, IMAGE, AND ASSET RULES
   style_reference, and texture_source. A generation condition must not silently become similarity search.
 - Procedural generation means a later Provider must generate, import, register, qualify, and return a
   Catalog asset ID. It does not mean you may inject geometry directly into the runtime.
+- The deterministic local Provider supports boxes, spheres, and z-axis cylinders. Record full bounding-box
+  dimensions in meters; a sphere has equal x/y/z diameters and a cylinder has equal x/y diameters with
+  z as its length. Do not use this route for irregular or articulated objects.
 
 OUTPUT PROTOCOL
 Return exactly one valid JSON object matching expansion_contract. Use double-quoted JSON property names
@@ -607,7 +612,12 @@ FIELD-BY-FIELD INSTRUCTIONS
    enable relaxation only when the user allows a broader match. acquisition.route is default,
    local_catalog, external_site, procedural_generation, or model_generation. Use required only when the
    user explicitly demanded that exact route and origin=user_explicit; otherwise use preferred. Required
-   routes have no fallback. provider_hint for the supported local box generator is box_mesh_v1.
+   routes have no fallback. For exact rule-based primitives, prefer procedural_generation and use only
+   the registered provider hints box_mesh_v1, sphere_mesh_v1, or cylinder_mesh_v1; alternatively leave
+   provider_hint null so the Provider can infer it from shape_hint. Never invent a recipe ID. Use box for
+   boxes/plates/walls, sphere for balls/spheres, and cylinder for rods/poles/columns/discs. approx_size_m
+   is the full x/y/z bounding-box size in meters; sphere dimensions must be equal and cylinder x/y must
+   be equal with z as its length. Irregular or articulated objects are not local primitives.
 9. acquisition.reference_inputs: every entry is an object with input_id copied exactly from
    request.inputs, usage as an array of registered usage enums, and allow_similarity_search as a boolean.
    Do not copy local paths, hashes, image bytes, captions, or invented IDs into this object.
@@ -793,6 +803,7 @@ def _case_spec_contract() -> dict[str, Any]:
             "camera_role": sorted(CAMERA_ROLES),
             "observation_modality": sorted(OBSERVATION_MODALITIES),
             "verification_assertion": sorted(VERIFICATION_ASSERTION_TYPES),
+            "local_procedural_recipe": ["box_mesh_v1", "sphere_mesh_v1", "cylinder_mesh_v1"],
         },
         "hard_rules": [
             "capabilities must be an object and capabilities.required must contain exactly capabilities.primary",

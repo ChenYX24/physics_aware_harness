@@ -74,6 +74,10 @@ class CaseGenerationV2Tests(unittest.TestCase):
 
         self.assertEqual([call["purpose"] for call in client.calls], ["expansion", "case_spec_generation"])
         contract = client.calls[1]["payload"]["case_spec_contract"]
+        self.assertEqual(
+            contract["enums"]["local_procedural_recipe"],
+            ["box_mesh_v1", "sphere_mesh_v1", "cylinder_mesh_v1"],
+        )
         self.assertIn("rigid_body_contact_causality", contract["enums"]["primary_capability"])
         self.assertEqual(
             set(contract["enums"]["resource_kind"]),

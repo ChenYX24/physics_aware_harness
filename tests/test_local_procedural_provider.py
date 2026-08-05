@@ -15,7 +15,7 @@ from harness.assets.asset_registry import AssetRegistry
 from harness.assets.asset_resolver import resolve_asset_intents
 from harness.assets.providers.backend_importer import DEFAULT_TIMEOUT_S, UECommandImporterAdapter
 from harness.assets.providers.contracts import BACKEND_IMPORT_REQUEST_SCHEMA, BackendImportRequest
-from harness.assets.providers.local_procedural_mesh import generate_box_obj
+from harness.assets.providers.local_procedural_mesh import generate_box_obj, generate_procedural_obj
 from harness.assets.providers.orchestrator import AssetProviderOrchestrator
 from harness.assets.sqlite_catalog import initialize_catalog
 from harness.core.case_spec import load_case_spec
@@ -113,12 +113,14 @@ class LocalProceduralProviderTests(unittest.TestCase):
         route: str = "procedural_generation",
         license_tier: str = "local_preview",
         include_size: bool = True,
+        provider_hint: str | None = "box_mesh_v1",
+        size_m: list[float] | None = None,
     ):
         data = case_spec_v2_fixture()
         data["asset_policy"]["required_license_tier"] = license_tier
         data["objects"][0]["geometry"] = {"shape_hint": shape}
         if include_size:
-            data["objects"][0]["geometry"]["approx_size_m"] = [0.4, 0.6, 0.8]
+            data["objects"][0]["geometry"]["approx_size_m"] = list(size_m or [0.4, 0.6, 0.8])
         data["objects"][0]["initial_state"]["position_m"][2] = 0.4
         data["objects"][0]["asset"] = {
             "description": "deterministic generated box",
@@ -127,7 +129,7 @@ class LocalProceduralProviderTests(unittest.TestCase):
                 "route": route,
                 "requirement": requirement,
                 "origin": "user_explicit",
-                "provider_hint": "box_mesh_v1",
+                "provider_hint": provider_hint,
                 "reference_inputs": [],
                 "fallback_order": list(fallback_order or []),
             },
@@ -150,6 +152,69 @@ class LocalProceduralProviderTests(unittest.TestCase):
         self.assertEqual(first["path"].read_bytes(), second["path"].read_bytes())
         with self.assertRaises(ValueError):
             first["path"].resolve().relative_to(ROOT.resolve())
+
+    def test_registered_primitive_recipes_are_deterministic_and_match_bounds(self) -> None:
+        recipes = [
+            ("box", "box_mesh_v1", [0.4, 0.6, 0.8]),
+            ("sphere", "sphere_mesh_v1", [0.5, 0.5, 0.5]),
+            ("cylinder", "cylinder_mesh_v1", [0.2, 0.2, 1.4]),
+        ]
+        for shape, recipe_id, expected_size in recipes:
+            with self.subTest(shape=shape):
+                spec = {"recipe_id": recipe_id, "recipe_version": "v1", "shape": shape, "size_m": expected_size}
+                first = generate_procedural_obj(spec, self.workspace / shape / "first.obj")
+                second = generate_procedural_obj(spec, self.workspace / shape / "second.obj")
+                self.assertEqual(first["asset_id"], second["asset_id"])
+                self.assertEqual(first["sha256"], second["sha256"])
+                self.assertEqual(first["path"].read_bytes(), second["path"].read_bytes())
+                self.assertTrue(first["asset_id"].startswith(f"generated.local.{recipe_id}."))
+                vertices = [
+                    [float(value) for value in line.split()[1:]]
+                    for line in first["path"].read_text(encoding="utf-8").splitlines()
+                    if line.startswith("v ")
+                ]
+                actual_size = [max(row[axis] for row in vertices) - min(row[axis] for row in vertices) for axis in range(3)]
+                for actual, expected in zip(actual_size, expected_size):
+                    self.assertAlmostEqual(actual, expected, places=12)
+
+    def test_provider_infers_registered_recipes_for_primitive_aliases(self) -> None:
+        cases = [
+            ("wall", [2.0, 0.1, 1.0], "box_mesh_v1", "box"),
+            ("ball", [0.3, 0.3, 0.3], "sphere_mesh_v1", "sphere"),
+            ("rod", [0.1, 0.1, 1.2], "cylinder_mesh_v1", "cylinder"),
+        ]
+        for shape, size, recipe_id, canonical_shape in cases:
+            with self.subTest(shape=shape), patch.dict(os.environ, {"SIM_HARNESS_ALLOW_LOCAL_PREVIEW_ASSETS": "1"}):
+                compilation = compile_runtime_case(
+                    self.provider_case(shape=shape, size_m=size, provider_hint=None),
+                    requested_backend="ue",
+                    registry=self.registry,
+                    provider_orchestrator=self.orchestrator(),
+                )
+                self.assertEqual(compilation.report["asset_resolve_invocation_count"], 1)
+                provider_result = compilation.artifacts["asset_provider_batch"]["results"][0]
+                self.assertEqual(provider_result["status"], "fulfilled")
+                selected = compilation.artifacts["asset_resolution"]["assets"][0]["selected_asset"]
+                self.assertTrue(selected["asset_id"].startswith(f"generated.local.{recipe_id}."))
+                self.assertEqual(compilation.provider_receipts[0]["recipe_parameters"]["shape"], canonical_shape)
+
+    def test_sphere_and_cylinder_dimension_rules_fail_structurally(self) -> None:
+        invalid = [
+            ("sphere", "sphere_mesh_v1", [0.2, 0.3, 0.2]),
+            ("cylinder", "cylinder_mesh_v1", [0.2, 0.3, 1.0]),
+        ]
+        for shape, recipe_id, size in invalid:
+            with self.subTest(shape=shape):
+                compilation = compile_runtime_case(
+                    self.provider_case(shape=shape, size_m=size, provider_hint=recipe_id),
+                    requested_backend="ue",
+                    registry=self.registry,
+                    provider_orchestrator=self.orchestrator(),
+                )
+                result = compilation.artifacts["asset_provider_batch"]["results"][0]
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(result["failure"]["code"], "invalid_generation_spec")
+                self.assertEqual(compilation.report["asset_resolve_invocation_count"], 1)
 
     def test_fake_import_register_lookup_qualify_and_resolver_select(self) -> None:
         case = self.provider_case()
