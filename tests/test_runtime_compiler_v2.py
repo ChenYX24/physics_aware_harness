@@ -126,7 +126,7 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
 
     def test_required_solver_capability_must_be_provided_by_selected_backend(self) -> None:
         data = case_spec_v2_fixture()
-        data["backend_constraints"]["required_solver_capabilities"].append("quantum_entanglement")
+        data["backend_constraints"]["required_solver_capabilities"].append("geometry_collection")
         case = case_spec_v2_from_dict(data)
         with self.assertRaises(BackendPlanningError) as context:
             compile_runtime_case(case, requested_backend="fallback", registry=self.registry())

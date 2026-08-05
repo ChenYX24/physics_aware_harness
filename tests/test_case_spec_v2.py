@@ -144,6 +144,16 @@ class CaseSpecV2Tests(unittest.TestCase):
             case_spec_v2_from_dict(data)
         self.assertIn("unsupported_capability_backend", {issue.code for issue in context.exception.issues})
 
+    def test_required_solver_capability_must_use_registered_vocabulary(self) -> None:
+        data = case_spec_v2_fixture()
+        data["backend_constraints"]["required_solver_capabilities"].append("quantum_entanglement")
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        issue = next(
+            issue for issue in context.exception.issues if issue.code == "unsupported_solver_capability"
+        )
+        self.assertEqual(issue.path, "/backend_constraints/required_solver_capabilities/2")
+
     def test_every_required_capability_must_be_registered(self) -> None:
         data = case_spec_v2_fixture()
         data["capabilities"]["required"].append("nonexistent_required_capability")

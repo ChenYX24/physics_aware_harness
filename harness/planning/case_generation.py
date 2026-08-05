@@ -17,6 +17,7 @@ from harness.core.artifact_schema import write_json
 from harness.core.case_spec_v2 import (
     ASSET_MUST_FIELDS,
     ASSET_MUST_NOT_FIELDS,
+    BACKEND_SOLVER_CAPABILITIES,
     CAMERA_ROLES,
     CASE_SPEC_V2_SCHEMA_VERSION,
     OBSERVATION_MODALITIES,
@@ -586,7 +587,8 @@ FIELD-BY-FIELD INSTRUCTIONS
    bounds_hint_m. Do not put UE map packages or runtime paths here.
 4. timebase: use positive integer physics_hz and observation_fps with physics_hz exactly divisible by
    observation_fps; deterministic_seed must be an integer.
-5. backend_constraints: list required solver capabilities. If request.execution_constraints has a
+5. backend_constraints: required_solver_capabilities must use only registered solver_capability enum
+   tokens such as rigid_body and contact_events, never natural-language phrases. If request.execution_constraints has a
    requested_backend, use it in allowed_solvers and render_backend and do not substitute another backend.
    Otherwise choose only registered compatible backends. Use allow_multi_backend only for an intentional
    separate solver/render plan.
@@ -772,6 +774,7 @@ def _case_spec_contract() -> dict[str, Any]:
             "coordinate_system": ["z_up"],
             "body_type": ["dynamic", "static", "kinematic"],
             "backend": ["fallback", "genesis_fem", "genesis_sph", "taichi_cloth", "ue"],
+            "solver_capability": sorted(frozenset().union(*BACKEND_SOLVER_CAPABILITIES.values())),
             "acquisition_route": [
                 "default",
                 "local_catalog",

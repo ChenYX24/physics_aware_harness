@@ -91,6 +91,8 @@ class CaseGenerationV2Tests(unittest.TestCase):
         )
         self.assertIn("runtime_ready", contract["enums"]["asset_must_field"])
         self.assertIn("source_kind", contract["enums"]["asset_must_not_field"])
+        self.assertIn("rigid_body", contract["enums"]["solver_capability"])
+        self.assertNotIn("rigid body dynamics", contract["enums"]["solver_capability"])
         self.assertIn("preferences", contract["field_shapes"]["asset_request"])
         self.assertIn("allow_similarity_search", contract["field_shapes"]["reference_input"])
         self.assertIn("source", contract["field_shapes"]["binary_relation"])
@@ -182,6 +184,22 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertEqual(
             client.calls[0]["payload"]["request"]["execution_constraints"],
             {"requested_backend": "ue"},
+        )
+
+    def test_unregistered_natural_language_solver_capability_enters_bounded_repair(self) -> None:
+        invalid = case_spec_v2_fixture()
+        invalid["backend_constraints"]["required_solver_capabilities"] = ["rigid body dynamics"]
+        repaired = case_spec_v2_fixture()
+        request = build_case_request(case_id="solver_vocabulary_repair", text="Drop a rigid body.")
+        client = FakeJSONClient([expansion_fixture(), invalid, repaired])
+
+        result = generate_case_spec_v2(request, client=client)
+
+        self.assertEqual(result.repair_count, 1)
+        errors = client.calls[-1]["payload"]["validation_errors"]["issues"]
+        self.assertIn(
+            "/backend_constraints/required_solver_capabilities/0",
+            {item["path"] for item in errors},
         )
 
     def test_image_upload_requires_explicit_authorization(self) -> None:

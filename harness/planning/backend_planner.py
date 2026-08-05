@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from harness.core.capability import canonical_capability_id
-from harness.core.case_spec_v2 import CaseSpecV2
+from harness.core.case_spec_v2 import BACKEND_SOLVER_CAPABILITIES, CaseSpecV2
 from harness.runtime.backend_policy import backend_plan as legacy_backend_policy
 
 
@@ -18,15 +18,6 @@ CAPABILITY_BACKEND_RESTRICTIONS = {
     "soft_body_deformation": {"fallback", "genesis_fem", "taichi_cloth"},
 }
 DEFAULT_CAPABILITY_BACKENDS = {"fallback", "ue"}
-BACKEND_SOLVER_CAPABILITIES = {
-    "fallback": {"rigid_body", "contact_events", "trajectory"},
-    "ue": {"rigid_body", "contact_events", "trajectory", "fracture_events", "geometry_collection"},
-    "genesis_sph": {"particle_dynamics", "fluid_dynamics", "particle_cache", "surface_mesh_cache", "trajectory"},
-    "genesis_fem": {"soft_body", "finite_element", "mesh_cache", "deformable_mesh_cache", "trajectory"},
-    "taichi_cloth": {"soft_body", "cloth", "mesh_cache", "trajectory"},
-}
-
-
 @dataclass(frozen=True)
 class BackendPlanningError(ValueError):
     code: str

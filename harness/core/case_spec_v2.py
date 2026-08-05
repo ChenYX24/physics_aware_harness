@@ -67,6 +67,14 @@ VERIFICATION_ASSERTION_TYPES = {
 LICENSE_TIERS = {"local_preview", "reference"}
 BODY_TYPES = {"dynamic", "static", "kinematic"}
 BACKEND_SOLVERS = {"fallback", "genesis_fem", "genesis_sph", "taichi_cloth", "ue"}
+BACKEND_SOLVER_CAPABILITIES = {
+    "fallback": {"rigid_body", "contact_events", "trajectory"},
+    "ue": {"rigid_body", "contact_events", "trajectory", "fracture_events", "geometry_collection"},
+    "genesis_sph": {"particle_dynamics", "fluid_dynamics", "particle_cache", "surface_mesh_cache", "trajectory"},
+    "genesis_fem": {"soft_body", "finite_element", "mesh_cache", "deformable_mesh_cache", "trajectory"},
+    "taichi_cloth": {"soft_body", "cloth", "mesh_cache", "trajectory"},
+}
+REGISTERED_SOLVER_CAPABILITIES = frozenset().union(*BACKEND_SOLVER_CAPABILITIES.values())
 CAPABILITY_ALLOWED_SOLVERS = {
     "fluid_particle_dynamics": {"fallback", "genesis_sph"},
     "soft_body_deformation": {"fallback", "genesis_fem", "taichi_cloth"},
@@ -333,7 +341,19 @@ def collect_case_spec_v2_issues(
         _issue(issues, "/timebase/deterministic_seed", "invalid_type", "must be an integer")
 
     backend = _mapping(data.get("backend_constraints"), "/backend_constraints", issues)
-    _string_list(backend.get("required_solver_capabilities"), "/backend_constraints/required_solver_capabilities", issues)
+    required_solver_capabilities = _string_list(
+        backend.get("required_solver_capabilities"),
+        "/backend_constraints/required_solver_capabilities",
+        issues,
+    )
+    for index, solver_capability in enumerate(required_solver_capabilities):
+        if solver_capability not in REGISTERED_SOLVER_CAPABILITIES:
+            _issue(
+                issues,
+                f"/backend_constraints/required_solver_capabilities/{index}",
+                "unsupported_solver_capability",
+                f"solver capability is not registered: {solver_capability}",
+            )
     allowed_solvers = _string_list(backend.get("allowed_solvers"), "/backend_constraints/allowed_solvers", issues)
     unsupported_solvers = [value for value in allowed_solvers if value not in BACKEND_SOLVERS]
     if unsupported_solvers:
