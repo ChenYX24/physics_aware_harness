@@ -75,6 +75,26 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertEqual([call["purpose"] for call in client.calls], ["expansion", "case_spec_generation"])
         contract = client.calls[1]["payload"]["case_spec_contract"]
         self.assertIn("rigid_body_contact_causality", contract["enums"]["primary_capability"])
+        self.assertEqual(
+            set(contract["enums"]["resource_kind"]),
+            {
+                "animation",
+                "blueprint_actor",
+                "geometry_collection",
+                "map",
+                "material",
+                "mesh_3d",
+                "skeletal_mesh",
+                "texture_2d",
+                "vfx",
+            },
+        )
+        self.assertIn("runtime_ready", contract["enums"]["asset_must_field"])
+        self.assertIn("source_kind", contract["enums"]["asset_must_not_field"])
+        self.assertIn("preferences", contract["field_shapes"]["asset_request"])
+        self.assertIn("allow_similarity_search", contract["field_shapes"]["reference_input"])
+        self.assertIn("source", contract["field_shapes"]["binary_relation"])
+        self.assertIn("thresholds", contract["field_shapes"]["verification_requirements"])
         expansion_contract = client.calls[0]["payload"]["expansion_contract"]
         self.assertEqual(expansion_contract["field_types"]["object_analysis"], "array")
         expansion_prompt = client.calls[0]["system_prompt"]
@@ -86,6 +106,8 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertIn("CASESPEC V2 GENERATOR", case_prompt)
         self.assertIn("PROVIDER AND RUNTIME BOUNDARY", case_prompt)
         self.assertIn("verification_requirements", case_prompt)
+        self.assertIn("must_not contains hard exclusions", case_prompt)
+        self.assertIn("passed unchanged to the selected verifier", case_prompt)
         structure_example = client.calls[1]["payload"]["case_spec_contract"]["valid_structure_example_do_not_copy_values"]
         self.assertEqual(case_spec_v2_from_dict(structure_example).case_id, "example")
         self.assertEqual(result.case_spec.case_id, "generated_v2")

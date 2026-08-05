@@ -15,9 +15,13 @@ from typing import Any, Mapping, Protocol
 
 from harness.core.artifact_schema import write_json
 from harness.core.case_spec_v2 import (
+    ASSET_MUST_FIELDS,
+    ASSET_MUST_NOT_FIELDS,
     CAMERA_ROLES,
     CASE_SPEC_V2_SCHEMA_VERSION,
     OBSERVATION_MODALITIES,
+    REFERENCE_INPUT_USAGES,
+    RESOURCE_KINDS,
     VERIFICATION_ASSERTION_TYPES,
     CaseSpecV2,
     CaseSpecV2ValidationError,
@@ -593,19 +597,33 @@ FIELD-BY-FIELD INSTRUCTIONS
    and independent of an eventual asset ID. role is semantic. geometry uses shape_hint and positive
    approx_size_m. physics.body_type is exactly dynamic, static, or kinematic. behavior is always an
    object. Use finite three-number arrays for positions, rotations, and velocities.
-8. object.asset: describe what later asset retrieval or generation must supply. acquisition.route is
-   default, local_catalog, external_site, procedural_generation, or model_generation. Use required only
-   when the user explicitly demanded that exact route and origin=user_explicit; otherwise use preferred.
-   Required routes have no fallback. provider_hint for the supported local box generator is box_mesh_v1.
-9. relations and events: use semantic types and reference objects only through exact previously declared
-   objects[].id values. Never use phrases such as "box with floor" as an object reference.
-10. expected_behavior: describe causal and observable outcomes without claiming success.
-11. observation_requirements: cameras use registered camera roles and exact target object IDs; modalities
+8. object.asset: description and optional semantic_text are natural-language search/generation intent;
+   resource_kind must use its enum. must contains hard filters that every candidate must satisfy;
+   must_not contains hard exclusions; preferences contains soft ranking preferences and can never override
+   must/must_not. taxonomy contains string hierarchy labels such as domain, category, subcategory, and
+   object_type. relaxation_policy contains boolean allow_parent_category and allow_format_conversion;
+   enable relaxation only when the user allows a broader match. acquisition.route is default,
+   local_catalog, external_site, procedural_generation, or model_generation. Use required only when the
+   user explicitly demanded that exact route and origin=user_explicit; otherwise use preferred. Required
+   routes have no fallback. provider_hint for the supported local box generator is box_mesh_v1.
+9. acquisition.reference_inputs: every entry is an object with input_id copied exactly from
+   request.inputs, usage as an array of registered usage enums, and allow_similarity_search as a boolean.
+   Do not copy local paths, hashes, image bytes, captions, or invented IDs into this object.
+10. relations and events: use canonical reference-bearing objects. A binary relation is
+    {"type": string, "source": exact_id, "target": exact_id}; a group relation may use
+    {"type": string, "objects": [exact_ids]}; an object event is
+    {"type": string, "object": exact_id}. Additional semantic parameters may be objects or scalars, but
+    must not replace these exact ID references. Never use phrases such as "box with floor" as a reference.
+11. expected_behavior: describe causal and observable outcomes without claiming success.
+12. observation_requirements: cameras use registered camera roles and exact target object IDs; modalities
     use registered values; signals name evidence required by the capability and assertions. Do not emit
     exact camera coordinates.
-12. verification_requirements: each assertion is an object with a registered type and exact object IDs.
-    Choose assertions that test the primary physical invariant. thresholds is an object.
-13. variant: should_pass is boolean. provenance is an object. notes is a string.
+13. verification_requirements: each assertion is an object with a registered type and exact object IDs.
+    Choose assertions that test the primary physical invariant. thresholds and time_window are global
+    verifier configuration objects passed unchanged to the selected verifier. Use {} unless the selected
+    capability contract or an explicit user requirement supplies a named numeric tolerance/window; do not
+    invent threshold names, measured values, or pass/fail evidence.
+14. variant: should_pass is boolean. provenance is an object. notes is a string.
 
 REFERENCE INTEGRITY
 First declare every object in objects. Then reuse those exact IDs in relations, events, camera targets,
@@ -709,11 +727,45 @@ def _case_spec_contract() -> dict[str, Any]:
                 "reference_inputs": [],
                 "fallback_order": [],
             },
+            "asset_request": {
+                "description": "natural-language asset intent string",
+                "resource_kind": "one resource_kind enum",
+                "must": "object using only asset_must_field keys; hard candidate requirements",
+                "must_not": "object using only asset_must_not_field keys; hard candidate exclusions",
+                "preferences": {
+                    "field_name": "a scalar value, or {value, weight>=0, confidence between 0 and 1}"
+                },
+                "taxonomy": {
+                    "domain": "string",
+                    "category": "string",
+                    "subcategory": "string",
+                    "object_type": "string",
+                },
+                "semantic_text": "optional semantic ranking string",
+                "relaxation_policy": {
+                    "allow_parent_category": "boolean",
+                    "allow_format_conversion": "boolean",
+                },
+                "acquisition": "asset_acquisition object",
+            },
+            "reference_input": {
+                "input_id": "exact request.inputs[].input_id",
+                "usage": ["one or more reference_usage enum values"],
+                "allow_similarity_search": "boolean; false for generation/style/geometry-only conditions",
+            },
+            "binary_relation": {"type": "string", "source": "exact object.id", "target": "exact object.id"},
+            "group_relation": {"type": "string", "objects": ["exact object.id"]},
+            "object_event": {"type": "string", "object": "exact object.id"},
             "verification_assertion": {
                 "type": "one verification_assertion enum string",
                 "objects": ["exact object.id", "exact object.id"],
             },
             "camera": {"role": "one camera_role enum", "target_objects": ["exact object.id"]},
+            "verification_requirements": {
+                "assertions": ["verification_assertion objects"],
+                "thresholds": "global capability/verifier-specific object; empty unless a known contract supplies names",
+                "time_window": "global capability/verifier-specific object; empty unless explicitly required",
+            },
         },
         "enums": {
             "primary_capability": _executable_primary_capabilities(),
@@ -730,12 +782,11 @@ def _case_spec_contract() -> dict[str, Any]:
             "acquisition_requirement": ["preferred", "required"],
             "acquisition_origin": ["user_explicit", "llm_inferred", "system_default"],
             "reference_usage": [
-                "similarity_search",
-                "generation_condition",
-                "geometry_reference",
-                "style_reference",
-                "texture_source",
+                *sorted(REFERENCE_INPUT_USAGES),
             ],
+            "resource_kind": sorted(RESOURCE_KINDS),
+            "asset_must_field": sorted(ASSET_MUST_FIELDS),
+            "asset_must_not_field": sorted(ASSET_MUST_NOT_FIELDS),
             "camera_role": sorted(CAMERA_ROLES),
             "observation_modality": sorted(OBSERVATION_MODALITIES),
             "verification_assertion": sorted(VERIFICATION_ASSERTION_TYPES),
@@ -745,6 +796,8 @@ def _case_spec_contract() -> dict[str, Any]:
             "every object behavior must be an object and every physics.body_type must use the body_type enum",
             "every relation, event, camera, and assertion object reference must exactly equal one declared object.id; never use a phrase",
             "every verification assertion requires a type from verification_assertion and an objects array of exact IDs",
+            "must and must_not are hard filters; preferences is soft ranking and cannot weaken a hard filter",
+            "thresholds and time_window are passed to the verifier unchanged; use only names defined by the selected capability contract",
             "required acquisition is legal only when origin=user_explicit and route is specific",
             "LLM inferred acquisition must use requirement=preferred",
             "reference input_id must come from request.inputs",
