@@ -115,6 +115,7 @@ class LocalProceduralProviderTests(unittest.TestCase):
         include_size: bool = True,
         provider_hint: str | None = "box_mesh_v1",
         size_m: list[float] | None = None,
+        asset_must: dict[str, object] | None = None,
     ):
         data = case_spec_v2_fixture()
         data["asset_policy"]["required_license_tier"] = license_tier
@@ -125,6 +126,7 @@ class LocalProceduralProviderTests(unittest.TestCase):
         data["objects"][0]["asset"] = {
             "description": "deterministic generated box",
             "resource_kind": "mesh_3d",
+            "must": dict(asset_must or {}),
             "acquisition": {
                 "route": route,
                 "requirement": requirement,
@@ -197,6 +199,23 @@ class LocalProceduralProviderTests(unittest.TestCase):
                 selected = compilation.artifacts["asset_resolution"]["assets"][0]["selected_asset"]
                 self.assertTrue(selected["asset_id"].startswith(f"generated.local.{recipe_id}."))
                 self.assertEqual(compilation.provider_receipts[0]["recipe_parameters"]["shape"], canonical_shape)
+
+    def test_provider_candidate_honors_canonical_source_and_geometry_hard_filters(self) -> None:
+        compilation = compile_runtime_case(
+            self.provider_case(
+                shape="sphere",
+                size_m=[0.3, 0.3, 0.3],
+                provider_hint="sphere_mesh_v1",
+                asset_must={"source_kind": "procedural", "geometry_type": "sphere"},
+            ),
+            requested_backend="ue",
+            registry=self.registry,
+            provider_orchestrator=self.orchestrator(),
+        )
+        self.assertEqual(compilation.compiled_asset_intents[0].search_intent.must["source_kind"], "procedural_generation")
+        selected = compilation.artifacts["asset_resolution"]["assets"][0]["selected_asset"]
+        self.assertTrue(selected["asset_id"].startswith("generated.local.sphere_mesh_v1."))
+        self.assertEqual(compilation.report["asset_resolve_invocation_count"], 1)
 
     def test_sphere_and_cylinder_dimension_rules_fail_structurally(self) -> None:
         invalid = [

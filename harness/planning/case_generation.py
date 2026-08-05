@@ -617,7 +617,10 @@ FIELD-BY-FIELD INSTRUCTIONS
    provider_hint null so the Provider can infer it from shape_hint. Never invent a recipe ID. Use box for
    boxes/plates/walls, sphere for balls/spheres, and cylinder for rods/poles/columns/discs. approx_size_m
    is the full x/y/z bounding-box size in meters; sphere dimensions must be equal and cylinder x/y must
-   be equal with z as its length. Irregular or articulated objects are not local primitives.
+   be equal with z as its length. Irregular or articulated objects are not local primitives. If
+   must.source_kind is used with procedural_generation, write the exact token procedural_generation,
+   not procedural or descriptive prose. asset_type is the backend asset class such as StaticMesh;
+   geometry_type is the shape such as box, sphere, or cylinder.
 9. acquisition.reference_inputs: every entry is an object with input_id copied exactly from
    request.inputs, usage as an array of registered usage enums, and allow_similarity_search as a boolean.
    Do not copy local paths, hashes, image bytes, captions, or invented IDs into this object.

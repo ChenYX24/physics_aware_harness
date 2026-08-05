@@ -282,7 +282,15 @@ def candidate_matches_search_intent(
         return False
     if not asset_matches_approx_size(item, intent):
         return False
-    if not _matches_value(asset_type, must.get("asset_type", must.get("geometry_type", must.get("class_name")))):
+    if not _matches_value(asset_type, must.get("asset_type", must.get("class_name"))):
+        return False
+    geometry_values = {
+        str(value).casefold()
+        for value in (item.get("shape"), item.get("collider"), asset_type)
+        if value
+    }
+    geometry_type = must.get("geometry_type")
+    if geometry_type is not None and not any(_matches_value(value, geometry_type) for value in geometry_values):
         return False
     inferred_license_tier = effective_license_tier(
         str(item.get("license") or ""),
@@ -303,8 +311,11 @@ def candidate_matches_search_intent(
         }
         if not any(value in roles for value in _expected_values(must["physics_role"])):
             return False
-    excluded_type = intent.must_not.get("asset_type", intent.must_not.get("geometry_type", intent.must_not.get("class_name")))
+    excluded_type = intent.must_not.get("asset_type", intent.must_not.get("class_name"))
     if excluded_type is not None and _matches_value(asset_type, excluded_type):
+        return False
+    excluded_geometry = intent.must_not.get("geometry_type")
+    if excluded_geometry is not None and any(_matches_value(value, excluded_geometry) for value in geometry_values):
         return False
     if intent.must_not.get("license_tier") is not None and _matches_value(
         inferred_license_tier,

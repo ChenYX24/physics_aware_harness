@@ -80,6 +80,11 @@ V2 对象的结构化 `physics.body_type` 和 `physics.collision_required` 是 r
 显式要求 collision 的对象必须启用碰撞，否则 Actor Placement 在 backend 调用前 fail closed。
 V1 缺少这些结构化字段时才继续使用既有 role 兼容分类。
 
+资产硬条件中 `asset_type` 表示 backend 资产类（例如 `StaticMesh`），`geometry_type` 表示几何
+形状（例如 `box`、`sphere`、`cylinder`），二者独立校验。`procedural_generation` route 对应的
+规范 source kind 同样是 `procedural_generation`；编译器只把既有同义输入 `procedural`、
+`local_procedural`、`generated_procedural` 规范化到该 token，不放宽其他 source-kind 硬条件。
+
 对象的 `asset.acquisition.route` 可由文字或图片请求明确指定：
 
 ```text

@@ -23,6 +23,12 @@ RESOURCE_KIND_TO_ASSET_TYPE = {
     "map": "World",
 }
 
+SOURCE_KIND_ALIASES = {
+    "procedural": "procedural_generation",
+    "local_procedural": "procedural_generation",
+    "generated_procedural": "procedural_generation",
+}
+
 
 @dataclass(frozen=True)
 class CompiledAssetIntent:
@@ -134,6 +140,8 @@ def _compile_search_intent(
     description = str(request.get("description") or legacy_intent.query).strip()
     raw_must = request.get("must") if isinstance(request.get("must"), Mapping) else {}
     must = dict(raw_must)
+    if must.get("source_kind") is not None:
+        must["source_kind"] = _canonical_source_kind(must["source_kind"])
     must.setdefault("backend", target_backend)
     resource_kind = str(request.get("resource_kind") or "").strip()
     if resource_kind in RESOURCE_KIND_TO_ASSET_TYPE:
@@ -186,3 +194,10 @@ def _similarity_reference(request: Mapping[str, Any]) -> str | None:
         if "similarity_search" in usage and reference.get("allow_similarity_search", True):
             return str(reference.get("input_id") or "") or None
     return None
+
+
+def _canonical_source_kind(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_canonical_source_kind(item) for item in value]
+    normalized = str(value).strip().casefold()
+    return SOURCE_KIND_ALIASES.get(normalized, value)

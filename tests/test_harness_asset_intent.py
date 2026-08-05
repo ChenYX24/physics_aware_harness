@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 
 from harness.assets.asset_intent import intent_from_object
-from harness.assets.asset_registry import AssetRegistry
+from harness.assets.asset_registry import AssetRegistry, candidate_matches_search_intent
 from harness.assets.asset_resolver import asset_quality_gate, resolve_asset_intents
 from harness.assets.search_intent import SearchIntent, search_intent_from_v2_asset_intent
 from harness.assets.sqlite_catalog import initialize_catalog
@@ -59,6 +59,22 @@ class HarnessAssetIntentTests(unittest.TestCase):
         self.assertTrue(dynamic.physics_critical)
         self.assertEqual(dynamic.category, "physics_critical")
         self.assertIn("collider", dynamic.required_properties)
+
+    def test_asset_class_and_geometry_shape_are_independent_hard_filters(self) -> None:
+        sphere = {
+            "type": "StaticMesh",
+            "collider": "sphere",
+            "source_kind": "procedural_generation",
+            "ue_path": "/Game/Test/Sphere.Sphere",
+        }
+        sphere_intent = SearchIntent.from_dict(
+            {"raw_query": "sphere", "must": {"asset_type": "StaticMesh", "geometry_type": "sphere"}}
+        )
+        box_intent = SearchIntent.from_dict(
+            {"raw_query": "box", "must": {"asset_type": "StaticMesh", "geometry_type": "box"}}
+        )
+        self.assertTrue(candidate_matches_search_intent(sphere, sphere_intent))
+        self.assertFalse(candidate_matches_search_intent(sphere, box_intent))
 
     def test_ramp_roles_are_physics_critical(self) -> None:
         subject = intent_from_object({"id": "ramp_subject", "role": "rolling_subject", "shape": "sphere"})
