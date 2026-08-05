@@ -29,7 +29,14 @@ class FakeJSONClient:
         images: list[dict[str, Any]] | None = None,
         purpose: str,
     ) -> LLMJSONResponse:
-        self.calls.append({"purpose": purpose, "images": images or [], "payload": dict(user_payload)})
+        self.calls.append(
+            {
+                "purpose": purpose,
+                "images": images or [],
+                "payload": dict(user_payload),
+                "system_prompt": system_prompt,
+            }
+        )
         payload = self.payloads.pop(0)
         return LLMJSONResponse(
             payload=payload,
@@ -70,6 +77,15 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertIn("rigid_body_contact_causality", contract["enums"]["primary_capability"])
         expansion_contract = client.calls[0]["payload"]["expansion_contract"]
         self.assertEqual(expansion_contract["field_types"]["object_analysis"], "array")
+        expansion_prompt = client.calls[0]["system_prompt"]
+        self.assertIn("turns a user's natural-language request", expansion_prompt)
+        self.assertIn("Unreal Engine (UE)", expansion_prompt)
+        self.assertIn("FIELD-BY-FIELD INSTRUCTIONS", expansion_prompt)
+        self.assertIn("exactly one Asset Resolve", expansion_prompt)
+        case_prompt = client.calls[1]["system_prompt"]
+        self.assertIn("CASESPEC V2 GENERATOR", case_prompt)
+        self.assertIn("PROVIDER AND RUNTIME BOUNDARY", case_prompt)
+        self.assertIn("verification_requirements", case_prompt)
         structure_example = client.calls[1]["payload"]["case_spec_contract"]["valid_structure_example_do_not_copy_values"]
         self.assertEqual(case_spec_v2_from_dict(structure_example).case_id, "example")
         self.assertEqual(result.case_spec.case_id, "generated_v2")
