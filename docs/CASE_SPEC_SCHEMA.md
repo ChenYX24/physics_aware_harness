@@ -86,6 +86,8 @@ V1 缺少这些结构化字段时才继续使用既有 role 兼容分类。
 形状（例如 `box`、`sphere`、`cylinder`），二者独立校验。`procedural_generation` route 对应的
 规范 source kind 同样是 `procedural_generation`；编译器只把既有同义输入 `procedural`、
 `local_procedural`、`generated_procedural` 规范化到该 token，不放宽其他 source-kind 硬条件。
+资产硬条件 `physics_role` 使用 `dynamic_rigid_body`、`static_rigid_body` 或
+`kinematic_rigid_body`；编译器会把对应的 `physics.body_type` 短值规范化到这些 token。
 
 对象的 `asset.acquisition.route` 可由文字或图片请求明确指定：
 

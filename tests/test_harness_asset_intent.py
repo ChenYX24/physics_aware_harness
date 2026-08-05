@@ -76,6 +76,18 @@ class HarnessAssetIntentTests(unittest.TestCase):
         self.assertTrue(candidate_matches_search_intent(sphere, sphere_intent))
         self.assertFalse(candidate_matches_search_intent(sphere, box_intent))
 
+    def test_body_type_physics_roles_are_canonicalized_for_catalog_matching(self) -> None:
+        intent = SearchIntent.from_dict(
+            {"raw_query": "falling sphere", "must": {"physics_role": "dynamic"}}
+        )
+        self.assertEqual(intent.must["physics_role"], "dynamic_rigid_body")
+        self.assertTrue(
+            candidate_matches_search_intent(
+                {"tags": ["dynamic_rigid_body"], "type": "StaticMesh"},
+                intent,
+            )
+        )
+
     def test_ramp_roles_are_physics_critical(self) -> None:
         subject = intent_from_object({"id": "ramp_subject", "role": "rolling_subject", "shape": "sphere"})
         ramp = intent_from_object({"id": "ramp", "role": "ramp", "shape": "inclined_plane"})

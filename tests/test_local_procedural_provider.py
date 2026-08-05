@@ -217,6 +217,35 @@ class LocalProceduralProviderTests(unittest.TestCase):
         self.assertTrue(selected["asset_id"].startswith("generated.local.sphere_mesh_v1."))
         self.assertEqual(compilation.report["asset_resolve_invocation_count"], 1)
 
+    def test_provider_candidate_canonicalizes_structured_physics_role(self) -> None:
+        compilation = compile_runtime_case(
+            self.provider_case(asset_must={"physics_role": "dynamic"}),
+            requested_backend="ue",
+            registry=self.registry,
+            provider_orchestrator=self.orchestrator(),
+        )
+        self.assertEqual(
+            compilation.compiled_asset_intents[0].search_intent.must["physics_role"],
+            "dynamic_rigid_body",
+        )
+        selected = compilation.artifacts["asset_resolution"]["assets"][0]["selected_asset"]
+        self.assertIsNotNone(selected)
+        self.assertIn("dynamic_rigid_body", selected["tags"])
+        self.assertEqual(compilation.report["asset_resolve_invocation_count"], 1)
+
+    def test_provider_qualification_uses_resolver_hard_constraint_matcher(self) -> None:
+        compilation = compile_runtime_case(
+            self.provider_case(asset_must={"geometry_type": "capsule"}),
+            requested_backend="ue",
+            registry=self.registry,
+            provider_orchestrator=self.orchestrator(),
+        )
+        provider_result = compilation.artifacts["asset_provider_batch"]["results"][0]
+        self.assertEqual(provider_result["status"], "failed")
+        self.assertEqual(provider_result["failure"]["code"], "asset_qualification_failed")
+        self.assertIn("hard_constraint_mismatch", provider_result["failure"]["message"])
+        self.assertEqual(compilation.report["asset_resolve_invocation_count"], 1)
+
     def test_sphere_and_cylinder_dimension_rules_fail_structurally(self) -> None:
         invalid = [
             ("sphere", "sphere_mesh_v1", [0.2, 0.3, 0.2]),

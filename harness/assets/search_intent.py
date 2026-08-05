@@ -31,6 +31,11 @@ ALLOWED_MUST_NOT_FIELDS = {
     "license_tier",
     "source_kind",
 }
+PHYSICS_ROLE_ALIASES = {
+    "dynamic": "dynamic_rigid_body",
+    "static": "static_rigid_body",
+    "kinematic": "kinematic_rigid_body",
+}
 
 
 @dataclass(frozen=True)
@@ -83,6 +88,8 @@ class SearchIntent:
         must_not = _mapping(data.get("must_not"), "must_not")
         _reject_unknown_fields(must, ALLOWED_MUST_FIELDS, "must")
         _reject_unknown_fields(must_not, ALLOWED_MUST_NOT_FIELDS, "must_not")
+        if "physics_role" in must:
+            must = {**must, "physics_role": canonical_physics_role(must["physics_role"])}
         if "approx_size_m" in must:
             _validate_size_vector(must["approx_size_m"], "must.approx_size_m")
         raw_should = data.get("should") or []
@@ -104,7 +111,6 @@ class SearchIntent:
             reference_image=str(data["reference_image"]) if data.get("reference_image") else None,
             relaxation_policy={str(key): bool(value) for key, value in relaxation.items()},
         )
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "raw_query": self.raw_query,
@@ -116,6 +122,13 @@ class SearchIntent:
             "reference_image": self.reference_image,
             "relaxation_policy": dict(self.relaxation_policy),
         }
+
+
+def canonical_physics_role(value: Any) -> Any:
+    if isinstance(value, list):
+        return [canonical_physics_role(item) for item in value]
+    normalized = str(value).strip().casefold()
+    return PHYSICS_ROLE_ALIASES.get(normalized, value)
 
 
 def search_intent_from_asset_intent(intent: AssetIntent, *, backend: str = "unreal") -> SearchIntent:
