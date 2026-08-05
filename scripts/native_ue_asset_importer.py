@@ -39,7 +39,9 @@ def main() -> None:
         options.static_mesh_import_data.combine_meshes = True
         options.static_mesh_import_data.generate_lightmap_u_vs = True
         options.static_mesh_import_data.auto_generate_collision = True
-        options.static_mesh_import_data.import_uniform_scale = 100.0
+        # The outer launcher materializes a temporary centimeter-normalized OBJ.
+        # UE 5.7's OBJ/Interchange path ignores FbxImportUI's meter scale.
+        options.static_mesh_import_data.import_uniform_scale = 1.0
         task.options = options
         unreal.AssetToolsHelpers.get_asset_tools().import_asset_tasks([task])
 
@@ -100,6 +102,7 @@ def main() -> None:
                 "actual_size_cm": actual_size_cm,
                 "expected_size_m": request.get("expected_size_m"),
                 "obj_meter_to_ue_centimeter_scale": 100.0,
+                "normalized_source_unit": "centimeter",
             },
         }
     except Exception as exc:
@@ -157,7 +160,9 @@ def _validate_dimensions(asset: Any, expected_size_m: Any) -> list[float]:
 
 def _write_result(result: dict[str, Any]) -> None:
     RESULT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    RESULT_PATH.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary = RESULT_PATH.with_suffix(RESULT_PATH.suffix + ".tmp")
+    temporary.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(RESULT_PATH)
     print(json.dumps({"status": result["status"], "asset_id": result.get("asset_id")}))
 
 
@@ -168,7 +173,6 @@ finally:
         unreal.EditorPythonScripting.set_keep_python_script_alive(False)
     except Exception:
         pass
-    try:
-        unreal.SystemLibrary.quit_editor()
-    except Exception:
-        unreal.SystemLibrary.execute_console_command(None, "QUIT_EDITOR")
+    # The outer launcher owns process shutdown after it observes the atomic
+    # result file. UE 5.7 can crash in LevelEditor teardown when a headless
+    # ExecutePythonScript calls quit_editor() before the level editor is ready.

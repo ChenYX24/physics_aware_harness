@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -45,10 +48,22 @@ def main() -> int:
         return 0
 
     result_path.unlink(missing_ok=True)
+    try:
+        ue_request_path, temporary_paths = _prepare_ue_request(request_path, request)
+    except (OSError, ValueError) as exc:
+        _write_json(
+            result_path,
+            _failure_result(
+                request,
+                code="backend_asset_import_failed",
+                message=f"could not normalize source asset for Unreal: {exc}",
+            ),
+        )
+        return 0
     environment = os.environ.copy()
     environment.update(
         {
-            "SIM_HARNESS_UE_IMPORT_REQUEST": str(request_path),
+            "SIM_HARNESS_UE_IMPORT_REQUEST": str(ue_request_path),
             "SIM_HARNESS_UE_IMPORT_RESULT": str(result_path),
             "SIM_HARNESS_UE_IMPORT_PROJECT_CONTENT": str(ue_project.parent / "Content"),
         }
@@ -65,51 +80,142 @@ def main() -> int:
         f"-ExecutePythonScript={UE_SCRIPT}",
     ]
     try:
-        completed = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=float(args.timeout),
-            shell=False,
-            env=environment,
-        )
-    except subprocess.TimeoutExpired as exc:
-        _write_json(
-            result_path,
-            _failure_result(
-                request,
-                code="backend_importer_timeout",
-                message=f"Unreal asset import exceeded {float(args.timeout):g}s",
-                retriable=True,
-            ),
-        )
-        _emit_output(exc.stdout, exc.stderr)
-        return 0
-    except OSError as exc:
-        _write_json(
-            result_path,
-            _failure_result(
-                request,
-                code="backend_importer_execution_failed",
-                message=f"could not start Unreal Editor: {exc}",
-                retriable=True,
-            ),
-        )
-        return 0
-
-    _emit_output(completed.stdout, completed.stderr)
-    if not result_path.is_file():
-        _write_json(
-            result_path,
-            _failure_result(
-                request,
-                code="backend_importer_execution_failed",
-                message=f"Unreal Editor exited with code {completed.returncode} without an importer result",
-                retriable=True,
-            ),
-        )
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as stdout_file, tempfile.TemporaryFile(
+            mode="w+", encoding="utf-8", errors="replace"
+        ) as stderr_file:
+            try:
+                process = subprocess.Popen(
+                    command,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    text=True,
+                    shell=False,
+                    env=environment,
+                )
+            except OSError as exc:
+                _write_json(
+                    result_path,
+                    _failure_result(
+                        request,
+                        code="backend_importer_execution_failed",
+                        message=f"could not start Unreal Editor: {exc}",
+                        retriable=True,
+                    ),
+                )
+                return 0
+            outcome = _wait_for_result(process, result_path=result_path, timeout_s=float(args.timeout))
+            if outcome == "result":
+                _stop_process(process)
+            elif outcome == "timeout":
+                _stop_process(process)
+                _write_json(
+                    result_path,
+                    _failure_result(
+                        request,
+                        code="backend_importer_timeout",
+                        message=f"Unreal asset import exceeded {float(args.timeout):g}s",
+                        retriable=True,
+                    ),
+                )
+            else:
+                returncode = process.returncode
+                if not _complete_json_file(result_path):
+                    _write_json(
+                        result_path,
+                        _failure_result(
+                            request,
+                            code="backend_importer_execution_failed",
+                            message=f"Unreal Editor exited with code {returncode} without an importer result",
+                            retriable=True,
+                        ),
+                    )
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            _emit_output(stdout_file.read(), stderr_file.read())
+    finally:
+        for path in temporary_paths:
+            path.unlink(missing_ok=True)
     return 0
+
+
+def _prepare_ue_request(request_path: Path, request: dict[str, Any]) -> tuple[Path, tuple[Path, ...]]:
+    sources = request.get("source_files") or []
+    if len(sources) != 1:
+        raise ValueError("Unreal static-mesh import requires exactly one source file")
+    source = Path(str(sources[0].get("local_path") or "")).expanduser().resolve()
+    if source.suffix.casefold() != ".obj" or not source.is_file():
+        raise ValueError(f"Unreal static-mesh import requires a materialized OBJ: {source}")
+    normalized_obj = request_path.with_name(f"{request_path.stem}.ue_centimeters.obj")
+    _write_scaled_obj(source, normalized_obj, scale=100.0)
+    ue_request = json.loads(json.dumps(request))
+    payload = normalized_obj.read_bytes()
+    ue_request["source_files"][0].update(
+        {
+            "local_path": str(normalized_obj),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "byte_size": len(payload),
+            "materialized": True,
+        }
+    )
+    ue_request_path = request_path.with_name(f"{request_path.stem}.ue_import.json")
+    _write_json(ue_request_path, ue_request)
+    return ue_request_path, (normalized_obj, ue_request_path)
+
+
+def _write_scaled_obj(source: Path, destination: Path, *, scale: float) -> None:
+    output: list[str] = []
+    vertex_count = 0
+    for line in source.read_text(encoding="utf-8").splitlines():
+        if line.startswith("v "):
+            fields = line.split()
+            if len(fields) != 4:
+                raise ValueError(f"unsupported OBJ vertex record: {line}")
+            coordinates = [float(value) * scale for value in fields[1:]]
+            if not all(value == value and abs(value) != float("inf") for value in coordinates):
+                raise ValueError("OBJ vertex coordinates must be finite")
+            line = "v " + " ".join(_format_float(value) for value in coordinates)
+            vertex_count += 1
+        output.append(line)
+    if vertex_count == 0:
+        raise ValueError("OBJ contains no vertices")
+    output.insert(1, "# normalized from meters to Unreal centimeters")
+    destination.write_text("\n".join(output) + "\n", encoding="utf-8", newline="\n")
+
+
+def _wait_for_result(process: subprocess.Popen[str], *, result_path: Path, timeout_s: float) -> str:
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if _complete_json_file(result_path):
+            return "result"
+        if process.poll() is not None:
+            return "exit"
+        if time.monotonic() >= deadline:
+            return "timeout"
+        time.sleep(0.1)
+
+
+def _complete_json_file(path: Path) -> bool:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(value, dict) and value.get("status") in {"fulfilled", "blocked", "failed"}
+
+
+def _stop_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=10.0)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5.0)
+
+
+def _format_float(value: float) -> str:
+    text = format(float(value), ".17g")
+    return "0" if text in {"-0", "-0.0"} else text
 
 
 def _configuration_failure(request: dict[str, Any], *, ue_executable: Path, ue_project: Path) -> dict[str, Any] | None:

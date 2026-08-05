@@ -103,7 +103,10 @@ default / local_catalog / external_site / procedural_generation / model_generati
 `backend_importer_unavailable`，不会触发普通 UE runner。仓库提供的真实命令入口为
 `python3.13 scripts/harness_ue_asset_importer.py`；它启动 UE 内部
 `native_ue_asset_importer.py`，执行米→厘米单位转换、StaticMesh bounds、LOD0 section、简单碰撞、
-保存后 package 文件与 SHA-256 校验，成功后才允许注册为 runtime-ready。
+保存后 package 文件与 SHA-256 校验，成功后才允许注册为 runtime-ready。launcher 使用临时、
+可删除的厘米规范化 OBJ，因为 UE 5.7 的 OBJ/Interchange 路径不采用 FbxImportUI 的缩放参数；
+原始米制 Provider OBJ、hash 和 request identity 保持不变。native 脚本原子写出结果后由 launcher
+负责结束 Editor，避免 headless `quit_editor()` 在 LevelEditor 初始化前触发退出崩溃。
 
 下一阶段的本地 Provider 实现边界、数据契约、负向测试和验收命令见
 [`LOCAL_PROVIDER_IMPLEMENTATION_PLAN.md`](LOCAL_PROVIDER_IMPLEMENTATION_PLAN.md)。
