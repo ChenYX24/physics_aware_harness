@@ -669,6 +669,10 @@ def _project_object(
         projected["collider"] = str(physics.get("collider") or _collider_for_shape(shape))
     body_type = str(physics.get("body_type") or "dynamic")
     projected["kinematic"] = body_type in {"static", "kinematic"}
+    if physics.get("body_type") is not None:
+        projected["body_type"] = body_type
+    if physics.get("collision_required") is not None:
+        projected["collision_required"] = bool(physics["collision_required"])
     if initial.get("angular_velocity_rad_s") is not None:
         projected["initial_angular_velocity_rad_s"] = copy.deepcopy(initial["angular_velocity_rad_s"])
     fracture = behavior.get("fracture") if isinstance(behavior.get("fracture"), Mapping) else None

@@ -46,6 +46,20 @@ class HarnessAssetIntentTests(unittest.TestCase):
         self.assertFalse(visual.physics_critical)
         self.assertEqual(visual.category, "visual_only")
 
+    def test_structured_physics_contract_overrides_free_form_role_vocabulary(self) -> None:
+        dynamic = intent_from_object(
+            {
+                "id": "custom_body",
+                "role": "arbitrary_semantic_name",
+                "shape": "sphere",
+                "body_type": "dynamic",
+                "collision_required": True,
+            }
+        )
+        self.assertTrue(dynamic.physics_critical)
+        self.assertEqual(dynamic.category, "physics_critical")
+        self.assertIn("collider", dynamic.required_properties)
+
     def test_ramp_roles_are_physics_critical(self) -> None:
         subject = intent_from_object({"id": "ramp_subject", "role": "rolling_subject", "shape": "sphere"})
         ramp = intent_from_object({"id": "ramp", "role": "ramp", "shape": "inclined_plane"})

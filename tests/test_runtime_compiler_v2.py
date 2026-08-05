@@ -18,6 +18,7 @@ from harness.planning.backend_planner import BackendPlanningError, plan_backend
 from harness.planning.runtime_compiler import compile_runtime_case
 from harness.runtime.fallback_backend import FallbackBackend
 from harness.runtime.ue_backend import UEBackend, UEBackendUnavailable, empty_preflight
+from harness.verification.runtime_actor_placement_verifier import verify_runtime_actor_placement
 from tests.case_spec_v2_fixture import case_spec_v2_fixture
 
 
@@ -94,6 +95,34 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
             ):
                 self.assertTrue((Path(temporary) / name).is_file(), name)
             self.assertFalse((Path(temporary) / "backend_plan.json").exists())
+
+    def test_v2_dynamic_contract_does_not_depend_on_free_form_role(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["role"] = "falling_object"
+        compilation = compile_runtime_case(
+            case_spec_v2_from_dict(data),
+            requested_backend="fallback",
+            registry=self.registry(),
+        )
+        self.assertEqual(compilation.status, "pass", compilation.errors)
+        projected = compilation.runtime_case.data["objects"][0]
+        self.assertEqual(projected["body_type"], "dynamic")
+        self.assertTrue(projected["collision_required"])
+        binding = next(
+            row
+            for row in compilation.artifacts["runtime_actor_placement"]["actor_bindings"]
+            if row["object_id"] == "cue_ball"
+        )
+        self.assertTrue(binding["physics_critical"])
+        self.assertTrue(binding["physics"]["simulate_physics"])
+        self.assertTrue(binding["physics"]["collision_enabled"])
+
+        bad_placement = deepcopy(compilation.artifacts["runtime_actor_placement"])
+        bad_binding = next(row for row in bad_placement["actor_bindings"] if row["object_id"] == "cue_ball")
+        bad_binding["physics"]["simulate_physics"] = False
+        report = verify_runtime_actor_placement(compilation.runtime_case.data, bad_placement)
+        self.assertEqual(report["status"], "fail")
+        self.assertEqual(report["first_failure"]["metric"], "dynamic_object_not_simulated")
 
     def test_non_ue_solver_remains_single_backend_unless_renderer_is_explicit(self) -> None:
         data = case_spec_v2_fixture()

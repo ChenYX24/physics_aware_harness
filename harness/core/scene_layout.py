@@ -83,6 +83,8 @@ def build_object_node(obj: dict[str, Any], asset_row: dict[str, Any] | None = No
             "top_z": bounds["top_z"],
         },
         "physics": {
+            "body_type": obj.get("body_type"),
+            "collision_required": obj.get("collision_required"),
             "mass_kg": mass,
             "collider": collider,
             "collision_profile": collision_profile,

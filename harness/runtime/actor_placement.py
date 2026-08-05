@@ -74,12 +74,14 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
     physics_critical = bool(node.get("physics_critical"))
     is_support = is_support_role(role)
     is_field = normalized_role(role) in FIELD_OR_CONTROLLER_ROLES or str(node.get("shape") or "").casefold() in {"fixed_point", "constraint"}
-    kinematic = bool(physics.get("kinematic") or is_support or is_field)
+    body_type = str(physics.get("body_type") or "").casefold()
+    kinematic = bool(body_type in {"static", "kinematic"} if body_type else physics.get("kinematic") or is_support or is_field)
     simulate_physics = bool(physics_critical and not kinematic and not is_field)
     proxy = bool(physics.get("proxy") or asset_binding.get("fallback_reason"))
     ue_path = asset_binding.get("selected_asset_ue_path")
     collider = str(physics.get("collider") or node.get("shape") or "box").casefold()
-    collision_enabled = bool(physics_critical and not is_field)
+    collision_required = physics.get("collision_required")
+    collision_enabled = bool(physics_critical and not is_field and collision_required is not False)
     analytic_primitive = (
         "sphere"
         if "sphere" in collider
@@ -136,6 +138,8 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
             "fallback_reason": asset_binding.get("fallback_reason"),
         },
         "physics": {
+            "body_type": body_type or None,
+            "collision_required": collision_required,
             "simulate_physics": simulate_physics,
             "kinematic": kinematic,
             "collision_enabled": collision_enabled,

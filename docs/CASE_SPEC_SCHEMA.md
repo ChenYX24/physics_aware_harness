@@ -75,6 +75,11 @@ compiler、verifier 和证据合并契约。`backend_constraints.required_solver
 fluid/soft-body specialized solver 外，当前通用 physics capability 只允许 `fallback` 或 `ue`，
 不能通过省略 `required_solver_capabilities` 绕过该能力门。
 
+V2 对象的结构化 `physics.body_type` 和 `physics.collision_required` 是 runtime physics contract
+真值；`role` 只表达开放语义，不能决定对象是否参与物理。投影后的 dynamic 对象必须启用模拟，
+显式要求 collision 的对象必须启用碰撞，否则 Actor Placement 在 backend 调用前 fail closed。
+V1 缺少这些结构化字段时才继续使用既有 role 兼容分类。
+
 对象的 `asset.acquisition.route` 可由文字或图片请求明确指定：
 
 ```text

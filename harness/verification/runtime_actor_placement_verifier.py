@@ -30,6 +30,16 @@ def verify_runtime_actor_placement(case_spec: dict[str, Any], placement: dict[st
             invalid_specialized_asset["value"],
             checks=checks(placement, bindings),
         )
+    contract_mismatch = first_structured_physics_contract_mismatch(case_spec, by_object)
+    if contract_mismatch:
+        return fail_report(
+            case_id,
+            "F3_invalid_initial_physics_state",
+            contract_mismatch["object_id"],
+            contract_mismatch["metric"],
+            contract_mismatch["value"],
+            checks=checks(placement, bindings),
+        )
     bad_binding = first_bad_physics_binding(bindings)
     if bad_binding:
         return fail_report(case_id, bad_binding["failure_type"], bad_binding["object_id"], bad_binding["metric"], bad_binding["value"], checks=checks(placement, bindings))
@@ -57,9 +67,51 @@ def first_missing_physics_object(case_spec: dict[str, Any], by_object: dict[str,
         object_id = str(obj.get("id") or "")
         if not object_id:
             continue
-        if object_id not in by_object and is_physics_critical_role(str(obj.get("role") or "")):
+        if object_id not in by_object and is_physics_contract_object(obj):
             return object_id
     return None
+
+
+def first_structured_physics_contract_mismatch(
+    case_spec: dict[str, Any],
+    by_object: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    for obj in case_spec.get("objects") or []:
+        if not isinstance(obj, dict):
+            continue
+        object_id = str(obj.get("id") or "")
+        binding = by_object.get(object_id)
+        if not binding:
+            continue
+        physics = binding.get("physics") if isinstance(binding.get("physics"), dict) else {}
+        body_type = str(obj.get("body_type") or "").casefold()
+        if body_type == "dynamic" and physics.get("simulate_physics") is not True:
+            return {
+                "object_id": object_id,
+                "metric": "dynamic_object_not_simulated",
+                "value": physics.get("simulate_physics"),
+            }
+        if body_type in {"static", "kinematic"} and physics.get("simulate_physics") is True:
+            return {
+                "object_id": object_id,
+                "metric": "non_dynamic_object_simulated",
+                "value": physics.get("simulate_physics"),
+            }
+        if obj.get("collision_required") is True and physics.get("collision_enabled") is not True:
+            return {
+                "object_id": object_id,
+                "metric": "required_collision_not_enabled",
+                "value": physics.get("collision_enabled"),
+            }
+    return None
+
+
+def is_physics_contract_object(obj: dict[str, Any]) -> bool:
+    return (
+        str(obj.get("body_type") or "").casefold() == "dynamic"
+        or obj.get("collision_required") is True
+        or is_physics_critical_role(str(obj.get("role") or ""))
+    )
 
 
 def first_invalid_specialized_asset(

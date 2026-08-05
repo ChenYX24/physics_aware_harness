@@ -26,6 +26,9 @@ class CaseSpecV2Tests(unittest.TestCase):
         self.assertEqual(projection.data["timebase"]["render_fps"], 24)
         self.assertEqual(projection.data["seed"], 42)
         self.assertEqual(projection.data["v2_projection"]["source_schema_version"], "harness_case_spec_v2")
+        self.assertEqual(projection.data["objects"][0]["body_type"], "dynamic")
+        self.assertTrue(projection.data["objects"][0]["collision_required"])
+        self.assertEqual(projection.data["objects"][2]["body_type"], "static")
 
     def test_text_can_require_model_generation_without_reference_image(self) -> None:
         data = case_spec_v2_fixture()
