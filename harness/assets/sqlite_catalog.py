@@ -109,6 +109,14 @@ class SQLiteCatalog:
             "schema_version": CATALOG_SCHEMA_VERSION,
         }
 
+    def get_asset(self, asset_id: str) -> dict[str, Any] | None:
+        with closing(self.connect()) as connection:
+            row = connection.execute(
+                "SELECT row_json FROM assets WHERE asset_id = ?",
+                (str(asset_id),),
+            ).fetchone()
+        return json.loads(str(row["row_json"])) if row else None
+
     def search(self, intent: SearchIntent, *, top_k: int = 5) -> list[dict[str, Any]]:
         return [entry["asset"] for entry in self.search_detailed(intent, top_k=top_k)["results"]]
 

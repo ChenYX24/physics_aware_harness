@@ -8,6 +8,7 @@ from typing import Any, Mapping
 from harness.assets.asset_intent_compiler import CompiledAssetIntent, compile_v2_asset_intents
 from harness.assets.asset_registry import AssetRegistry
 from harness.assets.asset_resolver import resolve_asset_intents
+from harness.assets.providers.orchestrator import AssetProviderOrchestrator
 from harness.core.artifact_schema import write_json
 from harness.core.case_spec import CaseSpec
 from harness.core.case_spec_v2 import CaseSpecV2, project_case_spec_v2_to_v1
@@ -30,8 +31,19 @@ ARTIFACT_FILENAMES = {
     "runtime_actor_placement": "runtime_actor_placement.json",
     "runtime_actor_placement_report": "runtime_actor_placement_report.json",
     "runtime_plan": "runtime_plan.json",
+    "asset_provider_batch": "asset_provider_batch.json",
 }
 COMPILATION_STAGE_ORDER = [
+    "backend_planner",
+    "asset_intent_compiler",
+    "provider_orchestrator",
+    "asset_resolver",
+    "scene_layout_compiler",
+    "verification_compiler",
+    "observation_planner",
+    "runtime_binding_and_stage_compiler",
+]
+V1_COMPILATION_STAGE_ORDER = [
     "backend_planner",
     "asset_intent_compiler_and_resolver",
     "scene_layout_compiler",
@@ -49,6 +61,7 @@ class RuntimeCompilation:
     compiled_asset_intents: tuple[CompiledAssetIntent, ...]
     artifacts: dict[str, dict[str, Any]]
     report: dict[str, Any]
+    provider_receipts: tuple[dict[str, Any], ...] = ()
 
     @property
     def status(self) -> str:
@@ -70,7 +83,10 @@ class RuntimeCompilation:
         if self.source_case_spec.get("schema_version") == "harness_case_spec_v2":
             write_json(destination / "case_spec_v2.json", self.source_case_spec)
         for key, filename in ARTIFACT_FILENAMES.items():
-            write_json(destination / filename, self.artifacts[key])
+            if key in self.artifacts:
+                write_json(destination / filename, self.artifacts[key])
+        for receipt in self.provider_receipts:
+            write_json(destination / "provider_receipts" / f"{receipt['receipt_id']}.json", receipt)
         write_json(destination / "runtime_compilation_report.json", self.report)
         return destination
 
@@ -83,10 +99,12 @@ def compile_runtime_case(
     render_passes: list[str] | None = None,
     camera_strategy: str = "bounds_auto_v1",
     registry: AssetRegistry | None = None,
+    provider_orchestrator: AssetProviderOrchestrator | None = None,
 ) -> RuntimeCompilation:
     source_v2 = case_spec if isinstance(case_spec, CaseSpecV2) else None
     runtime_case = project_case_spec_v2_to_v1(source_v2) if source_v2 else case_spec
     source_data = copy.deepcopy(source_v2.data if source_v2 else runtime_case.data)
+    registry = registry or AssetRegistry()
 
     backend_selection = plan_backend(
         runtime_case.data,
@@ -103,11 +121,26 @@ def compile_runtime_case(
         if source_v2
         else []
     )
+    provider_orchestration = (
+        (provider_orchestrator or AssetProviderOrchestrator()).fulfill(
+            case_id=runtime_case.case_id,
+            source_case_spec=source_v2.data,
+            compiled_intents=compiled_intents,
+            target_backend=target_asset_backend,
+            registry=registry,
+        )
+        if source_v2
+        else None
+    )
     asset_resolution = resolve_asset_intents(
         runtime_case.data,
         registry=registry,
         compiled_intents=list(compiled_intents) if source_v2 else None,
+        provider_results=provider_orchestration.results if provider_orchestration else None,
         target_backend=target_asset_backend,
+        allow_local_preview=(source_v2.data.get("asset_policy") or {}).get("required_license_tier") == "local_preview"
+        if source_v2
+        else None,
     )
     scene_layout = build_static_scene_layout(
         runtime_case.data,
@@ -141,6 +174,7 @@ def compile_runtime_case(
         backend_selection,
         verification_plan,
         observation_plan,
+        provider_enabled=source_v2 is not None,
     )
     errors = _compilation_errors(
         source_v2,
@@ -161,19 +195,22 @@ def compile_runtime_case(
         "runtime_actor_placement_report": actor_report,
         "runtime_plan": runtime_plan,
     }
+    if provider_orchestration is not None:
+        artifacts["asset_provider_batch"] = provider_orchestration.batch
     report = {
         "schema_version": "harness_runtime_compilation_report_v1",
         "case_id": runtime_case.case_id,
         "source_schema_version": source_data.get("schema_version"),
         "runtime_projection_schema_version": runtime_case.data.get("schema_version"),
         "status": "fail" if errors else "pass",
-        "stage_order": list(COMPILATION_STAGE_ORDER),
-        "completed_stages": list(COMPILATION_STAGE_ORDER),
+        "stage_order": list(COMPILATION_STAGE_ORDER if source_v2 else V1_COMPILATION_STAGE_ORDER),
+        "completed_stages": list(COMPILATION_STAGE_ORDER if source_v2 else V1_COMPILATION_STAGE_ORDER),
         "asset_resolve_invocation_count": 1,
         "backend_selection": copy.deepcopy(backend_selection),
         "artifact_schemas": {
             ARTIFACT_FILENAMES[key]: value.get("schema_version")
             for key, value in artifacts.items()
+            if key in ARTIFACT_FILENAMES
         },
         "errors": errors,
     }
@@ -184,6 +221,7 @@ def compile_runtime_case(
         compiled_asset_intents=compiled_intents,
         artifacts=artifacts,
         report=report,
+        provider_receipts=provider_orchestration.receipts if provider_orchestration else (),
     )
 
 
@@ -192,8 +230,10 @@ def _compile_runtime_plan(
     backend_selection: Mapping[str, Any],
     verification_plan: Mapping[str, Any],
     observation_plan: Mapping[str, Any],
+    *,
+    provider_enabled: bool = False,
 ) -> dict[str, Any]:
-    return {
+    plan = {
         "schema_version": "harness_runtime_plan_v1",
         "case_id": case_spec.get("case_id"),
         "backend_selection": {
@@ -222,6 +262,10 @@ def _compile_runtime_plan(
             "assertion_count": len(verification_plan.get("assertions") or []),
         },
     }
+    if provider_enabled:
+        plan["artifacts"]["asset_provider_batch"] = "asset_provider_batch.json"
+        plan["artifacts"]["provider_receipts"] = "provider_receipts/"
+    return plan
 
 
 def _compilation_errors(
@@ -241,11 +285,25 @@ def _compilation_errors(
             acquisition = row.get("acquisition") if isinstance(row.get("acquisition"), Mapping) else {}
             requested = acquisition.get("requested") if isinstance(acquisition.get("requested"), Mapping) else {}
             requirement = str(requested.get("requirement") or "preferred")
-            if requirement == "required" and acquisition.get("status") != "resolved_local_catalog":
+            route = str(requested.get("route") or "default")
+            required_resolved = acquisition.get("status") in {
+                "resolved_provider" if route in {"external_site", "procedural_generation", "model_generation"} else "resolved_local_catalog"
+            }
+            if requirement == "required" and not required_resolved:
+                provider_result = acquisition.get("provider_result") if isinstance(acquisition.get("provider_result"), Mapping) else {}
+                provider_failure = provider_result.get("failure") if isinstance(provider_result.get("failure"), Mapping) else {}
+                if provider_failure.get("code"):
+                    failure_code = str(provider_failure["code"])
+                elif provider_result.get("status") == "fulfilled":
+                    failure_code = "provider_asset_unresolved"
+                elif route in {"external_site", "procedural_generation", "model_generation"}:
+                    failure_code = "provider_required"
+                else:
+                    failure_code = "required_asset_route_unresolved"
                 errors.append(
                     {
                         "stage": "asset_resolution",
-                        "code": "provider_required" if acquisition.get("status") == "provider_required" else "required_asset_route_unresolved",
+                        "code": failure_code,
                         "object_id": (row.get("intent") or {}).get("object_id"),
                         "message": str(row.get("fallback_reason") or "required acquisition route did not resolve"),
                     }

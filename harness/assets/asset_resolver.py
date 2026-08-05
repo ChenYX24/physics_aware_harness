@@ -9,7 +9,7 @@ from typing import Any
 
 from harness.assets.asset_intent_compiler import CompiledAssetIntent, local_catalog_allowed, provider_route_required
 from harness.assets.asset_intent import intent_from_object
-from harness.assets.asset_registry import AssetRegistry
+from harness.assets.asset_registry import AssetRegistry, candidate_matches_search_intent
 from harness.assets.search_intent import SearchIntent, analytic_search_intent_from_asset_intent, search_intent_from_asset_intent
 from harness.assets.sqlite_catalog import effective_license_tier, reference_license_authorized
 
@@ -20,10 +20,13 @@ def resolve_asset_intents(
     top_k: int = 5,
     registry: AssetRegistry | None = None,
     compiled_intents: list[CompiledAssetIntent] | None = None,
+    provider_results: dict[tuple[str, str], dict[str, Any]] | None = None,
     target_backend: str = "unreal",
+    allow_local_preview: bool | None = None,
 ) -> dict[str, Any]:
     registry = registry or AssetRegistry()
-    allow_local_preview = os.environ.get("SIM_HARNESS_ALLOW_LOCAL_PREVIEW_ASSETS", "").casefold() in {"1", "true", "yes"}
+    if allow_local_preview is None:
+        allow_local_preview = os.environ.get("SIM_HARNESS_ALLOW_LOCAL_PREVIEW_ASSETS", "").casefold() in {"1", "true", "yes"}
     objects = [obj for obj in case_spec.get("objects", []) if isinstance(obj, dict)]
     compiled_by_id = {item.object_id: item for item in compiled_intents or []}
     intents = [
@@ -37,6 +40,7 @@ def resolve_asset_intents(
         compiled = compiled_by_id.get(str(obj.get("id") or ""))
         acquisition = compiled.acquisition if compiled else None
         provider_pending = bool(acquisition and provider_route_required(acquisition))
+        provider_result = provider_results.get((compiled.object_id, compiled.slot)) if compiled and provider_results else None
         explicit_proxy = bool(obj.get("force_analytic_proxy") or obj.get("asset_policy") == "analytic_proxy")
         search_intent = (
             compiled.search_intent
@@ -45,15 +49,30 @@ def resolve_asset_intents(
             if explicit_proxy
             else search_intent_from_asset_intent(intent, backend=target_backend)
         )
+        provider_fulfilled = bool(provider_result and provider_result.get("status") == "fulfilled")
+        provider_failed = bool(provider_result and provider_result.get("status") in {"blocked", "failed"})
+        explicit_local_fallback = bool(
+            acquisition and "local_catalog" in {str(value) for value in acquisition.get("fallback_order") or []}
+        )
         can_search_catalog = (
             explicit_proxy
             or acquisition is None
-            or local_catalog_allowed(
+            or (not provider_pending and local_catalog_allowed(
                 acquisition,
                 allow_local=compiled.allow_local if compiled else True,
-            )
+            ))
+            or (provider_failed and explicit_local_fallback and bool(compiled and compiled.allow_local))
         )
-        ranked = registry.search_intent(search_intent, top_k=max(top_k * 4, top_k)) if can_search_catalog else []
+        if provider_fulfilled:
+            ranked = [
+                candidate
+                for candidate in registry.get_assets_by_ids(
+                    [str(value) for value in provider_result.get("catalog_asset_ids") or []]
+                )
+                if candidate_matches_search_intent(candidate, search_intent)
+            ]
+        else:
+            ranked = registry.search_intent(search_intent, top_k=max(top_k * 4, top_k)) if can_search_catalog else []
         if explicit_proxy:
             ranked = [resolved_analytic_recipe(candidate, obj, intent.to_dict()) for candidate in ranked]
         evaluated = [
@@ -82,13 +101,19 @@ def resolve_asset_intents(
                 else "first_explicit_local_preview_candidate"
                 if selected
                 else "provider_route_not_implemented"
-                if provider_pending
+                if provider_pending and provider_result is None
+                else "provider_fulfilled_catalog_candidate"
+                if provider_fulfilled and selected
+                else "provider_failed_local_catalog_fallback"
+                if provider_failed and selected
                 else "no_quality_approved_candidate"
             ),
             "runtime_binding_requirements": intent.required_properties,
             "fallback_reason": (
                 None
                 if selected
+                else str((provider_result.get("failure") or {}).get("message") or "Provider result did not yield a qualified registered asset")
+                if provider_result
                 else f"requested acquisition route requires next-stage Provider: {acquisition['route']}"
                 if provider_pending and acquisition
                 else "no quality-approved analytic recipe candidate"
@@ -106,22 +131,30 @@ def resolve_asset_intents(
             ),
         }
         if acquisition is not None:
+            provider_status = str(provider_result.get("status")) if provider_result else None
             row["acquisition"] = {
                 "requested": dict(acquisition),
                 "status": (
-                    "resolved_local_fallback"
-                    if selected and provider_pending
+                    "resolved_provider"
+                    if selected and provider_fulfilled
+                    else "provider_asset_unresolved"
+                    if provider_fulfilled
+                    else "resolved_local_fallback"
+                    if selected and provider_failed
                     else "resolved_local_catalog"
                     if selected
+                    else f"provider_{provider_status}"
+                    if provider_status
                     else "provider_required"
                     if provider_pending
                     else "local_catalog_unresolved"
                 ),
-                "actual_route": "local_catalog" if selected else None,
+                "actual_route": str(acquisition.get("route")) if selected and provider_fulfilled else "local_catalog" if selected else None,
                 "route_honored": bool(
-                    selected and str(acquisition.get("route")) in {"default", "local_catalog"}
+                    selected and (provider_fulfilled or str(acquisition.get("route")) in {"default", "local_catalog"})
                 ),
-                "provider_execution": "deferred_to_provider_phase" if provider_pending else "not_required",
+                "provider_execution": provider_status or "not_invoked" if provider_pending else "not_required",
+                "provider_result": dict(provider_result) if provider_result else None,
             }
             row["intent"] = {
                 **row["intent"],

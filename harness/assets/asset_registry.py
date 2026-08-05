@@ -46,6 +46,48 @@ class AssetRegistry:
             return []
         return self.search_intent(SearchIntent(raw_query=query, semantic_text=query), top_k=top_k)
 
+    @property
+    def writable(self) -> bool:
+        return self._sqlite is not None
+
+    def register_asset(self, asset: dict[str, Any]) -> dict[str, Any]:
+        asset_id = str(asset.get("asset_id") or "").strip()
+        if not asset_id:
+            raise ValueError("Catalog registration requires asset_id")
+        if self._sqlite is None:
+            return {
+                "status": "blocked",
+                "code": "catalog_not_writable",
+                "message": f"Provider registration requires a writable SQLite Catalog: {self.path}",
+                "asset_id": asset_id,
+            }
+        stats = self._sqlite.import_registry([asset])
+        registered = self._sqlite.get_asset(asset_id)
+        if registered is None:
+            return {
+                "status": "failed",
+                "code": "catalog_registration_failed",
+                "message": f"registered asset cannot be read back through AssetRegistry: {asset_id}",
+                "asset_id": asset_id,
+            }
+        return {
+            "status": "registered",
+            "asset_id": asset_id,
+            "changed": bool(stats["changed_count"]),
+            "catalog_asset_count": stats["catalog_asset_count"],
+        }
+
+    def get_asset_by_id(self, asset_id: str) -> dict[str, Any] | None:
+        identity = str(asset_id).strip()
+        if not identity:
+            return None
+        if self._sqlite is not None:
+            return self._sqlite.get_asset(identity)
+        return next((item for item in self.assets if asset_identity(item) == identity), None)
+
+    def get_assets_by_ids(self, asset_ids: list[str]) -> list[dict[str, Any]]:
+        return [asset for asset_id in asset_ids if (asset := self.get_asset_by_id(asset_id)) is not None]
+
     def search_intent(self, intent: SearchIntent, *, top_k: int = 5) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         if self._sqlite:

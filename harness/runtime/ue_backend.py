@@ -82,6 +82,22 @@ class UEBackend:
         }
         scene_spec = compile_minimal_scene_spec(case.data, asset_resolution=asset_resolution)
         write_json(run_dir / "scene_spec.json", scene_spec)
+        if compilation.status != "pass":
+            first_error = compilation.errors[0] if compilation.errors else {}
+            preflight = empty_preflight(case.case_id)
+            report = build_backend_report(
+                case,
+                run_id,
+                preflight,
+                phase="runtime_compilation",
+                real_ue_invoked=False,
+                failure_code=str(first_error.get("code") or "F7_RUNTIME_COMPILATION_FAILED"),
+                failure_message=str(first_error.get("message") or "Runtime Compiler rejected the case."),
+                failure_category="preflight_failure",
+            )
+            write_json(run_dir / "ue_preflight_report.json", preflight)
+            write_failed_ue_artifacts(run_dir, output_dir, case, run_id, report, camera_plan=camera_plan, render_passes=ue_render_passes, requested_view_count=len(ue_requested_views))
+            raise UEBackendUnavailable(report["failure_message"], run_dir, str(report["failure_code"]), report)
         if actor_contract["status"] != "pass":
             report = build_backend_report(
                 case,
@@ -106,22 +122,6 @@ class UEBackend:
                 real_ue_invoked=False,
                 failure_code="F3_UE_MAP_UNRESOLVED",
                 failure_message="Requested UE Map did not pass Catalog qualification and Asset Resolve.",
-                failure_category="preflight_failure",
-            )
-            write_json(run_dir / "ue_preflight_report.json", preflight)
-            write_failed_ue_artifacts(run_dir, output_dir, case, run_id, report, camera_plan=camera_plan, render_passes=ue_render_passes, requested_view_count=len(ue_requested_views))
-            raise UEBackendUnavailable(report["failure_message"], run_dir, str(report["failure_code"]), report)
-        if compilation.status != "pass":
-            first_error = compilation.errors[0] if compilation.errors else {}
-            preflight = empty_preflight(case.case_id)
-            report = build_backend_report(
-                case,
-                run_id,
-                preflight,
-                phase="runtime_compilation",
-                real_ue_invoked=False,
-                failure_code=str(first_error.get("code") or "F7_RUNTIME_COMPILATION_FAILED"),
-                failure_message=str(first_error.get("message") or "Runtime Compiler rejected the case."),
                 failure_category="preflight_failure",
             )
             write_json(run_dir / "ue_preflight_report.json", preflight)

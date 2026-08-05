@@ -232,9 +232,9 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
         )
 
         self.assertEqual(compilation.status, "fail")
-        self.assertIn("provider_required", {error["code"] for error in compilation.errors})
+        self.assertIn("unsupported_provider_route", {error["code"] for error in compilation.errors})
         row = compilation.artifacts["asset_resolution"]["assets"][0]
-        self.assertEqual(row["acquisition"]["status"], "provider_required")
+        self.assertEqual(row["acquisition"]["status"], "provider_blocked")
         self.assertIsNone(row["selected_asset"])
         self.assertEqual(row["fallback_mode"], "provider_required")
 

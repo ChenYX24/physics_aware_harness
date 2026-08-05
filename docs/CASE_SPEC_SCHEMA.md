@@ -86,7 +86,17 @@ default / local_catalog / external_site / procedural_generation / model_generati
 `reference_inputs[].usage` 区分
 `similarity_search`、`generation_condition`、`geometry_reference`、`style_reference` 和
 `texture_source`。Provider 尚未接入时，要求外部获取或生成的 V2 会在 compilation 阶段以
-`provider_required` 明确阻断，不会静默改用本地相似素材。
+`procedural_generation` 当前由统一 Provider Orchestrator 支持 `box_mesh_v1`；它必须先生成、
+校验 hash/license/provenance、经显式 UE importer 导入、通过 `AssetRegistry` 注册和资格门，
+最后才由单次 Asset Resolve 选择。`external_site` 和 `model_generation` 仍以结构化
+`unsupported_provider_route` 阻断，不会静默改用本地相似素材。Provider 失败后只有
+`fallback_order` 显式包含 `local_catalog` 时才允许本地检索。
+
+本地程序化 Provider 使用 `acquisition.provider_hint: box_mesh_v1`（省略时该 route 也默认此
+recipe），并从对象的 `geometry.shape_hint: box` 与三个正有限数
+`geometry.approx_size_m` 构造版本化 generation spec。UE importer 命令通过
+`SIM_HARNESS_UE_ASSET_IMPORTER_CMD` 显式配置；未配置时返回
+`backend_importer_unavailable`，不会触发普通 UE runner。
 
 下一阶段的本地 Provider 实现边界、数据契约、负向测试和验收命令见
 [`LOCAL_PROVIDER_IMPLEMENTATION_PLAN.md`](LOCAL_PROVIDER_IMPLEMENTATION_PLAN.md)。
