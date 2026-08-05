@@ -212,10 +212,14 @@ def generate_case_spec_v2(
             "planning_contract": {
                 "executable_primary_capabilities": _executable_primary_capabilities(),
             },
+            "expansion_contract": _expansion_contract(),
         },
         images=images,
         purpose="expansion",
     )
+    if destination is not None:
+        write_json(destination / "expansion_raw.json", expansion_response.payload)
+        write_json(destination / "expansion_call_receipt.json", expansion_response.receipt)
     expansion = _normalize_expansion(expansion_response.payload)
     if destination is not None:
         write_json(destination / "expansion.json", expansion)
@@ -336,7 +340,10 @@ def _normalize_expansion(payload: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(expansion.get("request_summary"), str):
         raise ValueError("expansion.request_summary must be a string")
     for field in ("object_analysis", "event_and_relation_analysis", "asset_analysis", "ambiguities", "assumptions"):
-        if not isinstance(expansion.get(field), list):
+        value = expansion.get(field)
+        if isinstance(value, Mapping):
+            expansion[field] = _analysis_mapping_to_list(value)
+        elif not isinstance(value, list):
             raise ValueError(f"expansion.{field} must be a list")
     for field in (
         "capability_analysis",
@@ -348,6 +355,22 @@ def _normalize_expansion(payload: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(expansion.get(field), dict):
             raise ValueError(f"expansion.{field} must be an object")
     return expansion
+
+
+def _analysis_mapping_to_list(value: Mapping[str, Any]) -> list[Any]:
+    data = dict(value)
+    if not data:
+        return []
+    if len(data) == 1:
+        wrapped = next(iter(data.values()))
+        if isinstance(wrapped, list):
+            return list(wrapped)
+    if all(isinstance(item, Mapping) for item in data.values()):
+        return [
+            {"analysis_key": str(key), **dict(item)}
+            for key, item in data.items()
+        ]
+    return [data]
 
 
 def _apply_request_identity(case_spec: Mapping[str, Any], request: Mapping[str, Any]) -> dict[str, Any]:
@@ -418,6 +441,27 @@ asset reference, distinguish similarity retrieval from local catalog, external a
 procedural generation, and model/API generation. Explicitly record when a reference image is a
 generation condition and must not be used for similarity search. Never infer permission to upload
 images, spend money, or use an unlicensed source."""
+
+
+def _expansion_contract() -> dict[str, Any]:
+    return {
+        "schema_version": EXPANSION_SCHEMA_VERSION,
+        "required_fields": list(EXPANSION_FIELDS),
+        "field_types": {
+            "request_summary": "string",
+            "capability_analysis": "object",
+            "scene_analysis": "object",
+            "object_analysis": "array",
+            "event_and_relation_analysis": "array",
+            "asset_analysis": "array",
+            "expected_behavior_analysis": "object",
+            "observation_analysis": "object",
+            "backend_constraints": "object",
+            "ambiguities": "array",
+            "assumptions": "array",
+        },
+        "output": "one JSON object only; no markdown or prose outside JSON",
+    }
 
 
 def _case_spec_system_prompt() -> str:

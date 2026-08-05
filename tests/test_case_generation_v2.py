@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from copy import deepcopy
@@ -65,8 +66,39 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertEqual([call["purpose"] for call in client.calls], ["expansion", "case_spec_generation"])
         contract = client.calls[1]["payload"]["case_spec_contract"]
         self.assertIn("rigid_body_contact_causality", contract["enums"]["primary_capability"])
+        expansion_contract = client.calls[0]["payload"]["expansion_contract"]
+        self.assertEqual(expansion_contract["field_types"]["object_analysis"], "array")
         self.assertEqual(result.case_spec.case_id, "generated_v2")
         self.assertEqual(result.repair_count, 0)
+
+    def test_common_mapping_shaped_analysis_is_canonicalized_without_losing_keys(self) -> None:
+        expansion = expansion_fixture()
+        expansion["object_analysis"] = {
+            "generated_box": {"role": "dynamic rigid body"},
+            "floor": {"role": "static support"},
+        }
+        request = build_case_request(case_id="mapping_expansion", text="Drop a generated box.")
+        client = FakeJSONClient([expansion, case_spec_v2_fixture()])
+
+        result = generate_case_spec_v2(request, client=client)
+
+        self.assertEqual(
+            [row["analysis_key"] for row in result.expansion["object_analysis"]],
+            ["generated_box", "floor"],
+        )
+
+    def test_invalid_expansion_is_auditable_before_normalization_failure(self) -> None:
+        expansion = expansion_fixture()
+        expansion["object_analysis"] = "not an array or object"
+        request = build_case_request(case_id="invalid_expansion", text="Drop a box.")
+        client = FakeJSONClient([expansion])
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary)
+            with self.assertRaisesRegex(ValueError, "object_analysis must be a list"):
+                generate_case_spec_v2(request, client=client, artifact_dir=destination)
+            raw = json.loads((destination / "expansion_raw.json").read_text(encoding="utf-8"))
+            self.assertEqual(raw["object_analysis"], "not an array or object")
+            self.assertTrue((destination / "expansion_call_receipt.json").is_file())
 
     def test_validation_failure_allows_one_bounded_repair(self) -> None:
         invalid = case_spec_v2_fixture()
