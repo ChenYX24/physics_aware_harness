@@ -5,12 +5,15 @@
 
 ## 1. 运行前提
 
-在仓库根目录执行命令，并使用 conda `base` / Python 3.13：
+在仓库根目录执行命令，并使用 Python 3.13：
 
 ```bash
-cd /Users/laplace/phyawareharness/physics_aware_harness
-conda run -n base python --version
+cd /path/to/physics_aware_harness
+python3.13 --version
 ```
+
+如果使用 conda、venv 或其他环境管理器，请先激活包含项目依赖的环境；下文的
+`python3.13` 可替换为该环境中的 `python`。
 
 本地 UE 运行需要事先配置 `SIM_HARNESS_WORKSPACE`、Catalog、UE executable/project/map、
 runner 和 Asset Importer 等环境变量。生成资产和运行产物只写入外部 workspace，不写入源码仓库。
@@ -18,7 +21,7 @@ runner 和 Asset Importer 等环境变量。生成资产和运行产物只写入
 ## 2. 最简自然语言运行
 
 ```bash
-conda run -n base python scripts/harness_run_case.py \
+python3.13 scripts/harness_run_case.py \
   --prompt "For local preview, procedurally generate a 0.3 meter rigid sphere, drop it onto a static floor, and render the collision." \
   --case-spec-version v2 \
   --case-id sphere_drop \
@@ -35,7 +38,7 @@ conda run -n base python scripts/harness_run_case.py \
 ## 3. 显式指定分辨率和多视角
 
 ```bash
-conda run -n base python scripts/harness_run_case.py \
+python3.13 scripts/harness_run_case.py \
   --prompt "Generate a rigid box above a static floor and render its fall and impact." \
   --case-spec-version v2 \
   --case-id box_drop_multiview \
@@ -61,7 +64,7 @@ conda run -n base python scripts/harness_run_case.py \
 示例：让一根倾斜圆柱杆撞击水平地面并倾倒：
 
 ```bash
-conda run -n base python scripts/harness_run_case.py \
+python3.13 scripts/harness_run_case.py \
   --prompt "For local preview, procedurally generate a dynamic rigid cylindrical rod exactly 0.12 meters in diameter and 1.20 meters long. Keep the static floor horizontal with its top at z=0. Rotate the rod itself 20 degrees about the world Y axis from vertical, place its lowest rim just above the floor, enable gravity and collision, and render the impact and toppling." \
   --case-spec-version v2 \
   --case-id rod_topple \
@@ -79,9 +82,9 @@ Provider 成功后只返回 Catalog asset ID 和 receipt。资产经过 hash、�
 ## 5. 使用参考图片
 
 ```bash
-conda run -n base python scripts/harness_run_case.py \
+python3.13 scripts/harness_run_case.py \
   --prompt "Use the reference image to describe the requested object and create a physics-ready scene." \
-  --image /absolute/path/reference.png \
+  --image /path/to/reference.png \
   --allow-image-upload \
   --case-spec-version v2 \
   --case-id image_reference_case \
@@ -96,8 +99,8 @@ conda run -n base python scripts/harness_run_case.py \
 重跑保存的 CaseSpec 可以排除 LLM 输出波动：
 
 ```bash
-conda run -n base python scripts/harness_run_case.py \
-  --case /absolute/path/to/case_spec_v2.json \
+python3.13 scripts/harness_run_case.py \
+  --case /path/to/case_spec_v2.json \
   --backend ue \
   --width 1280 --height 720 \
   --views front_static,side_static,event_closeup \
