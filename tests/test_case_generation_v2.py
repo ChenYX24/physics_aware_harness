@@ -7,7 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping
 
-from harness.core.case_spec_v2 import CaseSpecV2ValidationError
+from harness.core.case_spec_v2 import CaseSpecV2ValidationError, case_spec_v2_from_dict
 from harness.planning.case_generation import (
     LLMJSONResponse,
     build_case_request,
@@ -62,12 +62,16 @@ class CaseGenerationV2Tests(unittest.TestCase):
             self.assertTrue((Path(temporary) / "request.json").is_file())
             self.assertTrue((Path(temporary) / "expansion.json").is_file())
             self.assertTrue((Path(temporary) / "case_spec_v2.json").is_file())
+            self.assertTrue((Path(temporary) / "case_spec_generation_raw.json").is_file())
+            self.assertTrue((Path(temporary) / "case_spec_generation_call_receipt.json").is_file())
 
         self.assertEqual([call["purpose"] for call in client.calls], ["expansion", "case_spec_generation"])
         contract = client.calls[1]["payload"]["case_spec_contract"]
         self.assertIn("rigid_body_contact_causality", contract["enums"]["primary_capability"])
         expansion_contract = client.calls[0]["payload"]["expansion_contract"]
         self.assertEqual(expansion_contract["field_types"]["object_analysis"], "array")
+        structure_example = client.calls[1]["payload"]["case_spec_contract"]["valid_structure_example_do_not_copy_values"]
+        self.assertEqual(case_spec_v2_from_dict(structure_example).case_id, "example")
         self.assertEqual(result.case_spec.case_id, "generated_v2")
         self.assertEqual(result.repair_count, 0)
 
@@ -171,8 +175,14 @@ class CaseGenerationV2Tests(unittest.TestCase):
         request = build_case_request(case_id="still_invalid", text="Make one ball hit another.")
         client = FakeJSONClient([expansion_fixture(), invalid, invalid])
 
-        with self.assertRaisesRegex(CaseSpecV2ValidationError, "physics_hz must be an integer multiple"):
-            generate_case_spec_v2(request, client=client)
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary)
+            with self.assertRaisesRegex(CaseSpecV2ValidationError, "physics_hz must be an integer multiple"):
+                generate_case_spec_v2(request, client=client, artifact_dir=destination)
+            self.assertTrue((destination / "case_spec_validation_errors.json").is_file())
+            self.assertTrue((destination / "case_spec_repair_raw.json").is_file())
+            self.assertTrue((destination / "case_spec_repair_call_receipt.json").is_file())
+            self.assertTrue((destination / "case_spec_repair_validation_errors.json").is_file())
 
         self.assertEqual(len(client.calls), 3)
 

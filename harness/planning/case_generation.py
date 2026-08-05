@@ -233,6 +233,9 @@ def generate_case_spec_v2(
         images=None,
         purpose="case_spec_generation",
     )
+    if destination is not None:
+        write_json(destination / "case_spec_generation_raw.json", generation_response.payload)
+        write_json(destination / "case_spec_generation_call_receipt.json", generation_response.receipt)
     raw_case_spec = _unwrap_case_spec(generation_response.payload)
     raw_case_spec = _apply_request_identity(raw_case_spec, validated_request)
     receipts = [expansion_response.receipt, generation_response.receipt]
@@ -243,6 +246,8 @@ def generate_case_spec_v2(
             available_input_ids=[str(item["input_id"]) for item in validated_request.get("inputs") or []],
         )
     except CaseSpecV2ValidationError as validation_error:
+        if destination is not None:
+            write_json(destination / "case_spec_validation_errors.json", validation_error.to_dict())
         repair_response = client.complete_json(
             system_prompt=_repair_system_prompt(),
             user_payload={
@@ -258,13 +263,21 @@ def generate_case_spec_v2(
             images=None,
             purpose="case_spec_validation_repair",
         )
+        if destination is not None:
+            write_json(destination / "case_spec_repair_raw.json", repair_response.payload)
+            write_json(destination / "case_spec_repair_call_receipt.json", repair_response.receipt)
         repair_count = 1
         receipts.append(repair_response.receipt)
         repaired = _apply_request_identity(_unwrap_case_spec(repair_response.payload), validated_request)
-        case_spec = case_spec_v2_from_dict(
-            repaired,
-            available_input_ids=[str(item["input_id"]) for item in validated_request.get("inputs") or []],
-        )
+        try:
+            case_spec = case_spec_v2_from_dict(
+                repaired,
+                available_input_ids=[str(item["input_id"]) for item in validated_request.get("inputs") or []],
+            )
+        except CaseSpecV2ValidationError as repair_error:
+            if destination is not None:
+                write_json(destination / "case_spec_repair_validation_errors.json", repair_error.to_dict())
+            raise
     provenance = case_spec.data.setdefault("provenance", {})
     provenance["case_generation"] = {
         "workflow": "expansion_then_single_case_spec_with_one_bounded_repair_v1",
@@ -515,6 +528,47 @@ def _case_spec_contract() -> dict[str, Any]:
             "semantic_sections": ["asset", "geometry", "physics", "initial_state", "behavior"],
             "asset_cardinality": "zero_or_one_direct_request",
         },
+        "field_shapes": {
+            "capabilities": {"primary": "string from primary_capability enum", "required": ["same primary string only"]},
+            "asset_policy": {
+                "allow_local": "boolean",
+                "allow_external": "boolean",
+                "allow_generation": "boolean; true for procedural_generation or model_generation",
+                "allow_analytic_proxy": "boolean",
+                "required_license_tier": "local_preview or reference",
+            },
+            "object": {
+                "id": "stable identifier string",
+                "role": "semantic role string",
+                "geometry": {"shape_hint": "string", "approx_size_m": ["positive x", "positive y", "positive z"]},
+                "physics": {
+                    "body_type": "dynamic, static, or kinematic",
+                    "mass_kg": "positive number",
+                    "collision_required": "boolean",
+                    "material": "object",
+                },
+                "initial_state": {
+                    "position_m": ["x", "y", "z"],
+                    "rotation_deg": ["x", "y", "z"],
+                    "linear_velocity_m_s": ["x", "y", "z"],
+                },
+                "behavior": "object, never a string",
+            },
+            "asset_acquisition": {
+                "route": "one acquisition_route enum",
+                "requirement": "preferred or required",
+                "origin": "user_explicit, llm_inferred, or system_default",
+                "provider_hint": "string or null",
+                "source_uri_hint": "string or null",
+                "reference_inputs": [],
+                "fallback_order": [],
+            },
+            "verification_assertion": {
+                "type": "one verification_assertion enum string",
+                "objects": ["exact object.id", "exact object.id"],
+            },
+            "camera": {"role": "one camera_role enum", "target_objects": ["exact object.id"]},
+        },
         "enums": {
             "primary_capability": _executable_primary_capabilities(),
             "coordinate_system": ["z_up"],
@@ -541,9 +595,102 @@ def _case_spec_contract() -> dict[str, Any]:
             "verification_assertion": sorted(VERIFICATION_ASSERTION_TYPES),
         },
         "hard_rules": [
+            "capabilities must be an object and capabilities.required must contain exactly capabilities.primary",
+            "every object behavior must be an object and every physics.body_type must use the body_type enum",
+            "every relation, event, camera, and assertion object reference must exactly equal one declared object.id; never use a phrase",
+            "every verification assertion requires a type from verification_assertion and an objects array of exact IDs",
             "required acquisition is legal only when origin=user_explicit and route is specific",
             "LLM inferred acquisition must use requirement=preferred",
             "reference input_id must come from request.inputs",
             "do not emit UE paths, runtime stages, exact camera poses, or verifier implementations",
         ],
+        "valid_structure_example_do_not_copy_values": _valid_case_spec_structure_example(),
+    }
+
+
+def _valid_case_spec_structure_example() -> dict[str, Any]:
+    return {
+        "schema_version": CASE_SPEC_V2_SCHEMA_VERSION,
+        "identity": {"case_id": "example", "title": "Example", "source_request": "Example request"},
+        "capabilities": {
+            "primary": "rigid_body_gravity_collision",
+            "required": ["rigid_body_gravity_collision"],
+        },
+        "scene": {
+            "environment_intent": "minimal floor",
+            "coordinate_system": "z_up",
+            "duration_s": 2.0,
+            "bounds_hint_m": [3.0, 3.0, 3.0],
+        },
+        "timebase": {"physics_hz": 120, "observation_fps": 24, "deterministic_seed": 1},
+        "backend_constraints": {
+            "required_solver_capabilities": ["rigid_body", "contact_events"],
+            "allowed_solvers": ["ue"],
+            "render_backend": "ue",
+            "allow_multi_backend": False,
+        },
+        "asset_policy": {
+            "allow_local": True,
+            "allow_external": False,
+            "allow_generation": True,
+            "allow_analytic_proxy": True,
+            "required_license_tier": "local_preview",
+        },
+        "objects": [
+            {
+                "id": "generated_box",
+                "role": "falling_body",
+                "geometry": {"shape_hint": "box", "approx_size_m": [0.4, 0.6, 0.8]},
+                "physics": {
+                    "body_type": "dynamic",
+                    "mass_kg": 1.0,
+                    "collision_required": True,
+                    "material": {"dynamic_friction": 0.5, "restitution": 0.2},
+                },
+                "initial_state": {
+                    "position_m": [0.0, 0.0, 1.4],
+                    "rotation_deg": [0.0, 0.0, 0.0],
+                    "linear_velocity_m_s": [0.0, 0.0, 0.0],
+                },
+                "behavior": {},
+                "asset": {
+                    "description": "generated box",
+                    "resource_kind": "mesh_3d",
+                    "acquisition": {
+                        "route": "procedural_generation",
+                        "requirement": "required",
+                        "origin": "user_explicit",
+                        "provider_hint": "box_mesh_v1",
+                        "source_uri_hint": None,
+                        "reference_inputs": [],
+                        "fallback_order": [],
+                    },
+                },
+            },
+            {
+                "id": "floor",
+                "role": "support",
+                "geometry": {"shape_hint": "box", "approx_size_m": [3.0, 3.0, 0.1]},
+                "physics": {"body_type": "static", "collision_required": True},
+                "initial_state": {"position_m": [0.0, 0.0, 0.0]},
+                "behavior": {},
+            },
+        ],
+        "relations": [{"type": "collision", "source": "generated_box", "target": "floor"}],
+        "events": [{"type": "gravity_drop", "object": "generated_box"}],
+        "expected_behavior": {"contact_required": True},
+        "observation_requirements": {
+            "cameras": [{"role": "front_static", "target_objects": ["generated_box", "floor"]}],
+            "modalities": ["rgb"],
+            "signals": ["trajectory", "contact_events"],
+        },
+        "verification_requirements": {
+            "assertions": [
+                {"type": "gravity_then_support_contact", "objects": ["generated_box", "floor"]}
+            ],
+            "thresholds": {},
+        },
+        "variant": {"should_pass": True},
+        "provenance": {},
+        "notes": "Structure example only.",
     }
