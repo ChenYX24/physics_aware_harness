@@ -83,10 +83,10 @@ def asset_rows_by_object_id(asset_resolution: dict[str, Any] | None) -> dict[str
 def infer_support_relations(case_spec: dict[str, Any], nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     expected = case_spec.get("expected_physics") or {}
     by_id = {node["object_id"]: node for node in nodes}
-    support_nodes = [node for node in nodes if is_support_role(str(node.get("role")))]
+    support_nodes = [node for node in nodes if is_support_node(node)]
     relations: list[dict[str, Any]] = []
     for node in nodes:
-        if not node.get("physics_critical") or is_support_role(str(node.get("role"))):
+        if not node.get("physics_critical") or not requires_support_relation(node):
             continue
         support_id = support_id_for_node(node, expected, support_nodes)
         support_node = by_id.get(support_id) if support_id else None
@@ -115,7 +115,7 @@ def support_id_for_node(node: dict[str, Any], expected: dict[str, Any], support_
 
 def support_relation(node: dict[str, Any], support_node: dict[str, Any] | None) -> dict[str, Any]:
     if support_node is None:
-        if allows_above_support(str(node.get("role"))):
+        if allows_free_initial_motion(node):
             return {
                 "object_id": node["object_id"],
                 "support_id": None,
@@ -137,7 +137,7 @@ def support_relation(node: dict[str, Any], support_node: dict[str, Any] | None) 
         status = "penetrating_support"
     elif abs(gap) <= 0.01:
         status = "contact_at_rest"
-    elif allows_above_support(str(node.get("role"))):
+    elif allows_free_initial_motion(node):
         status = "above_support"
     else:
         status = "unsupported_gap"
@@ -147,6 +147,30 @@ def support_relation(node: dict[str, Any], support_node: dict[str, Any] | None) 
         "status": status,
         "vertical_gap_m": gap,
     }
+
+
+def is_support_node(node: dict[str, Any]) -> bool:
+    physics = node.get("physics") if isinstance(node.get("physics"), dict) else {}
+    body_type = str(physics.get("body_type") or "").casefold()
+    if body_type in {"static", "kinematic"} and physics.get("collision_required") is True:
+        return True
+    return is_support_role(str(node.get("role")))
+
+
+def requires_support_relation(node: dict[str, Any]) -> bool:
+    physics = node.get("physics") if isinstance(node.get("physics"), dict) else {}
+    body_type = str(physics.get("body_type") or "").casefold()
+    if body_type:
+        return body_type == "dynamic"
+    return not is_support_role(str(node.get("role")))
+
+
+def allows_free_initial_motion(node: dict[str, Any]) -> bool:
+    physics = node.get("physics") if isinstance(node.get("physics"), dict) else {}
+    body_type = str(physics.get("body_type") or "").casefold()
+    if body_type:
+        return body_type == "dynamic"
+    return allows_above_support(str(node.get("role")))
 
 
 def inclined_surface_gap(node: dict[str, Any], support_node: dict[str, Any]) -> float | None:

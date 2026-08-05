@@ -78,6 +78,8 @@ fluid/soft-body specialized solver 外，当前通用 physics capability 只允�
 V2 对象的结构化 `physics.body_type` 和 `physics.collision_required` 是 runtime physics contract
 真值；`role` 只表达开放语义，不能决定对象是否参与物理。投影后的 dynamic 对象必须启用模拟，
 显式要求 collision 的对象必须启用碰撞，否则 Actor Placement 在 backend 调用前 fail closed。
+Static Scene 同样使用该结构化 contract：static/kinematic collision 对象可作为潜在支撑面且自身
+不需要支撑关系，dynamic 对象允许从非接触初态开始自由运动。
 V1 缺少这些结构化字段时才继续使用既有 role 兼容分类。
 
 资产硬条件中 `asset_type` 表示 backend 资产类（例如 `StaticMesh`），`geometry_type` 表示几何

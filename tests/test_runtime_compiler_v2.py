@@ -98,7 +98,10 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
 
     def test_v2_dynamic_contract_does_not_depend_on_free_form_role(self) -> None:
         data = case_spec_v2_fixture()
-        data["objects"][0]["role"] = "falling_object"
+        data["objects"][0]["role"] = "falling object"
+        data["objects"][0]["initial_state"]["position_m"][2] = 1.0
+        data["objects"][1]["initial_state"]["position_m"][2] = 0.14
+        data["objects"][2]["role"] = "static collision surface"
         compilation = compile_runtime_case(
             case_spec_v2_from_dict(data),
             requested_backend="fallback",
@@ -116,6 +119,11 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
         self.assertTrue(binding["physics_critical"])
         self.assertTrue(binding["physics"]["simulate_physics"])
         self.assertTrue(binding["physics"]["collision_enabled"])
+        support_relations = compilation.artifacts["scene_layout"]["support_relations"]
+        falling_relation = next(row for row in support_relations if row["object_id"] == "cue_ball")
+        self.assertEqual(falling_relation["support_id"], "floor")
+        self.assertEqual(falling_relation["status"], "above_support")
+        self.assertNotIn("floor", {row["object_id"] for row in support_relations})
 
         bad_placement = deepcopy(compilation.artifacts["runtime_actor_placement"])
         bad_binding = next(row for row in bad_placement["actor_bindings"] if row["object_id"] == "cue_ball")
