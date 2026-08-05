@@ -17,7 +17,10 @@ from harness.assets.providers.contracts import (
 from harness.core.artifact_schema import write_json
 
 
-DEFAULT_TIMEOUT_S = 120.0
+# The production launcher owns the Unreal process timeout (600 seconds) and
+# needs enough time afterward to persist its structured result.  Keep this
+# outer command timeout longer so it does not terminate the launcher first.
+DEFAULT_TIMEOUT_S = 660.0
 IMPORTER_COMMAND_ENV = "SIM_HARNESS_UE_ASSET_IMPORTER_CMD"
 
 

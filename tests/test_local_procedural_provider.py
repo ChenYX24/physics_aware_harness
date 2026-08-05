@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from harness.assets.asset_registry import AssetRegistry
 from harness.assets.asset_resolver import resolve_asset_intents
-from harness.assets.providers.backend_importer import UECommandImporterAdapter
+from harness.assets.providers.backend_importer import DEFAULT_TIMEOUT_S, UECommandImporterAdapter
 from harness.assets.providers.contracts import BACKEND_IMPORT_REQUEST_SCHEMA, BackendImportRequest
 from harness.assets.providers.local_procedural_mesh import generate_box_obj
 from harness.assets.providers.orchestrator import AssetProviderOrchestrator
@@ -99,6 +99,10 @@ class LocalProceduralProviderTests(unittest.TestCase):
 
     def importer(self, mode: str = "success") -> UECommandImporterAdapter:
         return UECommandImporterAdapter([sys.executable, str(self.importer_script), "--mode", mode], timeout_s=10)
+
+    def test_default_adapter_timeout_outlives_real_ue_launcher_timeout(self) -> None:
+        self.assertGreater(DEFAULT_TIMEOUT_S, 600.0)
+        self.assertEqual(UECommandImporterAdapter([]).timeout_s, DEFAULT_TIMEOUT_S)
 
     def provider_case(
         self,
