@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from harness.assets.asset_registry import AssetRegistry
 from harness.assets.providers.contracts import BACKEND_IMPORT_RESULT_SCHEMA, BackendImportResult
+from harness.assets.providers.input_manifest import ProviderInputError, build_provider_input_manifest
 from harness.assets.providers.orchestrator import AssetProviderOrchestrator
 from harness.assets.providers.remote import (
     MeshyModelGenerationAdapter,
@@ -26,7 +27,7 @@ from tests.case_spec_v2_fixture import case_spec_v2_fixture
 
 
 class FakeTransport:
-    def __init__(self, *, json_responses: list[dict[str, Any]], downloads: Mapping[str, bytes]) -> None:
+    def __init__(self, *, json_responses: list[Any], downloads: Mapping[str, bytes]) -> None:
         self.json_responses = list(json_responses)
         self.downloads = dict(downloads)
         self.requests: list[dict[str, Any]] = []
@@ -45,7 +46,10 @@ class FakeTransport:
         )
         if not self.json_responses:
             raise AssertionError(f"unexpected JSON request: {method} {url}")
-        return self.json_responses.pop(0)
+        response = self.json_responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
     def download(
         self,
@@ -173,6 +177,36 @@ class RemoteAssetProviderTests(unittest.TestCase):
             adapter.acquire(request, destination=self.workspace / "provider", workspace=self.workspace)
         self.assertEqual(context.exception.code, "upload_not_authorized")
 
+    def test_provider_manifest_keeps_planning_and_meshy_authorizations_separate(self) -> None:
+        image = self.workspace / "input.png"
+        image.write_bytes(b"png")
+        raw = self._provider_input(image, planning_upload=True)
+        denied = build_provider_input_manifest([raw], workspace=self.workspace, meshy_upload_authorized=False)
+        self.assertTrue(denied["inputs"][0]["authorizations"]["planning_llm_upload"])
+        self.assertFalse(denied["inputs"][0]["authorizations"]["meshy_upload"])
+        allowed = build_provider_input_manifest([raw], workspace=self.workspace, meshy_upload_authorized=True)
+        self.assertTrue(allowed["inputs"][0]["authorizations"]["meshy_upload"])
+
+    def test_meshy_manifest_rejects_authorized_input_outside_workspace(self) -> None:
+        image = self.root / "outside.png"
+        image.write_bytes(b"png")
+        with self.assertRaises(ProviderInputError) as context:
+            build_provider_input_manifest(
+                [self._provider_input(image)],
+                workspace=self.workspace,
+                meshy_upload_authorized=True,
+            )
+        self.assertEqual(context.exception.code, "provider_input_outside_workspace")
+
+    def test_meshy_rejects_unverified_remote_reference_urls(self) -> None:
+        request = self._meshy_request(
+            [{"input_id": "front", "uri": "https://example.com/image.png", "sha256": "0" * 64, "upload_authorized": True}]
+        )
+        adapter = MeshyModelGenerationAdapter(transport=FakeTransport(json_responses=[], downloads={}), api_key="test")
+        with self.assertRaises(RemoteProviderError) as context:
+            adapter.acquire(request, destination=self.workspace / "remote-url", workspace=self.workspace)
+        self.assertEqual(context.exception.code, "remote_reference_url_unsupported")
+
     def test_meshy_submits_polls_and_immediately_materializes_glb_and_obj(self) -> None:
         image = self.workspace / "input.png"
         image.write_bytes(b"png-image")
@@ -235,6 +269,54 @@ class RemoteAssetProviderTests(unittest.TestCase):
         manifest = (self.workspace / "provider" / "acquisition.json").read_text(encoding="utf-8")
         self.assertNotIn("secret-key", manifest)
         self.assertNotIn("token=secret", manifest)
+
+    def test_meshy_resumes_checkpoint_without_duplicate_post(self) -> None:
+        image = self.workspace / "resume.png"
+        image.write_bytes(b"image")
+        request = self._meshy_request(
+            [
+                {
+                    "input_id": "front",
+                    "local_path": str(image),
+                    "sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
+                    "upload_authorized": True,
+                }
+            ]
+        )
+        destination = self.workspace / "resume-provider"
+        first_transport = FakeTransport(
+            json_responses=[
+                {"result": "paid-task-123"},
+                RemoteProviderError("provider_network_error", "connection lost", retriable=True),
+            ],
+            downloads={},
+        )
+        with self.assertRaises(RemoteProviderError) as context:
+            MeshyModelGenerationAdapter(transport=first_transport, api_key="test").acquire(
+                request,
+                destination=destination,
+                workspace=self.workspace,
+            )
+        self.assertEqual(context.exception.details["task_id"], "paid-task-123")
+        checkpoint = json.loads((destination / "task_checkpoint.json").read_text(encoding="utf-8"))
+        self.assertEqual(checkpoint["task_id"], "paid-task-123")
+
+        resumed_transport = FakeTransport(
+            json_responses=[
+                {
+                    "status": "SUCCEEDED",
+                    "model_urls": {"glb": "https://d/model.glb", "obj": "https://d/model.obj"},
+                }
+            ],
+            downloads={"https://d/model.glb": b"glb", "https://d/model.obj": b"v 0 0 0\n"},
+        )
+        acquisition = MeshyModelGenerationAdapter(transport=resumed_transport, api_key="test").acquire(
+            request,
+            destination=destination,
+            workspace=self.workspace,
+        )
+        self.assertEqual(acquisition.source_asset_id, "paid-task-123")
+        self.assertEqual([row["method"] for row in resumed_transport.requests], ["GET"])
 
     def test_meshy_failure_timeout_and_missing_outputs_are_structured(self) -> None:
         image = self.workspace / "input.png"
@@ -370,9 +452,6 @@ class RemoteAssetProviderTests(unittest.TestCase):
                         "input_id": "front",
                         "usage": ["generation_condition", "geometry_reference"],
                         "allow_similarity_search": False,
-                        "local_path": str(image),
-                        "sha256": image_sha,
-                        "upload_authorized": True,
                     }
                 ],
             ),
@@ -383,11 +462,19 @@ class RemoteAssetProviderTests(unittest.TestCase):
                 importer=StubImporter(),
                 remote_providers={"model_generation": meshy},
             ),
+            provider_input_manifest=build_provider_input_manifest(
+                [self._provider_input(image)],
+                workspace=self.workspace,
+                meshy_upload_authorized=True,
+            ),
         )
         self.assertEqual(model_compilation.report["asset_resolve_invocation_count"], 1)
         model_result = model_compilation.artifacts["asset_provider_batch"]["results"][0]
         self.assertEqual(model_result["status"], "fulfilled")
         self.assertEqual(self.registry.get_asset_by_id(model_result["catalog_asset_ids"][0])["lifecycle_status"], "runtime_bound")
+        provider_reference = model_compilation.artifacts["asset_provider_batch"]["requests"][0]["reference_inputs"][0]
+        self.assertEqual(provider_reference["sha256"], image_sha)
+        self.assertTrue(provider_reference["upload_authorized"])
 
         poly_transport = self._poly_transport()
         poly = PolyHavenExternalSiteAdapter(transport=poly_transport)
@@ -408,6 +495,49 @@ class RemoteAssetProviderTests(unittest.TestCase):
         self.assertEqual(selected["license_tier"], "reference")
         self.assertEqual(selected["source_uri"], "https://polyhaven.com/a/dirty_football")
 
+    def test_normal_model_route_requires_manifest_and_independent_meshy_authorization(self) -> None:
+        image = self.workspace / "authorization.png"
+        image.write_bytes(b"image")
+        case = self._case(
+            route="model_generation",
+            provider_hint="meshy",
+            references=[{"input_id": "front", "usage": ["generation_condition"]}],
+        )
+        transport = FakeTransport(json_responses=[], downloads={})
+        orchestrator = AssetProviderOrchestrator(
+            workspace=self.workspace,
+            importer=StubImporter(),
+            remote_providers={
+                "model_generation": MeshyModelGenerationAdapter(transport=transport, api_key="test")
+            },
+        )
+        missing = compile_runtime_case(
+            case,
+            requested_backend="ue",
+            registry=self.registry,
+            provider_orchestrator=orchestrator,
+        )
+        self.assertEqual(
+            missing.artifacts["asset_provider_batch"]["results"][0]["failure"]["code"],
+            "provider_input_manifest_missing",
+        )
+        denied = compile_runtime_case(
+            case,
+            requested_backend="ue",
+            registry=self.registry,
+            provider_orchestrator=orchestrator,
+            provider_input_manifest=build_provider_input_manifest(
+                [self._provider_input(image, planning_upload=True)],
+                workspace=self.workspace,
+                meshy_upload_authorized=False,
+            ),
+        )
+        self.assertEqual(
+            denied.artifacts["asset_provider_batch"]["results"][0]["failure"]["code"],
+            "upload_not_authorized",
+        )
+        self.assertEqual(transport.requests, [])
+
     def test_remote_import_failure_is_receipted_and_never_registered(self) -> None:
         poly = PolyHavenExternalSiteAdapter(transport=self._poly_transport())
         compilation = compile_runtime_case(
@@ -426,6 +556,43 @@ class RemoteAssetProviderTests(unittest.TestCase):
         self.assertEqual(compilation.report["asset_resolve_invocation_count"], 1)
         self.assertEqual(len(result["receipt_ids"]), 1)
         self.assertIsNone(self.registry.get_asset_by_id("external.polyhaven.dirty_football.abcdef123456"))
+
+    def test_meshy_paid_task_failure_has_receipt_with_checkpoint(self) -> None:
+        image = self.workspace / "failed.png"
+        image.write_bytes(b"image")
+        meshy = MeshyModelGenerationAdapter(
+            transport=FakeTransport(
+                json_responses=[{"result": "paid-task"}, {"status": "FAILED", "task_error": "moderation"}],
+                downloads={},
+            ),
+            api_key="test",
+            poll_interval_s=0,
+        )
+        compilation = compile_runtime_case(
+            self._case(
+                route="model_generation",
+                provider_hint="meshy",
+                references=[{"input_id": "front", "usage": ["generation_condition"]}],
+            ),
+            requested_backend="ue",
+            registry=self.registry,
+            provider_orchestrator=AssetProviderOrchestrator(
+                workspace=self.workspace,
+                importer=StubImporter(),
+                remote_providers={"model_generation": meshy},
+            ),
+            provider_input_manifest=build_provider_input_manifest(
+                [self._provider_input(image)],
+                workspace=self.workspace,
+                meshy_upload_authorized=True,
+            ),
+        )
+        result = compilation.artifacts["asset_provider_batch"]["results"][0]
+        self.assertEqual(result["failure"]["code"], "provider_task_failed")
+        self.assertEqual(len(result["receipt_ids"]), 1)
+        receipt = compilation.provider_receipts[0]
+        self.assertEqual(receipt["provider_execution"]["task_id"], "paid-task")
+        self.assertEqual(receipt["output_files"][0]["role"], "provider_task_checkpoint")
 
     def _case(
         self,
@@ -468,6 +635,19 @@ class RemoteAssetProviderTests(unittest.TestCase):
             "source_uri_hint": "polyhaven:dirty_football",
             "search_intent": {"raw_query": "dirty football"},
             "generation_spec": {"size_m": [0.18, 0.18, 0.18]},
+        }
+
+    @staticmethod
+    def _provider_input(path: Path, *, planning_upload: bool = False) -> dict[str, Any]:
+        payload = path.read_bytes()
+        return {
+            "input_id": "front",
+            "kind": "image",
+            "local_path": str(path),
+            "mime_type": "image/png",
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "byte_size": len(payload),
+            "external_upload_authorized": planning_upload,
         }
 
     @staticmethod

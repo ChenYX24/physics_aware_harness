@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import math
 import os
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from harness.assets.asset_intent_compiler import CompiledAssetIntent
 from harness.assets.asset_registry import AssetRegistry, candidate_matches_search_intent
 from harness.assets.asset_resolver import asset_quality_gate
 from harness.assets.providers.backend_importer import BackendImporterAdapter, UECommandImporterAdapter
+from harness.assets.providers.input_manifest import ProviderInputError, bind_provider_reference_inputs
 from harness.assets.providers.contracts import (
     BACKEND_IMPORT_REQUEST_SCHEMA,
     PROVIDER_BATCH_SCHEMA,
@@ -45,6 +47,7 @@ from harness.assets.providers.remote import (
     RemoteProviderAdapter,
     RemoteProviderError,
 )
+from harness.core.artifact_schema import write_json
 
 
 PROVIDER_ROUTES = {"external_site", "procedural_generation", "model_generation"}
@@ -88,6 +91,7 @@ class AssetProviderOrchestrator:
         compiled_intents: tuple[CompiledAssetIntent, ...] | list[CompiledAssetIntent],
         target_backend: str,
         registry: AssetRegistry,
+        input_manifest: Mapping[str, Any] | None = None,
     ) -> ProviderOrchestration:
         requests: list[dict[str, Any]] = []
         results: dict[tuple[str, str], dict[str, Any]] = {}
@@ -109,6 +113,30 @@ class AssetProviderOrchestrator:
                 target_backend=target_backend,
                 required_license_tier=str(policy.get("required_license_tier") or "local_preview"),
             )
+            adapter = self.remote_providers.get(route)
+            hint = str(request.get("provider_hint") or "").strip().casefold()
+            meshy_hint_accepted = (
+                adapter is not None
+                and adapter.provider_id == "meshy_model_generation_v1"
+                and hint in {"", "meshy", "meshy_v1", adapter.provider_id}
+            )
+            if route == "model_generation" and registry.writable and meshy_hint_accepted:
+                try:
+                    references = bind_provider_reference_inputs(
+                        request.get("reference_inputs") or [],
+                        input_manifest,
+                        provider="meshy",
+                    )
+                    request = self._request_with_reference_inputs(request, references)
+                except ProviderInputError as exc:
+                    requests.append(request)
+                    results[(intent.object_id, intent.slot)] = provider_failure(
+                        request,
+                        status="blocked",
+                        code=exc.code,
+                        message=exc.message,
+                    )
+                    continue
             requests.append(request)
             result, receipt = self._fulfill_one(request, intent=intent, registry=registry)
             results[(intent.object_id, intent.slot)] = result
@@ -124,6 +152,27 @@ class AssetProviderOrchestrator:
             }
         ).to_dict()
         return ProviderOrchestration(batch=batch, results=results, receipts=tuple(receipts))
+
+    @staticmethod
+    def _request_with_reference_inputs(
+        request: Mapping[str, Any],
+        references: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        identity = {
+            key: copy.deepcopy(value)
+            for key, value in request.items()
+            if key not in {"schema_version", "request_id", "request_digest"}
+        }
+        identity["reference_inputs"] = references
+        digest = stable_digest(identity)
+        return ProviderRequest.from_dict(
+            {
+                "schema_version": PROVIDER_REQUEST_SCHEMA,
+                "request_id": f"asset-provider.{digest[:24]}",
+                "request_digest": digest,
+                **identity,
+            }
+        ).to_dict()
 
     def _build_request(
         self,
@@ -446,6 +495,12 @@ class AssetProviderOrchestrator:
         try:
             acquisition = adapter.acquire(request, destination=request_dir, workspace=self.workspace)
         except RemoteProviderError as exc:
+            receipt = self._remote_failure_receipt(
+                request=request,
+                adapter=adapter,
+                request_dir=request_dir,
+                error=exc,
+            )
             return (
                 provider_failure(
                     request,
@@ -453,18 +508,30 @@ class AssetProviderOrchestrator:
                     code=exc.code,
                     message=exc.message,
                     retriable=exc.retriable,
+                    receipt_ids=[receipt["receipt_id"]],
                 ),
-                None,
+                receipt,
             )
         except (OSError, ValueError, KeyError, TypeError) as exc:
+            error = RemoteProviderError(
+                "provider_execution_failed",
+                f"remote provider adapter failed closed: {exc}",
+            )
+            receipt = self._remote_failure_receipt(
+                request=request,
+                adapter=adapter,
+                request_dir=request_dir,
+                error=error,
+            )
             return (
                 provider_failure(
                     request,
                     status="failed",
-                    code="provider_execution_failed",
-                    message=f"remote provider adapter failed closed: {exc}",
+                    code=error.code,
+                    message=error.message,
+                    receipt_ids=[receipt["receipt_id"]],
                 ),
-                None,
+                receipt,
             )
         import_record = next(
             (row for row in acquisition.files if Path(str(row["path"])).resolve() == acquisition.import_file.resolve()),
@@ -665,6 +732,94 @@ class AssetProviderOrchestrator:
             }
         ).to_dict()
         return result, receipt
+
+    def _remote_failure_receipt(
+        self,
+        *,
+        request: Mapping[str, Any],
+        adapter: RemoteProviderAdapter,
+        request_dir: Path,
+        error: RemoteProviderError,
+    ) -> dict[str, Any]:
+        details = copy.deepcopy(error.details)
+        task_id = str(details.get("task_id") or "").strip()
+        source_kind = str(getattr(adapter, "source_kind", request.get("route") or "remote_provider"))
+        source_uri = (
+            f"meshy://multi-image-to-3d/{task_id}"
+            if task_id and source_kind == "model_generation"
+            else f"provider://{adapter.provider_id}/{request['request_digest']}"
+        )
+        outputs: list[dict[str, Any]] = []
+        checkpoint = request_dir / "task_checkpoint.json"
+        if checkpoint.is_file():
+            try:
+                checkpoint_payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                checkpoint_payload = {"checkpoint_unreadable": True}
+            audit_payload = {
+                "schema_version": "harness_remote_provider_failure_audit_v1",
+                "provider_id": adapter.provider_id,
+                "request_digest": request["request_digest"],
+                "failure": {
+                    "code": error.code,
+                    "status": error.status,
+                    "retriable": error.retriable,
+                },
+                "task_checkpoint": checkpoint_payload,
+            }
+            audit_path = request_dir / "failure_audits" / f"{stable_digest(audit_payload)}.json"
+            write_json(audit_path, audit_payload)
+            outputs.append(self._receipt_file(audit_path, role="provider_task_checkpoint", file_format="json"))
+        inputs = [
+            {"input_id": str(row["input_id"]), "sha256": str(row["sha256"])}
+            for row in request.get("reference_inputs") or []
+            if isinstance(row, Mapping) and row.get("input_id") and _is_sha256(str(row.get("sha256") or ""))
+        ]
+        receipt_digest = stable_digest(
+            {
+                "request_digest": request["request_digest"],
+                "provider_id": adapter.provider_id,
+                "provider_version": adapter.provider_version,
+                "failure_code": error.code,
+                "task_id": task_id,
+                "outputs": [{"path": row["path"], "sha256": row["sha256"]} for row in outputs],
+            }
+        )
+        receipt = {
+            "schema_version": PROVIDER_RECEIPT_SCHEMA,
+            "receipt_id": f"provider-receipt.{receipt_digest}",
+            "status": error.status,
+            "provider_id": adapter.provider_id,
+            "provider_version": adapter.provider_version,
+            "request_id": request["request_id"],
+            "request_digest": request["request_digest"],
+            "recipe_id": task_id or request["request_digest"],
+            "recipe_version": adapter.provider_version,
+            "recipe_parameters": {
+                "provider_hint": request.get("provider_hint"),
+                "source_uri_hint": request.get("source_uri_hint"),
+            },
+            "generator_source_version": adapter.provider_version,
+            "input_identities": inputs,
+            "output_files": outputs,
+            "source_kind": source_kind,
+            "source_uri": source_uri,
+            "author": "Meshy" if source_kind == "model_generation" else adapter.provider_id,
+            "license": "All Rights Reserved" if source_kind == "model_generation" else "Unknown",
+            "redistribution": {},
+            "lifecycle_transitions": ["requested"],
+            "importer_request_digest": "0" * 64,
+            "importer_result_digest": "0" * 64,
+            "provider_execution": {
+                "status": error.status,
+                "failure_code": error.code,
+                "retriable": error.retriable,
+                **details,
+            },
+            "importer_execution": {},
+            "backend_binding": {},
+        }
+        return ProviderReceipt.from_dict(receipt).to_dict()
 
     def _remote_catalog_asset(
         self,

@@ -20,6 +20,7 @@ from harness.core.case_library import build_run_control_execution, write_run_con
 from harness.core.workspace import WORKSPACE_ENV, case_output_root, workspace_path, workspace_root
 from harness.planning.prompt_to_case import prompt_to_case
 from harness.planning.case_generation import build_case_request, generate_case_spec_v2
+from harness.assets.providers.input_manifest import ProviderInputError, build_provider_input_manifest
 from harness.planning.runtime_compiler import compile_runtime_case
 from harness.runtime.fallback_backend import FallbackBackend
 from harness.runtime.genesis_sph_backend import GenesisSPHBackend
@@ -45,6 +46,11 @@ def parse_args() -> argparse.Namespace:
         "--allow-image-upload",
         action="store_true",
         help="Explicitly authorize uploading --image inputs to the configured planning LLM.",
+    )
+    parser.add_argument(
+        "--allow-meshy-upload",
+        action="store_true",
+        help="Separately authorize uploading resolved --image inputs to Meshy; does not follow --allow-image-upload.",
     )
     parser.add_argument("--case-id", default="generated_case", help="Case id used with --prompt.")
     parser.add_argument("--backend", choices=["auto", "fallback", "genesis_fem", "genesis_sph", "taichi_cloth", "ue"])
@@ -96,6 +102,7 @@ def main() -> int:
         raise SystemExit("custom resolution must be within 320x180 and 7680x4320")
     requested_backend = None if args.backend in {None, "auto"} else args.backend
     generation = None
+    provider_input_manifest = None
     if has_generation_input:
         if args.case_spec_version == "v1":
             if args.image:
@@ -111,6 +118,14 @@ def main() -> int:
                 allow_image_upload=args.allow_image_upload,
                 requested_backend=requested_backend,
             )
+            try:
+                provider_input_manifest = build_provider_input_manifest(
+                    request.get("inputs") or [],
+                    workspace=workspace_root(),
+                    meshy_upload_authorized=args.allow_meshy_upload,
+                )
+            except ProviderInputError as exc:
+                raise SystemExit(f"{exc.code}: {exc.message}") from exc
             planning_dir = Path(output_root) / "_planning" / args.case_id
             generation = generate_case_spec_v2(request, artifact_dir=planning_dir)
             source_case = generation.case_spec
@@ -132,6 +147,7 @@ def main() -> int:
         requested_views=requested_views,
         render_passes=render_passes,
         camera_strategy=args.camera_strategy,
+        provider_input_manifest=provider_input_manifest,
     )
     case = compilation.runtime_case
     selected_backend = compilation.selected_backend

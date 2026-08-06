@@ -26,12 +26,21 @@ MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
 
 
 class RemoteProviderError(RuntimeError):
-    def __init__(self, code: str, message: str, *, status: str = "failed", retriable: bool = False) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        status: str = "failed",
+        retriable: bool = False,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.status = status
         self.retriable = retriable
+        self.details = dict(details or {})
 
 
 class RemoteTransport(Protocol):
@@ -172,6 +181,8 @@ class RemoteAcquisition:
 
 class RemoteProviderAdapter(Protocol):
     provider_id: str
+    provider_version: str
+    source_kind: str
 
     def acquire(
         self,
@@ -185,6 +196,7 @@ class RemoteProviderAdapter(Protocol):
 class MeshyModelGenerationAdapter:
     provider_id = "meshy_model_generation_v1"
     provider_version = "2026-08-06"
+    source_kind = "model_generation"
 
     def __init__(
         self,
@@ -239,74 +251,103 @@ class MeshyModelGenerationAdapter:
         }
         headers = {"Authorization": f"Bearer {api_key}"}
         destination.mkdir(parents=True, exist_ok=True)
-        submitted = self.transport.request_json(
-            "POST",
-            f"{MESHY_API_ROOT}/multi-image-to-3d",
-            headers=headers,
-            payload=payload,
-            timeout_s=30.0,
-        )
-        write_json(destination / "submit_response.json", _redact_signed_urls(submitted))
-        task_id = str(submitted.get("result") or "").strip()
-        if not task_id:
-            raise RemoteProviderError("provider_response_invalid", "Meshy create response does not contain a task ID")
-        deadline = time.monotonic() + self.timeout_s
-        task: dict[str, Any] = {}
-        while True:
-            task = self.transport.request_json(
-                "GET",
-                f"{MESHY_API_ROOT}/multi-image-to-3d/{urllib.parse.quote(task_id, safe='')}",
+        checkpoint = _load_meshy_checkpoint(destination, request=request, provider_id=self.provider_id)
+        if checkpoint is None:
+            submitted = self.transport.request_json(
+                "POST",
+                f"{MESHY_API_ROOT}/multi-image-to-3d",
                 headers=headers,
+                payload=payload,
                 timeout_s=30.0,
             )
-            write_json(destination / "task_response_latest.json", _redact_signed_urls(task))
-            status = str(task.get("status") or "").upper()
-            if status == "SUCCEEDED":
-                break
-            if status in {"FAILED", "CANCELED"}:
-                raise RemoteProviderError(
-                    "provider_task_failed" if status == "FAILED" else "provider_task_canceled",
-                    str(task.get("task_error") or task.get("message") or f"Meshy task {status.casefold()}"),
+            write_json(destination / "submit_response.json", _redact_signed_urls(submitted))
+            task_id = str(submitted.get("result") or "").strip()
+            if not task_id:
+                raise RemoteProviderError("provider_response_invalid", "Meshy create response does not contain a task ID")
+            checkpoint = _write_meshy_checkpoint(
+                destination,
+                request=request,
+                provider_id=self.provider_id,
+                task_id=task_id,
+                task={"status": "SUBMITTED"},
+            )
+        else:
+            task_id = str(checkpoint["task_id"])
+        deadline = time.monotonic() + self.timeout_s
+        task: dict[str, Any] = {}
+        try:
+            while True:
+                task = self.transport.request_json(
+                    "GET",
+                    f"{MESHY_API_ROOT}/multi-image-to-3d/{urllib.parse.quote(task_id, safe='')}",
+                    headers=headers,
+                    timeout_s=30.0,
                 )
-            if status not in {"PENDING", "IN_PROGRESS"}:
-                raise RemoteProviderError("provider_response_invalid", f"unknown Meshy task status: {status or '<missing>'}")
-            if time.monotonic() >= deadline:
-                raise RemoteProviderError("provider_task_timeout", f"Meshy task exceeded {self.timeout_s:g}s", retriable=True)
-            self.sleep(min(self.poll_interval_s, max(0.0, deadline - time.monotonic())))
-        model_urls = task.get("model_urls") if isinstance(task.get("model_urls"), Mapping) else {}
-        glb_url = str(model_urls.get("glb") or task.get("model_url") or "").strip()
-        obj_url = str(model_urls.get("obj") or "").strip()
-        if not glb_url or not obj_url:
-            raise RemoteProviderError("provider_output_missing", "Meshy task did not return both GLB and OBJ outputs")
-        files: list[dict[str, Any]] = []
-        for role, file_format, url in (("canonical", "glb", glb_url), ("import_source", "obj", obj_url)):
-            downloaded = self.transport.download(url, destination / f"model.{file_format}", headers={})
-            files.append(_download_record(downloaded, role=role, file_format=file_format))
-        for optional_format in ("mtl",):
-            url = str(model_urls.get(optional_format) or "").strip()
-            if url:
-                downloaded = self.transport.download(url, destination / f"model.{optional_format}", headers={})
-                files.append(_download_record(downloaded, role="material_dependency", file_format=optional_format))
-        downloaded_names = {Path(str(row["path"])).name for row in files}
-        for texture_index, texture_set in enumerate(task.get("texture_urls") or []):
-            if not isinstance(texture_set, Mapping):
-                raise RemoteProviderError("provider_response_invalid", "Meshy texture output must be an object")
-            for texture_role, raw_url in sorted(texture_set.items()):
-                url = str(raw_url or "").strip()
-                if not url:
-                    continue
-                name = urllib.parse.unquote(Path(urllib.parse.urlsplit(url).path).name)
-                if not name or name in downloaded_names or Path(name).name != name:
-                    name = f"texture_{texture_index}_{_safe_id(str(texture_role))}.png"
-                downloaded_names.add(name)
-                downloaded = self.transport.download(url, destination / name, headers={})
-                files.append(
-                    _download_record(
-                        downloaded,
-                        role=f"texture_{texture_role}",
-                        file_format=Path(name).suffix.lstrip(".") or "png",
+                write_json(destination / "task_response_latest.json", _redact_signed_urls(task))
+                _write_meshy_checkpoint(
+                    destination,
+                    request=request,
+                    provider_id=self.provider_id,
+                    task_id=task_id,
+                    task=task,
+                )
+                status = str(task.get("status") or "").upper()
+                if status == "SUCCEEDED":
+                    break
+                if status in {"FAILED", "CANCELED"}:
+                    raise RemoteProviderError(
+                        "provider_task_failed" if status == "FAILED" else "provider_task_canceled",
+                        str(task.get("task_error") or task.get("message") or f"Meshy task {status.casefold()}"),
                     )
-                )
+                if status not in {"PENDING", "IN_PROGRESS"}:
+                    raise RemoteProviderError("provider_response_invalid", f"unknown Meshy task status: {status or '<missing>'}")
+                if time.monotonic() >= deadline:
+                    raise RemoteProviderError("provider_task_timeout", f"Meshy task exceeded {self.timeout_s:g}s", retriable=True)
+                self.sleep(min(self.poll_interval_s, max(0.0, deadline - time.monotonic())))
+            model_urls = task.get("model_urls") if isinstance(task.get("model_urls"), Mapping) else {}
+            glb_url = str(model_urls.get("glb") or task.get("model_url") or "").strip()
+            obj_url = str(model_urls.get("obj") or "").strip()
+            if not glb_url or not obj_url:
+                raise RemoteProviderError("provider_output_missing", "Meshy task did not return both GLB and OBJ outputs")
+            files: list[dict[str, Any]] = []
+            for role, file_format, url in (("canonical", "glb", glb_url), ("import_source", "obj", obj_url)):
+                downloaded = self.transport.download(url, destination / f"model.{file_format}", headers={})
+                files.append(_download_record(downloaded, role=role, file_format=file_format))
+            for optional_format in ("mtl",):
+                url = str(model_urls.get(optional_format) or "").strip()
+                if url:
+                    downloaded = self.transport.download(url, destination / f"model.{optional_format}", headers={})
+                    files.append(_download_record(downloaded, role="material_dependency", file_format=optional_format))
+            downloaded_names = {Path(str(row["path"])).name for row in files}
+            for texture_index, texture_set in enumerate(task.get("texture_urls") or []):
+                if not isinstance(texture_set, Mapping):
+                    raise RemoteProviderError("provider_response_invalid", "Meshy texture output must be an object")
+                for texture_role, raw_url in sorted(texture_set.items()):
+                    url = str(raw_url or "").strip()
+                    if not url:
+                        continue
+                    name = urllib.parse.unquote(Path(urllib.parse.urlsplit(url).path).name)
+                    if not name or name in downloaded_names or Path(name).name != name:
+                        name = f"texture_{texture_index}_{_safe_id(str(texture_role))}.png"
+                    downloaded_names.add(name)
+                    downloaded = self.transport.download(url, destination / name, headers={})
+                    files.append(
+                        _download_record(
+                            downloaded,
+                            role=f"texture_{texture_role}",
+                            file_format=Path(name).suffix.lstrip(".") or "png",
+                        )
+                    )
+        except RemoteProviderError as exc:
+            exc.details.update(
+                {
+                    "task_id": task_id,
+                    "task_status": str(task.get("status") or checkpoint.get("task_status") or "UNKNOWN").upper(),
+                    "progress": task.get("progress", checkpoint.get("progress")),
+                    "consumed_credits": task.get("consumed_credits", checkpoint.get("consumed_credits")),
+                }
+            )
+            raise
         output_digest = stable_digest({"task_id": task_id, "files": [{"format": row["format"], "sha256": row["sha256"]} for row in files]})
         acquisition = RemoteAcquisition(
             provider_id=self.provider_id,
@@ -340,6 +381,7 @@ class MeshyModelGenerationAdapter:
 class PolyHavenExternalSiteAdapter:
     provider_id = "poly_haven_external_site_v1"
     provider_version = "2026-07-18"
+    source_kind = "external_site"
 
     def __init__(self, *, transport: RemoteTransport | None = None, resolution: str = "1k") -> None:
         self.transport = transport or UrllibRemoteTransport()
@@ -543,6 +585,59 @@ def _request_identity(request: Mapping[str, Any]) -> str:
     return digest if re.fullmatch(r"[0-9a-f]{64}", digest.casefold()) else stable_digest(request)
 
 
+def _load_meshy_checkpoint(
+    destination: Path,
+    *,
+    request: Mapping[str, Any],
+    provider_id: str,
+) -> dict[str, Any] | None:
+    path = destination / "task_checkpoint.json"
+    if not path.exists():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RemoteProviderError(
+            "provider_task_checkpoint_invalid",
+            "Meshy task checkpoint exists but cannot be read; refusing to submit a duplicate paid task",
+            status="blocked",
+        ) from exc
+    if (
+        not isinstance(value, Mapping)
+        or value.get("schema_version") != "harness_meshy_task_checkpoint_v1"
+        or value.get("provider_id") != provider_id
+        or value.get("request_identity") != _request_identity(request)
+        or not str(value.get("task_id") or "").strip()
+    ):
+        raise RemoteProviderError(
+            "provider_task_checkpoint_invalid",
+            "Meshy task checkpoint does not match this request; refusing to submit a duplicate paid task",
+            status="blocked",
+        )
+    return dict(value)
+
+
+def _write_meshy_checkpoint(
+    destination: Path,
+    *,
+    request: Mapping[str, Any],
+    provider_id: str,
+    task_id: str,
+    task: Mapping[str, Any],
+) -> dict[str, Any]:
+    checkpoint = {
+        "schema_version": "harness_meshy_task_checkpoint_v1",
+        "provider_id": provider_id,
+        "request_identity": _request_identity(request),
+        "task_id": task_id,
+        "task_status": str(task.get("status") or "UNKNOWN").upper(),
+        "progress": task.get("progress"),
+        "consumed_credits": task.get("consumed_credits"),
+    }
+    write_json(destination / "task_checkpoint.json", checkpoint)
+    return checkpoint
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -566,30 +661,25 @@ def _meshy_references(value: Any, *, workspace: Path) -> tuple[list[str], list[d
         if row.get("upload_authorized") is not True:
             raise RemoteProviderError("upload_not_authorized", f"Meshy upload is not authorized for input: {input_id}", status="blocked")
         local_value = row.get("local_path")
-        uri = str(row.get("uri") or row.get("url") or "").strip()
-        if local_value:
-            path = Path(str(local_value)).expanduser().resolve()
-            try:
-                path.relative_to(workspace.resolve())
-            except (OSError, ValueError) as exc:
-                raise RemoteProviderError("input_outside_workspace", f"Meshy input must be stored in the external workspace: {input_id}", status="blocked") from exc
-            if path.suffix.casefold() not in {".jpg", ".jpeg", ".png"} or not path.is_file():
-                raise RemoteProviderError("reference_input_invalid", f"Meshy input is not a materialized JPG/PNG: {input_id}", status="blocked")
-            payload = path.read_bytes()
-            actual_sha = hashlib.sha256(payload).hexdigest()
-            if actual_sha != expected_sha:
-                raise RemoteProviderError("input_hash_mismatch", f"Meshy input hash mismatch: {input_id}", status="blocked")
-            mime = mimetypes.guess_type(path.name)[0] or "image/png"
-            uri = f"data:{mime};base64,{base64.b64encode(payload).decode('ascii')}"
-        elif uri.startswith("data:image/"):
-            try:
-                payload = base64.b64decode(uri.split(",", 1)[1], validate=True)
-            except (IndexError, ValueError) as exc:
-                raise RemoteProviderError("reference_input_invalid", f"invalid data URI: {input_id}", status="blocked") from exc
-            if hashlib.sha256(payload).hexdigest() != expected_sha:
-                raise RemoteProviderError("input_hash_mismatch", f"Meshy input hash mismatch: {input_id}", status="blocked")
-        elif urllib.parse.urlparse(uri).scheme != "https":
-            raise RemoteProviderError("reference_input_invalid", f"Meshy input requires local_path, HTTPS URL, or image data URI: {input_id}", status="blocked")
+        if not local_value:
+            raise RemoteProviderError(
+                "remote_reference_url_unsupported",
+                f"Meshy MVP accepts only workspace-local image files: {input_id}",
+                status="blocked",
+            )
+        path = Path(str(local_value)).expanduser().resolve()
+        try:
+            path.relative_to(workspace.resolve())
+        except (OSError, ValueError) as exc:
+            raise RemoteProviderError("input_outside_workspace", f"Meshy input must be stored in the external workspace: {input_id}", status="blocked") from exc
+        if path.suffix.casefold() not in {".jpg", ".jpeg", ".png"} or not path.is_file():
+            raise RemoteProviderError("reference_input_invalid", f"Meshy input is not a materialized JPG/PNG: {input_id}", status="blocked")
+        payload = path.read_bytes()
+        actual_sha = hashlib.sha256(payload).hexdigest()
+        if actual_sha != expected_sha:
+            raise RemoteProviderError("input_hash_mismatch", f"Meshy input hash mismatch: {input_id}", status="blocked")
+        mime = mimetypes.guess_type(path.name)[0] or "image/png"
+        uri = f"data:{mime};base64,{base64.b64encode(payload).decode('ascii')}"
         references.append(uri)
         identities.append({"input_id": input_id, "sha256": expected_sha})
     return references, identities

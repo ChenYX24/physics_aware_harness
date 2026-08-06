@@ -32,6 +32,7 @@ ARTIFACT_FILENAMES = {
     "runtime_actor_placement_report": "runtime_actor_placement_report.json",
     "runtime_plan": "runtime_plan.json",
     "asset_provider_batch": "asset_provider_batch.json",
+    "provider_input_manifest": "provider_input_manifest.json",
 }
 COMPILATION_STAGE_ORDER = [
     "backend_planner",
@@ -100,6 +101,7 @@ def compile_runtime_case(
     camera_strategy: str = "bounds_auto_v1",
     registry: AssetRegistry | None = None,
     provider_orchestrator: AssetProviderOrchestrator | None = None,
+    provider_input_manifest: Mapping[str, Any] | None = None,
 ) -> RuntimeCompilation:
     source_v2 = case_spec if isinstance(case_spec, CaseSpecV2) else None
     runtime_case = project_case_spec_v2_to_v1(source_v2) if source_v2 else case_spec
@@ -128,6 +130,7 @@ def compile_runtime_case(
             compiled_intents=compiled_intents,
             target_backend=target_asset_backend,
             registry=registry,
+            input_manifest=provider_input_manifest,
         )
         if source_v2
         else None
@@ -175,6 +178,7 @@ def compile_runtime_case(
         verification_plan,
         observation_plan,
         provider_enabled=source_v2 is not None,
+        provider_input_manifest_enabled=provider_input_manifest is not None,
     )
     errors = _compilation_errors(
         source_v2,
@@ -197,6 +201,8 @@ def compile_runtime_case(
     }
     if provider_orchestration is not None:
         artifacts["asset_provider_batch"] = provider_orchestration.batch
+    if provider_input_manifest is not None:
+        artifacts["provider_input_manifest"] = copy.deepcopy(dict(provider_input_manifest))
     report = {
         "schema_version": "harness_runtime_compilation_report_v1",
         "case_id": runtime_case.case_id,
@@ -232,6 +238,7 @@ def _compile_runtime_plan(
     observation_plan: Mapping[str, Any],
     *,
     provider_enabled: bool = False,
+    provider_input_manifest_enabled: bool = False,
 ) -> dict[str, Any]:
     plan = {
         "schema_version": "harness_runtime_plan_v1",
@@ -265,6 +272,8 @@ def _compile_runtime_plan(
     if provider_enabled:
         plan["artifacts"]["asset_provider_batch"] = "asset_provider_batch.json"
         plan["artifacts"]["provider_receipts"] = "provider_receipts/"
+    if provider_input_manifest_enabled:
+        plan["artifacts"]["provider_input_manifest"] = "provider_input_manifest.json"
     return plan
 
 
