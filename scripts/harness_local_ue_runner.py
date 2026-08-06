@@ -442,6 +442,7 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
         transform = binding.get("transform") if isinstance(binding.get("transform"), dict) else {}
         bounds = binding.get("bounds") if isinstance(binding.get("bounds"), dict) else {}
         asset = binding.get("asset") if isinstance(binding.get("asset"), dict) else {}
+        fit_dynamic_plan = case_object.get("fit_dynamic_plan")
         params = {
             "runtime_actor_id": binding.get("runtime_actor_id"),
             "binding_source": asset.get("binding_source"),
@@ -451,7 +452,9 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
             "collision_profile": physics.get("collision_profile"),
             "collider": physics.get("collider"),
             "desired_extent_cm": desired_extent_cm_for_binding(binding),
-            "fit_dynamic_plan": case_object.get("fit_dynamic_plan"),
+            # Actor Placement is the compiled transform truth. The native UE
+            # scene may only refit objects when the case explicitly opts in.
+            "fit_dynamic_plan": False if fit_dynamic_plan is None else bool(fit_dynamic_plan),
             "fracture_response": case_object.get("fracture_response"),
             "visual_material_path": case_object.get("visual_material_path"),
             "intact_visual_material_path": case_object.get("intact_visual_material_path"),

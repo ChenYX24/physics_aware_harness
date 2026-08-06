@@ -19,6 +19,73 @@ class RuntimeActorPlacementTests(unittest.TestCase):
     def load_case(self, relative_path: str) -> dict:
         return json.loads((ROOT / relative_path).read_text(encoding="utf-8"))
 
+    def test_compiled_actor_placement_is_not_refit_without_explicit_opt_in(self) -> None:
+        from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement
+
+        binding = {
+            "object_id": "falling_block",
+            "runtime_actor_id": "actor_falling_block",
+            "role": "falling_body",
+            "asset": {"ue_path": "/Engine/BasicShapes/Cube.Cube", "proxy": True},
+            "transform": {"position_m": [0.0, 0.0, 1.2]},
+            "bounds": {"extents_m": [0.25, 0.25, 0.25]},
+            "physics": {
+                "simulate_physics": True,
+                "kinematic": False,
+                "collider": "box",
+                "enable_gravity": True,
+            },
+        }
+        placement = {"actor_bindings": [binding]}
+
+        dynamic, _ = runtime_objects_from_actor_placement(
+            placement,
+            {"objects": [{"id": "falling_block", "initial_position_m": [0.0, 0.0, 1.2]}]},
+        )
+        self.assertEqual(dynamic[0]["initial_position_m"], [0.0, 0.0, 1.2])
+        self.assertIs(dynamic[0]["params"]["fit_dynamic_plan"], False)
+
+        opted_in, _ = runtime_objects_from_actor_placement(
+            placement,
+            {
+                "objects": [
+                    {
+                        "id": "falling_block",
+                        "initial_position_m": [0.0, 0.0, 1.2],
+                        "fit_dynamic_plan": True,
+                    }
+                ]
+            },
+        )
+        self.assertIs(opted_in[0]["params"]["fit_dynamic_plan"], True)
+
+    def test_native_ue_snapshots_initial_pose_before_enabling_physics(self) -> None:
+        import ast
+
+        source = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        setup_scene = next(
+            node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "setup_scene"
+        )
+        snapshot_lines = sorted(
+            node.lineno
+            for node in ast.walk(setup_scene)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "record_runtime_initial_transform"
+        )
+        physics_lines = sorted(
+            node.lineno
+            for node in ast.walk(setup_scene)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "configure_runtime_physics"
+        )
+
+        self.assertEqual(len(snapshot_lines), 2)
+        self.assertEqual(len(physics_lines), 2)
+        self.assertTrue(all(snapshot < physics for snapshot, physics in zip(snapshot_lines, physics_lines, strict=True)))
+
     def test_fracture_energy_matrix_changes_only_speed_and_expected_outcome(self) -> None:
         matrix_dir = ROOT / "cases" / "fracture" / "steel_ball_board_energy_matrix"
         cases = [json.loads(path.read_text(encoding="utf-8")) for path in sorted(matrix_dir.glob("*.json"))]

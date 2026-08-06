@@ -6063,7 +6063,16 @@ def setup_scene(runtime_scene: dict | None = None):
         runtime_actors = {}
         runtime_visual_actors = {}
         runtime_actor_bounds = {}
+        runtime_initial_transforms = {}
         support_surfaces = []
+
+        def record_runtime_initial_transform(obj_id: str, actor) -> None:
+            location = actor.get_actor_location()
+            rotation = actor.get_actor_rotation()
+            runtime_initial_transforms[obj_id] = {
+                "position_cm": [location.x, location.y, location.z],
+                "rotation_degrees": [rotation.pitch, rotation.yaw, rotation.roll],
+            }
 
         def add_runtime_visual(obj: dict, physics_actor) -> None:
             visual_path = str((obj.get("params") or {}).get("visual_ue5_path") or "")
@@ -6261,6 +6270,7 @@ def setup_scene(runtime_scene: dict | None = None):
                 runtime_actor_bounds[obj["id"]] = {"origin": [origin.x, origin.y, origin.z], "extent": [extent.x, extent.y, extent.z]}
             if is_runtime_support_surface(obj):
                 support_surfaces.append({"id": obj.get("id"), "origin": origin, "extent": extent})
+            record_runtime_initial_transform(obj["id"], actor)
             physics_detail = configure_runtime_physics(actor, obj, "static", physics_controls)
             chaos_runtime["actors"].append(physics_detail)
             record_runtime_actor_physics(obj["id"], physics_detail)
@@ -6294,6 +6304,9 @@ def setup_scene(runtime_scene: dict | None = None):
                 runtime_actor_bounds[obj["id"]] = {"origin": [origin.x, origin.y, origin.z], "extent": [extent.x, extent.y, extent.z]}
             origin, extent = maybe_align_dynamic_to_support(obj, actor, origin, extent)
             runtime_actor_bounds[obj["id"]] = {"origin": [origin.x, origin.y, origin.z], "extent": [extent.x, extent.y, extent.z]}
+            # Capture the planned pose before Chaos is enabled. Scene setup and
+            # viewport warmup can otherwise advance a free body before frame 0.
+            record_runtime_initial_transform(obj["id"], actor)
             physics_detail = configure_runtime_physics(actor, obj, "dynamic", physics_controls)
             add_runtime_visual(obj, actor)
             if str(obj["id"]) in runtime_visual_actors:
@@ -6352,17 +6365,6 @@ def setup_scene(runtime_scene: dict | None = None):
             )
         else:
             exposure = {"enabled": False, "reason": "map_lighting_controls.use_post_process=false_or_zero_blend"}
-        runtime_initial_transforms = {}
-        for actor_id, actor in runtime_actors.items():
-            try:
-                location = actor.get_actor_location()
-                rotation = actor.get_actor_rotation()
-                runtime_initial_transforms[actor_id] = {
-                    "position_cm": [location.x, location.y, location.z],
-                    "rotation_degrees": [rotation.pitch, rotation.yaw, rotation.roll],
-                }
-            except Exception:
-                pass
         return {
             **runtime_actors,
             "visual_actors": runtime_visual_actors,
