@@ -249,7 +249,7 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
         self.assertEqual(row["acquisition"]["status"], "local_catalog_unresolved")
         self.assertTrue(compilation.artifacts["asset_resolution"]["assets"][1]["selected_asset"])
 
-    def test_required_model_generation_is_structurally_blocked_until_provider_phase(self) -> None:
+    def test_required_model_generation_fails_closed_without_writable_catalog(self) -> None:
         data = case_spec_v2_fixture()
         data["objects"][0]["asset"] = {
             "description": "a ball generated from a textual design",
@@ -269,7 +269,7 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
         )
 
         self.assertEqual(compilation.status, "fail")
-        self.assertIn("unsupported_provider_route", {error["code"] for error in compilation.errors})
+        self.assertIn("catalog_not_writable", {error["code"] for error in compilation.errors})
         row = compilation.artifacts["asset_resolution"]["assets"][0]
         self.assertEqual(row["acquisition"]["status"], "provider_blocked")
         self.assertIsNone(row["selected_asset"])

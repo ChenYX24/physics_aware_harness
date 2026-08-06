@@ -38,6 +38,13 @@ from harness.assets.providers.local_procedural_mesh import (
     recipe_digest,
     stable_asset_id,
 )
+from harness.assets.providers.remote import (
+    MeshyModelGenerationAdapter,
+    PolyHavenExternalSiteAdapter,
+    RemoteAcquisition,
+    RemoteProviderAdapter,
+    RemoteProviderError,
+)
 
 
 PROVIDER_ROUTES = {"external_site", "procedural_generation", "model_generation"}
@@ -59,10 +66,19 @@ class AssetProviderOrchestrator:
         workspace: str | Path | None = None,
         importer: BackendImporterAdapter | None = None,
         redistribution_evidence: Mapping[str, Any] | None = None,
+        remote_providers: Mapping[str, RemoteProviderAdapter] | None = None,
     ) -> None:
         self.workspace = Path(workspace or os.environ.get("SIM_HARNESS_WORKSPACE", DEFAULT_WORKSPACE)).resolve()
         self.importer = importer or UECommandImporterAdapter()
         self.redistribution_evidence = dict(redistribution_evidence or {})
+        self.remote_providers = dict(
+            remote_providers
+            if remote_providers is not None
+            else {
+                "model_generation": MeshyModelGenerationAdapter(),
+                "external_site": PolyHavenExternalSiteAdapter(),
+            }
+        )
 
     def fulfill(
         self,
@@ -159,16 +175,6 @@ class AssetProviderOrchestrator:
         registry: AssetRegistry,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         route = str(request["route"])
-        if route in {"external_site", "model_generation"}:
-            return (
-                provider_failure(
-                    request,
-                    status="blocked",
-                    code="unsupported_provider_route",
-                    message=f"Provider route is not implemented in this phase: {route}",
-                ),
-                None,
-            )
         if not registry.writable:
             return (
                 provider_failure(
@@ -179,6 +185,19 @@ class AssetProviderOrchestrator:
                 ),
                 None,
             )
+        if route in {"external_site", "model_generation"}:
+            adapter = self.remote_providers.get(route)
+            if adapter is None:
+                return (
+                    provider_failure(
+                        request,
+                        status="blocked",
+                        code="unsupported_provider_route",
+                        message=f"Provider route is not configured: {route}",
+                    ),
+                    None,
+                )
+            return self._fulfill_remote(request, intent=intent, registry=registry, adapter=adapter)
         invalid_inputs = [
             str(row.get("input_id") or "")
             for row in request.get("reference_inputs") or []
@@ -400,6 +419,422 @@ class AssetProviderOrchestrator:
             }
         ).to_dict()
         return result, receipt
+
+    def _fulfill_remote(
+        self,
+        request: dict[str, Any],
+        *,
+        intent: CompiledAssetIntent,
+        registry: AssetRegistry,
+        adapter: RemoteProviderAdapter,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        try:
+            self.workspace.relative_to(SOURCE_ROOT)
+        except ValueError:
+            pass
+        else:
+            return (
+                provider_failure(
+                    request,
+                    status="blocked",
+                    code="workspace_inside_source_repository",
+                    message="Provider outputs cannot be written inside the source repository",
+                ),
+                None,
+            )
+        request_dir = self.workspace / "providers" / adapter.provider_id / request["request_digest"]
+        try:
+            acquisition = adapter.acquire(request, destination=request_dir, workspace=self.workspace)
+        except RemoteProviderError as exc:
+            return (
+                provider_failure(
+                    request,
+                    status=exc.status,
+                    code=exc.code,
+                    message=exc.message,
+                    retriable=exc.retriable,
+                ),
+                None,
+            )
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return (
+                provider_failure(
+                    request,
+                    status="failed",
+                    code="provider_execution_failed",
+                    message=f"remote provider adapter failed closed: {exc}",
+                ),
+                None,
+            )
+        import_record = next(
+            (row for row in acquisition.files if Path(str(row["path"])).resolve() == acquisition.import_file.resolve()),
+            None,
+        )
+        if import_record is None:
+            return (
+                provider_failure(
+                    request,
+                    status="failed",
+                    code="provider_output_invalid",
+                    message="remote acquisition import file is absent from the verified output manifest",
+                ),
+                None,
+            )
+        import_request_payload: dict[str, Any] = {
+            "schema_version": BACKEND_IMPORT_REQUEST_SCHEMA,
+            "request_id": f"backend-import.{request['request_digest'][:24]}",
+            "asset_id": acquisition.asset_id,
+            "target_backend": request["target_backend"],
+            "class_name": "StaticMesh",
+            "source_files": [
+                {
+                    "role": "provider_import_source",
+                    "local_path": str(acquisition.import_file),
+                    "format": str(import_record["format"]),
+                    "sha256": str(import_record["sha256"]),
+                    "byte_size": int(import_record["byte_size"]),
+                    "materialized": True,
+                }
+            ],
+            "desired_name": acquisition.asset_id.replace(".", "_"),
+            "source_kind": acquisition.source_kind,
+        }
+        if acquisition.expected_size_m is not None:
+            import_request_payload["expected_size_m"] = list(acquisition.expected_size_m)
+        import_request_payload["request_digest"] = stable_digest(import_request_payload)
+        import_request = BackendImportRequest.from_dict(import_request_payload)
+        import_result = self.importer.import_asset(import_request, work_dir=request_dir, workspace=self.workspace)
+        importer_request_digest = stable_digest(import_request.to_dict())
+        importer_result_digest = stable_digest(import_result.to_dict())
+        receipt_digest = stable_digest(
+            {
+                "request_digest": request["request_digest"],
+                "provider_id": acquisition.provider_id,
+                "provider_version": acquisition.provider_version,
+                "source_asset_id": acquisition.source_asset_id,
+                "outputs": [{"format": row["format"], "sha256": row["sha256"]} for row in acquisition.files],
+                "importer_request_digest": importer_request_digest,
+                "importer_result_digest": importer_result_digest,
+            }
+        )
+        receipt_id = f"provider-receipt.{receipt_digest}"
+        if import_result.data["status"] != "fulfilled":
+            failure = import_result.data["failure"]
+            receipt = self._remote_receipt(
+                receipt_id=receipt_id,
+                request=request,
+                acquisition=acquisition,
+                lifecycle=SUCCESSFUL_LIFECYCLE[:5],
+                status=str(import_result.data["status"]),
+                importer_request_digest=importer_request_digest,
+                importer_result_digest=importer_result_digest,
+                backend_binding={},
+                importer_result=import_result.data,
+            )
+            return (
+                provider_failure(
+                    request,
+                    status=str(import_result.data["status"]),
+                    code=str(failure["code"]),
+                    message=str(failure["message"]),
+                    retriable=bool(failure["retriable"]),
+                    receipt_ids=[receipt_id],
+                ),
+                receipt,
+            )
+        asset = self._remote_catalog_asset(
+            request=request,
+            intent=intent,
+            acquisition=acquisition,
+            import_result=import_result.data,
+            receipt_id=receipt_id,
+        )
+        existing_asset = registry.get_asset_by_id(acquisition.asset_id)
+        if (
+            existing_asset
+            and existing_asset.get("lifecycle_status") == "runtime_bound"
+            and existing_asset.get("sha256") == asset.get("sha256")
+            and existing_asset.get("ue_path") == asset.get("ue_path")
+        ):
+            asset["lifecycle_status"] = "runtime_bound"
+            asset["qualification"] = copy.deepcopy(existing_asset.get("qualification") or {})
+        registration = registry.register_asset(asset)
+        if registration.get("status") != "registered" or registry.get_asset_by_id(acquisition.asset_id) is None:
+            receipt = self._remote_receipt(
+                receipt_id=receipt_id,
+                request=request,
+                acquisition=acquisition,
+                lifecycle=SUCCESSFUL_LIFECYCLE[:6],
+                status="failed",
+                importer_request_digest=importer_request_digest,
+                importer_result_digest=importer_result_digest,
+                backend_binding=asset["backend_bindings"]["unreal"],
+                importer_result=import_result.data,
+            )
+            return (
+                provider_failure(
+                    request,
+                    status="failed",
+                    code=str(registration.get("code") or "catalog_registration_failed"),
+                    message=str(registration.get("message") or "Catalog registration failed"),
+                    receipt_ids=[receipt_id],
+                ),
+                receipt,
+            )
+        registered = registry.get_asset_by_id(acquisition.asset_id)
+        assert registered is not None
+        quality = asset_quality_gate(
+            registered,
+            physics_critical=intent.legacy_intent.physics_critical,
+            allow_local_preview=request["required_license_tier"] == "local_preview",
+        )
+        hard_constraints_match = candidate_matches_search_intent(registered, intent.search_intent)
+        if not hard_constraints_match or not str(quality["status"]).startswith("pass"):
+            failures = [*quality["failure_codes"]]
+            if not hard_constraints_match:
+                failures.append("hard_constraint_mismatch")
+            receipt = self._remote_receipt(
+                receipt_id=receipt_id,
+                request=request,
+                acquisition=acquisition,
+                lifecycle=SUCCESSFUL_LIFECYCLE[:7],
+                status="failed",
+                importer_request_digest=importer_request_digest,
+                importer_result_digest=importer_result_digest,
+                backend_binding=asset["backend_bindings"]["unreal"],
+                importer_result=import_result.data,
+            )
+            return (
+                provider_failure(
+                    request,
+                    status="failed",
+                    code="asset_qualification_failed",
+                    message=f"registered remote asset failed qualification: {failures}",
+                    receipt_ids=[receipt_id],
+                ),
+                receipt,
+            )
+        runtime_bound_asset = copy.deepcopy(registered)
+        runtime_bound_asset["lifecycle_status"] = "runtime_bound"
+        runtime_bound_asset["qualification"] = copy.deepcopy(quality)
+        final_registration = registry.register_asset(runtime_bound_asset)
+        final_asset = registry.get_asset_by_id(acquisition.asset_id)
+        if final_registration.get("status") != "registered" or not final_asset or final_asset.get("lifecycle_status") != "runtime_bound":
+            receipt = self._remote_receipt(
+                receipt_id=receipt_id,
+                request=request,
+                acquisition=acquisition,
+                lifecycle=SUCCESSFUL_LIFECYCLE[:8],
+                status="failed",
+                importer_request_digest=importer_request_digest,
+                importer_result_digest=importer_result_digest,
+                backend_binding=asset["backend_bindings"]["unreal"],
+                importer_result=import_result.data,
+            )
+            return (
+                provider_failure(
+                    request,
+                    status="failed",
+                    code="runtime_binding_registration_failed",
+                    message="qualified remote asset could not be persisted as runtime_bound",
+                    receipt_ids=[receipt_id],
+                ),
+                receipt,
+            )
+        receipt = self._remote_receipt(
+            receipt_id=receipt_id,
+            request=request,
+            acquisition=acquisition,
+            lifecycle=list(SUCCESSFUL_LIFECYCLE),
+            status="fulfilled",
+            importer_request_digest=importer_request_digest,
+            importer_result_digest=importer_result_digest,
+            backend_binding=asset["backend_bindings"]["unreal"],
+            importer_result=import_result.data,
+        )
+        result = ProviderResult.from_dict(
+            {
+                "schema_version": PROVIDER_RESULT_SCHEMA,
+                "request_id": request["request_id"],
+                "request_digest": request["request_digest"],
+                "object_id": request["object_id"],
+                "slot": request["slot"],
+                "status": "fulfilled",
+                "catalog_asset_ids": [acquisition.asset_id],
+                "receipt_ids": [receipt_id],
+            }
+        ).to_dict()
+        return result, receipt
+
+    def _remote_catalog_asset(
+        self,
+        *,
+        request: Mapping[str, Any],
+        intent: CompiledAssetIntent,
+        acquisition: RemoteAcquisition,
+        import_result: Mapping[str, Any],
+        receipt_id: str,
+    ) -> dict[str, Any]:
+        imported_files = [dict(row) for row in import_result.get("files") or []]
+        for index, row in enumerate(imported_files):
+            row.setdefault("role", "primary" if index == 0 else "imported_dependency")
+            row.setdefault("format", Path(str(row.get("local_path") or "")).suffix.lstrip("."))
+        primary = next((row for row in imported_files if row.get("role") == "primary"), imported_files[0])
+        dependencies = [dict(row) for row in import_result.get("dependencies") or []]
+        size = list(acquisition.expected_size_m) if acquisition.expected_size_m is not None else None
+        volume_m3 = math.prod(size) if size else 0.001
+        tags = [
+            intent.legacy_intent.role,
+            *_string_values(intent.search_intent.must.get("physics_role")),
+            acquisition.source_kind,
+            *[str(value) for value in acquisition.metadata.get("tags") or []],
+        ]
+        source_files = [
+            {
+                "role": str(row["role"]),
+                "local_path": str(row["path"]),
+                "format": str(row["format"]),
+                "sha256": str(row["sha256"]),
+                "byte_size": int(row["byte_size"]),
+                "materialized": True,
+            }
+            for row in acquisition.files
+        ]
+        return {
+            "asset_id": acquisition.asset_id,
+            "name": acquisition.name,
+            "semantic_name": str(intent.search_intent.raw_query),
+            "description": acquisition.description,
+            "aliases": [acquisition.asset_id, acquisition.source_asset_id, acquisition.name],
+            "tags": list(dict.fromkeys(value for value in tags if value)),
+            "category": intent.legacy_intent.category,
+            "category_l1": intent.legacy_intent.category,
+            "type": "StaticMesh",
+            "asset_kind": "StaticMesh",
+            "source_kind": acquisition.source_kind,
+            "source_uri": acquisition.source_uri,
+            "author": acquisition.author,
+            "license": acquisition.license,
+            "license_tier": acquisition.license_tier,
+            "redistribution": {},
+            "quality_status": "approved",
+            "lifecycle_status": "registered",
+            "materialized": True,
+            "ue_path": import_result["object_path"],
+            "class_name": import_result["class_name"],
+            "local_path": str(primary["local_path"]),
+            "sha256": str(primary["sha256"]),
+            "byte_size": int(primary.get("byte_size") or Path(str(primary["local_path"])).stat().st_size),
+            "bbox_size_m": size,
+            "authored_size_m": size,
+            "preserve_authored_scale": True,
+            "collider": "box",
+            "collision_profile": "PhysicsActor",
+            "mass_kg": max(volume_m3 * 1000.0, 0.001),
+            "material": {"static_friction": 0.5, "dynamic_friction": 0.4, "restitution": 0.1},
+            "collision": {"present": True, "kind": "simple_convex"},
+            "files": [*imported_files, *source_files],
+            "ue": {
+                "object_path": import_result["object_path"],
+                "class_name": import_result["class_name"],
+                "dependencies": [str(row.get("dependency_id") or row.get("package")) for row in dependencies],
+            },
+            "bundle": {"dependencies": dependencies},
+            "backend_bindings": {
+                "unreal": {
+                    "backend": "unreal",
+                    "object_path": import_result["object_path"],
+                    "class_name": import_result["class_name"],
+                    "materialized": True,
+                    "runtime_ready": True,
+                    "files": imported_files,
+                    "dependencies": dependencies,
+                }
+            },
+            "provenance": {
+                "provider_id": acquisition.provider_id,
+                "provider_version": acquisition.provider_version,
+                "receipt_id": receipt_id,
+                "source_asset_id": acquisition.source_asset_id,
+                "canonical_file_sha256": next(
+                    str(row["sha256"])
+                    for row in acquisition.files
+                    if Path(str(row["path"])).resolve() == acquisition.canonical_file.resolve()
+                ),
+                "provider_metadata": copy.deepcopy(acquisition.metadata),
+            },
+        }
+
+    def _remote_receipt(
+        self,
+        *,
+        receipt_id: str,
+        request: Mapping[str, Any],
+        acquisition: RemoteAcquisition,
+        lifecycle: list[str],
+        status: str,
+        importer_request_digest: str,
+        importer_result_digest: str,
+        backend_binding: Mapping[str, Any],
+        importer_result: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        outputs = [
+            self._receipt_file(
+                Path(str(row["path"])),
+                role=str(row["role"]),
+                file_format=str(row["format"]),
+            )
+            for row in acquisition.files
+        ]
+        for row in importer_result.get("files") or []:
+            outputs.append(
+                self._receipt_file(
+                    Path(str(row["local_path"])),
+                    role=str(row.get("role") or "imported_asset"),
+                    file_format=str(row.get("format") or Path(str(row["local_path"])).suffix.lstrip(".")),
+                )
+            )
+        for row in importer_result.get("dependencies") or []:
+            if row.get("local_path"):
+                outputs.append(
+                    self._receipt_file(
+                        Path(str(row["local_path"])),
+                        role="dependency",
+                        file_format=str(row.get("format") or Path(str(row["local_path"])).suffix.lstrip(".")),
+                    )
+                )
+        receipt = {
+            "schema_version": PROVIDER_RECEIPT_SCHEMA,
+            "receipt_id": receipt_id,
+            "status": status,
+            "provider_id": acquisition.provider_id,
+            "provider_version": acquisition.provider_version,
+            "request_id": request["request_id"],
+            "request_digest": request["request_digest"],
+            "recipe_id": acquisition.source_asset_id,
+            "recipe_version": acquisition.provider_version,
+            "recipe_parameters": copy.deepcopy(acquisition.request_parameters),
+            "generator_source_version": acquisition.provider_version,
+            "input_identities": [dict(row) for row in acquisition.input_identities],
+            "output_files": outputs,
+            "source_kind": acquisition.source_kind,
+            "source_uri": acquisition.source_uri,
+            "author": acquisition.author,
+            "license": acquisition.license,
+            "redistribution": {},
+            "lifecycle_transitions": lifecycle,
+            "importer_request_digest": importer_request_digest,
+            "importer_result_digest": importer_result_digest,
+            "provider_execution": copy.deepcopy(acquisition.metadata),
+            "importer_execution": {
+                "status": importer_result.get("status"),
+                "stdout": str(importer_result.get("stdout") or ""),
+                "stderr": str(importer_result.get("stderr") or ""),
+                "returncode": importer_result.get("returncode"),
+            },
+            "backend_binding": self._receipt_binding(backend_binding),
+        }
+        return ProviderReceipt.from_dict(receipt).to_dict()
 
     def _catalog_asset(
         self,

@@ -32,10 +32,11 @@ def main() -> None:
         task.replace_existing_settings = True
         task.save = True
         options = unreal.FbxImportUI()
+        remote_asset = str(request.get("source_kind") or "") in {"external_site", "model_generation"}
         options.import_as_skeletal = False
         options.import_mesh = True
-        options.import_materials = False
-        options.import_textures = False
+        options.import_materials = remote_asset
+        options.import_textures = remote_asset
         options.static_mesh_import_data.combine_meshes = True
         options.static_mesh_import_data.generate_lightmap_u_vs = True
         options.static_mesh_import_data.auto_generate_collision = True
@@ -73,6 +74,7 @@ def main() -> None:
         if not package_file.is_file():
             raise RuntimeError(f"saved Unreal package is missing: {package_file}")
         payload = package_file.read_bytes()
+        dependencies = _imported_dependencies(task, primary_object_path=object_path)
         result = {
             "schema_version": "harness_backend_asset_import_result_v1",
             "request_id": request["request_id"],
@@ -93,7 +95,7 @@ def main() -> None:
                     "materialized": True,
                 }
             ],
-            "dependencies": [],
+            "dependencies": dependencies,
             "import_validation": {
                 "loaded_class": asset.get_class().get_name(),
                 "lod0_section_count": int(asset.get_num_sections(0)),
@@ -103,6 +105,9 @@ def main() -> None:
                 "expected_size_m": request.get("expected_size_m"),
                 "obj_meter_to_ue_centimeter_scale": 100.0,
                 "normalized_source_unit": "centimeter",
+                "source_format": source.suffix.lstrip(".").casefold(),
+                "materials_imported": remote_asset,
+                "textures_imported": remote_asset,
             },
         }
     except Exception as exc:
@@ -127,9 +132,40 @@ def _source_file(request: dict[str, Any]) -> Path:
     if len(sources) != 1:
         raise RuntimeError("UE static-mesh importer requires exactly one source file")
     source = Path(str(sources[0].get("local_path") or "")).expanduser().resolve()
-    if source.suffix.casefold() != ".obj" or not source.is_file():
-        raise RuntimeError(f"UE static-mesh importer requires a materialized OBJ: {source}")
+    if source.suffix.casefold() not in {".obj", ".fbx"} or not source.is_file():
+        raise RuntimeError(f"UE static-mesh importer requires a materialized OBJ or FBX: {source}")
     return source
+
+
+def _imported_dependencies(task: Any, *, primary_object_path: str) -> list[dict[str, Any]]:
+    dependencies: list[dict[str, Any]] = []
+    for raw_path in task.imported_object_paths or []:
+        object_path = str(raw_path)
+        if object_path == primary_object_path:
+            continue
+        imported = unreal.load_asset(object_path)
+        if imported is None:
+            raise RuntimeError(f"imported dependency cannot be loaded: {object_path}")
+        unreal.EditorAssetLibrary.save_loaded_asset(imported, only_if_is_dirty=False)
+        package_path = object_path.split(".", 1)[0]
+        if not package_path.startswith("/Game/"):
+            raise RuntimeError(f"imported dependency is outside /Game: {object_path}")
+        package_file = CONTENT_ROOT / f"{package_path.removeprefix('/Game/')}.uasset"
+        if not package_file.is_file():
+            raise RuntimeError(f"imported dependency package is missing: {package_file}")
+        payload = package_file.read_bytes()
+        dependencies.append(
+            {
+                "dependency_id": object_path,
+                "package": package_path,
+                "local_path": str(package_file),
+                "format": "uasset",
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "byte_size": len(payload),
+                "materialized": True,
+            }
+        )
+    return dependencies
 
 
 def _safe_asset_name(value: str) -> str:
@@ -140,14 +176,18 @@ def _safe_asset_name(value: str) -> str:
 
 
 def _validate_dimensions(asset: Any, expected_size_m: Any) -> list[float]:
-    if not isinstance(expected_size_m, list) or len(expected_size_m) != 3:
-        raise RuntimeError("backend import request requires expected_size_m for runtime validation")
     bounds = asset.get_bounding_box()
     actual_size_cm = [
         float(bounds.max.x - bounds.min.x),
         float(bounds.max.y - bounds.min.y),
         float(bounds.max.z - bounds.min.z),
     ]
+    if expected_size_m is None:
+        if any(value <= 0 for value in actual_size_cm):
+            raise RuntimeError(f"imported StaticMesh has degenerate bounds: {actual_size_cm}")
+        return actual_size_cm
+    if not isinstance(expected_size_m, list) or len(expected_size_m) != 3:
+        raise RuntimeError("backend import request expected_size_m must contain three values when provided")
     expected_size_cm = [float(value) * 100.0 for value in expected_size_m]
     for actual, expected in zip(actual_size_cm, expected_size_cm):
         tolerance = max(0.1, abs(expected) * 0.01)

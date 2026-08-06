@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -143,10 +144,15 @@ def _prepare_ue_request(request_path: Path, request: dict[str, Any]) -> tuple[Pa
     if len(sources) != 1:
         raise ValueError("Unreal static-mesh import requires exactly one source file")
     source = Path(str(sources[0].get("local_path") or "")).expanduser().resolve()
-    if source.suffix.casefold() != ".obj" or not source.is_file():
-        raise ValueError(f"Unreal static-mesh import requires a materialized OBJ: {source}")
+    if source.suffix.casefold() not in {".obj", ".fbx"} or not source.is_file():
+        raise ValueError(f"Unreal static-mesh import requires a materialized OBJ or FBX: {source}")
+    if source.suffix.casefold() == ".fbx":
+        return request_path, ()
     normalized_obj = request_path.with_name(f"{request_path.stem}.ue_centimeters.obj")
-    _write_scaled_obj(source, normalized_obj, scale=100.0)
+    if str(request.get("source_kind") or "") in {"external_site", "model_generation"} and request.get("expected_size_m"):
+        _write_fitted_obj(source, normalized_obj, expected_size_m=request["expected_size_m"])
+    else:
+        _write_scaled_obj(source, normalized_obj, scale=100.0)
     ue_request = json.loads(json.dumps(request))
     payload = normalized_obj.read_bytes()
     ue_request["source_files"][0].update(
@@ -160,6 +166,45 @@ def _prepare_ue_request(request_path: Path, request: dict[str, Any]) -> tuple[Pa
     ue_request_path = request_path.with_name(f"{request_path.stem}.ue_import.json")
     _write_json(ue_request_path, ue_request)
     return ue_request_path, (normalized_obj, ue_request_path)
+
+
+def _write_fitted_obj(source: Path, destination: Path, *, expected_size_m: object) -> None:
+    if not isinstance(expected_size_m, list) or len(expected_size_m) != 3:
+        raise ValueError("remote OBJ normalization requires three expected_size_m values")
+    expected_cm = [float(value) * 100.0 for value in expected_size_m]
+    if any(value <= 0 or not math.isfinite(value) for value in expected_cm):
+        raise ValueError("remote OBJ normalization expected_size_m must be finite and positive")
+    lines = source.read_text(encoding="utf-8").splitlines()
+    vertices: list[list[float]] = []
+    for line in lines:
+        if line.startswith("v "):
+            fields = line.split()
+            if len(fields) < 4:
+                raise ValueError(f"unsupported OBJ vertex record: {line}")
+            vertex = [float(value) for value in fields[1:4]]
+            if any(not math.isfinite(value) for value in vertex):
+                raise ValueError("OBJ vertex coordinates must be finite")
+            vertices.append(vertex)
+    if not vertices:
+        raise ValueError("OBJ contains no vertices")
+    minima = [min(vertex[axis] for vertex in vertices) for axis in range(3)]
+    maxima = [max(vertex[axis] for vertex in vertices) for axis in range(3)]
+    extents = [maxima[axis] - minima[axis] for axis in range(3)]
+    if any(value <= 0 for value in extents):
+        raise ValueError("OBJ bounds must be non-degenerate on every axis")
+    centers = [(minima[axis] + maxima[axis]) / 2.0 for axis in range(3)]
+    scales = [expected_cm[axis] / extents[axis] for axis in range(3)]
+    output: list[str] = ["# fitted to CaseSpec bounds and centered for Unreal import"]
+    vertex_index = 0
+    for line in lines:
+        if line.startswith("v "):
+            vertex = vertices[vertex_index]
+            line = "v " + " ".join(
+                _format_float((vertex[axis] - centers[axis]) * scales[axis]) for axis in range(3)
+            )
+            vertex_index += 1
+        output.append(line)
+    destination.write_text("\n".join(output) + "\n", encoding="utf-8", newline="\n")
 
 
 def _write_scaled_obj(source: Path, destination: Path, *, scale: float) -> None:

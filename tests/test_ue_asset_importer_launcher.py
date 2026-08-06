@@ -71,6 +71,56 @@ class UEAssetImporterLauncherTests(unittest.TestCase):
             self.assertEqual(outcome, "result")
             self.assertLess(time.monotonic() - started, 5.0)
 
+    def test_prepare_remote_obj_fits_declared_bounds_and_centers_pivot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "remote.obj"
+            source.write_text(
+                "v 10 20 30\nv 12 20 30\nv 10 24 30\nv 10 20 38\nf 1 2 3\n",
+                encoding="utf-8",
+            )
+            request = {
+                "request_id": "backend-import.remote",
+                "request_digest": "b" * 64,
+                "asset_id": "generated.meshy.fixture",
+                "source_kind": "model_generation",
+                "expected_size_m": [0.2, 0.4, 0.8],
+                "source_files": [{"local_path": str(source), "materialized": True}],
+            }
+            request_path = root / "request.json"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+            ue_request_path, temporary_paths = _prepare_ue_request(request_path, request)
+            normalized = Path(json.loads(ue_request_path.read_text(encoding="utf-8"))["source_files"][0]["local_path"])
+            vertices = [
+                [float(value) for value in line.split()[1:]]
+                for line in normalized.read_text(encoding="utf-8").splitlines()
+                if line.startswith("v ")
+            ]
+            extents = [max(row[axis] for row in vertices) - min(row[axis] for row in vertices) for axis in range(3)]
+            centers = [(max(row[axis] for row in vertices) + min(row[axis] for row in vertices)) / 2 for axis in range(3)]
+            self.assertEqual(extents, [20.0, 40.0, 80.0])
+            self.assertEqual(centers, [0.0, 0.0, 0.0])
+            for path in temporary_paths:
+                path.unlink(missing_ok=True)
+
+    def test_prepare_remote_fbx_preserves_materialized_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "asset.fbx"
+            source.write_bytes(b"fbx")
+            request = {
+                "request_id": "backend-import.external",
+                "request_digest": "c" * 64,
+                "asset_id": "external.polyhaven.fixture",
+                "source_kind": "external_site",
+                "source_files": [{"local_path": str(source), "materialized": True}],
+            }
+            request_path = root / "request.json"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+            ue_request_path, temporary_paths = _prepare_ue_request(request_path, request)
+            self.assertEqual(ue_request_path, request_path)
+            self.assertEqual(temporary_paths, ())
+
 
 if __name__ == "__main__":
     unittest.main()

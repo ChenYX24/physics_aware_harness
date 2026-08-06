@@ -500,8 +500,8 @@ class LocalProceduralProviderTests(unittest.TestCase):
 
     def test_missing_optional_size_is_structured_for_every_provider_route(self) -> None:
         expected = {
-            "external_site": "unsupported_provider_route",
-            "model_generation": "unsupported_provider_route",
+            "external_site": "unsupported_provider_hint",
+            "model_generation": "unsupported_provider_hint",
             "procedural_generation": "invalid_generation_spec",
         }
         for route, code in expected.items():
@@ -517,7 +517,7 @@ class LocalProceduralProviderTests(unittest.TestCase):
                 self.assertEqual(result["failure"]["code"], code)
                 self.assertEqual(compilation.report["asset_resolve_invocation_count"], 1)
 
-    def test_external_and_model_routes_are_structured_blockers(self) -> None:
+    def test_external_and_model_routes_reject_procedural_provider_hints(self) -> None:
         for route in ("external_site", "model_generation"):
             with self.subTest(route=route):
                 compilation = compile_runtime_case(
@@ -528,7 +528,7 @@ class LocalProceduralProviderTests(unittest.TestCase):
                 )
                 result = compilation.artifacts["asset_provider_batch"]["results"][0]
                 self.assertEqual(result["status"], "blocked")
-                self.assertEqual(result["failure"]["code"], "unsupported_provider_route")
+                self.assertEqual(result["failure"]["code"], "unsupported_provider_hint")
                 self.assertEqual(compilation.report["asset_resolve_invocation_count"], 1)
 
     def test_v1_does_not_invoke_provider_or_add_provider_artifacts(self) -> None:
