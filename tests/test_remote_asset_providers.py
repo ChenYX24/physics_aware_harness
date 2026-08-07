@@ -417,21 +417,65 @@ class RemoteAssetProviderTests(unittest.TestCase):
         self.assertTrue((self.workspace / "poly" / "textures" / "ball.jpg").is_file())
         self.assertEqual(transport.requests[0]["headers"]["User-Agent"].split("/")[0], "PhysicsAwareHarness")
 
-    def test_poly_haven_rejects_ambiguous_discovery_and_hash_mismatch(self) -> None:
-        ambiguous = {
-            "red_ball": {"type": 2, "name": "Red Ball", "tags": []},
-            "blue_ball": {"type": 2, "name": "Blue Ball", "tags": []},
-        }
-        adapter = PolyHavenExternalSiteAdapter(transport=FakeTransport(json_responses=[ambiguous], downloads={}))
-        with self.assertRaises(RemoteProviderError) as context:
-            adapter.acquire(
-                {"provider_hint": "polyhaven", "search_intent": {"raw_query": "ball"}},
-                destination=self.workspace / "ambiguous",
-                workspace=self.workspace,
-            )
-        self.assertEqual(context.exception.code, "ambiguous_external_asset")
-
+    def test_poly_haven_ranks_candidates_and_breaks_score_ties_by_asset_id(self) -> None:
         fbx = b"fbx"
+        files = {
+            "fbx": {
+                "1k": {
+                    "fbx": {
+                        "url": "https://d/model.fbx",
+                        "md5": hashlib.md5(fbx, usedforsecurity=False).hexdigest(),
+                    }
+                }
+            }
+        }
+        ambiguous = {
+            "red_ball": {"type": 2, "name": "Red Ball", "tags": [], "dimensions": [180, 180, 180]},
+            "blue_ball": {"type": 2, "name": "Blue Ball", "tags": [], "dimensions": [180, 180, 180]},
+        }
+        adapter = PolyHavenExternalSiteAdapter(
+            transport=FakeTransport(
+                json_responses=[ambiguous, files],
+                downloads={"https://d/model.fbx": fbx},
+            )
+        )
+        acquisition = adapter.acquire(
+            {"provider_hint": "polyhaven", "search_intent": {"raw_query": "ball"}},
+            destination=self.workspace / "ambiguous",
+            workspace=self.workspace,
+        )
+        self.assertEqual(acquisition.source_asset_id, "blue_ball")
+        discovery = acquisition.metadata["discovery"]
+        self.assertEqual(discovery["selection_reason"], "stable_asset_id_tiebreak")
+        self.assertEqual(discovery["tie_count"], 2)
+        self.assertEqual(
+            [row["asset_id"] for row in discovery["ranked_candidates"]],
+            ["blue_ball", "red_ball"],
+        )
+        self.assertTrue((self.workspace / "ambiguous" / "discovery.json").is_file())
+
+        ranked_assets = {
+            "generic_crate": {"type": 2, "name": "Crate", "tags": ["container"]},
+            "wooden_crate_02": {"type": 2, "name": "Wooden Crate", "tags": ["wood", "crate"]},
+        }
+        ranked = PolyHavenExternalSiteAdapter(
+            transport=FakeTransport(
+                json_responses=[ranked_assets, files],
+                downloads={"https://d/model.fbx": fbx},
+            )
+        ).acquire(
+            {"provider_hint": "polyhaven", "search_intent": {"raw_query": "realistic wooden crate"}},
+            destination=self.workspace / "ranked",
+            workspace=self.workspace,
+        )
+        self.assertEqual(ranked.source_asset_id, "wooden_crate_02")
+        self.assertEqual(ranked.metadata["discovery"]["selection_reason"], "highest_relevance_score")
+        scores = ranked.metadata["discovery"]["ranked_candidates"]
+        self.assertGreater(scores[0]["score"], scores[1]["score"])
+
+    def test_poly_haven_rejects_hash_mismatch(self) -> None:
+        fbx = b"fbx"
+
         bad_hash_transport = FakeTransport(
             json_responses=[
                 {"ball": {"type": 2, "name": "Ball", "dimensions": [100, 100, 100]}},

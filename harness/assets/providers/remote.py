@@ -223,7 +223,12 @@ class MeshyModelGenerationAdapter:
         hint = str(request.get("provider_hint") or "").strip().casefold()
         if hint and hint not in {"meshy", "meshy_v1", self.provider_id}:
             raise RemoteProviderError("unsupported_provider_hint", f"model_generation provider is not supported: {hint}", status="blocked")
-        cached = _load_cached_acquisition(destination, provider_id=self.provider_id, request=request)
+        cached = _load_cached_acquisition(
+            destination,
+            provider_id=self.provider_id,
+            provider_version=self.provider_version,
+            request=request,
+        )
         if cached is not None:
             return cached
         api_key = (os.environ.get(MESHY_API_KEY_ENV, "") if self.api_key is None else self.api_key).strip()
@@ -380,7 +385,7 @@ class MeshyModelGenerationAdapter:
 
 class PolyHavenExternalSiteAdapter:
     provider_id = "poly_haven_external_site_v1"
-    provider_version = "2026-07-18"
+    provider_version = "2026-08-07"
     source_kind = "external_site"
 
     def __init__(self, *, transport: RemoteTransport | None = None, resolution: str = "1k") -> None:
@@ -398,18 +403,24 @@ class PolyHavenExternalSiteAdapter:
         hint = str(request.get("provider_hint") or "").strip().casefold()
         if hint and hint not in {"polyhaven", "poly_haven", "poly_haven_v1", self.provider_id} and not hint.startswith("polyhaven:"):
             raise RemoteProviderError("unsupported_provider_hint", f"external_site provider is not supported: {hint}", status="blocked")
-        cached = _load_cached_acquisition(destination, provider_id=self.provider_id, request=request)
+        cached = _load_cached_acquisition(
+            destination,
+            provider_id=self.provider_id,
+            provider_version=self.provider_version,
+            request=request,
+        )
         if cached is not None:
             return cached
         headers = {"User-Agent": POLY_HAVEN_USER_AGENT}
         assets = self.transport.request_json("GET", f"{POLY_HAVEN_API_ROOT}/assets", headers=headers)
-        asset_id, metadata = _select_poly_haven_asset(request, assets)
+        asset_id, metadata, discovery = _select_poly_haven_asset(request, assets)
         files_response = self.transport.request_json(
             "GET",
             f"{POLY_HAVEN_API_ROOT}/files/{urllib.parse.quote(asset_id, safe='')}",
             headers=headers,
         )
         destination.mkdir(parents=True, exist_ok=True)
+        write_json(destination / "discovery.json", discovery)
         write_json(destination / "asset_metadata.json", {"asset_id": asset_id, **metadata})
         write_json(destination / "files_response.json", files_response)
         selected = _poly_haven_fbx(files_response, resolution=self.resolution)
@@ -446,7 +457,12 @@ class PolyHavenExternalSiteAdapter:
             author=", ".join(sorted(str(value) for value in (metadata.get("authors") or {}).keys())) or "Poly Haven",
             license="CC0-1.0",
             license_tier="reference",
-            request_parameters={"asset_id": asset_id, "resolution": self.resolution, "format": "fbx"},
+            request_parameters={
+                "asset_id": asset_id,
+                "resolution": self.resolution,
+                "format": "fbx",
+                "selection_policy": discovery["selection_policy"],
+            },
             input_identities=(),
             files=tuple(files),
             import_file=canonical,
@@ -459,6 +475,7 @@ class PolyHavenExternalSiteAdapter:
                 "tags": list(metadata.get("tags") or []),
                 "authors": dict(metadata.get("authors") or {}),
                 "api_attribution": "Poly Haven",
+                "discovery": discovery,
             },
         )
         _write_cached_acquisition(destination, request=request, acquisition=acquisition)
@@ -515,6 +532,7 @@ def _load_cached_acquisition(
     destination: Path,
     *,
     provider_id: str,
+    provider_version: str,
     request: Mapping[str, Any],
 ) -> RemoteAcquisition | None:
     manifest = destination / "acquisition.json"
@@ -526,6 +544,7 @@ def _load_cached_acquisition(
         not isinstance(value, Mapping)
         or value.get("schema_version") != "harness_remote_acquisition_v1"
         or value.get("provider_id") != provider_id
+        or value.get("provider_version") != provider_version
         or value.get("request_identity") != _request_identity(request)
     ):
         return None
@@ -685,37 +704,172 @@ def _meshy_references(value: Any, *, workspace: Path) -> tuple[list[str], list[d
     return references, identities
 
 
-def _select_poly_haven_asset(request: Mapping[str, Any], assets: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+def _select_poly_haven_asset(
+    request: Mapping[str, Any],
+    assets: Mapping[str, Any],
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
     models = {str(key): dict(value) for key, value in assets.items() if isinstance(value, Mapping) and value.get("type") == 2}
     explicit = _poly_haven_explicit_id(request)
     if explicit:
         if explicit not in models:
             raise RemoteProviderError("external_asset_not_found", f"Poly Haven model does not exist: {explicit}", status="blocked")
-        return explicit, models[explicit]
+        return explicit, models[explicit], {
+            "schema_version": "harness_poly_haven_discovery_v1",
+            "selection_policy": "explicit_source_identity_v1",
+            "selected_asset_id": explicit,
+            "selection_reason": "explicit_source_identity",
+            "candidate_count": 1,
+            "tie_count": 1,
+            "ranked_candidates": [_poly_haven_candidate_summary(explicit, models[explicit])],
+        }
     search = request.get("search_intent") if isinstance(request.get("search_intent"), Mapping) else {}
     query = str(search.get("raw_query") or search.get("semantic_text") or "").strip()
     tokens = set(_search_tokens(query))
     if not tokens:
         raise RemoteProviderError("external_search_query_missing", "Poly Haven discovery requires a search query", status="blocked")
-    ranked: list[tuple[float, str, dict[str, Any]]] = []
+    taxonomy = search.get("taxonomy") if isinstance(search.get("taxonomy"), Mapping) else {}
+    context_tokens = set(_search_tokens(" ".join(str(value) for value in taxonomy.values())))
+    requested_size = _poly_haven_requested_size(request, search)
+    ranked: list[tuple[float, str, dict[str, Any], dict[str, float]]] = []
+    size_rejected_count = 0
     for asset_id, metadata in models.items():
-        name_tokens = set(_search_tokens(f"{asset_id} {metadata.get('name', '')}"))
-        all_tokens = set(_search_tokens(" ".join([str(metadata.get("category") or ""), *[str(tag) for tag in metadata.get("tags") or []]])))
-        score = 4.0 * len(tokens & name_tokens) + 1.0 * len(tokens & all_tokens)
-        if _safe_id(query) in {_safe_id(asset_id), _safe_id(str(metadata.get("name") or ""))}:
-            score += 100.0
-        if score > 0:
-            ranked.append((score, asset_id, metadata))
+        actual_size = _poly_haven_size(metadata)
+        if (
+            requested_size is not None
+            and actual_size is not None
+            and not _poly_haven_size_matches(requested_size, actual_size)
+        ):
+            size_rejected_count += 1
+            continue
+        components = _score_poly_haven_candidate(
+            query=query,
+            query_tokens=tokens,
+            context_tokens=context_tokens,
+            requested_size=requested_size,
+            asset_id=asset_id,
+            metadata=metadata,
+        )
+        lexical_score = sum(value for key, value in components.items() if key != "size_similarity")
+        if lexical_score > 0:
+            ranked.append((round(sum(components.values()), 6), asset_id, metadata, components))
     ranked.sort(key=lambda row: (-row[0], row[1]))
     if not ranked:
         raise RemoteProviderError("no_relevant_external_asset", f"Poly Haven has no relevant model for: {query}", status="blocked")
-    if len(ranked) > 1 and ranked[0][0] == ranked[1][0]:
-        raise RemoteProviderError(
-            "ambiguous_external_asset",
-            f"Poly Haven search is ambiguous: {ranked[0][1]}, {ranked[1][1]}",
-            status="blocked",
-        )
-    return ranked[0][1], ranked[0][2]
+    winning_score = ranked[0][0]
+    tie_count = sum(1 for score, *_ in ranked if score == winning_score)
+    discovery = {
+        "schema_version": "harness_poly_haven_discovery_v1",
+        "selection_policy": "highest_relevance_then_asset_id_v1",
+        "query": query,
+        "query_tokens": sorted(tokens),
+        "context_tokens": sorted(context_tokens),
+        "requested_size_m": list(requested_size) if requested_size is not None else None,
+        "selected_asset_id": ranked[0][1],
+        "selected_score": winning_score,
+        "selection_reason": "stable_asset_id_tiebreak" if tie_count > 1 else "highest_relevance_score",
+        "candidate_count": len(ranked),
+        "size_rejected_count": size_rejected_count,
+        "tie_count": tie_count,
+        "ranked_candidates": [
+            {
+                **_poly_haven_candidate_summary(asset_id, metadata),
+                "rank": index,
+                "score": score,
+                "score_components": components,
+            }
+            for index, (score, asset_id, metadata, components) in enumerate(ranked[:20], start=1)
+        ],
+    }
+    return ranked[0][1], ranked[0][2], discovery
+
+
+def _score_poly_haven_candidate(
+    *,
+    query: str,
+    query_tokens: set[str],
+    context_tokens: set[str],
+    requested_size: tuple[float, float, float] | None,
+    asset_id: str,
+    metadata: Mapping[str, Any],
+) -> dict[str, float]:
+    name = str(metadata.get("name") or "")
+    name_tokens = set(_search_tokens(f"{asset_id} {name}"))
+    tag_tokens = set(_search_tokens(" ".join(str(tag) for tag in metadata.get("tags") or [])))
+    category_tokens = set(_search_tokens(str(metadata.get("category") or "")))
+    description_tokens = set(_search_tokens(str(metadata.get("description") or "")))
+    normalized_query = _safe_id(query)
+    normalized_ids = {_safe_id(asset_id), _safe_id(name)} - {""}
+    exact_identity = 100.0 if normalized_query in normalized_ids else 0.0
+    identity_phrase = 30.0 if any(identity and identity in normalized_query for identity in normalized_ids) else 0.0
+    name_overlap = 8.0 * len(query_tokens & name_tokens)
+    name_coverage = 12.0 * len(query_tokens & name_tokens) / max(1, len(name_tokens))
+    tag_overlap = 4.0 * len(query_tokens & tag_tokens)
+    category_overlap = 2.0 * len((query_tokens | context_tokens) & category_tokens)
+    description_overlap = 1.0 * len(query_tokens & description_tokens)
+    context_overlap = 1.5 * len(context_tokens & (name_tokens | tag_tokens | category_tokens))
+    actual_size = _poly_haven_size(metadata)
+    size_similarity = _poly_haven_size_similarity(requested_size, actual_size)
+    return {
+        "exact_identity": exact_identity,
+        "identity_phrase": identity_phrase,
+        "name_overlap": name_overlap,
+        "name_coverage": round(name_coverage, 6),
+        "tag_overlap": tag_overlap,
+        "category_overlap": category_overlap,
+        "description_overlap": description_overlap,
+        "context_overlap": context_overlap,
+        "size_similarity": size_similarity,
+    }
+
+
+def _poly_haven_requested_size(
+    request: Mapping[str, Any],
+    search: Mapping[str, Any],
+) -> tuple[float, float, float] | None:
+    must = search.get("must") if isinstance(search.get("must"), Mapping) else {}
+    values = must.get("approx_size_m")
+    if not isinstance(values, list):
+        return _optional_size(request.get("generation_spec"))
+    try:
+        size = tuple(float(value) for value in values)
+    except (TypeError, ValueError):
+        return None
+    return size if len(size) == 3 and all(value > 0 for value in size) else None
+
+
+def _poly_haven_size_similarity(
+    requested: tuple[float, float, float] | None,
+    actual: tuple[float, float, float] | None,
+) -> float:
+    if requested is None or actual is None:
+        return 0.0
+    requested_sorted = sorted(requested)
+    actual_sorted = sorted(actual)
+    relative_error = sum(
+        abs(actual_value - requested_value) / max(actual_value, requested_value)
+        for actual_value, requested_value in zip(actual_sorted, requested_sorted)
+    ) / 3.0
+    return round(max(0.0, 8.0 * (1.0 - relative_error)), 6)
+
+
+def _poly_haven_size_matches(
+    requested: tuple[float, float, float],
+    actual: tuple[float, float, float],
+) -> bool:
+    return all(
+        abs(actual_value - requested_value) <= max(requested_value * 0.5, 0.05)
+        for actual_value, requested_value in zip(sorted(actual), sorted(requested))
+    )
+
+
+def _poly_haven_candidate_summary(asset_id: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "asset_id": asset_id,
+        "name": str(metadata.get("name") or asset_id),
+        "category": metadata.get("category"),
+        "tags": [str(tag) for tag in metadata.get("tags") or []],
+        "dimensions_m": list(size) if (size := _poly_haven_size(metadata)) is not None else None,
+    }
 
 
 def _poly_haven_explicit_id(request: Mapping[str, Any]) -> str | None:
