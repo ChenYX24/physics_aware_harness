@@ -97,6 +97,10 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertIn("source_kind", contract["enums"]["asset_must_not_field"])
         self.assertIn("rigid_body", contract["enums"]["solver_capability"])
         self.assertNotIn("rigid body dynamics", contract["enums"]["solver_capability"])
+        self.assertEqual(
+            contract["enums"]["geometry_scale_policy"],
+            ["preserve_authored", "fit_uniform_to_approx_size"],
+        )
         self.assertIn("preferences", contract["field_shapes"]["asset_request"])
         self.assertIn("allow_similarity_search", contract["field_shapes"]["reference_input"])
         self.assertIn("source", contract["field_shapes"]["binary_relation"])
@@ -116,6 +120,8 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertIn("verification_requirements", case_prompt)
         self.assertIn("must_not contains hard exclusions", case_prompt)
         self.assertIn("passed unchanged to the selected verifier", case_prompt)
+        self.assertIn("fit_uniform_to_approx_size", case_prompt)
+        self.assertIn("positive pitch makes local +X downhill", case_prompt)
         structure_example = client.calls[1]["payload"]["case_spec_contract"]["valid_structure_example_do_not_copy_values"]
         self.assertEqual(case_spec_v2_from_dict(structure_example).case_id, "example")
         self.assertEqual(result.case_spec.case_id, "generated_v2")

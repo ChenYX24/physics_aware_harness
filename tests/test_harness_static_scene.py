@@ -174,6 +174,158 @@ class StaticScenePlacementTests(unittest.TestCase):
         self.assertEqual(len(adjustments), 1)
         self.assertEqual(support_relation(subject, ramp)["status"], "contact_at_rest")
 
+    def test_v2_static_support_transform_is_not_rewritten_by_single_support_snap(self) -> None:
+        from harness.planning.static_scene_builder import align_v2_explicit_supports
+
+        ramp = {
+            "object_id": "ramp",
+            "role": "static inclined ramp",
+            "shape": "box",
+            "transform": {"position_m": [-2.4, 0.0, 0.74], "rotation_deg": [15.0, 0.0, 0.0]},
+            "bounds": {"extents_m": [2.5, 0.5, 0.1], "bottom_z": 0.64, "top_z": 0.84},
+            "physics": {"body_type": "static", "collision_required": True},
+        }
+        ground = {
+            "object_id": "ground",
+            "role": "ground",
+            "shape": "box",
+            "transform": {"position_m": [0.0, 0.0, 0.0]},
+            "bounds": {"extents_m": [10.0, 10.0, 0.05], "bottom_z": -0.05, "top_z": 0.05},
+            "physics": {"body_type": "static", "collision_required": True},
+        }
+        case = {
+            "v2_projection": {"source_schema_version": "harness_case_spec_v2"},
+            "expected_physics": {"support": {"ramp": "ground"}},
+        }
+
+        adjustments = align_v2_explicit_supports(case, [ramp, ground])
+
+        self.assertEqual(adjustments, [])
+        self.assertEqual(ramp["transform"]["position_m"], [-2.4, 0.0, 0.74])
+
+    def test_v2_uniform_fit_and_resolved_bounds_separate_dynamic_chain(self) -> None:
+        from harness.planning.static_scene_builder import build_static_scene_layout
+
+        case = {
+            "case_id": "resolved_bounds_chain",
+            "capability_id": "sequential_contact_propagation",
+            "v2_projection": {"source_schema_version": "harness_case_spec_v2"},
+            "expected_physics": {
+                "support": {"target_1": "floor", "target_2": "floor", "target_3": "floor"},
+                "collision_graph": [["target_1", "target_2"], ["target_2", "target_3"]],
+            },
+            "objects": [
+                {
+                    "id": "target_1",
+                    "role": "passive target",
+                    "shape": "box",
+                    "size_m": [0.3, 0.3, 0.4],
+                    "asset_scale_policy": "fit_uniform_to_approx_size",
+                    "initial_position_m": [-4.85, 0.0, 0.2],
+                    "body_type": "dynamic",
+                    "collision_required": True,
+                },
+                {
+                    "id": "target_2",
+                    "role": "passive target",
+                    "shape": "box",
+                    "size_m": [0.3, 0.3, 0.5],
+                    "asset_scale_policy": "fit_uniform_to_approx_size",
+                    "initial_position_m": [-5.15, 0.0, 0.25],
+                    "body_type": "dynamic",
+                    "collision_required": True,
+                },
+                {
+                    "id": "target_3",
+                    "role": "passive target",
+                    "shape": "box",
+                    "size_m": [0.25, 0.35, 0.35],
+                    "asset_scale_policy": "fit_uniform_to_approx_size",
+                    "initial_position_m": [-5.425, 0.0, 0.175],
+                    "body_type": "dynamic",
+                    "collision_required": True,
+                },
+                {
+                    "id": "floor",
+                    "role": "ground",
+                    "shape": "box",
+                    "size_m": [20.0, 20.0, 0.1],
+                    "initial_position_m": [0.0, 0.0, 0.0],
+                    "body_type": "static",
+                    "collision_required": True,
+                },
+            ],
+        }
+        authored_sizes = {
+            "target_1": [0.36697, 0.342222, 0.549862],
+            "target_2": [0.40001, 0.270534, 0.304724],
+            "target_3": [0.505502, 0.405502, 0.25409],
+            "floor": [20.0, 20.0, 0.1],
+        }
+        assets = {
+            "schema_version": "harness_asset_resolution_v1",
+            "assets": [
+                {
+                    "intent": {"object_id": object_id},
+                    "selected_asset": {
+                        "asset_id": f"asset.{object_id}",
+                        "asset_kind": "StaticMesh",
+                        "source_kind": "external_site" if object_id != "floor" else "procedural_generation",
+                        "ue_path": f"/Game/Test/{object_id}.{object_id}",
+                        "authored_size_m": size,
+                        "bbox_size_m": size,
+                        "preserve_authored_scale": True,
+                        "collider": "box",
+                    },
+                    "fallback_reason": None,
+                }
+                for object_id, size in authored_sizes.items()
+            ],
+        }
+
+        layout = build_static_scene_layout(case, asset_resolution=assets)
+        nodes = {node["object_id"]: node for node in layout["object_nodes"]}
+        target_positions = [nodes[f"target_{index}"]["transform"]["position_m"][0] for index in range(1, 4)]
+
+        self.assertEqual(layout["overlap_pairs"], [])
+        self.assertGreater(target_positions[0], target_positions[1])
+        self.assertGreater(target_positions[1], target_positions[2])
+        self.assertTrue(
+            any(row["type"] == "dynamic_overlap_bounds_separation" for row in layout["placement_adjustments"])
+        )
+        for index in range(1, 4):
+            node = nodes[f"target_{index}"]
+            binding = node["asset_binding"]
+            target_diagonal = sum(value * value for value in binding["target_size_m"]) ** 0.5
+            effective_diagonal = sum(value * value for value in binding["effective_size_m"]) ** 0.5
+            self.assertAlmostEqual(target_diagonal, effective_diagonal, places=5)
+            self.assertEqual(binding["scale_policy"], "fit_uniform_to_approx_size")
+            self.assertTrue(binding["scale_applied"])
+            self.assertFalse(binding["preserve_authored_scale"])
+
+    def test_v2_overlap_repair_does_not_guess_order_for_coincident_bodies(self) -> None:
+        from harness.planning.static_scene_builder import separate_v2_dynamic_overlaps
+
+        nodes = [
+            {
+                "object_id": object_id,
+                "physics_critical": True,
+                "transform": {"position_m": [0.0, 0.0, 0.25]},
+                "bounds": {"extents_m": [0.2, 0.2, 0.25]},
+                "physics": {"body_type": "dynamic", "collision_required": True},
+            }
+            for object_id in ("left", "right")
+        ]
+        case = {
+            "v2_projection": {"source_schema_version": "harness_case_spec_v2"},
+            "expected_physics": {"collision_graph": [["left", "right"]]},
+        }
+
+        adjustments = separate_v2_dynamic_overlaps(case, nodes, [["left", "right"]])
+
+        self.assertEqual(adjustments, [])
+        self.assertEqual(nodes[0]["transform"]["position_m"], nodes[1]["transform"]["position_m"])
+
     def test_static_scene_cli_writes_layout_and_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result = subprocess.run(

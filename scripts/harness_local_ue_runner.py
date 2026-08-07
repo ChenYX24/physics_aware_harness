@@ -461,9 +461,20 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
             "intact_visual_scale": case_object.get("intact_visual_scale"),
         }
         preserve_authored_scale = asset.get("preserve_authored_scale") is True
+        instance_scale = asset.get("instance_scale")
+        has_instance_scale = bool(
+            positive_scale3(instance_scale)
+            and asset.get("scale_policy") == "fit_uniform_to_approx_size"
+            and asset.get("scale_applied") is True
+        )
         runtime_usage = str(asset.get("runtime_usage") or "")
-        if preserve_authored_scale and runtime_usage == "collision_and_visual":
+        if has_instance_scale and runtime_usage == "collision_and_visual":
             params["preserve_authored_scale"] = True
+        elif preserve_authored_scale and runtime_usage == "collision_and_visual":
+            params["preserve_authored_scale"] = True
+        if has_instance_scale and runtime_usage == "visual_proxy":
+            params["visual_instance_scale"] = [float(value) for value in instance_scale[:3]]
+            params["preserve_visual_authored_scale"] = True
         elif preserve_authored_scale and runtime_usage == "visual_proxy":
             params["preserve_visual_authored_scale"] = True
         role = str(binding.get("role") or "").casefold()
@@ -657,6 +668,15 @@ def is_runtime_mesh_path(ue_path: str) -> bool:
 
 def scale_for_binding(binding: dict[str, Any]) -> list[float]:
     asset = binding.get("asset") if isinstance(binding.get("asset"), dict) else {}
+    instance_scale = asset.get("instance_scale")
+    if (
+        asset.get("scale_policy") == "fit_uniform_to_approx_size"
+        and asset.get("scale_applied") is True
+        and asset.get("runtime_usage") == "collision_and_visual"
+        and isinstance(instance_scale, list)
+        and len(instance_scale) >= 3
+    ):
+        return [float(value) for value in instance_scale[:3]]
     if asset.get("preserve_authored_scale") and asset.get("runtime_usage") == "collision_and_visual":
         return [1.0, 1.0, 1.0]
     bounds = binding.get("bounds") if isinstance(binding.get("bounds"), dict) else {}
@@ -664,6 +684,15 @@ def scale_for_binding(binding: dict[str, Any]) -> list[float]:
     if isinstance(extents, list) and len(extents) >= 3:
         return [float(extents[0]), float(extents[1]), float(extents[2])]
     return [0.25, 0.25, 0.25]
+
+
+def positive_scale3(value: Any) -> bool:
+    if not isinstance(value, list) or len(value) < 3:
+        return False
+    try:
+        return all(math.isfinite(float(item)) and float(item) > 0.0 for item in value[:3])
+    except (TypeError, ValueError):
+        return False
 
 
 def desired_extent_cm_for_binding(binding: dict[str, Any]) -> float | None:

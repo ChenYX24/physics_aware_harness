@@ -66,6 +66,7 @@ VERIFICATION_ASSERTION_TYPES = {
 }
 LICENSE_TIERS = {"local_preview", "reference"}
 BODY_TYPES = {"dynamic", "static", "kinematic"}
+GEOMETRY_SCALE_POLICIES = {"preserve_authored", "fit_uniform_to_approx_size"}
 BACKEND_SOLVERS = {"fallback", "genesis_fem", "genesis_sph", "taichi_cloth", "ue"}
 BACKEND_SOLVER_CAPABILITIES = {
     "fallback": {"rigid_body", "contact_events", "trajectory"},
@@ -417,6 +418,21 @@ def collect_case_spec_v2_issues(
         geometry = _mapping(obj.get("geometry"), f"{path}/geometry", issues, required=False)
         if geometry.get("approx_size_m") is not None:
             _positive_vec3(geometry.get("approx_size_m"), f"{path}/geometry/approx_size_m", issues)
+        scale_policy = geometry.get("scale_policy")
+        if scale_policy is not None and scale_policy not in GEOMETRY_SCALE_POLICIES:
+            _issue(
+                issues,
+                f"{path}/geometry/scale_policy",
+                "invalid_enum",
+                f"must be one of {sorted(GEOMETRY_SCALE_POLICIES)}",
+            )
+        if scale_policy == "fit_uniform_to_approx_size" and geometry.get("approx_size_m") is None:
+            _issue(
+                issues,
+                f"{path}/geometry/scale_policy",
+                "scale_target_missing",
+                "fit_uniform_to_approx_size requires geometry.approx_size_m",
+            )
         physics = _mapping(obj.get("physics"), f"{path}/physics", issues, required=False)
         if physics:
             if physics.get("body_type") not in BODY_TYPES:
@@ -677,6 +693,8 @@ def _project_object(
         projected["size_m"] = [float(value) for value in size]
         if "sphere" in shape.casefold():
             projected["radius_m"] = max(float(value) for value in size) / 2.0
+    if geometry.get("scale_policy") is not None:
+        projected["asset_scale_policy"] = str(geometry["scale_policy"])
     for source, target in (
         ("mass_kg", "mass_kg"),
         ("material", "material"),

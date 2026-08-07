@@ -24,6 +24,14 @@ def build_static_scene_layout(
     asset_rows = asset_rows_by_object_id(asset_resolution)
     nodes = [build_object_node(obj, asset_rows.get(str(obj.get("id")))) for obj in case_spec.get("objects", []) if isinstance(obj, dict)]
     placement_adjustments = align_v2_explicit_supports(case_spec, nodes)
+    expected_physics = case_spec.get("expected_physics") or {}
+    collision_edges = normalize_edges(expected_physics.get("collision_graph") or expected_physics.get("contact_order") or [])
+    if not collision_edges:
+        collision_edges = infer_collision_edges(nodes)
+    overlap_adjustments = separate_v2_dynamic_overlaps(case_spec, nodes, collision_edges)
+    placement_adjustments.extend(overlap_adjustments)
+    if overlap_adjustments:
+        placement_adjustments.extend(align_v2_explicit_supports(case_spec, nodes))
     compiled_camera_plan = (
         camera_plan
         if camera_plan is not None
@@ -35,10 +43,6 @@ def build_static_scene_layout(
             )
         )
     )
-    expected_physics = case_spec.get("expected_physics") or {}
-    collision_edges = normalize_edges(expected_physics.get("collision_graph") or expected_physics.get("contact_order") or [])
-    if not collision_edges:
-        collision_edges = infer_collision_edges(nodes)
     support_relations = infer_support_relations(case_spec, nodes)
     overlap_pairs = find_overlap_pairs(nodes)
     return {
@@ -111,6 +115,13 @@ def align_v2_explicit_supports(case_spec: dict[str, Any], nodes: list[dict[str, 
         support = by_id.get(str(support_id))
         if node is None or support is None:
             continue
+        physics = node.get("physics") if isinstance(node.get("physics"), dict) else {}
+        if str(physics.get("body_type") or "").casefold() != "dynamic":
+            # Static/kinematic supports may intentionally touch multiple other
+            # supports (for example both ends of an inclined ramp). Their
+            # authored CaseSpec transform is authoritative; a one-support snap
+            # would flatten or translate the complete structure.
+            continue
         gap = inclined_surface_gap(node, support)
         normal_z = 1.0
         if gap is None:
@@ -145,6 +156,102 @@ def align_v2_explicit_supports(case_spec: dict[str, Any], nodes: list[dict[str, 
             }
         )
     return adjustments
+
+
+def separate_v2_dynamic_overlaps(
+    case_spec: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    collision_edges: list[list[str]],
+    *,
+    clearance_m: float = 0.005,
+) -> list[dict[str, Any]]:
+    """Apply the smallest inferable horizontal separation to V2 dynamic chains.
+
+    The LLM-provided order and direction remain authoritative.  Exact co-location,
+    deep disagreement, static geometry, and unrelated bodies remain hard failures.
+    """
+    projection = case_spec.get("v2_projection") if isinstance(case_spec.get("v2_projection"), dict) else {}
+    if projection.get("source_schema_version") != "harness_case_spec_v2":
+        return []
+    expected = case_spec.get("expected_physics") if isinstance(case_spec.get("expected_physics"), dict) else {}
+    support_map = expected.get("support") if isinstance(expected.get("support"), dict) else {}
+    edge_pairs = {
+        frozenset((str(edge[0]), str(edge[1])))
+        for edge in collision_edges
+        if isinstance(edge, list) and len(edge) >= 2
+    }
+    adjustments: list[dict[str, Any]] = []
+    maximum_passes = max(1, len(nodes) * 2)
+    for _ in range(maximum_passes):
+        changed = False
+        for left_index, left in enumerate(nodes):
+            if not is_dynamic_collidable(left):
+                continue
+            for right in nodes[left_index + 1 :]:
+                if not is_dynamic_collidable(right):
+                    continue
+                left_id = str(left.get("object_id") or "")
+                right_id = str(right.get("object_id") or "")
+                same_support = bool(
+                    support_map.get(left_id)
+                    and support_map.get(left_id) == support_map.get(right_id)
+                )
+                if not same_support and frozenset((left_id, right_id)) not in edge_pairs:
+                    continue
+                left_position = object_position(left)
+                right_position = object_position(right)
+                left_extents = object_extents(left)
+                right_extents = object_extents(right)
+                axis_distances = [abs(left_position[axis] - right_position[axis]) for axis in range(3)]
+                overlap_thresholds = [
+                    max((left_extents[axis] + right_extents[axis]) * 0.92, 0.001)
+                    for axis in range(3)
+                ]
+                if not all(axis_distances[axis] < overlap_thresholds[axis] for axis in range(3)):
+                    continue
+                horizontal_axes = sorted(
+                    (0, 1),
+                    key=lambda axis: axis_distances[axis] / max(left_extents[axis] + right_extents[axis], 0.001),
+                    reverse=True,
+                )
+                axis = next((value for value in horizontal_axes if axis_distances[value] > 1e-6), None)
+                if axis is None:
+                    continue
+                required_distance = left_extents[axis] + right_extents[axis] + clearance_m
+                shift = required_distance - axis_distances[axis]
+                maximum_safe_shift = max(0.25, required_distance * 0.75)
+                if shift <= 1e-6 or shift > maximum_safe_shift:
+                    continue
+                direction = 1.0 if right_position[axis] > left_position[axis] else -1.0
+                original_position = list(right_position)
+                right_position[axis] = round(right_position[axis] + direction * shift, 6)
+                right.setdefault("transform", {})["position_m"] = right_position
+                adjustments.append(
+                    {
+                        "object_id": right_id,
+                        "relative_to_object_id": left_id,
+                        "type": "dynamic_overlap_bounds_separation",
+                        "axis": "xyz"[axis],
+                        "delta_m": round(direction * shift, 6),
+                        "clearance_m": clearance_m,
+                        "original_position_m": [round(value, 6) for value in original_position],
+                        "position_m": list(right_position),
+                        "bounds_source": "resolved_effective_asset_bounds",
+                    }
+                )
+                changed = True
+        if not changed:
+            break
+    return adjustments
+
+
+def is_dynamic_collidable(node: dict[str, Any]) -> bool:
+    physics = node.get("physics") if isinstance(node.get("physics"), dict) else {}
+    return bool(
+        str(physics.get("body_type") or "").casefold() == "dynamic"
+        and physics.get("collision_required") is not False
+        and node.get("physics_critical")
+    )
 
 
 def support_id_for_node(node: dict[str, Any], expected: dict[str, Any], support_nodes: list[dict[str, Any]]) -> str | None:
@@ -246,6 +353,8 @@ def inclined_surface_gap(node: dict[str, Any], support_node: dict[str, Any]) -> 
     if not any(token in shape_role for token in ("ramp", "inclined", "slope")):
         return None
     pitch = math.radians(float(((support_node.get("transform") or {}).get("rotation_deg") or [0.0])[0]))
+    # Match the UE runtime convention used by the registered ramp cases:
+    # positive pitch makes local +X the downhill direction.
     normal = [math.sin(pitch), 0.0, math.cos(pitch)]
     node_position = object_position(node)
     support_position = object_position(support_node)

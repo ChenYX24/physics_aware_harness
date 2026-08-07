@@ -30,6 +30,33 @@ class CaseSpecV2Tests(unittest.TestCase):
         self.assertTrue(projection.data["objects"][0]["collision_required"])
         self.assertEqual(projection.data["objects"][2]["body_type"], "static")
 
+    def test_uniform_asset_scale_policy_is_validated_and_projected(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["geometry"]["scale_policy"] = "fit_uniform_to_approx_size"
+
+        projection = project_case_spec_v2_to_v1(case_spec_v2_from_dict(data))
+
+        self.assertEqual(
+            projection.data["objects"][0]["asset_scale_policy"],
+            "fit_uniform_to_approx_size",
+        )
+
+        data["objects"][0]["geometry"]["scale_policy"] = "stretch_each_axis"
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("invalid_enum", {issue.code for issue in context.exception.issues})
+
+    def test_uniform_asset_scale_policy_requires_a_target_size(self) -> None:
+        data = case_spec_v2_fixture()
+        geometry = data["objects"][0]["geometry"]
+        geometry["scale_policy"] = "fit_uniform_to_approx_size"
+        del geometry["approx_size_m"]
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        self.assertIn("scale_target_missing", {issue.code for issue in context.exception.issues})
+
     def test_text_can_require_model_generation_without_reference_image(self) -> None:
         data = case_spec_v2_fixture()
         data["objects"][0]["asset"] = {

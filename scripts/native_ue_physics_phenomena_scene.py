@@ -6099,7 +6099,10 @@ def setup_scene(runtime_scene: dict | None = None):
             if not visual_path:
                 return
             try:
-                visual_scale = (obj.get("params") or {}).get("intact_visual_scale")
+                visual_scale = (
+                    (obj.get("params") or {}).get("intact_visual_scale")
+                    or (obj.get("params") or {}).get("visual_instance_scale")
+                )
                 spawn_scale = (
                     unreal.Vector(*[float(value) for value in visual_scale])
                     if isinstance(visual_scale, list) and len(visual_scale) >= 3

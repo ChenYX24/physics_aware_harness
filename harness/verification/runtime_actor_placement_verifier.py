@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from harness.runtime.actor_placement import RUNTIME_ACTOR_PLACEMENT_SCHEMA_VERSION
@@ -156,6 +157,33 @@ def first_bad_physics_binding(bindings: list[dict[str, Any]]) -> dict[str, Any] 
             or quality_gate.get("status") not in {"pass", "pass_local_preview"}
         ):
             return {"failure_type": "F2_asset_missing", "object_id": object_id, "metric": "asset_quality_gate", "value": quality_gate}
+        if asset.get("ue_path") and asset.get("scale_policy") == "fit_uniform_to_approx_size":
+            instance_scale = asset.get("instance_scale")
+            valid_scale = bool(
+                asset.get("scale_applied") is True
+                and isinstance(instance_scale, list)
+                and len(instance_scale) == 3
+                and all(
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and math.isfinite(float(value))
+                    and float(value) > 0.0
+                    for value in instance_scale
+                )
+                and max(float(value) for value in instance_scale)
+                - min(float(value) for value in instance_scale)
+                <= 1e-6
+            )
+            if not valid_scale:
+                return {
+                    "failure_type": "F3_invalid_initial_physics_state",
+                    "object_id": object_id,
+                    "metric": "invalid_uniform_asset_instance_scale",
+                    "value": {
+                        "scale_applied": asset.get("scale_applied"),
+                        "instance_scale": instance_scale,
+                    },
+                }
         if physics.get("collision_enabled") and not physics.get("collider"):
             return {"failure_type": "F3_invalid_initial_physics_state", "object_id": object_id, "metric": "missing_collider", "value": None}
         if physics.get("collision_enabled") and not physics.get("collision_profile"):

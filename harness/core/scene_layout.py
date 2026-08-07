@@ -38,7 +38,8 @@ def build_object_node(obj: dict[str, Any], asset_row: dict[str, Any] | None = No
     selected_asset = asset_row.get("selected_asset") if asset_row else None
     position = vec3(obj.get("initial_position_m") or obj.get("position_m") or obj.get("position") or [0.0, 0.0, 0.0])
     rotation = vec3(obj.get("rotation_deg") or obj.get("initial_rotation_deg") or [0.0, 0.0, 0.0])
-    extents = estimate_shape_extents(obj, selected_asset)
+    instance_geometry = resolve_instance_geometry(obj, selected_asset)
+    extents = instance_geometry["extents_m"]
     radius = round(math.sqrt(sum(value * value for value in extents)), 6)
     mass = obj.get("mass_kg")
     if mass is None and isinstance(selected_asset, dict):
@@ -84,7 +85,7 @@ def build_object_node(obj: dict[str, Any], asset_row: dict[str, Any] | None = No
         "transform": {
             "position_m": round_vec(position),
             "rotation_deg": round_vec(rotation),
-            "scale": obj.get("scale") or [1.0, 1.0, 1.0],
+            "scale": instance_geometry["instance_scale"],
         },
         "bounds": {
             "extents_m": round_vec(extents),
@@ -119,13 +120,81 @@ def build_object_node(obj: dict[str, Any], asset_row: dict[str, Any] | None = No
             "source_uri": selected_asset.get("source_uri") if isinstance(selected_asset, dict) else None,
             "license": selected_asset.get("license") if isinstance(selected_asset, dict) else None,
             "sha256": selected_asset.get("sha256") if isinstance(selected_asset, dict) else None,
-            "preserve_authored_scale": bool(selected_asset.get("preserve_authored_scale")) if isinstance(selected_asset, dict) else False,
+            "preserve_authored_scale": bool(
+                selected_asset.get("preserve_authored_scale")
+                and instance_geometry["scale_policy"] == "preserve_authored"
+            ) if isinstance(selected_asset, dict) else False,
+            "catalog_preserve_authored_scale": bool(selected_asset.get("preserve_authored_scale")) if isinstance(selected_asset, dict) else False,
             "authored_size_m": selected_asset.get("authored_size_m") if isinstance(selected_asset, dict) else None,
+            "scale_policy": instance_geometry["scale_policy"],
+            "scale_applied": instance_geometry["scale_applied"],
+            "instance_scale": instance_geometry["instance_scale"],
+            "uniform_scale_factor": instance_geometry["uniform_scale_factor"],
+            "target_size_m": instance_geometry["target_size_m"],
+            "effective_size_m": instance_geometry["effective_size_m"],
             "quality_gate": selected_asset.get("quality_gate") if isinstance(selected_asset, dict) else None,
             "fallback_reason": asset_row.get("fallback_reason") if asset_row else "asset resolution missing",
             "runtime_binding_requirements": asset_row.get("runtime_binding_requirements", []) if asset_row else [],
         },
     }
+
+
+def resolve_instance_geometry(
+    obj: dict[str, Any],
+    selected_asset: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Resolve an auditable per-scene scale without mutating the Catalog asset."""
+    authored_size = first_positive_size(
+        (selected_asset or {}).get("authored_size_m"),
+        (selected_asset or {}).get("bbox_size_m"),
+    )
+    target_size = first_positive_size(obj.get("size_m"))
+    scale_policy = str(obj.get("asset_scale_policy") or "preserve_authored")
+    uniform_scale_factor = 1.0
+    effective_size = authored_size or target_size
+    if (
+        scale_policy == "fit_uniform_to_approx_size"
+        and authored_size is not None
+        and target_size is not None
+    ):
+        authored_diagonal = math.sqrt(sum(value * value for value in authored_size))
+        target_diagonal = math.sqrt(sum(value * value for value in target_size))
+        if authored_diagonal > 1e-9:
+            uniform_scale_factor = target_diagonal / authored_diagonal
+            effective_size = [value * uniform_scale_factor for value in authored_size]
+    if effective_size is None:
+        extents = estimate_shape_extents(obj, selected_asset)
+        effective_size = [value * 2.0 for value in extents]
+    else:
+        extents = [max(value / 2.0, 0.001) for value in effective_size]
+    instance_scale = (
+        [uniform_scale_factor, uniform_scale_factor, uniform_scale_factor]
+        if scale_policy == "fit_uniform_to_approx_size" and authored_size is not None and target_size is not None
+        else vec3(obj.get("scale") or [1.0, 1.0, 1.0])
+    )
+    return {
+        "scale_policy": scale_policy,
+        "scale_applied": bool(
+            scale_policy == "fit_uniform_to_approx_size"
+            and authored_size is not None
+            and target_size is not None
+        ),
+        "uniform_scale_factor": round(uniform_scale_factor, 9),
+        "instance_scale": round_vec(instance_scale),
+        "target_size_m": round_vec(target_size) if target_size is not None else None,
+        "effective_size_m": round_vec(effective_size),
+        "extents_m": extents,
+    }
+
+
+def first_positive_size(*values: Any) -> list[float] | None:
+    for value in values:
+        if not isinstance(value, (list, tuple)) or len(value) < 3:
+            continue
+        size = vec3(value)
+        if all(component > 0.0 for component in size):
+            return size
+    return None
 
 
 def analytic_physics_defaults(obj: dict[str, Any], role: str) -> dict[str, Any]:

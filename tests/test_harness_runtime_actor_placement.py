@@ -493,6 +493,89 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         native_source = (ROOT / "scripts" / "native_ue_physics_phenomena_scene.py").read_text(encoding="utf-8")
         self.assertIn('get("preserve_visual_authored_scale")', native_source)
 
+    def test_uniform_instance_scale_reaches_runtime_mesh_and_visual_proxy(self) -> None:
+        from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement
+
+        binding = {
+            "object_id": "crate",
+            "runtime_actor_id": "actor_crate",
+            "role": "passive target",
+            "asset": {
+                "ue_path": "/Game/Provider/Crate.Crate",
+                "runtime_usage": "collision_and_visual",
+                "scale_policy": "fit_uniform_to_approx_size",
+                "scale_applied": True,
+                "instance_scale": [0.75, 0.75, 0.75],
+                "preserve_authored_scale": False,
+            },
+            "bounds": {"extents_m": [0.3, 0.2, 0.25]},
+            "transform": {"position_m": [0.0, 0.0, 0.25]},
+            "physics": {"simulate_physics": True, "collider": "mesh"},
+        }
+
+        dynamic, _ = runtime_objects_from_actor_placement(
+            {"actor_bindings": [binding]},
+            {"objects": [{"id": "crate"}]},
+        )
+        self.assertEqual(dynamic[0]["scale"], [0.75, 0.75, 0.75])
+        self.assertTrue(dynamic[0]["params"]["preserve_authored_scale"])
+
+        visual_binding = deepcopy(binding)
+        visual_binding["asset"]["runtime_usage"] = "visual_proxy"
+        visual_binding["physics"]["collider"] = "box"
+        visual, _ = runtime_objects_from_actor_placement(
+            {"actor_bindings": [visual_binding]},
+            {"objects": [{"id": "crate"}]},
+        )
+        self.assertEqual(visual[0]["params"]["visual_instance_scale"], [0.75, 0.75, 0.75])
+        self.assertTrue(visual[0]["params"]["preserve_visual_authored_scale"])
+
+    def test_runtime_verifier_rejects_unapplied_uniform_asset_scale(self) -> None:
+        from harness.verification.runtime_actor_placement_verifier import verify_runtime_actor_placement
+
+        placement = {
+            "schema_version": "harness_runtime_actor_placement_v1",
+            "actor_bindings": [
+                {
+                    "object_id": "crate",
+                    "runtime_actor_id": "actor_crate",
+                    "physics_critical": True,
+                    "asset": {
+                        "ue_path": "/Game/Provider/Crate.Crate",
+                        "proxy": False,
+                        "quality_gate": {"status": "pass_local_preview"},
+                        "scale_policy": "fit_uniform_to_approx_size",
+                        "scale_applied": False,
+                        "instance_scale": [1.0, 1.0, 1.0],
+                    },
+                    "physics": {
+                        "simulate_physics": True,
+                        "collision_enabled": True,
+                        "collider": "box",
+                        "collision_profile": "PhysicsActor",
+                        "mass_kg": 1.0,
+                    },
+                }
+            ],
+            "camera_bindings": [{"camera_id": "front"}],
+            "physics_graph": {"collision_edges": []},
+        }
+        case = {
+            "case_id": "invalid_scale",
+            "objects": [
+                {
+                    "id": "crate",
+                    "body_type": "dynamic",
+                    "collision_required": True,
+                }
+            ],
+        }
+
+        report = verify_runtime_actor_placement(case, placement)
+
+        self.assertEqual(report["status"], "fail")
+        self.assertEqual(report["first_failure"]["metric"], "invalid_uniform_asset_instance_scale")
+
     def test_dynamic_sphere_uses_controlled_collision_geometry(self) -> None:
         from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement, ue_path_for_binding
 

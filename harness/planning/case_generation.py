@@ -607,11 +607,18 @@ FIELD-BY-FIELD INSTRUCTIONS
    keep the permitted local/procedural/analytic routes needed for support surfaces and other infrastructure
    unless the user explicitly forbids those routes for the entire scene.
 7. objects: create one entry per logical scene object. Each id must be unique, stable, machine-friendly,
-   and independent of an eventual asset ID. role is semantic. geometry uses shape_hint and positive
-   approx_size_m. physics.body_type is exactly dynamic, static, or kinematic. behavior is always an
+   and independent of an eventual asset ID. role is semantic. geometry uses shape_hint, positive
+   approx_size_m, and optional scale_policy. scale_policy is preserve_authored or
+   fit_uniform_to_approx_size. Use fit_uniform_to_approx_size for an external/model-generated mesh when
+   the requested physical dimensions are part of the scenario; it applies one uniform instance scale,
+   preserving mesh proportions and materials while matching the target bounding-box diagonal as closely
+   as possible. Use preserve_authored when source-authored real-world scale
+   is explicitly required. physics.body_type is exactly dynamic, static, or kinematic. behavior is always an
    object. Use finite three-number arrays for positions, rotations, and velocities. rotation_deg is
    exactly [pitch, yaw, roll], matching UE Rotator semantics: incline a box ramp along X with pitch
-   (the first value), not yaw. Place initially resting objects with a small positive clearance (about
+   (the first value), not yaw. In the Harness UE convention, positive pitch makes local +X downhill
+   (the -X end is high), while negative pitch makes local -X downhill; place the high-end support and
+   released body on the corresponding high end. Place initially resting objects with a small positive clearance (about
    0.002-0.005 m) above the supporting surface. Use low restitution (normally <=0.1) unless a bounce is
    requested, and set use_ccd=true for small or fast-moving collision bodies.
 8. object.asset: description and optional semantic_text are natural-language search/generation intent;
@@ -648,7 +655,8 @@ FIELD-BY-FIELD INSTRUCTIONS
     Size every support surface so its horizontal footprint contains every supported object's full initial
     bounds plus at least 0.25 m margin, and ensure scene.bounds_hint_m contains all full object bounds.
     For a collision chain, include enough support area for the staged objects and expected interaction path.
-    A declared collision order must be physically reachable from the initial positions, velocities, gravity,
+    A declared collision order must include one collision/impacts relation for every intended adjacent pair
+    in the chain and must be physically reachable from the initial positions, velocities, gravity,
     friction, and release times: keep intended targets close enough, aim the mover toward them, and do not
     rely on equal-acceleration followers magically catching a leading body. Do not substitute several small
     vertical drops when the request asks for an impact, transfer, cascade, or ramp collision process. For a
@@ -748,7 +756,11 @@ def _case_spec_contract() -> dict[str, Any]:
             "object": {
                 "id": "stable identifier string",
                 "role": "semantic role string",
-                "geometry": {"shape_hint": "string", "approx_size_m": ["positive x", "positive y", "positive z"]},
+                "geometry": {
+                    "shape_hint": "string",
+                    "approx_size_m": ["positive x", "positive y", "positive z"],
+                    "scale_policy": "preserve_authored or fit_uniform_to_approx_size",
+                },
                 "physics": {
                     "body_type": "dynamic, static, or kinematic",
                     "mass_kg": "positive number",
@@ -815,6 +827,7 @@ def _case_spec_contract() -> dict[str, Any]:
             "primary_capability": _executable_primary_capabilities(),
             "coordinate_system": ["z_up"],
             "body_type": ["dynamic", "static", "kinematic"],
+            "geometry_scale_policy": ["preserve_authored", "fit_uniform_to_approx_size"],
             "backend": ["fallback", "genesis_fem", "genesis_sph", "taichi_cloth", "ue"],
             "solver_capability": sorted(frozenset().union(*BACKEND_SOLVER_CAPABILITIES.values())),
             "acquisition_route": [
