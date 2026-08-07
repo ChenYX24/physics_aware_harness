@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import json
+import math
 import subprocess
 import sys
 import tempfile
@@ -13,6 +15,25 @@ from scripts.harness_ue_asset_importer import _prepare_ue_request, _stop_process
 
 
 class UEAssetImporterLauncherTests(unittest.TestCase):
+    def test_external_fbx_bounds_allow_metadata_drift_but_reject_scale_errors(self) -> None:
+        source = Path(__file__).resolve().parents[1] / "scripts" / "native_ue_asset_importer.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "_dimensions_match_source"
+        )
+        namespace = {"math": math}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+        matches = namespace["_dimensions_match_source"]
+
+        actual = [40.00098991394043, 27.053309440612793, 30.472382032600194]
+        expected = [40.00099003314972, 29.232875257730484, 34.710586071014404]
+        self.assertTrue(matches(actual, expected, source_kind="external_site"))
+        self.assertFalse(matches([4000.0, 2700.0, 3000.0], expected, source_kind="external_site"))
+        self.assertFalse(matches(actual, expected, source_kind="procedural_generation"))
+
     def test_prepare_request_normalizes_meter_obj_to_centimeters_without_changing_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

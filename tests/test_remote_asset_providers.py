@@ -111,6 +111,10 @@ class StubImporter:
 class DependencyStubImporter(StubImporter):
     def import_asset(self, request, *, work_dir: Path, workspace: Path) -> BackendImportResult:
         result = super().import_asset(request, work_dir=work_dir, workspace=workspace).to_dict()
+        result["import_validation"] = {
+            "actual_size_cm": [17.0, 17.0, 17.0],
+            "expected_size_m": [0.18, 0.18, 0.18],
+        }
         dependency_file = work_dir / "MI_Remote.uasset"
         dependency_payload = b"FAKE_REMOTE_UE_MATERIAL\n"
         dependency_file.write_bytes(dependency_payload)
@@ -601,6 +605,8 @@ class RemoteAssetProviderTests(unittest.TestCase):
         self.assertEqual(selected["source_uri"], "https://polyhaven.com/a/dirty_football")
         self.assertEqual(selected["shape"], "sphere")
         self.assertEqual(selected["collider"], "box")
+        self.assertEqual(selected["authored_size_m"], [0.17, 0.17, 0.17])
+        self.assertEqual(selected["provider_reported_size_m"], [0.18, 0.18, 0.18])
 
     def test_external_asset_and_procedural_ground_qualify_in_same_case(self) -> None:
         data = case_spec_v2_fixture()

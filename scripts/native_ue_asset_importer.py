@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import traceback
@@ -51,7 +52,11 @@ def main() -> None:
             raise RuntimeError(f"imported object is not a StaticMesh: {object_path}")
         if int(asset.get_num_sections(0)) <= 0:
             raise RuntimeError(f"imported StaticMesh has no LOD0 render sections: {object_path}")
-        actual_size_cm = _validate_dimensions(asset, request.get("expected_size_m"))
+        actual_size_cm = _validate_dimensions(
+            asset,
+            request.get("expected_size_m"),
+            source_kind=str(request.get("source_kind") or ""),
+        )
         mesh_editor = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
         if mesh_editor is None:
             raise RuntimeError("StaticMeshEditorSubsystem is unavailable for collision validation")
@@ -175,7 +180,34 @@ def _safe_asset_name(value: str) -> str:
     return name[:120]
 
 
-def _validate_dimensions(asset: Any, expected_size_m: Any) -> list[float]:
+def _dimensions_match_source(
+    actual_size_cm: list[float],
+    expected_size_cm: list[float],
+    *,
+    source_kind: str,
+) -> bool:
+    if len(actual_size_cm) != 3 or len(expected_size_cm) != 3:
+        return False
+    if any(not math.isfinite(value) or value <= 0.0 for value in [*actual_size_cm, *expected_size_cm]):
+        return False
+    # Poly Haven's API dimensions can include source-node transforms or small
+    # non-rendering parts that are absent from the combined FBX StaticMesh.
+    # Validate that import retained the same physical scale without distorting
+    # the authored FBX to reproduce advisory metadata exactly.  Sorting also
+    # tolerates source/up-axis conventions.  Procedural and fitted sources keep
+    # the strict per-axis contract.
+    external_fbx = str(source_kind).casefold() == "external_site"
+    actual_values = sorted(actual_size_cm) if external_fbx else actual_size_cm
+    expected_values = sorted(expected_size_cm) if external_fbx else expected_size_cm
+    relative_tolerance = 0.20 if external_fbx else 0.01
+    absolute_tolerance_cm = 1.0 if external_fbx else 0.1
+    return all(
+        abs(actual - expected) <= max(absolute_tolerance_cm, abs(expected) * relative_tolerance)
+        for actual, expected in zip(actual_values, expected_values)
+    )
+
+
+def _validate_dimensions(asset: Any, expected_size_m: Any, *, source_kind: str = "") -> list[float]:
     bounds = asset.get_bounding_box()
     actual_size_cm = [
         float(bounds.max.x - bounds.min.x),
@@ -189,12 +221,10 @@ def _validate_dimensions(asset: Any, expected_size_m: Any) -> list[float]:
     if not isinstance(expected_size_m, list) or len(expected_size_m) != 3:
         raise RuntimeError("backend import request expected_size_m must contain three values when provided")
     expected_size_cm = [float(value) * 100.0 for value in expected_size_m]
-    for actual, expected in zip(actual_size_cm, expected_size_cm):
-        tolerance = max(0.1, abs(expected) * 0.01)
-        if abs(actual - expected) > tolerance:
-            raise RuntimeError(
-                f"imported StaticMesh bounds mismatch: actual_cm={actual_size_cm}, expected_cm={expected_size_cm}"
-            )
+    if not _dimensions_match_source(actual_size_cm, expected_size_cm, source_kind=source_kind):
+        raise RuntimeError(
+            f"imported StaticMesh bounds mismatch: actual_cm={actual_size_cm}, expected_cm={expected_size_cm}"
+        )
     return actual_size_cm
 
 

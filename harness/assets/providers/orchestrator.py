@@ -836,7 +836,17 @@ class AssetProviderOrchestrator:
             row.setdefault("format", Path(str(row.get("local_path") or "")).suffix.lstrip("."))
         primary = next((row for row in imported_files if row.get("role") == "primary"), imported_files[0])
         dependencies = [dict(row) for row in import_result.get("dependencies") or []]
-        size = list(acquisition.expected_size_m) if acquisition.expected_size_m is not None else None
+        import_validation = import_result.get("import_validation") if isinstance(import_result.get("import_validation"), Mapping) else {}
+        actual_size_cm = import_validation.get("actual_size_cm")
+        size = (
+            [float(value) / 100.0 for value in actual_size_cm]
+            if isinstance(actual_size_cm, list)
+            and len(actual_size_cm) == 3
+            and all(isinstance(value, (int, float)) and not isinstance(value, bool) and float(value) > 0.0 for value in actual_size_cm)
+            else list(acquisition.expected_size_m)
+            if acquisition.expected_size_m is not None
+            else None
+        )
         volume_m3 = math.prod(size) if size else 0.001
         requested_geometry = next(
             (
@@ -890,6 +900,9 @@ class AssetProviderOrchestrator:
             "byte_size": int(primary.get("byte_size") or Path(str(primary["local_path"])).stat().st_size),
             "bbox_size_m": size,
             "authored_size_m": size,
+            "provider_reported_size_m": (
+                list(acquisition.expected_size_m) if acquisition.expected_size_m is not None else None
+            ),
             "preserve_authored_scale": True,
             # This is the semantic geometry contract used to choose the
             # provider asset.  Keep it separate from `collider`, which records
