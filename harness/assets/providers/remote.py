@@ -734,13 +734,6 @@ def _select_poly_haven_asset(
     size_rejected_count = 0
     for asset_id, metadata in models.items():
         actual_size = _poly_haven_size(metadata)
-        if (
-            requested_size is not None
-            and actual_size is not None
-            and not _poly_haven_size_matches(requested_size, actual_size)
-        ):
-            size_rejected_count += 1
-            continue
         components = _score_poly_haven_candidate(
             query=query,
             query_tokens=tokens,
@@ -750,8 +743,16 @@ def _select_poly_haven_asset(
             metadata=metadata,
         )
         lexical_score = sum(value for key, value in components.items() if key != "size_similarity")
-        if lexical_score > 0:
-            ranked.append((round(sum(components.values()), 6), asset_id, metadata, components))
+        if lexical_score <= 0:
+            continue
+        if (
+            requested_size is not None
+            and actual_size is not None
+            and not _poly_haven_size_matches(requested_size, actual_size)
+        ):
+            size_rejected_count += 1
+            continue
+        ranked.append((round(sum(components.values()), 6), asset_id, metadata, components))
     ranked.sort(key=lambda row: (-row[0], row[1]))
     if not ranked:
         raise RemoteProviderError("no_relevant_external_asset", f"Poly Haven has no relevant model for: {query}", status="blocked")
