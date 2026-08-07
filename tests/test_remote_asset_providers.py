@@ -579,7 +579,12 @@ class RemoteAssetProviderTests(unittest.TestCase):
         poly_transport = self._poly_transport()
         poly = PolyHavenExternalSiteAdapter(transport=poly_transport)
         external_compilation = compile_runtime_case(
-            self._case(route="external_site", provider_hint="polyhaven", source_uri="polyhaven:dirty_football"),
+            self._case(
+                route="external_site",
+                provider_hint="polyhaven",
+                source_uri="polyhaven:dirty_football",
+                asset_must={"license_tier": "local_preview"},
+            ),
             requested_backend="ue",
             registry=self.registry,
             provider_orchestrator=AssetProviderOrchestrator(
@@ -750,11 +755,13 @@ class RemoteAssetProviderTests(unittest.TestCase):
         provider_hint: str,
         references: list[dict[str, Any]] | None = None,
         source_uri: str | None = None,
+        asset_must: dict[str, Any] | None = None,
     ):
         data = case_spec_v2_fixture()
         data["objects"][0]["asset"] = {
             "description": "dirty football",
             "resource_kind": "mesh_3d",
+            "must": dict(asset_must or {}),
             "acquisition": {
                 "route": route,
                 "requirement": "required",

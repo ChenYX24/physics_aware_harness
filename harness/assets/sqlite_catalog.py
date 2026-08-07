@@ -27,7 +27,12 @@ from harness.assets.hybrid_ranking import (
     load_retrieval_config,
     retrieval_match_decision,
 )
-from harness.assets.search_intent import SearchIntent, asset_matches_approx_size, taxonomy_relaxation_values
+from harness.assets.search_intent import (
+    SearchIntent,
+    acceptable_license_tiers,
+    asset_matches_approx_size,
+    taxonomy_relaxation_values,
+)
 
 
 CATALOG_SCHEMA_VERSION = 2
@@ -1163,10 +1168,17 @@ def _hard_filter_sql(intent: SearchIntent, *, requested_category: str | None) ->
     for field, column in (
         ("asset_type", "a.asset_type"),
         ("geometry_type", "a.asset_type"),
-        ("license_tier", "a.license_tier"),
     ):
         if field in must:
             _append_value_filter(clauses, parameters, column, must[field], negate=False)
+    if "license_tier" in must:
+        _append_value_filter(
+            clauses,
+            parameters,
+            "a.license_tier",
+            sorted(acceptable_license_tiers(must["license_tier"])),
+            negate=False,
+        )
     if "class_name" in must:
         values = _as_values(must["class_name"])
         placeholders = ",".join("?" for _ in values)

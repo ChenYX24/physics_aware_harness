@@ -38,6 +38,26 @@ PHYSICS_ROLE_ALIASES = {
 }
 
 
+def acceptable_license_tiers(required: Any) -> set[str]:
+    """Return tiers that satisfy a minimum publication/use clearance."""
+    raw_values = required if isinstance(required, list) else [required]
+    accepted: set[str] = set()
+    for raw_value in raw_values:
+        value = str(raw_value).strip().casefold()
+        if not value:
+            continue
+        accepted.add(value)
+        if value == "local_preview":
+            accepted.add("reference")
+    return accepted
+
+
+def license_tier_satisfies(actual: Any, required: Any) -> bool:
+    if required is None:
+        return True
+    return str(actual or "").strip().casefold() in acceptable_license_tiers(required)
+
+
 @dataclass(frozen=True)
 class SearchPreference:
     field: str

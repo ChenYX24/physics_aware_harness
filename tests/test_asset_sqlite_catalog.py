@@ -61,6 +61,28 @@ class AssetSQLiteCatalogTests(unittest.TestCase):
 
             self.assertEqual([row["asset_id"] for row in results], ["modern_wood_chair"])
 
+    def test_reference_assets_satisfy_local_preview_minimum_tier(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            catalog = initialize_catalog(root / "catalog.sqlite")
+            catalog.import_registry(self.registry_payload(root))
+
+            local_preview = SearchIntent.from_dict(
+                {
+                    "raw_query": "office chair",
+                    "must": {"license_tier": "local_preview", "asset_type": "StaticMesh", "collision": True},
+                }
+            )
+            reference = SearchIntent.from_dict(
+                {
+                    "raw_query": "office chair",
+                    "must": {"license_tier": "reference", "asset_type": "StaticMesh", "collision": True},
+                }
+            )
+
+            self.assertEqual(catalog.search(local_preview, top_k=1)[0]["asset_id"], "modern_wood_chair")
+            self.assertEqual(catalog.search(reference, top_k=1)[0]["asset_id"], "modern_wood_chair")
+
     def test_taxonomy_relaxes_from_object_type_to_parent_category(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

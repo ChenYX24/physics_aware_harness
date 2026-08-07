@@ -8,7 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from harness.assets.embedding_index import EmbeddingProvider
-from harness.assets.search_intent import SearchIntent, asset_matches_approx_size, taxonomy_relaxation_values
+from harness.assets.search_intent import (
+    SearchIntent,
+    asset_matches_approx_size,
+    license_tier_satisfies,
+    taxonomy_relaxation_values,
+)
 from harness.assets.sqlite_catalog import SQLiteCatalog, default_catalog_path, effective_license_tier
 
 
@@ -298,7 +303,7 @@ def candidate_matches_search_intent(
         source_kind=item.get("source_kind"),
         redistribution=item.get("redistribution") or (item.get("release_audit") or {}).get("redistribution"),
     )
-    if not _matches_value(inferred_license_tier, must.get("license_tier")):
+    if not license_tier_satisfies(inferred_license_tier, must.get("license_tier")):
         return False
     if requested_category and str(requested_category).casefold() not in {"physics_critical", "visual_only"}:
         if str(requested_category).casefold() not in category_values:

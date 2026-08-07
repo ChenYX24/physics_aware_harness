@@ -602,7 +602,8 @@ FIELD-BY-FIELD INSTRUCTIONS
    required_license_tier is local_preview or reference and must reflect the user's request. Default to
    local_preview unless the user explicitly requires reference/publishable/distributable output; choosing
    external_site or a source that happens to be CC0 does not by itself make the whole case require the
-   reference tier. A source restriction for one named object applies only to that object's acquisition:
+   reference tier. In asset.must, license_tier is a minimum acceptable clearance: a reference asset also
+   satisfies local_preview. A source restriction for one named object applies only to that object's acquisition:
    keep the permitted local/procedural/analytic routes needed for support surfaces and other infrastructure
    unless the user explicitly forbids those routes for the entire scene.
 7. objects: create one entry per logical scene object. Each id must be unique, stable, machine-friendly,
