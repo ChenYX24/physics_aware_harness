@@ -87,6 +87,8 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
         if "sphere" in collider
         else "box"
         if "box" in collider
+        else "cylinder"
+        if "cylinder" in collider
         else None
     )
     # A declared primitive collider is part of the CaseSpec physics contract.

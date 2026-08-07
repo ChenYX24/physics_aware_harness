@@ -628,6 +628,8 @@ def ue_path_for_binding(binding: dict[str, Any]) -> str:
         return "/Engine/BasicShapes/Sphere.Sphere"
     if collision_geometry_source == "analytic_box":
         return "/Engine/BasicShapes/Cube.Cube"
+    if collision_geometry_source == "analytic_cylinder":
+        return "/Engine/BasicShapes/Cylinder.Cylinder"
     if role == "elastic_constrained_body":
         return "/Engine/BasicShapes/Sphere.Sphere"
     if role == "elastic_constraint_anchor":

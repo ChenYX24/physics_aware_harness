@@ -649,7 +649,11 @@ FIELD-BY-FIELD INSTRUCTIONS
     A declared collision order must be physically reachable from the initial positions, velocities, gravity,
     friction, and release times: keep intended targets close enough, aim the mover toward them, and do not
     rely on equal-acceleration followers magically catching a leading body. Do not substitute several small
-    vertical drops when the request asks for an impact, transfer, cascade, or ramp collision process.
+    vertical drops when the request asks for an impact, transfer, cascade, or ramp collision process. For a
+    tabletop chain with initially resting passive targets, keep those targets at their supported poses with
+    zero initial velocity and delay the striker release by about 0.5-1.0 s so Chaos can establish resting
+    contact first. Unless the user explicitly requests a high-speed impact, choose the lowest useful tabletop
+    striker speed (normally about 0.8-1.5 m/s) rather than an unnecessarily fast launch.
 11. expected_behavior: describe causal and observable outcomes without claiming success.
 12. observation_requirements: cameras use registered camera roles and exact target object IDs; modalities
     use registered values; signals name evidence required by the capability and assertions. Do not emit

@@ -2801,6 +2801,17 @@ def sync_runtime_visuals(actors: dict) -> None:
         try:
             visual.set_actor_location(physics_actor.get_actor_location(), False, False)
             visual.set_actor_rotation(physics_actor.get_actor_rotation(), False)
+            # Provider meshes commonly keep an authored pivot at their base or
+            # at an arbitrary modelling origin.  The controlled collision mesh
+            # is centred on the CaseSpec pose, so copying actor transforms alone
+            # makes the visible mesh orbit vertically as the rigid body rotates.
+            # Re-centre the rendered bounds after applying the current rotation;
+            # this preserves authored scale/materials while keeping visual and
+            # collision geometry on the same physical body every frame.
+            physics_origin, _ = actor_bounds(physics_actor)
+            visual_origin, _ = actor_bounds(visual)
+            center_delta = physics_origin - visual_origin
+            visual.set_actor_location(visual.get_actor_location() + center_delta, False, False)
         except Exception:
             pass
 

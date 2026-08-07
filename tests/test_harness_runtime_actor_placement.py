@@ -663,6 +663,48 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertFalse(dynamic[0]["params"]["visual_simulate_physics"])
         self.assertEqual(dynamic[0]["physics_properties"]["collision_geometry_source"], "analytic_box")
 
+    def test_declared_cylinder_collider_uses_centered_proxy_for_provider_visual(self) -> None:
+        from harness.runtime.actor_placement import compile_runtime_actor_placement
+        from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement, ue_path_for_binding
+
+        placement = compile_runtime_actor_placement(
+            {"case_id": "bottle"},
+            {
+                "case_id": "bottle",
+                "object_nodes": [{
+                    "object_id": "bottle",
+                    "role": "passive_target",
+                    "shape": "cylinder",
+                    "physics_critical": True,
+                    "physics": {"collider": "cylinder", "collision_profile": "PhysicsActor"},
+                    "asset_binding": {
+                        "selected_asset_ue_path": "/Game/Provider/SM_Bottle.SM_Bottle",
+                        "preserve_authored_scale": True,
+                    },
+                }],
+            },
+        )
+
+        binding = placement["actor_bindings"][0]
+        self.assertEqual(binding["asset"]["runtime_usage"], "visual_proxy")
+        self.assertEqual(binding["physics"]["collision_geometry_source"], "analytic_cylinder")
+        self.assertEqual(binding["physics"]["collision_geometry_verification"], "runtime_controlled")
+        self.assertEqual(ue_path_for_binding(binding), "/Engine/BasicShapes/Cylinder.Cylinder")
+        dynamic, static = runtime_objects_from_actor_placement(
+            placement,
+            {"case_id": "bottle", "objects": [{"id": "bottle"}]},
+        )
+        self.assertEqual(static, [])
+        self.assertEqual(dynamic[0]["ue5_path"], "/Engine/BasicShapes/Cylinder.Cylinder")
+        self.assertEqual(dynamic[0]["params"]["visual_ue5_path"], "/Game/Provider/SM_Bottle.SM_Bottle")
+        self.assertTrue(dynamic[0]["params"]["preserve_visual_authored_scale"])
+
+    def test_native_visual_proxy_tracks_collision_bounds_center(self) -> None:
+        native_source = (ROOT / "scripts" / "native_ue_physics_phenomena_scene.py").read_text(encoding="utf-8")
+        self.assertIn("physics_origin, _ = actor_bounds(physics_actor)", native_source)
+        self.assertIn("visual_origin, _ = actor_bounds(visual)", native_source)
+        self.assertIn("center_delta = physics_origin - visual_origin", native_source)
+
     def test_native_ue_preserves_selected_asset_materials_for_llm_objects(self) -> None:
         native_source = (ROOT / "scripts" / "native_ue_physics_phenomena_scene.py").read_text(encoding="utf-8")
         self.assertIn('params.get("binding_source") == "ue_asset"', native_source)
