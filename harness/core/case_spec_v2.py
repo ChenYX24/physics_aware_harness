@@ -483,6 +483,7 @@ def collect_case_spec_v2_issues(
     known_objects = set(object_ids)
     _validate_references(data.get("relations"), "/relations", known_objects, issues)
     _validate_references(data.get("events"), "/events", known_objects, issues)
+    _validate_event_payloads(data.get("events"), issues)
     _validate_support_footprints(objects, data.get("relations"), issues)
     verification = _mapping(data.get("verification_requirements"), "/verification_requirements", issues)
     assertions = verification.get("assertions")
@@ -748,10 +749,23 @@ def _project_release_events(events: Iterable[Any], objects: list[dict[str, Any]]
         if not math.isfinite(release_time) or release_time < 0.0:
             continue
         projected["release_time_s"] = release_time
+        event_velocity = event.get("linear_velocity_m_s")
+        projected["release_velocity_m_s"] = (
+            [float(value) for value in event_velocity]
+            if _is_finite_vec3(event_velocity)
+            else copy.deepcopy(projected["initial_velocity_m_s"])
+        )
+        angular_velocity_deg = event.get("angular_velocity_deg_s")
+        angular_velocity_rad = event.get("angular_velocity_rad_s")
+        if _is_finite_vec3(angular_velocity_deg):
+            projected["release_angular_velocity_deg_s"] = [float(value) for value in angular_velocity_deg]
+        elif _is_finite_vec3(angular_velocity_rad):
+            projected["release_angular_velocity_deg_s"] = [
+                math.degrees(float(value)) for value in angular_velocity_rad
+            ]
         if release_time > 0.0:
             projected["hold_position_m"] = copy.deepcopy(projected["initial_position_m"])
             projected["release_position_m"] = copy.deepcopy(projected["initial_position_m"])
-            projected["release_velocity_m_s"] = copy.deepcopy(projected["initial_velocity_m_s"])
 
 
 def _collision_graph(relations: Iterable[Any]) -> list[list[str]]:
@@ -980,6 +994,29 @@ def _validate_support_footprints(
             )
 
 
+def _validate_event_payloads(events: Any, issues: list[ValidationIssue]) -> None:
+    if not isinstance(events, list):
+        return
+    for index, event in enumerate(events):
+        if not isinstance(event, Mapping):
+            continue
+        event_type = str(event.get("type") or "").casefold().replace("-", "_").replace(" ", "_")
+        if event_type not in {"release", "delayed_release", "staged_release"}:
+            continue
+        path = f"/events/{index}"
+        raw_time = event.get("time_s", event.get("time"))
+        if (
+            not isinstance(raw_time, (int, float))
+            or isinstance(raw_time, bool)
+            or not math.isfinite(float(raw_time))
+            or float(raw_time) < 0.0
+        ):
+            _issue(issues, f"{path}/time_s", "invalid_release_time", "must be a non-negative finite number")
+        for field in ("linear_velocity_m_s", "angular_velocity_rad_s", "angular_velocity_deg_s"):
+            if event.get(field) is not None:
+                _finite_vec3(event.get(field), f"{path}/{field}", issues)
+
+
 def _mapping(
     value: Any,
     path: str,
@@ -1035,12 +1072,19 @@ def _positive_number(value: Any, path: str, issues: list[ValidationIssue]) -> fl
 
 
 def _finite_vec3(value: Any, path: str, issues: list[ValidationIssue]) -> list[float]:
-    if not isinstance(value, list) or len(value) != 3 or any(
-        not isinstance(item, (int, float)) or isinstance(item, bool) or not math.isfinite(float(item)) for item in value
-    ):
+    if not _is_finite_vec3(value):
         _issue(issues, path, "invalid_vector", "must contain three finite numbers")
         return []
     return [float(item) for item in value]
+
+
+def _is_finite_vec3(value: Any) -> bool:
+    return isinstance(value, list) and len(value) == 3 and all(
+        isinstance(item, (int, float))
+        and not isinstance(item, bool)
+        and math.isfinite(float(item))
+        for item in value
+    )
 
 
 def _positive_vec3(value: Any, path: str, issues: list[ValidationIssue]) -> list[float]:

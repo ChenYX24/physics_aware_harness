@@ -641,8 +641,10 @@ FIELD-BY-FIELD INSTRUCTIONS
     {"type": string, "object": exact_id}. Additional semantic parameters may be objects or scalars, but
     must not replace these exact ID references. Express support canonically as
     {"type":"supported_by","source":subject_id,"target":support_id}. A delayed release event uses
-    {"type":"release","object":exact_id,"time_s":nonnegative_number}; until that time the runtime holds
-    the object at its declared initial transform. Never use phrases such as "box with floor" as a reference.
+    {"type":"release","object":exact_id,"time_s":nonnegative_number}; put the post-release launch velocity
+    on that event as "linear_velocity_m_s":[x,y,z] (and optional "angular_velocity_rad_s":[x,y,z]), while the
+    object's initial_state velocity remains zero during the hold. Until release time the runtime holds the object
+    at its declared initial transform. Never use phrases such as "box with floor" as a reference.
     Size every support surface so its horizontal footprint contains every supported object's full initial
     bounds plus at least 0.25 m margin, and ensure scene.bounds_hint_m contains all full object bounds.
     For a collision chain, include enough support area for the staged objects and expected interaction path.

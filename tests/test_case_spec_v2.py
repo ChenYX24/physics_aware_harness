@@ -154,6 +154,36 @@ class CaseSpecV2Tests(unittest.TestCase):
         projected = project_case_spec_v2_to_v1(case_spec_v2_from_dict(data)).data
         self.assertFalse(projected["objects"][0]["use_ccd"])
 
+    def test_release_event_velocity_overrides_zero_hold_velocity(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["initial_state"]["linear_velocity_m_s"] = [0.0, 0.0, 0.0]
+        data["events"] = [{
+            "type": "release",
+            "object": "cue_ball",
+            "time_s": 0.8,
+            "linear_velocity_m_s": [1.2, 0.0, 0.0],
+            "angular_velocity_rad_s": [0.0, 1.0, 0.0],
+        }]
+
+        projected = project_case_spec_v2_to_v1(case_spec_v2_from_dict(data)).data
+        ball = next(obj for obj in projected["objects"] if obj["id"] == "cue_ball")
+        self.assertEqual(ball["initial_velocity_m_s"], [0.0, 0.0, 0.0])
+        self.assertEqual(ball["release_time_s"], 0.8)
+        self.assertEqual(ball["release_velocity_m_s"], [1.2, 0.0, 0.0])
+        self.assertEqual(ball["release_angular_velocity_deg_s"], [0.0, 57.29577951308232, 0.0])
+
+    def test_release_event_rejects_invalid_velocity(self) -> None:
+        data = case_spec_v2_fixture()
+        data["events"] = [{
+            "type": "release",
+            "object": "cue_ball",
+            "time_s": 0.8,
+            "linear_velocity_m_s": [1.2, 0.0],
+        }]
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("invalid_vector", {issue.code for issue in context.exception.issues})
+
     def test_invalid_energy_inputs_remain_structured_validation_errors(self) -> None:
         data = case_spec_v2_fixture()
         data["objects"][0]["initial_state"]["linear_velocity_m_s"] = ["fast", 0.0, 0.0]
