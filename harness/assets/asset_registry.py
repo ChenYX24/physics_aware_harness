@@ -26,7 +26,6 @@ class AssetRegistry:
         explicit = (
             path
             or os.environ.get("SIM_HARNESS_ASSET_CATALOG")
-            or os.environ.get("SIM_STUDIO_ASSET_REGISTRY")
         )
         workspace_catalog = default_catalog_path()
         configured = explicit or (workspace_catalog if workspace_catalog.is_file() else ROOT / "assets" / "asset_physics_index.json")

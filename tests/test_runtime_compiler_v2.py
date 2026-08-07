@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from harness.assets.asset_registry import AssetRegistry
 from harness.assets.asset_resolver import resolve_asset_intents
+from harness.assets.sqlite_catalog import initialize_catalog
 from harness.core.artifact_schema import read_json
 from harness.core.case_spec_v2 import case_spec_v2_from_dict
 from harness.planning.backend_planner import BackendPlanningError, plan_backend
@@ -40,6 +41,25 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
         ):
             registry = AssetRegistry()
         self.assertEqual(registry.path, catalog)
+
+    def test_legacy_ue_runner_registry_never_overrides_writable_workspace_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            catalog = workspace / "catalog" / "assets" / "catalog.sqlite"
+            initialize_catalog(catalog)
+            legacy_registry = workspace / "asset_registry.local.json"
+            legacy_registry.write_text('{"assets": []}', encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {
+                    "SIM_HARNESS_WORKSPACE": str(workspace),
+                    "SIM_STUDIO_ASSET_REGISTRY": str(legacy_registry),
+                },
+                clear=True,
+            ):
+                registry = AssetRegistry()
+            self.assertEqual(registry.path, catalog)
+            self.assertTrue(registry.writable)
 
     def test_v2_compiles_all_runtime_artifacts_with_one_asset_resolve(self) -> None:
         case = case_spec_v2_from_dict(case_spec_v2_fixture())
