@@ -583,7 +583,7 @@ class RemoteAssetProviderTests(unittest.TestCase):
                 route="external_site",
                 provider_hint="polyhaven",
                 source_uri="polyhaven:dirty_football",
-                asset_must={"license_tier": "local_preview"},
+                asset_must={"license_tier": "local_preview", "geometry_type": "sphere"},
             ),
             requested_backend="ue",
             registry=self.registry,
@@ -599,6 +599,8 @@ class RemoteAssetProviderTests(unittest.TestCase):
         selected = self.registry.get_asset_by_id(external_result["catalog_asset_ids"][0])
         self.assertEqual(selected["license_tier"], "reference")
         self.assertEqual(selected["source_uri"], "https://polyhaven.com/a/dirty_football")
+        self.assertEqual(selected["shape"], "sphere")
+        self.assertEqual(selected["collider"], "box")
 
     def test_external_asset_and_procedural_ground_qualify_in_same_case(self) -> None:
         data = case_spec_v2_fixture()

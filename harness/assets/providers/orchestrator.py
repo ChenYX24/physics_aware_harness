@@ -838,6 +838,14 @@ class AssetProviderOrchestrator:
         dependencies = [dict(row) for row in import_result.get("dependencies") or []]
         size = list(acquisition.expected_size_m) if acquisition.expected_size_m is not None else None
         volume_m3 = math.prod(size) if size else 0.001
+        requested_geometry = next(
+            (
+                value.casefold()
+                for value in _string_values(intent.search_intent.must.get("geometry_type"))
+                if value.casefold() in {"box", "sphere", "cylinder", "capsule", "convex", "mesh"}
+            ),
+            None,
+        )
         tags = [
             intent.legacy_intent.role,
             *_string_values(intent.search_intent.must.get("physics_role")),
@@ -883,6 +891,10 @@ class AssetProviderOrchestrator:
             "bbox_size_m": size,
             "authored_size_m": size,
             "preserve_authored_scale": True,
+            # This is the semantic geometry contract used to choose the
+            # provider asset.  Keep it separate from `collider`, which records
+            # the imported mesh's actual generic simple-convex BodySetup.
+            "shape": requested_geometry,
             "collider": "box",
             "collision_profile": "PhysicsActor",
             "mass_kg": max(volume_m3 * 1000.0, 0.001),
