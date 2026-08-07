@@ -14,7 +14,7 @@ from harness.assets.asset_registry import AssetRegistry
 from harness.assets.asset_resolver import resolve_asset_intents
 from harness.assets.sqlite_catalog import initialize_catalog
 from harness.core.artifact_schema import read_json
-from harness.core.case_spec_v2 import case_spec_v2_from_dict
+from harness.core.case_spec_v2 import case_spec_v2_from_dict, project_case_spec_v2_to_v1
 from harness.planning.backend_planner import BackendPlanningError, plan_backend
 from harness.planning.runtime_compiler import compile_runtime_case
 from harness.runtime.fallback_backend import FallbackBackend
@@ -151,6 +151,21 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
         report = verify_runtime_actor_placement(compilation.runtime_case.data, bad_placement)
         self.assertEqual(report["status"], "fail")
         self.assertEqual(report["first_failure"]["metric"], "dynamic_object_not_simulated")
+
+    def test_v2_release_events_project_to_runtime_hold_controls(self) -> None:
+        data = case_spec_v2_fixture()
+        data["events"] = [
+            {"type": "release", "object": "cue_ball", "time": 0.35},
+            {"type": "release", "object": "target_ball", "time_s": 0.0},
+        ]
+        projected = project_case_spec_v2_to_v1(case_spec_v2_from_dict(data)).data
+        by_id = {obj["id"]: obj for obj in projected["objects"]}
+        self.assertEqual(by_id["cue_ball"]["release_time_s"], 0.35)
+        self.assertEqual(by_id["cue_ball"]["hold_position_m"], by_id["cue_ball"]["initial_position_m"])
+        self.assertEqual(by_id["cue_ball"]["release_position_m"], by_id["cue_ball"]["initial_position_m"])
+        self.assertEqual(by_id["cue_ball"]["release_velocity_m_s"], by_id["cue_ball"]["initial_velocity_m_s"])
+        self.assertEqual(by_id["target_ball"]["release_time_s"], 0.0)
+        self.assertNotIn("hold_position_m", by_id["target_ball"])
 
     def test_non_ue_solver_remains_single_backend_unless_renderer_is_explicit(self) -> None:
         data = case_spec_v2_fixture()

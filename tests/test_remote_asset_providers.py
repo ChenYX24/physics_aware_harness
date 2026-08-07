@@ -473,6 +473,42 @@ class RemoteAssetProviderTests(unittest.TestCase):
         scores = ranked.metadata["discovery"]["ranked_candidates"]
         self.assertGreater(scores[0]["score"], scores[1]["score"])
 
+        drum_assets = {
+            "metal_stool_01": {
+                "type": 2,
+                "name": "Metal Stool 01",
+                "tags": ["metal", "industrial"],
+                "category": "Furniture/Seating/Stools",
+                "dimensions": [352, 355, 883],
+            },
+            "Barrel_01": {
+                "type": 2,
+                "name": "Barrel_01",
+                "tags": ["metal", "industrial", "oil", "drums"],
+                "category": "Containers & Storage/Barrels & Drums/Metal Drums",
+                "dimensions": [563, 563, 880],
+            },
+        }
+        drum = PolyHavenExternalSiteAdapter(
+            transport=FakeTransport(
+                json_responses=[drum_assets, files],
+                downloads={"https://d/model.fbx": fbx},
+            )
+        ).acquire(
+            {
+                "provider_hint": "polyhaven",
+                "search_intent": {
+                    "raw_query": "Industrial metal drum, cylindrical, dimensions approx 0.56 m diameter, 0.88 m height.",
+                    "must": {"approx_size_m": [0.56, 0.56, 0.88]},
+                    "taxonomy": {"category": "container", "object_type": "drum"},
+                },
+            },
+            destination=self.workspace / "drum",
+            workspace=self.workspace,
+        )
+        self.assertEqual(drum.source_asset_id, "Barrel_01")
+        self.assertIn("barrel", drum.metadata["discovery"]["query_tokens"])
+
     def test_poly_haven_rejects_hash_mismatch(self) -> None:
         fbx = b"fbx"
 

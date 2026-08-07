@@ -124,6 +124,56 @@ class StaticScenePlacementTests(unittest.TestCase):
         self.assertEqual(relation["status"], "contact_at_rest")
         self.assertAlmostEqual(relation["vertical_gap_m"], 0.002, places=4)
 
+    def test_support_relation_rejects_object_outside_horizontal_footprint(self) -> None:
+        from harness.planning.static_scene_builder import support_relation
+
+        subject = {
+            "object_id": "crate",
+            "role": "dynamic crate",
+            "shape": "box",
+            "transform": {"position_m": [2.9, 0.0, 0.25]},
+            "bounds": {"extents_m": [0.4, 0.3, 0.25], "bottom_z": 0.0},
+            "physics": {"body_type": "dynamic"},
+        }
+        support = {
+            "object_id": "table",
+            "role": "static support table",
+            "shape": "box",
+            "transform": {"position_m": [0.0, 0.0, -0.05]},
+            "bounds": {"extents_m": [2.5, 1.0, 0.05], "top_z": 0.0},
+            "physics": {"body_type": "static"},
+        }
+        relation = support_relation(subject, support)
+        self.assertEqual(relation["status"], "outside_support_footprint")
+        self.assertLess(relation["horizontal_margin_m"][0], 0.0)
+
+    def test_v2_explicit_support_snap_uses_resolved_inclined_geometry(self) -> None:
+        from harness.planning.static_scene_builder import align_v2_explicit_supports, support_relation
+
+        subject = {
+            "object_id": "barrel",
+            "role": "dynamic barrel",
+            "shape": "cylinder",
+            "transform": {"position_m": [1.0, 0.0, 0.49]},
+            "bounds": {"extents_m": [0.28, 0.28, 0.44], "bottom_z": 0.05, "top_z": 0.93},
+            "physics": {"body_type": "dynamic"},
+        }
+        ramp = {
+            "object_id": "ramp",
+            "role": "static inclined ramp",
+            "shape": "box",
+            "transform": {"position_m": [2.445, 0.0, 0.52], "rotation_deg": [-12.0, 0.0, 0.0]},
+            "bounds": {"extents_m": [2.5, 1.0, 0.05], "bottom_z": 0.47, "top_z": 0.57},
+            "physics": {"body_type": "static"},
+        }
+        case = {
+            "v2_projection": {"source_schema_version": "harness_case_spec_v2"},
+            "expected_physics": {"support": {"barrel": "ramp"}},
+        }
+        adjustments = align_v2_explicit_supports(case, [subject, ramp])
+        self.assertEqual(len(adjustments), 1)
+        self.assertEqual(support_relation(subject, ramp)["status"], "contact_at_rest")
+
     def test_static_scene_cli_writes_layout_and_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result = subprocess.run(

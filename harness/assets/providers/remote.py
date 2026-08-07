@@ -385,7 +385,7 @@ class MeshyModelGenerationAdapter:
 
 class PolyHavenExternalSiteAdapter:
     provider_id = "poly_haven_external_site_v1"
-    provider_version = "2026-08-07"
+    provider_version = "2026-08-07.2"
     source_kind = "external_site"
 
     def __init__(self, *, transport: RemoteTransport | None = None, resolution: str = "1k") -> None:
@@ -724,11 +724,11 @@ def _select_poly_haven_asset(
         }
     search = request.get("search_intent") if isinstance(request.get("search_intent"), Mapping) else {}
     query = str(search.get("raw_query") or search.get("semantic_text") or "").strip()
-    tokens = set(_search_tokens(query))
+    tokens = _poly_haven_semantic_tokens(query)
     if not tokens:
         raise RemoteProviderError("external_search_query_missing", "Poly Haven discovery requires a search query", status="blocked")
     taxonomy = search.get("taxonomy") if isinstance(search.get("taxonomy"), Mapping) else {}
-    context_tokens = set(_search_tokens(" ".join(str(value) for value in taxonomy.values())))
+    context_tokens = _poly_haven_semantic_tokens(" ".join(str(value) for value in taxonomy.values()))
     requested_size = _poly_haven_requested_size(request, search)
     ranked: list[tuple[float, str, dict[str, Any], dict[str, float]]] = []
     size_rejected_count = 0
@@ -821,6 +821,21 @@ def _score_poly_haven_candidate(
         "context_overlap": context_overlap,
         "size_similarity": size_similarity,
     }
+
+
+def _poly_haven_semantic_tokens(text: str) -> set[str]:
+    """Expand a small set of high-confidence object-name aliases for discovery."""
+    tokens = set(_search_tokens(text))
+    alias_groups = (
+        {"barrel", "drum", "drums"},
+        {"box", "carton"},
+        {"crate", "basket"},
+        {"football", "soccer"},
+    )
+    for group in alias_groups:
+        if tokens & group:
+            tokens.update(group)
+    return tokens
 
 
 def _poly_haven_requested_size(

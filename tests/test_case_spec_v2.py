@@ -113,6 +113,47 @@ class CaseSpecV2Tests(unittest.TestCase):
             case_spec_v2_from_dict(data)
         self.assertIn("kinetic_energy_mismatch", {issue.code for issue in context.exception.issues})
 
+    def test_box_ramp_must_use_pitch_or_roll_not_yaw_only(self) -> None:
+        data = case_spec_v2_fixture()
+        ramp = data["objects"][2]
+        ramp["role"] = "static inclined ramp"
+        ramp["geometry"]["shape_hint"] = "box"
+        ramp["initial_state"]["rotation_deg"] = [0.0, -12.0, 0.0]
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("ramp_has_no_incline_rotation", {issue.code for issue in context.exception.issues})
+
+        ramp["initial_state"]["rotation_deg"] = [-12.0, 0.0, 0.0]
+        case_spec_v2_from_dict(data)
+
+    def test_support_relations_project_to_explicit_runtime_support_map(self) -> None:
+        data = case_spec_v2_fixture()
+        data["relations"].append({"type": "supported_by", "source": "cue_ball", "target": "floor"})
+        data["relations"].append({"type": "supports", "source": "floor", "target": "target_ball"})
+        projection = project_case_spec_v2_to_v1(case_spec_v2_from_dict(data))
+        self.assertEqual(
+            projection.data["expected_physics"]["support"],
+            {"cue_ball": "floor", "target_ball": "floor"},
+        )
+
+    def test_explicit_support_must_contain_subject_horizontal_bounds(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["initial_state"]["position_m"][0] = 3.0
+        data["relations"].append({"type": "supported_by", "source": "cue_ball", "target": "floor"})
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("support_footprint_too_small", {issue.code for issue in context.exception.issues})
+
+    def test_fast_dynamic_body_defaults_to_ccd_but_preserves_explicit_false(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["initial_state"]["linear_velocity_m_s"] = [4.0, 0.0, 0.0]
+        projected = project_case_spec_v2_to_v1(case_spec_v2_from_dict(data)).data
+        self.assertTrue(projected["objects"][0]["use_ccd"])
+
+        data["objects"][0]["physics"]["use_ccd"] = False
+        projected = project_case_spec_v2_to_v1(case_spec_v2_from_dict(data)).data
+        self.assertFalse(projected["objects"][0]["use_ccd"])
+
     def test_invalid_energy_inputs_remain_structured_validation_errors(self) -> None:
         data = case_spec_v2_fixture()
         data["objects"][0]["initial_state"]["linear_velocity_m_s"] = ["fast", 0.0, 0.0]

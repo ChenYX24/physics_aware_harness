@@ -542,6 +542,34 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual(dynamic[0]["params"]["release_time_s"], 1.0)
         self.assertEqual(dynamic[0]["params"]["hold_position_m"], [0.0, -1.4, 0.1])
 
+    def test_v2_delayed_release_uses_compiled_support_snapped_position(self) -> None:
+        from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement
+
+        binding = {
+            "object_id": "crate",
+            "runtime_actor_id": "actor_crate",
+            "role": "dynamic crate",
+            "asset": {"ue_path": "/Game/Props/SM_Crate.SM_Crate", "runtime_usage": "visual_proxy"},
+            "bounds": {"extents_m": [0.3, 0.3, 0.3]},
+            "transform": {"position_m": [1.0, 0.0, 0.83]},
+            "physics": {"simulate_physics": True, "collider": "box"},
+        }
+        dynamic, _ = runtime_objects_from_actor_placement(
+            {"actor_bindings": [binding]},
+            {
+                "v2_projection": {"source_schema_version": "harness_case_spec_v2"},
+                "expected_physics": {"support": {"crate": "ramp"}},
+                "objects": [{
+                    "id": "crate",
+                    "release_time_s": 0.7,
+                    "hold_position_m": [1.0, 0.0, 0.5],
+                    "release_position_m": [1.0, 0.0, 0.5],
+                }],
+            },
+        )
+        self.assertEqual(dynamic[0]["params"]["hold_position_m"], [1.0, 0.0, 0.83])
+        self.assertEqual(dynamic[0]["params"]["release_position_m"], [1.0, 0.0, 0.83])
+
     def test_elastic_anchor_uses_compact_builtin_cube(self) -> None:
         from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement, ue_path_for_binding
 
@@ -620,7 +648,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         )
 
         binding = placement["actor_bindings"][0]
-        self.assertEqual(binding["asset"]["runtime_usage"], "analytic_proxy")
+        self.assertEqual(binding["asset"]["runtime_usage"], "visual_proxy")
         self.assertEqual(binding["physics"]["collision_geometry_source"], "analytic_box")
         self.assertEqual(binding["physics"]["collision_geometry_verification"], "runtime_controlled")
         self.assertEqual(ue_path_for_binding(binding), "/Engine/BasicShapes/Cube.Cube")
@@ -630,8 +658,15 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         )
         self.assertEqual(static, [])
         self.assertEqual(dynamic[0]["ue5_path"], "/Engine/BasicShapes/Cube.Cube")
-        self.assertNotIn("visual_ue5_path", dynamic[0]["params"])
+        self.assertEqual(dynamic[0]["params"]["visual_ue5_path"], "/Game/Props/SM_Box.SM_Box")
+        self.assertEqual(dynamic[0]["params"]["visual_collision_profile"], "NoCollision")
+        self.assertFalse(dynamic[0]["params"]["visual_simulate_physics"])
         self.assertEqual(dynamic[0]["physics_properties"]["collision_geometry_source"], "analytic_box")
+
+    def test_native_ue_preserves_selected_asset_materials_for_llm_objects(self) -> None:
+        native_source = (ROOT / "scripts" / "native_ue_physics_phenomena_scene.py").read_text(encoding="utf-8")
+        self.assertIn('params.get("binding_source") == "ue_asset"', native_source)
+        self.assertIn('params.get("asset_runtime_usage") in {"collision_and_visual", "visual_proxy"}', native_source)
 
     def test_local_ue_runner_preserves_compiled_actor_extent(self) -> None:
         from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement

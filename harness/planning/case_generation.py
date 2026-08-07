@@ -608,7 +608,11 @@ FIELD-BY-FIELD INSTRUCTIONS
 7. objects: create one entry per logical scene object. Each id must be unique, stable, machine-friendly,
    and independent of an eventual asset ID. role is semantic. geometry uses shape_hint and positive
    approx_size_m. physics.body_type is exactly dynamic, static, or kinematic. behavior is always an
-   object. Use finite three-number arrays for positions, rotations, and velocities.
+   object. Use finite three-number arrays for positions, rotations, and velocities. rotation_deg is
+   exactly [pitch, yaw, roll], matching UE Rotator semantics: incline a box ramp along X with pitch
+   (the first value), not yaw. Place initially resting objects with a small positive clearance (about
+   0.002-0.005 m) above the supporting surface. Use low restitution (normally <=0.1) unless a bounce is
+   requested, and set use_ccd=true for small or fast-moving collision bodies.
 8. object.asset: description and optional semantic_text are natural-language search/generation intent;
    resource_kind must use its enum. must contains hard filters that every candidate must satisfy;
    must_not contains hard exclusions; preferences contains soft ranking preferences and can never override
@@ -634,7 +638,17 @@ FIELD-BY-FIELD INSTRUCTIONS
     {"type": string, "source": exact_id, "target": exact_id}; a group relation may use
     {"type": string, "objects": [exact_ids]}; an object event is
     {"type": string, "object": exact_id}. Additional semantic parameters may be objects or scalars, but
-    must not replace these exact ID references. Never use phrases such as "box with floor" as a reference.
+    must not replace these exact ID references. Express support canonically as
+    {"type":"supported_by","source":subject_id,"target":support_id}. A delayed release event uses
+    {"type":"release","object":exact_id,"time_s":nonnegative_number}; until that time the runtime holds
+    the object at its declared initial transform. Never use phrases such as "box with floor" as a reference.
+    Size every support surface so its horizontal footprint contains every supported object's full initial
+    bounds plus at least 0.25 m margin, and ensure scene.bounds_hint_m contains all full object bounds.
+    For a collision chain, include enough support area for the staged objects and expected interaction path.
+    A declared collision order must be physically reachable from the initial positions, velocities, gravity,
+    friction, and release times: keep intended targets close enough, aim the mover toward them, and do not
+    rely on equal-acceleration followers magically catching a leading body. Do not substitute several small
+    vertical drops when the request asks for an impact, transfer, cascade, or ramp collision process.
 11. expected_behavior: describe causal and observable outcomes without claiming success.
 12. observation_requirements: cameras use registered camera roles and exact target object IDs; modalities
     use registered values; signals name evidence required by the capability and assertions. Do not emit
@@ -674,7 +688,9 @@ a listed error requires a change. For each error, correct the exact JSON path an
 rules: capabilities.required contains primary; backend constraints honor the explicit requested backend;
 asset-policy booleans authorize declared routes; behavior is an object; body_type is an enum; every
 relation, event, camera, and assertion reference exactly matches an objects[].id; every assertion has a
-registered type. Do not redesign the scene, add a Provider, add UE paths, relax a required route, invent
+registered type. For support_footprint_too_small, enlarge or reposition the named support so it contains
+the subject's full horizontal bounds; for ramp_has_no_incline_rotation, remember rotation_deg is
+[pitch,yaw,roll] and use pitch (or roll) rather than yaw as the incline. Do not redesign the scene, add a Provider, add UE paths, relax a required route, invent
 evidence, or perform free-form regeneration.
 
 Return exactly one valid JSON object. No Markdown, comments, trailing commas, single quotes, placeholders,

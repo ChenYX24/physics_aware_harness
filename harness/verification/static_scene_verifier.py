@@ -70,7 +70,7 @@ def first_missing_physics_asset(nodes: list[dict[str, Any]]) -> dict[str, Any] |
 
 
 def first_bad_support(relations: list[dict[str, Any]]) -> dict[str, Any] | None:
-    bad_statuses = {"missing_support", "penetrating_support", "unsupported_gap"}
+    bad_statuses = {"missing_support", "penetrating_support", "unsupported_gap", "outside_support_footprint"}
     for relation in relations:
         if isinstance(relation, dict) and relation.get("status") in bad_statuses:
             return relation

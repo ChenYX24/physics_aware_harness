@@ -104,7 +104,7 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
     )
     runtime_usage = (
         "visual_proxy"
-        if ue_path and analytic_primitive == "sphere" and simulate_physics
+        if ue_path and controlled_analytic_collision and simulate_physics
         else "analytic_proxy"
         if controlled_analytic_collision
         else "collision_and_visual"

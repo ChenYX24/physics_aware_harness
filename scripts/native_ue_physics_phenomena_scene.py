@@ -5708,6 +5708,15 @@ def setup_scene(runtime_scene: dict | None = None):
                 chaos_runtime.setdefault("material_errors", []).append(f"{obj.get('id')}:{visual_material_path}:{exc}")
         if material_override:
             pass
+        elif (
+            params.get("binding_source") == "ue_asset"
+            and params.get("asset_runtime_usage") in {"collision_and_visual", "visual_proxy"}
+            and preserve_material is not False
+        ):
+            # Catalog assets already carry their authored Poly Haven / generated
+            # materials.  The generic LLM palette is only a fallback for analytic
+            # geometry; applying it here erases the visual identity of the asset.
+            material_override = False
         elif force_library_mesh and params.get("preserve_material") is True:
             material_override = False
         elif str(obj.get("asset_kind") or "").lower() in {"geometrycollection", "geometry_collection"} and preserve_material is not False:

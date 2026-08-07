@@ -23,6 +23,7 @@ def build_static_scene_layout(
 ) -> dict[str, Any]:
     asset_rows = asset_rows_by_object_id(asset_resolution)
     nodes = [build_object_node(obj, asset_rows.get(str(obj.get("id")))) for obj in case_spec.get("objects", []) if isinstance(obj, dict)]
+    placement_adjustments = align_v2_explicit_supports(case_spec, nodes)
     compiled_camera_plan = (
         camera_plan
         if camera_plan is not None
@@ -49,6 +50,7 @@ def build_static_scene_layout(
         "stage_id": "static_scene_layout",
         "object_nodes": nodes,
         "support_relations": support_relations,
+        "placement_adjustments": placement_adjustments,
         "overlap_pairs": overlap_pairs,
         "physics_graph": {
             "nodes": [node["object_id"] for node in nodes if node.get("physics_graph_member")],
@@ -94,6 +96,57 @@ def infer_support_relations(case_spec: dict[str, Any], nodes: list[dict[str, Any
     return relations
 
 
+def align_v2_explicit_supports(case_spec: dict[str, Any], nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Snap explicitly supported V2 bodies to resolved support geometry."""
+    projection = case_spec.get("v2_projection") if isinstance(case_spec.get("v2_projection"), dict) else {}
+    expected = case_spec.get("expected_physics") if isinstance(case_spec.get("expected_physics"), dict) else {}
+    support_map = expected.get("support") if isinstance(expected.get("support"), dict) else {}
+    if projection.get("source_schema_version") != "harness_case_spec_v2" or not support_map:
+        return []
+    by_id = {str(node.get("object_id")): node for node in nodes}
+    adjustments: list[dict[str, Any]] = []
+    clearance_m = 0.003
+    for object_id, support_id in support_map.items():
+        node = by_id.get(str(object_id))
+        support = by_id.get(str(support_id))
+        if node is None or support is None:
+            continue
+        gap = inclined_surface_gap(node, support)
+        normal_z = 1.0
+        if gap is None:
+            gap = round(
+                float((node.get("bounds") or {}).get("bottom_z", 0.0))
+                - float((support.get("bounds") or {}).get("top_z", 0.0)),
+                6,
+            )
+        else:
+            pitch = math.radians(float(((support.get("transform") or {}).get("rotation_deg") or [0.0])[0]))
+            normal_z = math.cos(pitch)
+        if abs(normal_z) < 1e-6:
+            continue
+        delta_z = (clearance_m - gap) / normal_z
+        if abs(delta_z) <= 1e-6:
+            continue
+        transform = node.setdefault("transform", {})
+        position = object_position(node)
+        position[2] = round(position[2] + delta_z, 6)
+        transform["position_m"] = position
+        bounds = node.setdefault("bounds", {})
+        for key in ("bottom_z", "top_z"):
+            if bounds.get(key) is not None:
+                bounds[key] = round(float(bounds[key]) + delta_z, 6)
+        adjustments.append(
+            {
+                "object_id": str(object_id),
+                "support_id": str(support_id),
+                "type": "explicit_support_surface_snap",
+                "delta_z_m": round(delta_z, 6),
+                "clearance_m": clearance_m,
+            }
+        )
+    return adjustments
+
+
 def support_id_for_node(node: dict[str, Any], expected: dict[str, Any], support_nodes: list[dict[str, Any]]) -> str | None:
     object_id = str(node.get("object_id"))
     support = expected.get("support")
@@ -128,12 +181,15 @@ def support_relation(node: dict[str, Any], support_node: dict[str, Any] | None) 
             "status": "missing_support",
             "vertical_gap_m": None,
         }
+    footprint_margins = support_footprint_margins(node, support_node)
     gap = inclined_surface_gap(node, support_node)
     if gap is None:
         bottom = float((node.get("bounds") or {}).get("bottom_z", 0.0))
         support_top = float((support_node.get("bounds") or {}).get("top_z", 0.0))
         gap = round(bottom - support_top, 6)
-    if gap < -0.01:
+    if any(margin < -0.01 for margin in footprint_margins):
+        status = "outside_support_footprint"
+    elif gap < -0.01:
         status = "penetrating_support"
     elif abs(gap) <= 0.01:
         status = "contact_at_rest"
@@ -146,7 +202,19 @@ def support_relation(node: dict[str, Any], support_node: dict[str, Any] | None) 
         "support_id": support_node["object_id"],
         "status": status,
         "vertical_gap_m": gap,
+        "horizontal_margin_m": footprint_margins,
     }
+
+
+def support_footprint_margins(node: dict[str, Any], support_node: dict[str, Any]) -> list[float]:
+    node_position = object_position(node)
+    support_position = object_position(support_node)
+    node_extents = object_extents(node)
+    support_extents = object_extents(support_node)
+    return [
+        round(support_extents[axis] - abs(node_position[axis] - support_position[axis]) - node_extents[axis], 6)
+        for axis in (0, 1)
+    ]
 
 
 def is_support_node(node: dict[str, Any]) -> bool:

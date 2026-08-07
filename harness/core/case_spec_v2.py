@@ -429,6 +429,23 @@ def collect_case_spec_v2_issues(
         for field in ("position_m", "rotation_deg", "linear_velocity_m_s", "angular_velocity_rad_s"):
             if initial.get(field) is not None:
                 _finite_vec3(initial.get(field), f"{path}/initial_state/{field}", issues)
+        role_text = f"{obj.get('role', '')} {geometry.get('shape_hint', '')}".casefold()
+        rotation = initial.get("rotation_deg")
+        if (
+            "box" in str(geometry.get("shape_hint") or "").casefold()
+            and any(token in role_text for token in ("ramp", "inclined", "slope"))
+            and isinstance(rotation, list)
+            and len(rotation) == 3
+            and all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in rotation)
+            and abs(float(rotation[0])) <= 1e-9
+            and abs(float(rotation[2])) <= 1e-9
+        ):
+            _issue(
+                issues,
+                f"{path}/initial_state/rotation_deg",
+                "ramp_has_no_incline_rotation",
+                "rotation_deg is [pitch, yaw, roll]; a box ramp needs non-zero pitch or roll, not yaw alone",
+            )
         behavior = _mapping(obj.get("behavior"), f"{path}/behavior", issues, required=False)
         declared_energy = behavior.get("initial_kinetic_energy_j")
         if declared_energy is not None:
@@ -466,6 +483,7 @@ def collect_case_spec_v2_issues(
     known_objects = set(object_ids)
     _validate_references(data.get("relations"), "/relations", known_objects, issues)
     _validate_references(data.get("events"), "/events", known_objects, issues)
+    _validate_support_footprints(objects, data.get("relations"), issues)
     verification = _mapping(data.get("verification_requirements"), "/verification_requirements", issues)
     assertions = verification.get("assertions")
     _validate_references(assertions, "/verification_requirements/assertions", known_objects, issues)
@@ -534,6 +552,7 @@ def project_case_spec_v2_to_v1(case_spec: CaseSpecV2) -> CaseSpec:
         )
         for obj in case_spec.objects
     ]
+    _project_release_events(data.get("events") or [], projected_objects)
     active, passive = _infer_active_passive(projected_objects)
     capability_id = case_spec.capability_id
     capability = CapabilityStore().get(capability_id)
@@ -543,6 +562,9 @@ def project_case_spec_v2_to_v1(case_spec: CaseSpecV2) -> CaseSpec:
     collision_graph = _collision_graph(data.get("relations") or [])
     if collision_graph and "collision_graph" not in expected:
         expected["collision_graph"] = collision_graph
+    support_map = _support_map(data.get("relations") or [])
+    if support_map and "support" not in expected:
+        expected["support"] = support_map
     assertions = [item for item in (data.get("verification_requirements") or {}).get("assertions", []) if isinstance(item, dict)]
     verification_rules = [str(item.get("type")) for item in assertions if item.get("type")]
     required_assets = [
@@ -673,6 +695,13 @@ def _project_object(
         projected["body_type"] = body_type
     if physics.get("collision_required") is not None:
         projected["collision_required"] = bool(physics["collision_required"])
+    if (
+        "use_ccd" not in projected
+        and body_type == "dynamic"
+        and physics.get("collision_required") is not False
+        and math.sqrt(sum(float(value) ** 2 for value in projected["initial_velocity_m_s"])) >= 2.0
+    ):
+        projected["use_ccd"] = True
     if initial.get("angular_velocity_rad_s") is not None:
         projected["initial_angular_velocity_rad_s"] = copy.deepcopy(initial["angular_velocity_rad_s"])
     fracture = behavior.get("fracture") if isinstance(behavior.get("fracture"), Mapping) else None
@@ -696,13 +725,42 @@ def _infer_active_passive(objects: list[dict[str, Any]]) -> tuple[list[str], lis
     return active, passive
 
 
+def _project_release_events(events: Iterable[Any], objects: list[dict[str, Any]]) -> None:
+    """Carry V2 delayed-release semantics into the legacy UE runtime contract."""
+    by_id = {str(obj.get("id") or ""): obj for obj in objects}
+    for event in events:
+        if not isinstance(event, Mapping):
+            continue
+        event_type = str(event.get("type") or "").casefold().replace("-", "_").replace(" ", "_")
+        if event_type not in {"release", "delayed_release", "staged_release"}:
+            continue
+        object_id = str(event.get("object") or event.get("actor") or "")
+        projected = by_id.get(object_id)
+        if projected is None:
+            continue
+        raw_time = event.get("time_s", event.get("time"))
+        if raw_time is None or isinstance(raw_time, bool):
+            continue
+        try:
+            release_time = float(raw_time)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(release_time) or release_time < 0.0:
+            continue
+        projected["release_time_s"] = release_time
+        if release_time > 0.0:
+            projected["hold_position_m"] = copy.deepcopy(projected["initial_position_m"])
+            projected["release_position_m"] = copy.deepcopy(projected["initial_position_m"])
+            projected["release_velocity_m_s"] = copy.deepcopy(projected["initial_velocity_m_s"])
+
+
 def _collision_graph(relations: Iterable[Any]) -> list[list[str]]:
     result: list[list[str]] = []
     for relation in relations:
         if not isinstance(relation, Mapping):
             continue
         relation_type = str(relation.get("type") or "").casefold()
-        if relation_type not in {"contact", "collision", "impacts", "hits", "contact_order"}:
+        if relation_type not in {"contact", "collision", "cascade_collision", "impacts", "hits", "contact_order"}:
             continue
         values = relation.get("objects")
         if not isinstance(values, list):
@@ -710,6 +768,23 @@ def _collision_graph(relations: Iterable[Any]) -> list[list[str]]:
         pair = [str(value) for value in values if value]
         if len(pair) >= 2:
             result.append(pair[:2])
+    return result
+
+
+def _support_map(relations: Iterable[Any]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for relation in relations:
+        if not isinstance(relation, Mapping):
+            continue
+        relation_type = str(relation.get("type") or "").casefold().replace("-", "_").replace(" ", "_")
+        source = relation.get("source")
+        target = relation.get("target")
+        if not source or not target:
+            continue
+        if relation_type in {"support", "supported_by", "rests_on", "on"}:
+            result[str(source)] = str(target)
+        elif relation_type == "supports":
+            result[str(target)] = str(source)
     return result
 
 
@@ -853,6 +928,56 @@ def _validate_references(
         for reference in references:
             if reference not in known_objects:
                 _issue(issues, f"{path}/{index}", "unknown_object_reference", f"unknown object id: {reference}")
+
+
+def _validate_support_footprints(
+    objects: Iterable[Any],
+    relations: Any,
+    issues: list[ValidationIssue],
+) -> None:
+    if not isinstance(relations, list):
+        return
+    by_id: dict[str, tuple[int, Mapping[str, Any]]] = {
+        str(obj.get("id")): (index, obj)
+        for index, obj in enumerate(objects)
+        if isinstance(obj, Mapping) and obj.get("id")
+    }
+    for subject_id, support_id in _support_map(relations).items():
+        subject_entry = by_id.get(subject_id)
+        support_entry = by_id.get(support_id)
+        if subject_entry is None or support_entry is None:
+            continue
+        _, subject = subject_entry
+        support_index, support = support_entry
+        subject_geometry = subject.get("geometry") if isinstance(subject.get("geometry"), Mapping) else {}
+        support_geometry = support.get("geometry") if isinstance(support.get("geometry"), Mapping) else {}
+        subject_initial = subject.get("initial_state") if isinstance(subject.get("initial_state"), Mapping) else {}
+        support_initial = support.get("initial_state") if isinstance(support.get("initial_state"), Mapping) else {}
+        subject_size = subject_geometry.get("approx_size_m")
+        support_size = support_geometry.get("approx_size_m")
+        subject_position = subject_initial.get("position_m")
+        support_position = support_initial.get("position_m")
+        vectors = (subject_size, support_size, subject_position, support_position)
+        if not all(
+            isinstance(vector, list)
+            and len(vector) == 3
+            and all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in vector)
+            for vector in vectors
+        ):
+            continue
+        margins = [
+            float(support_size[axis]) / 2.0
+            - abs(float(subject_position[axis]) - float(support_position[axis]))
+            - float(subject_size[axis]) / 2.0
+            for axis in (0, 1)
+        ]
+        if any(margin < 0.0 for margin in margins):
+            _issue(
+                issues,
+                f"/objects/{support_index}/geometry/approx_size_m",
+                "support_footprint_too_small",
+                f"support {support_id} does not contain the full horizontal bounds of {subject_id}; enlarge or reposition it",
+            )
 
 
 def _mapping(
