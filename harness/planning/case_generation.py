@@ -599,7 +599,12 @@ FIELD-BY-FIELD INSTRUCTIONS
    separate solver/render plan.
 6. asset_policy: use booleans for allow_local, allow_external, allow_generation, and
    allow_analytic_proxy. Set allow_generation=true for procedural_generation or model_generation.
-   required_license_tier is local_preview or reference and must reflect the user's request.
+   required_license_tier is local_preview or reference and must reflect the user's request. Default to
+   local_preview unless the user explicitly requires reference/publishable/distributable output; choosing
+   external_site or a source that happens to be CC0 does not by itself make the whole case require the
+   reference tier. A source restriction for one named object applies only to that object's acquisition:
+   keep the permitted local/procedural/analytic routes needed for support surfaces and other infrastructure
+   unless the user explicitly forbids those routes for the entire scene.
 7. objects: create one entry per logical scene object. Each id must be unique, stable, machine-friendly,
    and independent of an eventual asset ID. role is semantic. geometry uses shape_hint and positive
    approx_size_m. physics.body_type is exactly dynamic, static, or kinematic. behavior is always an

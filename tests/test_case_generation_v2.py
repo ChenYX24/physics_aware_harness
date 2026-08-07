@@ -109,6 +109,8 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertIn("FIELD-BY-FIELD INSTRUCTIONS", expansion_prompt)
         self.assertIn("exactly one Asset Resolve", expansion_prompt)
         case_prompt = client.calls[1]["system_prompt"]
+        self.assertIn("Default to\n   local_preview", case_prompt)
+        self.assertIn("source restriction for one named object applies only to that object's acquisition", case_prompt)
         self.assertIn("CASESPEC V2 GENERATOR", case_prompt)
         self.assertIn("PROVIDER AND RUNTIME BOUNDARY", case_prompt)
         self.assertIn("verification_requirements", case_prompt)

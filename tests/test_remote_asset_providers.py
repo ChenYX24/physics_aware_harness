@@ -108,6 +108,26 @@ class StubImporter:
         )
 
 
+class DependencyStubImporter(StubImporter):
+    def import_asset(self, request, *, work_dir: Path, workspace: Path) -> BackendImportResult:
+        result = super().import_asset(request, work_dir=work_dir, workspace=workspace).to_dict()
+        dependency_file = work_dir / "MI_Remote.uasset"
+        dependency_payload = b"FAKE_REMOTE_UE_MATERIAL\n"
+        dependency_file.write_bytes(dependency_payload)
+        result["dependencies"] = [
+            {
+                "dependency_id": "/Game/Generated/Provider/MI_Remote.MI_Remote",
+                "package": "/Game/Generated/Provider/MI_Remote",
+                "local_path": str(dependency_file),
+                "format": "uasset",
+                "sha256": hashlib.sha256(dependency_payload).hexdigest(),
+                "byte_size": len(dependency_payload),
+                "materialized": True,
+            }
+        ]
+        return BackendImportResult.from_dict(result)
+
+
 class FailingImporter:
     def import_asset(self, request, *, work_dir: Path, workspace: Path) -> BackendImportResult:
         del work_dir, workspace
@@ -484,7 +504,7 @@ class RemoteAssetProviderTests(unittest.TestCase):
             registry=self.registry,
             provider_orchestrator=AssetProviderOrchestrator(
                 workspace=self.workspace,
-                importer=StubImporter(),
+                importer=DependencyStubImporter(),
                 remote_providers={"external_site": poly},
             ),
         )
@@ -494,6 +514,55 @@ class RemoteAssetProviderTests(unittest.TestCase):
         selected = self.registry.get_asset_by_id(external_result["catalog_asset_ids"][0])
         self.assertEqual(selected["license_tier"], "reference")
         self.assertEqual(selected["source_uri"], "https://polyhaven.com/a/dirty_football")
+
+    def test_external_asset_and_procedural_ground_qualify_in_same_case(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["asset"] = {
+            "description": "dirty football",
+            "resource_kind": "mesh_3d",
+            "acquisition": {
+                "route": "external_site",
+                "requirement": "required",
+                "origin": "user_explicit",
+                "provider_hint": "polyhaven",
+                "source_uri_hint": "polyhaven:dirty_football",
+                "reference_inputs": [],
+                "fallback_order": [],
+            },
+        }
+        data["objects"][2]["asset"] = {
+            "description": "procedural collision floor",
+            "resource_kind": "mesh_3d",
+            "acquisition": {
+                "route": "procedural_generation",
+                "requirement": "required",
+                "origin": "user_explicit",
+                "provider_hint": "box_mesh_v1",
+                "reference_inputs": [],
+                "fallback_order": [],
+            },
+        }
+        compilation = compile_runtime_case(
+            case_spec_v2_from_dict(data),
+            requested_backend="ue",
+            registry=self.registry,
+            provider_orchestrator=AssetProviderOrchestrator(
+                workspace=self.workspace,
+                importer=DependencyStubImporter(),
+                remote_providers={
+                    "external_site": PolyHavenExternalSiteAdapter(transport=self._poly_transport())
+                },
+            ),
+        )
+        self.assertEqual(compilation.report["asset_resolve_invocation_count"], 1)
+        results = compilation.artifacts["asset_provider_batch"]["results"]
+        self.assertEqual([row["status"] for row in results], ["fulfilled", "fulfilled"])
+        selected = {
+            row["intent"]["object_id"]: row["selected_asset"]["asset_id"]
+            for row in compilation.artifacts["asset_resolution"]["assets"]
+        }
+        self.assertTrue(selected["cue_ball"].startswith("external.polyhaven.dirty_football."))
+        self.assertTrue(selected["floor"].startswith("generated.local.box_mesh_v1."))
 
     def test_normal_model_route_requires_manifest_and_independent_meshy_authorization(self) -> None:
         image = self.workspace / "authorization.png"

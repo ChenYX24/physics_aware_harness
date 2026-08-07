@@ -892,7 +892,10 @@ class AssetProviderOrchestrator:
             "ue": {
                 "object_path": import_result["object_path"],
                 "class_name": import_result["class_name"],
-                "dependencies": [str(row.get("dependency_id") or row.get("package")) for row in dependencies],
+                # Qualification keys dependency records by package when one is
+                # available. Keep this declaration in the same identity domain;
+                # Unreal object paths include an additional `.ObjectName` suffix.
+                "dependencies": [str(row.get("package") or row.get("dependency_id")) for row in dependencies],
             },
             "bundle": {"dependencies": dependencies},
             "backend_bindings": {
@@ -1073,7 +1076,7 @@ class AssetProviderOrchestrator:
                 "object_path": import_result["object_path"],
                 "class_name": import_result["class_name"],
                 "dependencies": [
-                    str(row.get("dependency_id") or row.get("package")) for row in dependencies
+                    str(row.get("package") or row.get("dependency_id")) for row in dependencies
                 ],
             },
             "bundle": {"dependencies": dependencies},
