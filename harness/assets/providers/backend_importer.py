@@ -22,11 +22,20 @@ from harness.core.artifact_schema import write_json
 # outer command timeout longer so it does not terminate the launcher first.
 DEFAULT_TIMEOUT_S = 660.0
 IMPORTER_COMMAND_ENV = "SIM_HARNESS_UE_ASSET_IMPORTER_CMD"
+IMPORTER_CONTRACT_VERSION = "ue_static_mesh_import_v2"
 
 
 class BackendImporterAdapter:
     def import_asset(self, request: BackendImportRequest, *, work_dir: Path, workspace: Path) -> BackendImportResult:
         raise NotImplementedError
+
+    def import_assets(
+        self,
+        requests: Sequence[tuple[BackendImportRequest, Path]],
+        *,
+        workspace: Path,
+    ) -> list[BackendImportResult]:
+        return [self.import_asset(request, work_dir=work_dir, workspace=workspace) for request, work_dir in requests]
 
 
 class BackendImportValidationError(ValueError):
@@ -148,6 +157,121 @@ class UECommandImporterAdapter(BackendImporterAdapter):
         write_json(result_path, parsed.to_dict())
         return parsed
 
+    def import_assets(
+        self,
+        requests: Sequence[tuple[BackendImportRequest, Path]],
+        *,
+        workspace: Path,
+    ) -> list[BackendImportResult]:
+        if len(requests) <= 1:
+            return super().import_assets(requests, workspace=workspace)
+        prepared: list[tuple[BackendImportRequest, Path, Path]] = []
+        direct: dict[str, BackendImportResult] = {}
+        for request, work_dir in requests:
+            work_dir.mkdir(parents=True, exist_ok=True)
+            request_path = work_dir / "backend_import_request.json"
+            result_path = work_dir / "backend_import_result.json"
+            write_json(request_path, request.to_dict())
+            error = _validate_file_records(request.data["source_files"], workspace=workspace)
+            if error:
+                direct[request.data["request_digest"]] = BackendImportResult.from_dict(
+                    _failure_result(
+                        request.data,
+                        status="failed",
+                        code=error,
+                        message="source file validation failed",
+                    )
+                )
+            else:
+                prepared.append((request, request_path, result_path))
+        if not prepared:
+            return [direct[request.data["request_digest"]] for request, _ in requests]
+        if not self.command:
+            for request, _, _ in prepared:
+                direct[request.data["request_digest"]] = BackendImportResult.from_dict(
+                    _failure_result(
+                        request.data,
+                        status="blocked",
+                        code="backend_importer_unavailable",
+                        message="no UE backend asset importer command is configured",
+                    )
+                )
+            return [direct[request.data["request_digest"]] for request, _ in requests]
+        batch_digest = hashlib.sha256(
+            "\n".join(request.data["request_digest"] for request, _, _ in prepared).encode("utf-8")
+        ).hexdigest()
+        batch_dir = workspace / "providers" / "_import_batches" / batch_digest
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        batch_request_path = batch_dir / "backend_import_batch_request.json"
+        batch_result_path = batch_dir / "backend_import_batch_result.json"
+        write_json(
+            batch_request_path,
+            {
+                "schema_version": "harness_backend_asset_import_batch_v1",
+                "items": [
+                    {"request_path": str(request_path), "result_path": str(result_path)}
+                    for _, request_path, result_path in prepared
+                ],
+            },
+        )
+        argv = [
+            *self.command,
+            "--batch-request",
+            str(batch_request_path),
+            "--batch-result",
+            str(batch_result_path),
+        ]
+        try:
+            completed = subprocess.run(
+                argv,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_s,
+                shell=False,
+            )
+            stdout = _safe_output(completed.stdout)
+            stderr = _safe_output(completed.stderr)
+            returncode = completed.returncode
+        except subprocess.TimeoutExpired as exc:
+            stdout = _safe_output(exc.stdout)
+            stderr = _safe_output(exc.stderr)
+            returncode = None
+        for request, _, result_path in prepared:
+            try:
+                raw = json.loads(result_path.read_text(encoding="utf-8"))
+                if not isinstance(raw, Mapping):
+                    raise ValueError("result root must be an object")
+                result = dict(raw)
+                result.update(
+                    {
+                        "stdout": stdout,
+                        "stderr": stderr,
+                        "returncode": returncode,
+                        "batch_size": len(prepared),
+                        "cache_hit": False,
+                        "importer_invoked": True,
+                    }
+                )
+                parsed = BackendImportResult.from_dict(result)
+                validate_import_result(request, parsed, workspace=workspace)
+            except (OSError, json.JSONDecodeError, BackendImportValidationError, ValueError) as exc:
+                parsed = BackendImportResult.from_dict(
+                    _failure_result(
+                        request.data,
+                        status="failed",
+                        code="backend_importer_timeout" if returncode is None else "backend_importer_result_invalid",
+                        message=(f"backend importer exceeded {self.timeout_s:g}s" if returncode is None else str(exc)),
+                        retriable=returncode is None,
+                        stdout=stdout,
+                        stderr=stderr,
+                        returncode=returncode,
+                    )
+                )
+            write_json(result_path, parsed.to_dict())
+            direct[request.data["request_digest"]] = parsed
+        return [direct[request.data["request_digest"]] for request, _ in requests]
+
 
 def _validate_result_identity(request: Mapping[str, Any], result: Mapping[str, Any]) -> None:
     for field in ("request_id", "request_digest", "asset_id"):
@@ -156,6 +280,19 @@ def _validate_result_identity(request: Mapping[str, Any], result: Mapping[str, A
                 "backend_importer_identity_mismatch",
                 f"backend importer result {field} does not match request",
             )
+
+
+def validate_import_result(
+    request: BackendImportRequest,
+    result: BackendImportResult,
+    *,
+    workspace: Path,
+) -> None:
+    _validate_result_identity(request.data, result.data)
+    source_error = _validate_file_records(request.data["source_files"], workspace=workspace)
+    if source_error:
+        raise BackendImportValidationError(source_error, "source file validation failed")
+    _validate_fulfilled_result(result.data, workspace=workspace)
 
 
 def _validate_fulfilled_result(result: Mapping[str, Any], *, workspace: Path) -> None:

@@ -15,6 +15,7 @@ from typing import Any, Mapping, Protocol
 
 from harness.core.artifact_schema import write_json
 from harness.core.case_spec_v2 import (
+    ACQUISITION_ROUTES,
     ASSET_MUST_FIELDS,
     ASSET_MUST_NOT_FIELDS,
     BACKEND_SOLVER_CAPABILITIES,
@@ -26,7 +27,9 @@ from harness.core.case_spec_v2 import (
     VERIFICATION_ASSERTION_TYPES,
     CaseSpecV2,
     CaseSpecV2ValidationError,
-    case_spec_v2_from_dict,
+    ValidationIssue,
+    asset_requests,
+    collect_case_spec_v2_issues,
     normalize_case_spec_v2,
     stable_case_spec_digest,
 )
@@ -44,8 +47,24 @@ EXPANSION_FIELDS = (
     "expected_behavior_analysis",
     "observation_analysis",
     "backend_constraints",
+    "asset_source_constraints",
     "ambiguities",
     "assumptions",
+)
+EXPANSION_ANALYSIS_LIST_FIELDS = (
+    "object_analysis",
+    "event_and_relation_analysis",
+    "asset_analysis",
+    "ambiguities",
+    "assumptions",
+)
+EXPANSION_LIST_FIELDS = (*EXPANSION_ANALYSIS_LIST_FIELDS, "asset_source_constraints")
+EXPANSION_OBJECT_FIELDS = (
+    "capability_analysis",
+    "scene_analysis",
+    "expected_behavior_analysis",
+    "observation_analysis",
+    "backend_constraints",
 )
 REQUESTED_BACKENDS = {"fallback", "genesis_fem", "genesis_sph", "taichi_cloth", "ue"}
 
@@ -253,8 +272,9 @@ def generate_case_spec_v2(
     receipts = [expansion_response.receipt, generation_response.receipt]
     repair_count = 0
     try:
-        case_spec = case_spec_v2_from_dict(
+        case_spec = _case_spec_from_generation(
             raw_case_spec,
+            expansion=expansion,
             available_input_ids=[str(item["input_id"]) for item in validated_request.get("inputs") or []],
         )
     except CaseSpecV2ValidationError as validation_error:
@@ -269,6 +289,7 @@ def generate_case_spec_v2(
                     "maximum_repairs": 1,
                     "preserve_user_intent": True,
                     "do_not_change_valid_fields_unless_required_by_an_error": True,
+                    "asset_source_constraints": copy.deepcopy(expansion.get("asset_source_constraints") or []),
                 },
                 "case_spec_contract": _case_spec_contract(),
             },
@@ -282,8 +303,9 @@ def generate_case_spec_v2(
         receipts.append(repair_response.receipt)
         repaired = _apply_request_identity(_unwrap_case_spec(repair_response.payload), validated_request)
         try:
-            case_spec = case_spec_v2_from_dict(
+            case_spec = _case_spec_from_generation(
                 repaired,
+                expansion=expansion,
                 available_input_ids=[str(item["input_id"]) for item in validated_request.get("inputs") or []],
             )
         except CaseSpecV2ValidationError as repair_error:
@@ -297,6 +319,7 @@ def generate_case_spec_v2(
         "llm_calls": receipts,
         "repair_count": repair_count,
         "execution_constraints": copy.deepcopy(validated_request.get("execution_constraints") or {}),
+        "asset_source_constraints": copy.deepcopy(expansion.get("asset_source_constraints") or []),
     }
     if destination is not None:
         write_json(destination / "case_spec_v2.json", case_spec.data)
@@ -370,25 +393,237 @@ def _normalize_expansion(payload: Mapping[str, Any]) -> dict[str, Any]:
     expansion["schema_version"] = EXPANSION_SCHEMA_VERSION
     for field in EXPANSION_FIELDS:
         if field not in expansion:
-            expansion[field] = [] if field in {"object_analysis", "event_and_relation_analysis", "asset_analysis", "ambiguities", "assumptions"} else {}
+            expansion[field] = [] if field in EXPANSION_LIST_FIELDS else {}
     if not isinstance(expansion.get("request_summary"), str):
         raise ValueError("expansion.request_summary must be a string")
-    for field in ("object_analysis", "event_and_relation_analysis", "asset_analysis", "ambiguities", "assumptions"):
+    for field in EXPANSION_ANALYSIS_LIST_FIELDS:
         value = expansion.get(field)
         if isinstance(value, Mapping):
             expansion[field] = _analysis_mapping_to_list(value)
         elif not isinstance(value, list):
             raise ValueError(f"expansion.{field} must be a list")
-    for field in (
-        "capability_analysis",
-        "scene_analysis",
-        "expected_behavior_analysis",
-        "observation_analysis",
-        "backend_constraints",
-    ):
+    for field in EXPANSION_OBJECT_FIELDS:
         if not isinstance(expansion.get(field), dict):
             raise ValueError(f"expansion.{field} must be an object")
+    _validate_asset_source_constraints(expansion)
     return expansion
+
+
+def _validate_asset_source_constraints(expansion: Mapping[str, Any]) -> None:
+    constraints = expansion.get("asset_source_constraints")
+    if not isinstance(constraints, list):
+        raise ValueError("expansion.asset_source_constraints must be a list")
+    suggested_ids = {
+        str(item.get("suggested_id") or "").strip()
+        for item in expansion.get("object_analysis") or []
+        if isinstance(item, Mapping) and str(item.get("suggested_id") or "").strip()
+    }
+    for index, constraint in enumerate(constraints):
+        path = f"expansion.asset_source_constraints[{index}]"
+        if not isinstance(constraint, Mapping):
+            raise ValueError(f"{path} must be an object")
+        scope = constraint.get("scope")
+        if not isinstance(scope, Mapping):
+            raise ValueError(f"{path}.scope must be an object")
+        object_ids = _nonempty_unique_strings(scope.get("object_ids"), f"{path}.scope.object_ids")
+        unknown_ids = [object_id for object_id in object_ids if object_id not in suggested_ids]
+        if unknown_ids:
+            raise ValueError(f"{path}.scope.object_ids references unknown suggested object IDs: {', '.join(unknown_ids)}")
+        allowed_routes = _nonempty_unique_strings(constraint.get("allowed_routes"), f"{path}.allowed_routes")
+        invalid_routes = [route for route in allowed_routes if route not in ACQUISITION_ROUTES]
+        if invalid_routes:
+            raise ValueError(f"{path}.allowed_routes contains invalid routes: {', '.join(invalid_routes)}")
+        allowed_providers = _nonempty_unique_strings(
+            constraint.get("allowed_providers"),
+            f"{path}.allowed_providers",
+        )
+        fallback_order = _unique_strings(constraint.get("fallback_order"), f"{path}.fallback_order")
+        canonical_allowed_providers = {_canonical_provider_id(value) for value in allowed_providers}
+        unknown_fallbacks = [
+            provider
+            for provider in fallback_order
+            if _canonical_provider_id(provider) not in canonical_allowed_providers
+        ]
+        if unknown_fallbacks:
+            raise ValueError(f"{path}.fallback_order contains providers outside allowed_providers: {', '.join(unknown_fallbacks)}")
+        if constraint.get("requirement") not in {"preferred", "required"}:
+            raise ValueError(f"{path}.requirement must be preferred or required")
+        if not isinstance(constraint.get("allow_proxy"), bool):
+            raise ValueError(f"{path}.allow_proxy must be a boolean")
+
+
+def _nonempty_unique_strings(value: Any, path: str) -> list[str]:
+    values = _unique_strings(value, path)
+    if not values:
+        raise ValueError(f"{path} must contain at least one value")
+    return values
+
+
+def _unique_strings(value: Any, path: str) -> list[str]:
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
+        raise ValueError(f"{path} must be a list of non-empty strings")
+    values = [str(item).strip() for item in value]
+    if len(values) != len(set(values)):
+        raise ValueError(f"{path} values must be unique")
+    return values
+
+
+def _case_spec_from_generation(
+    data: Mapping[str, Any],
+    *,
+    expansion: Mapping[str, Any],
+    available_input_ids: list[str],
+) -> CaseSpecV2:
+    normalized = normalize_case_spec_v2(data)
+    issues = collect_case_spec_v2_issues(
+        normalized,
+        available_input_ids=available_input_ids,
+    )
+    issues.extend(_asset_source_constraint_issues(expansion, normalized))
+    if issues:
+        raise CaseSpecV2ValidationError(issues)
+    return CaseSpecV2(normalized)
+
+
+def _asset_source_constraint_issues(
+    expansion: Mapping[str, Any],
+    case_spec: Mapping[str, Any],
+) -> list[ValidationIssue]:
+    constraints = expansion.get("asset_source_constraints") or []
+    objects = {
+        str(obj.get("id") or ""): (index, obj)
+        for index, obj in enumerate(case_spec.get("objects") or [])
+        if isinstance(obj, Mapping) and obj.get("id")
+    }
+    issues: list[ValidationIssue] = []
+    for constraint_index, constraint in enumerate(constraints):
+        if not isinstance(constraint, Mapping):
+            continue
+        scope = constraint.get("scope") if isinstance(constraint.get("scope"), Mapping) else {}
+        allowed_routes = {str(value) for value in constraint.get("allowed_routes") or []}
+        allowed_providers = {_canonical_provider_id(value) for value in constraint.get("allowed_providers") or []}
+        required = constraint.get("requirement") == "required"
+        no_proxy = constraint.get("allow_proxy") is False
+        for object_id in scope.get("object_ids") or []:
+            entry = objects.get(str(object_id))
+            if entry is None:
+                issues.append(
+                    ValidationIssue(
+                        path="/objects",
+                        code="asset_source_scope_object_missing",
+                        message=(
+                            f"asset_source_constraints/{constraint_index} references missing object ID: {object_id}"
+                        ),
+                    )
+                )
+                continue
+            object_index, obj = entry
+            path = f"/objects/{object_index}/asset"
+            requests = asset_requests(obj.get("asset"))
+            if not requests:
+                issues.append(
+                    ValidationIssue(
+                        path=path,
+                        code="asset_source_constraint_missing_request",
+                        message=f"object {object_id} requires an asset acquisition matching Expansion constraint {constraint_index}",
+                    )
+                )
+                continue
+            acquisition = requests[0].get("acquisition")
+            acquisition = acquisition if isinstance(acquisition, Mapping) else {}
+            acquisition_path = f"{path}/acquisition"
+            route = str(acquisition.get("route") or "default")
+            if route not in allowed_routes:
+                issues.append(
+                    ValidationIssue(
+                        path=f"{acquisition_path}/route",
+                        code="asset_source_route_mismatch",
+                        message=(
+                            f"object {object_id} route {route!r} is outside Expansion allowed_routes "
+                            f"{sorted(allowed_routes)}"
+                        ),
+                    )
+                )
+            provider_hint = str(acquisition.get("provider_hint") or "").strip()
+            provider = _canonical_provider_id(provider_hint or _default_provider_for_route(route))
+            if not provider or provider not in allowed_providers:
+                issues.append(
+                    ValidationIssue(
+                        path=f"{acquisition_path}/provider_hint",
+                        code="asset_source_provider_mismatch",
+                        message=(
+                            f"object {object_id} provider {provider_hint or '<unspecified>'!r} is outside "
+                            f"Expansion allowed_providers {sorted(allowed_providers)}"
+                        ),
+                    )
+                )
+            expected_route = _route_for_provider(provider)
+            if expected_route and route != expected_route:
+                issues.append(
+                    ValidationIssue(
+                        path=f"{acquisition_path}/provider_hint",
+                        code="asset_provider_route_mismatch",
+                        message=f"object {object_id} provider {provider!r} is not compatible with route {route!r}",
+                    )
+                )
+            if required and acquisition.get("requirement") != "required":
+                issues.append(
+                    ValidationIssue(
+                        path=f"{acquisition_path}/requirement",
+                        code="explicit_asset_source_not_required",
+                        message=f"object {object_id} must preserve Expansion requirement=required",
+                    )
+                )
+            if required and acquisition.get("origin") != "user_explicit":
+                issues.append(
+                    ValidationIssue(
+                        path=f"{acquisition_path}/origin",
+                        code="explicit_asset_source_origin_lost",
+                        message=f"object {object_id} must preserve Expansion origin=user_explicit",
+                    )
+                )
+            fallback_routes = [str(value) for value in acquisition.get("fallback_order") or []]
+            unauthorized_fallbacks = [value for value in fallback_routes if value not in allowed_routes]
+            if unauthorized_fallbacks or (required and no_proxy and fallback_routes):
+                issues.append(
+                    ValidationIssue(
+                        path=f"{acquisition_path}/fallback_order",
+                        code="unauthorized_asset_source_fallback",
+                        message=(
+                            f"object {object_id} has fallback routes not authorized by its required no-proxy "
+                            f"Expansion constraint: {fallback_routes}"
+                        ),
+                    )
+                )
+    return issues
+
+
+def _canonical_provider_id(value: Any) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().casefold()).strip("_")
+    return {
+        "polyhaven": "poly_haven",
+        "poly_haven_v1": "poly_haven",
+        "poly_haven_external_site_v1": "poly_haven",
+        "meshy_v1": "meshy",
+        "meshy_model_generation_v1": "meshy",
+    }.get(normalized, normalized)
+
+
+def _default_provider_for_route(route: str) -> str:
+    return {
+        "external_site": "poly_haven",
+        "model_generation": "meshy",
+    }.get(str(route), "")
+
+
+def _route_for_provider(provider: str) -> str:
+    return {
+        "poly_haven": "external_site",
+        "meshy": "model_generation",
+        "box_mesh_v1": "procedural_generation",
+        "sphere_mesh_v1": "procedural_generation",
+        "cylinder_mesh_v1": "procedural_generation",
+    }.get(provider, "")
 
 
 def _analysis_mapping_to_list(value: Mapping[str, Any]) -> list[Any]:
@@ -526,14 +761,19 @@ FIELD-BY-FIELD INSTRUCTIONS
    procedural_generation, or model_generation. Preserve explicit routes; inferred routes are soft.
    Prefer procedural_generation for simple rule-based primitives that can be described exactly as a
    box, sphere, or z-axis cylinder; plates/walls are thin boxes and rods/poles/columns/discs are cylinders.
-7. expected_behavior_analysis: an object describing observable preconditions, event ordering, causal
+7. asset_source_constraints: an array of auditable hard source constraints extracted only from explicit
+   user requirements. Each entry scopes exact object_analysis suggested_id values, lists every allowed
+   acquisition route and every allowed structured Provider ID, preserves Provider fallback order, records
+   requirement as preferred or required, and records allow_proxy. Different object groups may use different
+   constraints. Do not infer a required route, Provider permission, or no-proxy rule from a mere preference.
+8. expected_behavior_analysis: an object describing observable preconditions, event ordering, causal
    response, and postconditions without claiming that the run passed.
-8. observation_analysis: an object describing useful camera roles, modalities (RGB/depth/segmentation),
+9. observation_analysis: an object describing useful camera roles, modalities (RGB/depth/segmentation),
    solver signals, and what evidence is needed. Do not emit exact camera transforms.
-9. backend_constraints: an object describing required solver capabilities and the explicit requested
+10. backend_constraints: an object describing required solver capabilities and the explicit requested
    backend, if any. Never contradict request.execution_constraints.requested_backend.
-10. ambiguities: an array of unresolved questions that could materially change the case.
-11. assumptions: an array of conservative assumptions used to make the case executable. Assumptions
+11. ambiguities: an array of unresolved questions that could materially change the case.
+12. assumptions: an array of conservative assumptions used to make the case executable. Assumptions
     must not grant permissions, licenses, or evidence.
 
 TEXT, IMAGE, AND ASSET RULES
@@ -564,11 +804,20 @@ def _expansion_contract() -> dict[str, Any]:
             "object_analysis": "array",
             "event_and_relation_analysis": "array",
             "asset_analysis": "array",
+            "asset_source_constraints": "array",
             "expected_behavior_analysis": "object",
             "observation_analysis": "object",
             "backend_constraints": "object",
             "ambiguities": "array",
             "assumptions": "array",
+        },
+        "asset_source_constraint_shape": {
+            "scope": {"object_ids": ["exact object_analysis suggested_id values"]},
+            "allowed_routes": ["one or more acquisition_route values"],
+            "allowed_providers": ["one or more structured Provider IDs"],
+            "requirement": "preferred or required",
+            "fallback_order": ["zero or more allowed Provider IDs in priority order"],
+            "allow_proxy": "boolean",
         },
         "output": "one JSON object only; no markdown or prose outside JSON",
     }
@@ -618,15 +867,22 @@ FIELD-BY-FIELD INSTRUCTIONS
    exactly [pitch, yaw, roll], matching UE Rotator semantics: incline a box ramp along X with pitch
    (the first value), not yaw. In the Harness UE convention, positive pitch makes local +X downhill
    (the -X end is high), while negative pitch makes local -X downhill; place the high-end support and
-   released body on the corresponding high end. Place initially resting objects with a small positive clearance (about
+   released body on the corresponding high end. A cylinder's authored/analytic axis is local Z: leave
+   rotation zero for a world-Z axis, use an absolute 90-degree roll for a world-Y axis, and an absolute
+   90-degree pitch for a world-X axis. Place initially resting objects with a small positive clearance (about
    0.002-0.005 m) above the supporting surface. Use low restitution (normally <=0.1) unless a bounce is
-   requested, and set use_ccd=true for small or fast-moving collision bodies.
+   requested, and set physics.use_ccd=true for small or fast-moving collision bodies. Do not put use_ccd
+   inside behavior.
 8. object.asset: description and optional semantic_text are natural-language search/generation intent;
    resource_kind must use its enum. must contains hard filters that every candidate must satisfy;
    must_not contains hard exclusions; preferences contains soft ranking preferences and can never override
    must/must_not. taxonomy contains string hierarchy labels such as domain, category, subcategory, and
    object_type. relaxation_policy contains boolean allow_parent_category and allow_format_conversion;
-   enable relaxation only when the user allows a broader match. acquisition.route is default,
+   enable relaxation only when the user allows a broader match. When the request explicitly contrasts
+   multiple semantic object classes, encode the competing classes as must_not.category exclusions for
+   each role; shared material or approximate size is not sufficient identity evidence. must_not must never
+   exclude the requested category itself or a parent category that contains it. A required Provider
+   route must fail rather than accept an excluded or semantically different class. acquisition.route is default,
    local_catalog, external_site, procedural_generation, or model_generation. Use required only when the
    user explicitly demanded that exact route and origin=user_explicit; otherwise use preferred. Required
    routes have no fallback. For exact rule-based primitives, prefer procedural_generation and use only
@@ -639,6 +895,9 @@ FIELD-BY-FIELD INSTRUCTIONS
    not procedural or descriptive prose. asset_type is the backend asset class such as StaticMesh;
    geometry_type is the shape such as box, sphere, or cylinder. If must.physics_role is needed, use
    dynamic_rigid_body, static_rigid_body, or kinematic_rigid_body to match physics.body_type.
+   Expansion asset_source_constraints are hard: for every scoped exact object ID, choose only an allowed
+   route and allowed Provider, preserve required and user_explicit, and do not add an unauthorized fallback.
+   A global allow_analytic_proxy=true for unrelated objects never weakens a scoped required no-proxy route.
 9. acquisition.reference_inputs: every entry is an object with input_id copied exactly from
    request.inputs, usage as an array of registered usage enums, and allow_similarity_search as a boolean.
    Do not copy local paths, hashes, image bytes, captions, or invented IDs into this object.
@@ -652,7 +911,9 @@ FIELD-BY-FIELD INSTRUCTIONS
     on that event as "linear_velocity_m_s":[x,y,z] (and optional "angular_velocity_rad_s":[x,y,z]), while the
     object's initial_state velocity remains zero during the hold. Until release time the runtime holds the object
     at its declared initial transform. Never use phrases such as "box with floor" as a reference.
-    Size every support surface so its horizontal footprint contains every supported object's full initial
+    Use supported_by, not plain contact, for every dynamic object that initially rests on a load-bearing
+    surface. Reserve collision/impacts for runtime propagation edges; plain contact is an initial/static
+    scene relation and is not an ordered impact. Size every support surface so its horizontal footprint contains every supported object's full initial
     bounds plus at least 0.25 m margin, and ensure scene.bounds_hint_m contains all full object bounds.
     For a collision chain, include enough support area for the staged objects and expected interaction path.
     A declared collision order must include one collision/impacts relation for every intended adjacent pair
@@ -703,7 +964,8 @@ a listed error requires a change. For each error, correct the exact JSON path an
 rules: capabilities.required contains primary; backend constraints honor the explicit requested backend;
 asset-policy booleans authorize declared routes; behavior is an object; body_type is an enum; every
 relation, event, camera, and assertion reference exactly matches an objects[].id; every assertion has a
-registered type. For support_footprint_too_small, enlarge or reposition the named support so it contains
+registered type. asset_source_constraints in repair_constraints are hard and must be restored at the exact
+object asset acquisition paths named by validation_errors. For support_footprint_too_small, enlarge or reposition the named support so it contains
 the subject's full horizontal bounds; for ramp_has_no_incline_rotation, remember rotation_deg is
 [pitch,yaw,roll] and use pitch (or roll) rather than yaw as the incline. Do not redesign the scene, add a Provider, add UE paths, relax a required route, invent
 evidence, or perform free-form regeneration.

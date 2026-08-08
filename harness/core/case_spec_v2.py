@@ -262,6 +262,9 @@ def normalize_case_spec_v2(data: Mapping[str, Any]) -> dict[str, Any]:
             acquisition.setdefault("source_uri_hint", None)
             acquisition.setdefault("reference_inputs", [])
             acquisition.setdefault("fallback_order", [])
+    for relation in normalized.get("relations") or []:
+        if isinstance(relation, dict) and relation.get("type") is not None:
+            relation["type"] = _canonical_relation_type(relation.get("type"))
     return normalized
 
 
@@ -441,15 +444,15 @@ def collect_case_spec_v2_issues(
                 _positive_number(physics.get("mass_kg"), f"{path}/physics/mass_kg", issues)
             if physics.get("collision_required") is not None and not isinstance(physics.get("collision_required"), bool):
                 _issue(issues, f"{path}/physics/collision_required", "invalid_type", "must be boolean")
+            if physics.get("use_ccd") is not None and not isinstance(physics.get("use_ccd"), bool):
+                _issue(issues, f"{path}/physics/use_ccd", "invalid_type", "must be boolean")
         initial = _mapping(obj.get("initial_state"), f"{path}/initial_state", issues, required=False)
         for field in ("position_m", "rotation_deg", "linear_velocity_m_s", "angular_velocity_rad_s"):
             if initial.get(field) is not None:
                 _finite_vec3(initial.get(field), f"{path}/initial_state/{field}", issues)
-        role_text = f"{obj.get('role', '')} {geometry.get('shape_hint', '')}".casefold()
         rotation = initial.get("rotation_deg")
         if (
-            "box" in str(geometry.get("shape_hint") or "").casefold()
-            and any(token in role_text for token in ("ramp", "inclined", "slope"))
+            _is_box_ramp_object(obj, geometry)
             and isinstance(rotation, list)
             and len(rotation) == 3
             and all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in rotation)
@@ -463,6 +466,13 @@ def collect_case_spec_v2_issues(
                 "rotation_deg is [pitch, yaw, roll]; a box ramp needs non-zero pitch or roll, not yaw alone",
             )
         behavior = _mapping(obj.get("behavior"), f"{path}/behavior", issues, required=False)
+        if behavior.get("use_ccd") is not None:
+            _issue(
+                issues,
+                f"{path}/behavior/use_ccd",
+                "misplaced_physics_field",
+                "use_ccd belongs in object.physics.use_ccd, not object.behavior",
+            )
         declared_energy = behavior.get("initial_kinetic_energy_j")
         if declared_energy is not None:
             _validate_initial_kinetic_energy(physics, initial, declared_energy, f"{path}/behavior/initial_kinetic_energy_j", issues)
@@ -580,6 +590,11 @@ def project_case_spec_v2_to_v1(case_spec: CaseSpecV2) -> CaseSpec:
     if collision_graph and "collision_graph" not in expected:
         expected["collision_graph"] = collision_graph
     support_map = _support_map(data.get("relations") or [])
+    for object_id, support_id in _initial_contact_support_map(
+        data.get("objects") or [],
+        data.get("relations") or [],
+    ).items():
+        support_map.setdefault(object_id, support_id)
     if support_map and "support" not in expected:
         expected["support"] = support_map
     assertions = [item for item in (data.get("verification_requirements") or {}).get("assertions", []) if isinstance(item, dict)]
@@ -791,8 +806,11 @@ def _collision_graph(relations: Iterable[Any]) -> list[list[str]]:
     for relation in relations:
         if not isinstance(relation, Mapping):
             continue
-        relation_type = str(relation.get("type") or "").casefold()
-        if relation_type not in {"contact", "collision", "cascade_collision", "impacts", "hits", "contact_order"}:
+        relation_type = _canonical_relation_type(relation.get("type"))
+        # A plain contact relation describes the initial/static scene contract.
+        # Runtime propagation edges must be declared as collision/impacts so a
+        # resting support contact cannot masquerade as a completed impact.
+        if relation_type not in {"collision", "cascade_collision", "impacts", "hits", "contact_order"}:
             continue
         values = relation.get("objects")
         if not isinstance(values, list):
@@ -801,6 +819,48 @@ def _collision_graph(relations: Iterable[Any]) -> list[list[str]]:
         if len(pair) >= 2:
             result.append(pair[:2])
     return result
+
+
+def _is_box_ramp_object(obj: Mapping[str, Any], geometry: Mapping[str, Any]) -> bool:
+    if "box" not in str(geometry.get("shape_hint") or "").casefold():
+        return False
+    asset = obj.get("asset") if isinstance(obj.get("asset"), Mapping) else {}
+    taxonomy = asset.get("taxonomy") if isinstance(asset.get("taxonomy"), Mapping) else {}
+    identity_words = _semantic_words(
+        " ".join(
+            str(value or "")
+            for value in (obj.get("id"), taxonomy.get("category"), taxonomy.get("object_type"))
+        )
+    )
+    if identity_words & {"ramp", "slope", "incline"}:
+        return True
+    role_words = list(_semantic_words(str(obj.get("role") or ""), ordered=True))
+    reference_prepositions = {"to", "of", "from", "near", "beside", "under", "above", "below"}
+    support_followers = {"support", "block", "base", "leg"}
+    for index, word in enumerate(role_words):
+        if word not in {"ramp", "slope"}:
+            continue
+        previous = role_words[index - 1] if index else ""
+        following = role_words[index + 1] if index + 1 < len(role_words) else ""
+        if previous not in reference_prepositions and following not in support_followers:
+            return True
+    return any(
+        phrase in " ".join(role_words)
+        for phrase in ("inclined plane", "inclined surface", "sloped plane", "sloped surface")
+    )
+
+
+def _semantic_words(value: str, *, ordered: bool = False) -> set[str] | list[str]:
+    words = "".join(character if character.isalnum() else " " for character in value.casefold()).split()
+    return words if ordered else set(words)
+
+
+def _canonical_relation_type(value: Any) -> str:
+    relation_type = str(value or "").strip().casefold().replace("-", "_").replace(" ", "_")
+    return {
+        "impact": "impacts",
+        "hit": "hits",
+    }.get(relation_type, relation_type)
 
 
 def _support_map(relations: Iterable[Any]) -> dict[str, str]:
@@ -818,6 +878,72 @@ def _support_map(relations: Iterable[Any]) -> dict[str, str]:
         elif relation_type == "supports":
             result[str(target)] = str(source)
     return result
+
+
+def _initial_contact_support_map(objects: Iterable[Any], relations: Iterable[Any]) -> dict[str, str]:
+    """Project a nearby stationary dynamic-to-static contact as initial support.
+
+    V2 historically allowed ``contact`` for a body initially resting on an
+    inclined surface.  Preserve that meaning without treating future contacts
+    (for example a falling body and the floor) as support.
+    """
+    by_id = {
+        str(obj.get("id")): obj
+        for obj in objects
+        if isinstance(obj, Mapping) and obj.get("id")
+    }
+    result: dict[str, str] = {}
+    for relation in relations:
+        if not isinstance(relation, Mapping) or str(relation.get("type") or "").casefold() != "contact":
+            continue
+        source_id = str(relation.get("source") or "")
+        target_id = str(relation.get("target") or "")
+        source = by_id.get(source_id)
+        target = by_id.get(target_id)
+        if source is None or target is None:
+            continue
+        source_physics = source.get("physics") if isinstance(source.get("physics"), Mapping) else {}
+        target_physics = target.get("physics") if isinstance(target.get("physics"), Mapping) else {}
+        if str(source_physics.get("body_type") or "dynamic").casefold() != "dynamic":
+            continue
+        if str(target_physics.get("body_type") or "dynamic").casefold() not in {"static", "kinematic"}:
+            continue
+        initial = source.get("initial_state") if isinstance(source.get("initial_state"), Mapping) else {}
+        velocity = initial.get("linear_velocity_m_s")
+        if isinstance(velocity, list) and any(abs(float(value)) > 1e-9 for value in velocity):
+            continue
+        if _is_near_initial_support(source, target):
+            result[source_id] = target_id
+    return result
+
+
+def _is_near_initial_support(subject: Mapping[str, Any], support: Mapping[str, Any]) -> bool:
+    subject_geometry = subject.get("geometry") if isinstance(subject.get("geometry"), Mapping) else {}
+    support_geometry = support.get("geometry") if isinstance(support.get("geometry"), Mapping) else {}
+    subject_initial = subject.get("initial_state") if isinstance(subject.get("initial_state"), Mapping) else {}
+    support_initial = support.get("initial_state") if isinstance(support.get("initial_state"), Mapping) else {}
+    subject_size = subject_geometry.get("approx_size_m")
+    support_size = support_geometry.get("approx_size_m")
+    subject_position = subject_initial.get("position_m")
+    support_position = support_initial.get("position_m")
+    if not all(_is_finite_vec3(value) for value in (subject_size, support_size, subject_position, support_position)):
+        return False
+    subject_half = [float(value) / 2.0 for value in subject_size]
+    support_half = [float(value) / 2.0 for value in support_size]
+    delta = [float(subject_position[index]) - float(support_position[index]) for index in range(3)]
+    rotation = support_initial.get("rotation_deg")
+    pitch = math.radians(float(rotation[0])) if _is_finite_vec3(rotation) else 0.0
+    tangent = [math.cos(pitch), 0.0, -math.sin(pitch)]
+    normal = [math.sin(pitch), 0.0, math.cos(pitch)]
+    tangent_coordinate = sum(delta[index] * tangent[index] for index in range(3))
+    if abs(tangent_coordinate) > support_half[0] + 0.05:
+        return False
+    if abs(delta[1]) > support_half[1] + 0.05:
+        return False
+    normal_radius = sum(abs(normal[index]) * subject_half[index] for index in range(3))
+    gap = sum(delta[index] * normal[index] for index in range(3)) - support_half[2] - normal_radius
+    tolerance = max(0.05, min(subject_half) * 0.75)
+    return abs(gap) <= tolerance
 
 
 def _validate_asset_request(
@@ -981,6 +1107,13 @@ def _validate_support_footprints(
             continue
         _, subject = subject_entry
         support_index, support = support_entry
+        subject_physics = subject.get("physics") if isinstance(subject.get("physics"), Mapping) else {}
+        if str(subject_physics.get("body_type") or "dynamic").casefold() in {"static", "kinematic"}:
+            # Structural supports commonly contact only one part of a static
+            # body, such as a block under the high end of a ramp. Full-footprint
+            # containment is required for resting dynamic bodies, not for this
+            # local structural contact.
+            continue
         subject_geometry = subject.get("geometry") if isinstance(subject.get("geometry"), Mapping) else {}
         support_geometry = support.get("geometry") if isinstance(support.get("geometry"), Mapping) else {}
         subject_initial = subject.get("initial_state") if isinstance(subject.get("initial_state"), Mapping) else {}

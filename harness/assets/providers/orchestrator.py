@@ -12,7 +12,12 @@ from typing import Any, Mapping
 from harness.assets.asset_intent_compiler import CompiledAssetIntent
 from harness.assets.asset_registry import AssetRegistry, candidate_matches_search_intent
 from harness.assets.asset_resolver import asset_quality_gate
-from harness.assets.providers.backend_importer import BackendImporterAdapter, UECommandImporterAdapter
+from harness.assets.providers.backend_importer import (
+    IMPORTER_CONTRACT_VERSION,
+    BackendImporterAdapter,
+    UECommandImporterAdapter,
+    validate_import_result,
+)
 from harness.assets.providers.input_manifest import ProviderInputError, bind_provider_reference_inputs
 from harness.assets.providers.contracts import (
     BACKEND_IMPORT_REQUEST_SCHEMA,
@@ -22,6 +27,7 @@ from harness.assets.providers.contracts import (
     PROVIDER_RESULT_SCHEMA,
     SUCCESSFUL_LIFECYCLE,
     BackendImportRequest,
+    BackendImportResult,
     ProviderBatch,
     ProviderReceipt,
     ProviderRequest,
@@ -36,7 +42,7 @@ from harness.assets.providers.local_procedural_mesh import (
     ProceduralGenerationError,
     generate_procedural_obj,
     normalize_generation_spec,
-    recipe_for_shape,
+    recipe_for_provider_hint,
     recipe_digest,
     stable_asset_id,
 )
@@ -60,6 +66,18 @@ class ProviderOrchestration:
     batch: dict[str, Any]
     results: dict[tuple[str, str], dict[str, Any]]
     receipts: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class PreparedProviderImport:
+    kind: str
+    request: dict[str, Any]
+    intent: CompiledAssetIntent
+    request_dir: Path
+    import_request: BackendImportRequest
+    normalized: dict[str, Any] | None = None
+    generated: dict[str, Any] | None = None
+    acquisition: RemoteAcquisition | None = None
 
 
 class AssetProviderOrchestrator:
@@ -102,6 +120,7 @@ class AssetProviderOrchestrator:
             if isinstance(item, Mapping) and item.get("id")
         }
         policy = source_case_spec.get("asset_policy") if isinstance(source_case_spec.get("asset_policy"), Mapping) else {}
+        prepared_imports: list[PreparedProviderImport] = []
         for intent in compiled_intents:
             route = str(intent.acquisition.get("route") or "default")
             if route not in PROVIDER_ROUTES:
@@ -138,8 +157,20 @@ class AssetProviderOrchestrator:
                     )
                     continue
             requests.append(request)
-            result, receipt = self._fulfill_one(request, intent=intent, registry=registry)
-            results[(intent.object_id, intent.slot)] = result
+            prepared, immediate = self._prepare_one(request, intent=intent, registry=registry)
+            if prepared is not None:
+                prepared_imports.append(prepared)
+            else:
+                assert immediate is not None
+                result, receipt = immediate
+                results[(intent.object_id, intent.slot)] = result
+                if receipt is not None:
+                    receipts.append(receipt)
+        import_results, import_summary = self._run_prepared_imports(prepared_imports, registry=registry)
+        for prepared in prepared_imports:
+            import_result = import_results[prepared.import_request.data["request_digest"]]
+            result, receipt = self._complete_prepared(prepared, import_result=import_result, registry=registry)
+            results[(prepared.intent.object_id, prepared.intent.slot)] = result
             if receipt is not None:
                 receipts.append(receipt)
         batch = ProviderBatch.from_dict(
@@ -149,6 +180,7 @@ class AssetProviderOrchestrator:
                 "requests": requests,
                 "results": [results[key] for key in sorted(results)],
                 "receipt_ids": [str(receipt["receipt_id"]) for receipt in receipts],
+                "import_summary": import_summary,
             }
         ).to_dict()
         return ProviderOrchestration(batch=batch, results=results, receipts=tuple(receipts))
@@ -186,10 +218,13 @@ class AssetProviderOrchestrator:
         geometry = source_object.get("geometry") if isinstance(source_object.get("geometry"), Mapping) else {}
         shape_hint = str(geometry.get("shape_hint") or "").strip().casefold()
         generation_spec = {
-            "recipe_id": str(intent.acquisition.get("provider_hint") or recipe_for_shape(shape_hint) or ""),
+            "recipe_id": str(
+                recipe_for_provider_hint(shape_hint, intent.acquisition.get("provider_hint")) or ""
+            ),
             "recipe_version": "v1",
             "shape": shape_hint,
             "size_m": copy.deepcopy(geometry.get("approx_size_m")),
+            "scale_policy": str(geometry.get("scale_policy") or "preserve_authored"),
         }
         identity = {
             "case_id": case_id,
@@ -216,16 +251,18 @@ class AssetProviderOrchestrator:
             }
         ).to_dict()
 
-    def _fulfill_one(
+    def _prepare_one(
         self,
         request: dict[str, Any],
         *,
         intent: CompiledAssetIntent,
         registry: AssetRegistry,
-    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-        route = str(request["route"])
+    ) -> tuple[
+        PreparedProviderImport | None,
+        tuple[dict[str, Any], dict[str, Any] | None] | None,
+    ]:
         if not registry.writable:
-            return (
+            return None, (
                 provider_failure(
                     request,
                     status="blocked",
@@ -234,10 +271,11 @@ class AssetProviderOrchestrator:
                 ),
                 None,
             )
+        route = str(request["route"])
         if route in {"external_site", "model_generation"}:
             adapter = self.remote_providers.get(route)
             if adapter is None:
-                return (
+                return None, (
                     provider_failure(
                         request,
                         status="blocked",
@@ -246,14 +284,14 @@ class AssetProviderOrchestrator:
                     ),
                     None,
                 )
-            return self._fulfill_remote(request, intent=intent, registry=registry, adapter=adapter)
+            return self._prepare_remote(request, intent=intent, adapter=adapter)
         invalid_inputs = [
             str(row.get("input_id") or "")
             for row in request.get("reference_inputs") or []
             if not _is_sha256(str(row.get("sha256") or ""))
         ]
         if invalid_inputs:
-            return (
+            return None, (
                 provider_failure(
                     request,
                     status="blocked",
@@ -265,41 +303,272 @@ class AssetProviderOrchestrator:
         try:
             normalized = normalize_generation_spec(request["generation_spec"])
         except ProceduralGenerationError as exc:
-            return (
-                provider_failure(request, status="failed", code=exc.code, message=exc.message),
-                None,
-            )
-        try:
-            self.workspace.relative_to(SOURCE_ROOT)
-        except ValueError:
-            pass
-        else:
-            return (
-                provider_failure(
-                    request,
-                    status="blocked",
-                    code="workspace_inside_source_repository",
-                    message="Provider outputs cannot be written inside the source repository",
-                ),
-                None,
-            )
+            return None, (provider_failure(request, status="failed", code=exc.code, message=exc.message), None)
+        workspace_failure = self._workspace_failure(request)
+        if workspace_failure is not None:
+            return None, workspace_failure
         request_dir = self.workspace / "providers" / PROVIDER_ID / request["request_digest"]
         generated = generate_procedural_obj(normalized, request_dir / f"{normalized['recipe_id']}.obj")
         asset_id = stable_asset_id(normalized)
-        lifecycle = SUCCESSFUL_LIFECYCLE[:5]
-        import_request_payload = {
+        payload = {
             "schema_version": BACKEND_IMPORT_REQUEST_SCHEMA,
-            "request_id": f"backend-import.{request['request_digest'][:24]}",
             "asset_id": asset_id,
             "target_backend": request["target_backend"],
             "class_name": "StaticMesh",
             "source_files": [self._file_record(generated["path"], role="generated_source", file_format="obj")],
             "desired_name": asset_id.replace(".", "_"),
             "expected_size_m": list(normalized["size_m"]),
+            "provider_id": PROVIDER_ID,
+            "provider_version": PROVIDER_VERSION,
+            "importer_contract_version": IMPORTER_CONTRACT_VERSION,
         }
-        import_request_payload["request_digest"] = stable_digest(import_request_payload)
-        import_request = BackendImportRequest.from_dict(import_request_payload)
-        import_result = self.importer.import_asset(import_request, work_dir=request_dir, workspace=self.workspace)
+        return (
+            PreparedProviderImport(
+                kind="procedural",
+                request=request,
+                intent=intent,
+                request_dir=request_dir,
+                import_request=self._backend_import_request(payload),
+                normalized=normalized,
+                generated=generated,
+            ),
+            None,
+        )
+
+    def _prepare_remote(
+        self,
+        request: dict[str, Any],
+        *,
+        intent: CompiledAssetIntent,
+        adapter: RemoteProviderAdapter,
+    ) -> tuple[
+        PreparedProviderImport | None,
+        tuple[dict[str, Any], dict[str, Any] | None] | None,
+    ]:
+        workspace_failure = self._workspace_failure(request)
+        if workspace_failure is not None:
+            return None, workspace_failure
+        request_dir = self.workspace / "providers" / adapter.provider_id / request["request_digest"]
+        try:
+            acquisition = adapter.acquire(request, destination=request_dir, workspace=self.workspace)
+        except RemoteProviderError as exc:
+            receipt = self._remote_failure_receipt(request=request, adapter=adapter, request_dir=request_dir, error=exc)
+            return None, (
+                provider_failure(
+                    request,
+                    status=exc.status,
+                    code=exc.code,
+                    message=exc.message,
+                    retriable=exc.retriable,
+                    receipt_ids=[receipt["receipt_id"]],
+                ),
+                receipt,
+            )
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            error = RemoteProviderError("provider_execution_failed", f"remote provider adapter failed closed: {exc}")
+            receipt = self._remote_failure_receipt(request=request, adapter=adapter, request_dir=request_dir, error=error)
+            return None, (
+                provider_failure(
+                    request,
+                    status="failed",
+                    code=error.code,
+                    message=error.message,
+                    receipt_ids=[receipt["receipt_id"]],
+                ),
+                receipt,
+            )
+        import_record = next(
+            (row for row in acquisition.files if Path(str(row["path"])).resolve() == acquisition.import_file.resolve()),
+            None,
+        )
+        if import_record is None:
+            return None, (
+                provider_failure(
+                    request,
+                    status="failed",
+                    code="provider_output_invalid",
+                    message="remote acquisition import file is absent from the verified output manifest",
+                ),
+                None,
+            )
+        payload: dict[str, Any] = {
+            "schema_version": BACKEND_IMPORT_REQUEST_SCHEMA,
+            "asset_id": acquisition.asset_id,
+            "target_backend": request["target_backend"],
+            "class_name": "StaticMesh",
+            "source_files": [
+                {
+                    "role": "provider_import_source",
+                    "local_path": str(acquisition.import_file),
+                    "format": str(import_record["format"]),
+                    "sha256": str(import_record["sha256"]),
+                    "byte_size": int(import_record["byte_size"]),
+                    "materialized": True,
+                }
+            ],
+            "desired_name": acquisition.asset_id.replace(".", "_"),
+            "source_kind": acquisition.source_kind,
+            "provider_id": acquisition.provider_id,
+            "provider_version": acquisition.provider_version,
+            "importer_contract_version": IMPORTER_CONTRACT_VERSION,
+        }
+        if acquisition.expected_size_m is not None:
+            payload["expected_size_m"] = list(acquisition.expected_size_m)
+        return (
+            PreparedProviderImport(
+                kind="remote",
+                request=request,
+                intent=intent,
+                request_dir=request_dir,
+                import_request=self._backend_import_request(payload),
+                acquisition=acquisition,
+            ),
+            None,
+        )
+
+    def _workspace_failure(
+        self,
+        request: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any] | None] | None:
+        try:
+            self.workspace.relative_to(SOURCE_ROOT)
+        except ValueError:
+            return None
+        return (
+            provider_failure(
+                request,
+                status="blocked",
+                code="workspace_inside_source_repository",
+                message="Provider outputs cannot be written inside the source repository",
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _backend_import_request(payload: Mapping[str, Any]) -> BackendImportRequest:
+        identity = dict(payload)
+        digest_identity = copy.deepcopy(identity)
+        digest_identity["source_files"] = [
+            {key: value for key, value in row.items() if key != "local_path"}
+            for row in identity.get("source_files") or []
+        ]
+        digest = stable_digest(digest_identity)
+        return BackendImportRequest.from_dict(
+            {
+                **identity,
+                "request_id": f"backend-import.{digest[:24]}",
+                "request_digest": digest,
+            }
+        )
+
+    def _run_prepared_imports(
+        self,
+        prepared_imports: list[PreparedProviderImport],
+        *,
+        registry: AssetRegistry,
+    ) -> tuple[dict[str, BackendImportResult], dict[str, Any]]:
+        results: dict[str, BackendImportResult] = {}
+        misses: list[PreparedProviderImport] = []
+        batch_capable = hasattr(self.importer, "import_assets")
+        for prepared in prepared_imports:
+            cached = self._cached_import_result(prepared, registry=registry)
+            if cached is None:
+                misses.append(prepared)
+            else:
+                results[prepared.import_request.data["request_digest"]] = cached
+        if misses:
+            inputs = [(item.import_request, item.request_dir) for item in misses]
+            if batch_capable:
+                imported = self.importer.import_assets(inputs, workspace=self.workspace)
+            else:
+                imported = [
+                    self.importer.import_asset(request, work_dir=work_dir, workspace=self.workspace)
+                    for request, work_dir in inputs
+                ]
+            if len(imported) != len(misses):
+                raise RuntimeError("backend importer returned the wrong number of batch results")
+            for prepared, result in zip(misses, imported):
+                results[prepared.import_request.data["request_digest"]] = result
+                if result.data.get("status") == "fulfilled":
+                    try:
+                        validate_import_result(prepared.import_request, result, workspace=self.workspace)
+                    except ValueError:
+                        continue
+                    write_json(self._import_cache_path(prepared), result.to_dict())
+        return results, {
+            "request_count": len(prepared_imports),
+            "cache_hit_count": len(prepared_imports) - len(misses),
+            "cache_miss_count": len(misses),
+            "importer_invocation_count": (1 if batch_capable else len(misses)) if misses else 0,
+            "batch_imported_count": len(misses),
+        }
+
+    def _cached_import_result(
+        self,
+        prepared: PreparedProviderImport,
+        *,
+        registry: AssetRegistry,
+    ) -> BackendImportResult | None:
+        existing = registry.get_asset_by_id(str(prepared.import_request.data["asset_id"]))
+        qualification = existing.get("qualification") if isinstance(existing, Mapping) else None
+        if (
+            not isinstance(existing, Mapping)
+            or existing.get("lifecycle_status") != "runtime_bound"
+            or not isinstance(qualification, Mapping)
+            or not str(qualification.get("status") or "").startswith("pass")
+        ):
+            return None
+        parsed: BackendImportResult | None = None
+        for result_path in (self._import_cache_path(prepared), prepared.request_dir / "backend_import_result.json"):
+            try:
+                raw = json.loads(result_path.read_text(encoding="utf-8"))
+                candidate = BackendImportResult.from_dict(raw)
+                validate_import_result(prepared.import_request, candidate, workspace=self.workspace)
+            except (OSError, json.JSONDecodeError, ValueError):
+                continue
+            parsed = candidate
+            break
+        if parsed is None:
+            return None
+        if parsed.data.get("status") != "fulfilled" or existing.get("ue_path") != parsed.data.get("object_path"):
+            return None
+        reused = copy.deepcopy(parsed.to_dict())
+        reused["cache_hit"] = True
+        reused["importer_invoked"] = False
+        return BackendImportResult.from_dict(reused)
+
+    def _import_cache_path(self, prepared: PreparedProviderImport) -> Path:
+        digest = str(prepared.import_request.data["request_digest"])
+        return self.workspace / "providers" / "_import_cache" / digest / "backend_import_result.json"
+
+    def _complete_prepared(
+        self,
+        prepared: PreparedProviderImport,
+        *,
+        import_result: BackendImportResult,
+        registry: AssetRegistry,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        if prepared.kind == "remote":
+            return self._complete_remote(prepared, import_result=import_result, registry=registry)
+        if prepared.kind != "procedural":
+            raise AssertionError(f"unknown prepared provider kind: {prepared.kind}")
+        return self._complete_procedural(prepared, import_result=import_result, registry=registry)
+
+    def _complete_procedural(
+        self,
+        prepared: PreparedProviderImport,
+        *,
+        import_result: BackendImportResult,
+        registry: AssetRegistry,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        request = prepared.request
+        intent = prepared.intent
+        normalized = prepared.normalized
+        generated = prepared.generated
+        assert normalized is not None and generated is not None
+        asset_id = stable_asset_id(normalized)
+        lifecycle = SUCCESSFUL_LIFECYCLE[:5]
+        import_request = prepared.import_request
         importer_request_digest = stable_digest(import_request.to_dict())
         importer_result_digest = stable_digest(import_result.to_dict())
         receipt_digest = stable_digest(
@@ -469,108 +738,18 @@ class AssetProviderOrchestrator:
         ).to_dict()
         return result, receipt
 
-    def _fulfill_remote(
+    def _complete_remote(
         self,
-        request: dict[str, Any],
+        prepared: PreparedProviderImport,
         *,
-        intent: CompiledAssetIntent,
+        import_result: BackendImportResult,
         registry: AssetRegistry,
-        adapter: RemoteProviderAdapter,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-        try:
-            self.workspace.relative_to(SOURCE_ROOT)
-        except ValueError:
-            pass
-        else:
-            return (
-                provider_failure(
-                    request,
-                    status="blocked",
-                    code="workspace_inside_source_repository",
-                    message="Provider outputs cannot be written inside the source repository",
-                ),
-                None,
-            )
-        request_dir = self.workspace / "providers" / adapter.provider_id / request["request_digest"]
-        try:
-            acquisition = adapter.acquire(request, destination=request_dir, workspace=self.workspace)
-        except RemoteProviderError as exc:
-            receipt = self._remote_failure_receipt(
-                request=request,
-                adapter=adapter,
-                request_dir=request_dir,
-                error=exc,
-            )
-            return (
-                provider_failure(
-                    request,
-                    status=exc.status,
-                    code=exc.code,
-                    message=exc.message,
-                    retriable=exc.retriable,
-                    receipt_ids=[receipt["receipt_id"]],
-                ),
-                receipt,
-            )
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            error = RemoteProviderError(
-                "provider_execution_failed",
-                f"remote provider adapter failed closed: {exc}",
-            )
-            receipt = self._remote_failure_receipt(
-                request=request,
-                adapter=adapter,
-                request_dir=request_dir,
-                error=error,
-            )
-            return (
-                provider_failure(
-                    request,
-                    status="failed",
-                    code=error.code,
-                    message=error.message,
-                    receipt_ids=[receipt["receipt_id"]],
-                ),
-                receipt,
-            )
-        import_record = next(
-            (row for row in acquisition.files if Path(str(row["path"])).resolve() == acquisition.import_file.resolve()),
-            None,
-        )
-        if import_record is None:
-            return (
-                provider_failure(
-                    request,
-                    status="failed",
-                    code="provider_output_invalid",
-                    message="remote acquisition import file is absent from the verified output manifest",
-                ),
-                None,
-            )
-        import_request_payload: dict[str, Any] = {
-            "schema_version": BACKEND_IMPORT_REQUEST_SCHEMA,
-            "request_id": f"backend-import.{request['request_digest'][:24]}",
-            "asset_id": acquisition.asset_id,
-            "target_backend": request["target_backend"],
-            "class_name": "StaticMesh",
-            "source_files": [
-                {
-                    "role": "provider_import_source",
-                    "local_path": str(acquisition.import_file),
-                    "format": str(import_record["format"]),
-                    "sha256": str(import_record["sha256"]),
-                    "byte_size": int(import_record["byte_size"]),
-                    "materialized": True,
-                }
-            ],
-            "desired_name": acquisition.asset_id.replace(".", "_"),
-            "source_kind": acquisition.source_kind,
-        }
-        if acquisition.expected_size_m is not None:
-            import_request_payload["expected_size_m"] = list(acquisition.expected_size_m)
-        import_request_payload["request_digest"] = stable_digest(import_request_payload)
-        import_request = BackendImportRequest.from_dict(import_request_payload)
-        import_result = self.importer.import_asset(import_request, work_dir=request_dir, workspace=self.workspace)
+        request = prepared.request
+        intent = prepared.intent
+        acquisition = prepared.acquisition
+        assert acquisition is not None
+        import_request = prepared.import_request
         importer_request_digest = stable_digest(import_request.to_dict())
         importer_result_digest = stable_digest(import_result.to_dict())
         receipt_digest = stable_digest(
@@ -873,6 +1052,13 @@ class AssetProviderOrchestrator:
             }
             for row in acquisition.files
         ]
+        requested_categories = _string_values(intent.search_intent.must.get("category"))
+        requested_category = (
+            requested_categories[0]
+            if requested_categories
+            else str(intent.search_intent.taxonomy.get("category") or intent.legacy_intent.category)
+        )
+        requested_subcategory = str(intent.search_intent.taxonomy.get("subcategory") or "").strip()
         return {
             "asset_id": acquisition.asset_id,
             "name": acquisition.name,
@@ -880,8 +1066,9 @@ class AssetProviderOrchestrator:
             "description": acquisition.description,
             "aliases": [acquisition.asset_id, acquisition.source_asset_id, acquisition.name],
             "tags": list(dict.fromkeys(value for value in tags if value)),
-            "category": intent.legacy_intent.category,
-            "category_l1": intent.legacy_intent.category,
+            "category": requested_category,
+            "category_l1": requested_category,
+            "category_l2": requested_subcategory or None,
             "type": "StaticMesh",
             "asset_kind": "StaticMesh",
             "source_kind": acquisition.source_kind,
@@ -1014,6 +1201,9 @@ class AssetProviderOrchestrator:
                 "stdout": str(importer_result.get("stdout") or ""),
                 "stderr": str(importer_result.get("stderr") or ""),
                 "returncode": importer_result.get("returncode"),
+                "cache_hit": bool(importer_result.get("cache_hit")),
+                "importer_invoked": importer_result.get("importer_invoked", not bool(importer_result.get("cache_hit"))),
+                "batch_size": importer_result.get("batch_size"),
             },
             "backend_binding": self._receipt_binding(backend_binding),
         }
@@ -1193,6 +1383,9 @@ class AssetProviderOrchestrator:
                 "stdout": str(importer_result.get("stdout") or ""),
                 "stderr": str(importer_result.get("stderr") or ""),
                 "returncode": importer_result.get("returncode"),
+                "cache_hit": bool(importer_result.get("cache_hit")),
+                "importer_invoked": importer_result.get("importer_invoked", not bool(importer_result.get("cache_hit"))),
+                "batch_size": importer_result.get("batch_size"),
             },
             "backend_binding": self._receipt_binding(backend_binding),
         }

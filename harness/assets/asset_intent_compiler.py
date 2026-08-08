@@ -170,6 +170,11 @@ def _compile_search_intent(
         else:
             should.append(SearchPreference(field=str(field), value=raw_value))
     taxonomy = request.get("taxonomy") if isinstance(request.get("taxonomy"), Mapping) else {}
+    relaxation_policy = dict(request.get("relaxation_policy") or {})
+    relaxation_policy.setdefault("allow_parent_category", True)
+    relaxation_policy.setdefault("allow_format_conversion", False)
+    if str(geometry.get("scale_policy") or "") == "fit_uniform_to_approx_size":
+        relaxation_policy["allow_uniform_scale_to_approx_size"] = True
     return SearchIntent.from_dict(
         {
             "raw_query": description,
@@ -179,8 +184,7 @@ def _compile_search_intent(
             "must_not": request.get("must_not") or {},
             "semantic_text": str(request.get("semantic_text") or description),
             "reference_image": _similarity_reference(request),
-            "relaxation_policy": request.get("relaxation_policy")
-            or {"allow_parent_category": True, "allow_format_conversion": False},
+            "relaxation_policy": relaxation_policy,
         }
     )
 

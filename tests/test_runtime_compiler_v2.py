@@ -309,6 +309,13 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
         self.assertEqual(row["acquisition"]["status"], "provider_blocked")
         self.assertIsNone(row["selected_asset"])
         self.assertEqual(row["fallback_mode"], "provider_required")
+        placement = compilation.artifacts["runtime_actor_placement"]
+        binding = next(item for item in placement["actor_bindings"] if item["object_id"] == "cue_ball")
+        self.assertFalse(binding["asset"]["proxy"])
+        self.assertEqual(binding["asset"]["binding_source"], "unbound")
+        self.assertEqual(binding["asset"]["runtime_usage"], "unbound_required_asset")
+        self.assertIsNone(binding["asset"]["source_kind"])
+        self.assertEqual(binding["physics"]["collision_geometry_source"], "unbound_required_asset")
 
     def test_generation_reference_is_not_sent_to_similarity_retrieval(self) -> None:
         data = case_spec_v2_fixture()

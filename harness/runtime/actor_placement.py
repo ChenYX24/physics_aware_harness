@@ -77,7 +77,11 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
     body_type = str(physics.get("body_type") or "").casefold()
     kinematic = bool(body_type in {"static", "kinematic"} if body_type else physics.get("kinematic") or is_support or is_field)
     simulate_physics = bool(physics_critical and not kinematic and not is_field)
-    proxy = bool(physics.get("proxy") or asset_binding.get("fallback_reason"))
+    required_asset_unresolved = bool(asset_binding.get("required_asset_unresolved"))
+    proxy = bool(
+        not required_asset_unresolved
+        and (physics.get("proxy") or asset_binding.get("fallback_reason"))
+    )
     ue_path = asset_binding.get("selected_asset_ue_path")
     collider = str(physics.get("collider") or node.get("shape") or "box").casefold()
     collision_required = physics.get("collision_required")
@@ -95,17 +99,23 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
     # Never let an arbitrary selected asset's pivot or BodySetup silently replace
     # that geometry: those properties vary by asset and by target UE platform.
     controlled_analytic_collision = bool(
-        collision_enabled and (not ue_path or analytic_primitive is not None)
+        collision_enabled
+        and not required_asset_unresolved
+        and (not ue_path or analytic_primitive is not None)
     )
     collision_geometry_source = (
         "none"
         if not collision_enabled
+        else "unbound_required_asset"
+        if required_asset_unresolved and not ue_path
         else f"analytic_{analytic_primitive or collider}"
         if controlled_analytic_collision
         else "selected_asset"
     )
     runtime_usage = (
-        "visual_proxy"
+        "unbound_required_asset"
+        if required_asset_unresolved and not ue_path
+        else "visual_proxy"
         if ue_path and controlled_analytic_collision and simulate_physics
         else "analytic_proxy"
         if controlled_analytic_collision
@@ -145,6 +155,7 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
             "effective_size_m": asset_binding.get("effective_size_m"),
             "quality_gate": asset_binding.get("quality_gate"),
             "fallback_reason": asset_binding.get("fallback_reason"),
+            "required_asset_unresolved": required_asset_unresolved,
         },
         "physics": {
             "body_type": body_type or None,

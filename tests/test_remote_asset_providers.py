@@ -27,10 +27,11 @@ from tests.case_spec_v2_fixture import case_spec_v2_fixture
 
 
 class FakeTransport:
-    def __init__(self, *, json_responses: list[Any], downloads: Mapping[str, bytes]) -> None:
+    def __init__(self, *, json_responses: list[Any], downloads: Mapping[str, Any]) -> None:
         self.json_responses = list(json_responses)
         self.downloads = dict(downloads)
         self.requests: list[dict[str, Any]] = []
+        self.download_requests: list[str] = []
 
     def request_json(
         self,
@@ -61,7 +62,13 @@ class FakeTransport:
         timeout_s: float = 120.0,
     ) -> dict[str, Any]:
         del headers, timeout_s
-        payload = self.downloads[url]
+        self.download_requests.append(url)
+        response = self.downloads[url]
+        if isinstance(response, list):
+            response = response.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        payload = response
         actual_md5 = hashlib.md5(payload, usedforsecurity=False).hexdigest()
         if expected_md5 and actual_md5 != expected_md5:
             raise RemoteProviderError("download_hash_mismatch", destination.name)
@@ -189,6 +196,108 @@ class RemoteAssetProviderTests(unittest.TestCase):
         self.assertEqual(context.exception.status, "blocked")
         self.assertFalse(context.exception.retriable)
         self.assertIn("Insufficient credits", context.exception.message)
+
+    def test_verified_completed_download_is_reused_without_network(self) -> None:
+        destination = self.workspace / "cached.fbx"
+        payload = b"verified-fbx"
+        destination.write_bytes(payload)
+        expected_md5 = hashlib.md5(payload, usedforsecurity=False).hexdigest()
+
+        with patch("urllib.request.urlopen") as urlopen:
+            result = UrllibRemoteTransport().download(
+                "https://download.example/cached.fbx",
+                destination,
+                headers={},
+                expected_md5=expected_md5,
+            )
+
+        urlopen.assert_not_called()
+        self.assertTrue(result["cache_hit"])
+        self.assertEqual(result["sha256"], hashlib.sha256(payload).hexdigest())
+
+    def test_poly_haven_accepts_domain_name_as_provider_hint(self) -> None:
+        acquisition = PolyHavenExternalSiteAdapter(transport=self._poly_transport()).acquire(
+            {
+                **self._poly_request(),
+                "provider_hint": "polyhaven.com",
+            },
+            destination=self.workspace / "domain-provider-hint",
+            workspace=self.workspace,
+        )
+
+        self.assertEqual(acquisition.provider_id, "poly_haven_external_site_v1")
+        self.assertEqual(acquisition.source_asset_id, "dirty_football")
+
+    def test_poly_haven_retries_only_retriable_metadata_and_download_failures(self) -> None:
+        fbx = b"fbx"
+        assets = {
+            "round_ball": {
+                "type": 2,
+                "name": "Round Ball",
+                "tags": ["round", "ball"],
+                "dimensions": [220, 221, 219],
+            }
+        }
+        files = {
+            "fbx": {
+                "1k": {
+                    "fbx": {
+                        "url": "https://d/round.fbx",
+                        "md5": hashlib.md5(fbx, usedforsecurity=False).hexdigest(),
+                    }
+                }
+            }
+        }
+        transport = FakeTransport(
+            json_responses=[
+                RemoteProviderError("provider_network_error", "reset", retriable=True),
+                assets,
+                files,
+            ],
+            downloads={
+                "https://d/round.fbx": [
+                    RemoteProviderError("provider_download_failed", "timeout", retriable=True),
+                    fbx,
+                ]
+            },
+        )
+
+        with patch("harness.assets.providers.remote.time.sleep") as sleep:
+            acquisition = PolyHavenExternalSiteAdapter(transport=transport).acquire(
+                {
+                    "provider_hint": "polyhaven",
+                    "search_intent": {
+                        "raw_query": "round sphere ball",
+                        "taxonomy": {"subcategory": "ball"},
+                        "must": {"geometry_type": "sphere"},
+                    },
+                    "generation_spec": {"scale_policy": "fit_uniform_to_approx_size"},
+                },
+                destination=self.workspace / "retried-poly",
+                workspace=self.workspace,
+            )
+
+        self.assertEqual(acquisition.source_asset_id, "round_ball")
+        self.assertEqual(acquisition.metadata["remote_attempts"]["assets_metadata"], 2)
+        self.assertEqual(acquisition.metadata["remote_attempts"]["files_metadata"], 1)
+        self.assertEqual(acquisition.metadata["remote_attempts"]["downloads"]["round_ball.fbx"], 2)
+        self.assertEqual(sleep.call_count, 2)
+
+        blocked_transport = FakeTransport(
+            json_responses=[RemoteProviderError("provider_response_invalid", "bad payload")],
+            downloads={},
+        )
+        with self.assertRaises(RemoteProviderError) as context, patch(
+            "harness.assets.providers.remote.time.sleep"
+        ) as blocked_sleep:
+            PolyHavenExternalSiteAdapter(transport=blocked_transport).acquire(
+                {"provider_hint": "polyhaven", "search_intent": {"raw_query": "ball"}},
+                destination=self.workspace / "not-retried-poly",
+                workspace=self.workspace,
+            )
+        self.assertEqual(context.exception.code, "provider_response_invalid")
+        self.assertEqual(context.exception.details["attempt_count"], 1)
+        blocked_sleep.assert_not_called()
 
     def test_meshy_requires_explicit_upload_authorization(self) -> None:
         image = self.workspace / "input.png"
@@ -513,6 +622,261 @@ class RemoteAssetProviderTests(unittest.TestCase):
         self.assertEqual(drum.source_asset_id, "Barrel_01")
         self.assertIn("barrel", drum.metadata["discovery"]["query_tokens"])
 
+    def test_poly_haven_identity_and_exclusion_gates_reject_wrong_object_class(self) -> None:
+        fbx = b"fbx"
+        files = {
+            "fbx": {
+                "1k": {
+                    "fbx": {
+                        "url": "https://d/model.fbx",
+                        "md5": hashlib.md5(fbx, usedforsecurity=False).hexdigest(),
+                    }
+                }
+            }
+        }
+        assets = {
+            "metal_jug": {
+                "type": 2,
+                "name": "Metal Jug",
+                "tags": ["metal", "jug", "pitcher"],
+                "category": "Food & Kitchen/Tableware/Jugs & Pitchers",
+                "dimensions": [200, 200, 300],
+            },
+            "steel_cylinder": {
+                "type": 2,
+                "name": "Steel Cylinder",
+                "tags": ["metal", "cylindrical", "industrial"],
+                "category": "Industrial Equipment",
+                "dimensions": [300, 300, 200],
+            },
+        }
+        acquisition = PolyHavenExternalSiteAdapter(
+            transport=FakeTransport(
+                json_responses=[assets, files],
+                downloads={"https://d/model.fbx": fbx},
+            )
+        ).acquire(
+            {
+                "provider_hint": "polyhaven",
+                "search_intent": {
+                    "raw_query": "solid heavy metal cylinder",
+                    "taxonomy": {"category": "cylinder", "object_type": "rolling_cylinder"},
+                    "must_not": {"category": ["container"]},
+                },
+            },
+            destination=self.workspace / "cylinder",
+            workspace=self.workspace,
+        )
+
+        self.assertEqual(acquisition.source_asset_id, "steel_cylinder")
+        self.assertGreater(acquisition.metadata["discovery"]["exclusion_rejected_count"], 0)
+
+    def test_poly_haven_spherical_identity_uses_round_asset_and_uniform_fit_skips_authored_size_gate(self) -> None:
+        fbx = b"fbx"
+        files = {
+            "fbx": {
+                "1k": {
+                    "fbx": {
+                        "url": "https://d/round.fbx",
+                        "md5": hashlib.md5(fbx, usedforsecurity=False).hexdigest(),
+                    }
+                }
+            }
+        }
+        assets = {
+            "elongated_football": {
+                "type": 2,
+                "name": "Elongated Football",
+                "tags": ["ball", "football", "sport"],
+                "category": "Props",
+                "dimensions": [450, 250, 250],
+            },
+            "round_sports_ball": {
+                "type": 2,
+                "name": "Round Sports Ball",
+                "tags": ["ball", "round", "soccer", "sport"],
+                "category": "Props",
+                "dimensions": [220, 221, 219],
+            },
+        }
+
+        acquisition = PolyHavenExternalSiteAdapter(
+            transport=FakeTransport(
+                json_responses=[assets, files],
+                downloads={"https://d/round.fbx": fbx},
+            )
+        ).acquire(
+            {
+                "provider_hint": "polyhaven",
+                "search_intent": {
+                    "raw_query": "a spherical ball with authentic materials",
+                    "taxonomy": {"category": "sphere", "object_type": "sphere", "subcategory": "ball"},
+                    "must": {"geometry_type": "sphere", "approx_size_m": [0.5, 0.5, 0.5]},
+                },
+                "generation_spec": {
+                    "shape": "sphere",
+                    "size_m": [0.5, 0.5, 0.5],
+                    "scale_policy": "fit_uniform_to_approx_size",
+                },
+            },
+            destination=self.workspace / "round-sphere",
+            workspace=self.workspace,
+        )
+
+        discovery = acquisition.metadata["discovery"]
+        self.assertEqual(acquisition.source_asset_id, "round_sports_ball")
+        self.assertFalse(discovery["enforce_authored_size"])
+        self.assertEqual(discovery["size_rejected_count"], 0)
+        self.assertEqual(discovery["geometry_rejected_count"], 1)
+        self.assertIn("ball", discovery["identity_tokens"])
+        self.assertIn("sphere", discovery["identity_tokens"])
+
+    def test_poly_haven_specific_subcategory_overrides_generic_container_identity(self) -> None:
+        fbx = b"fbx"
+        files = {
+            "fbx": {
+                "1k": {
+                    "fbx": {
+                        "url": "https://d/crate.fbx",
+                        "md5": hashlib.md5(fbx, usedforsecurity=False).hexdigest(),
+                    }
+                }
+            }
+        }
+        assets = {
+            "wooden_bucket": {
+                "type": 2,
+                "name": "Wooden Bucket",
+                "tags": ["bucket", "container"],
+                "category": "Containers",
+            },
+            "plastic_crate": {
+                "type": 2,
+                "name": "Plastic Crate",
+                "tags": ["crate", "container"],
+                "category": "Containers",
+            },
+        }
+
+        acquisition = PolyHavenExternalSiteAdapter(
+            transport=FakeTransport(
+                json_responses=[assets, files],
+                downloads={"https://d/crate.fbx": fbx},
+            )
+        ).acquire(
+            {
+                "provider_hint": "polyhaven",
+                "search_intent": {
+                    "raw_query": "a visually distinct container or obstacle",
+                    "taxonomy": {
+                        "category": "container",
+                        "object_type": "container",
+                        "subcategory": "crate",
+                    },
+                },
+            },
+            destination=self.workspace / "specific-subcategory",
+            workspace=self.workspace,
+        )
+
+        self.assertEqual(acquisition.source_asset_id, "plastic_crate")
+        self.assertIn("crate", acquisition.metadata["discovery"]["identity_tokens"])
+
+    def test_poly_haven_rejects_contradictory_identity_and_parent_exclusion_before_download(self) -> None:
+        transport = FakeTransport(
+            json_responses=[
+                {
+                    "metal_barrel": {
+                        "type": 2,
+                        "name": "Metal Barrel",
+                        "tags": ["barrel", "container"],
+                        "category": "Containers & Storage/Barrels",
+                    }
+                }
+            ],
+            downloads={},
+        )
+        adapter = PolyHavenExternalSiteAdapter(transport=transport)
+
+        with self.assertRaises(RemoteProviderError) as context:
+            adapter.acquire(
+                {
+                    "request_id": "provider-request.chain-barrel",
+                    "object_id": "chain_target",
+                    "provider_hint": "poly_haven",
+                    "search_intent": {
+                        "raw_query": "heavy barrel",
+                        "taxonomy": {"category": "container", "object_type": "barrel"},
+                        "must_not": {"category": ["container"]},
+                    },
+                },
+                destination=self.workspace / "contradictory",
+                workspace=self.workspace,
+            )
+
+        error = context.exception
+        self.assertEqual(error.code, "contradictory_asset_constraints")
+        self.assertEqual(error.status, "blocked")
+        self.assertEqual(error.details["request_id"], "provider-request.chain-barrel")
+        self.assertEqual(error.details["object_id"], "chain_target")
+        self.assertEqual(error.details["positive_token"], "barrel")
+        self.assertEqual(error.details["excluded_token"], "container")
+        self.assertEqual(len(transport.requests), 1)
+        self.assertEqual(transport.downloads, {})
+
+    def test_poly_haven_specific_exclusion_does_not_exclude_parent_container_category(self) -> None:
+        fbx = b"fbx"
+        files = {
+            "fbx": {
+                "1k": {
+                    "fbx": {
+                        "url": "https://d/model.fbx",
+                        "md5": hashlib.md5(fbx, usedforsecurity=False).hexdigest(),
+                    }
+                }
+            }
+        }
+        assets = {
+            "plastic_crate_02": {
+                "type": 2,
+                "name": "Plastic Crate 02",
+                "tags": ["plastic", "crate", "container"],
+                "category": "Containers & Storage/Crates",
+            },
+            "metal_barrel": {
+                "type": 2,
+                "name": "Metal Barrel",
+                "tags": ["barrel", "container"],
+                "category": "Containers & Storage/Barrels",
+            },
+            "cardboard_box": {
+                "type": 2,
+                "name": "Cardboard Box",
+                "tags": ["box", "container"],
+                "category": "Containers & Storage/Boxes",
+            },
+        }
+        acquisition = PolyHavenExternalSiteAdapter(
+            transport=FakeTransport(
+                json_responses=[assets, files],
+                downloads={"https://d/model.fbx": fbx},
+            )
+        ).acquire(
+            {
+                "provider_hint": "polyhaven",
+                "search_intent": {
+                    "raw_query": "plastic crate container",
+                    "taxonomy": {"category": "crate", "object_type": "crate"},
+                    "must_not": {"category": ["barrel", "box"]},
+                },
+            },
+            destination=self.workspace / "specific-exclusion",
+            workspace=self.workspace,
+        )
+
+        self.assertEqual(acquisition.source_asset_id, "plastic_crate_02")
+        self.assertNotIn("container", acquisition.metadata["discovery"]["excluded_category_tokens"])
+
     def test_poly_haven_rejects_hash_mismatch(self) -> None:
         fbx = b"fbx"
 
@@ -582,13 +946,15 @@ class RemoteAssetProviderTests(unittest.TestCase):
 
         poly_transport = self._poly_transport()
         poly = PolyHavenExternalSiteAdapter(transport=poly_transport)
+        external_case = self._case(
+            route="external_site",
+            provider_hint="polyhaven",
+            source_uri="polyhaven:dirty_football",
+            asset_must={"license_tier": "local_preview", "geometry_type": "sphere"},
+        )
+        external_case.data["objects"][0]["geometry"]["scale_policy"] = "fit_uniform_to_approx_size"
         external_compilation = compile_runtime_case(
-            self._case(
-                route="external_site",
-                provider_hint="polyhaven",
-                source_uri="polyhaven:dirty_football",
-                asset_must={"license_tier": "local_preview", "geometry_type": "sphere"},
-            ),
+            external_case,
             requested_backend="ue",
             registry=self.registry,
             provider_orchestrator=AssetProviderOrchestrator(
@@ -600,6 +966,10 @@ class RemoteAssetProviderTests(unittest.TestCase):
         self.assertEqual(external_compilation.report["asset_resolve_invocation_count"], 1)
         external_result = external_compilation.artifacts["asset_provider_batch"]["results"][0]
         self.assertEqual(external_result["status"], "fulfilled")
+        self.assertEqual(
+            external_compilation.artifacts["asset_provider_batch"]["requests"][0]["generation_spec"]["scale_policy"],
+            "fit_uniform_to_approx_size",
+        )
         selected = self.registry.get_asset_by_id(external_result["catalog_asset_ids"][0])
         self.assertEqual(selected["license_tier"], "reference")
         self.assertEqual(selected["source_uri"], "https://polyhaven.com/a/dirty_football")
@@ -607,6 +977,75 @@ class RemoteAssetProviderTests(unittest.TestCase):
         self.assertEqual(selected["collider"], "box")
         self.assertEqual(selected["authored_size_m"], [0.17, 0.17, 0.17])
         self.assertEqual(selected["provider_reported_size_m"], [0.18, 0.18, 0.18])
+
+    def test_uniform_fit_qualifies_specific_provider_asset_for_generic_requested_category(self) -> None:
+        fbx = b"crate-fbx"
+        data = case_spec_v2_fixture()
+        data["objects"][0]["geometry"]["approx_size_m"] = [0.5, 0.5, 0.5]
+        data["objects"][0]["geometry"]["scale_policy"] = "fit_uniform_to_approx_size"
+        data["objects"][0]["asset"] = {
+            "description": "a wooden crate container",
+            "resource_kind": "mesh_3d",
+            "must": {"category": "container", "license_tier": "local_preview"},
+            "taxonomy": {
+                "category": "container",
+                "object_type": "container",
+                "subcategory": "crate",
+            },
+            "acquisition": {
+                "route": "external_site",
+                "requirement": "required",
+                "origin": "user_explicit",
+                "provider_hint": "polyhaven",
+                "source_uri_hint": "polyhaven:wooden_crate_01",
+                "reference_inputs": [],
+                "fallback_order": [],
+            },
+        }
+        transport = FakeTransport(
+            json_responses=[
+                {
+                    "wooden_crate_01": {
+                        "type": 2,
+                        "name": "Wooden Crate",
+                        "category": "Props/Industrial",
+                        "tags": ["wooden", "crate"],
+                        "dimensions": [825, 409, 350],
+                    }
+                },
+                {
+                    "fbx": {
+                        "1k": {
+                            "fbx": {
+                                "url": "https://d/crate.fbx",
+                                "md5": hashlib.md5(fbx, usedforsecurity=False).hexdigest(),
+                            }
+                        }
+                    }
+                },
+            ],
+            downloads={"https://d/crate.fbx": fbx},
+        )
+
+        compilation = compile_runtime_case(
+            case_spec_v2_from_dict(data),
+            requested_backend="ue",
+            registry=self.registry,
+            provider_orchestrator=AssetProviderOrchestrator(
+                workspace=self.workspace,
+                importer=StubImporter(),
+                remote_providers={"external_site": PolyHavenExternalSiteAdapter(transport=transport)},
+            ),
+        )
+
+        result = compilation.artifacts["asset_provider_batch"]["results"][0]
+        self.assertEqual(result["status"], "fulfilled")
+        selected = self.registry.get_asset_by_id(result["catalog_asset_ids"][0])
+        self.assertEqual(selected["category"], "container")
+        self.assertEqual(selected["category_l2"], "crate")
+        compiled_intent = compilation.artifacts["asset_provider_batch"]["requests"][0]["search_intent"]
+        self.assertTrue(compiled_intent["relaxation_policy"]["allow_uniform_scale_to_approx_size"])
+        self.assertEqual(selected["provider_reported_size_m"], [0.825, 0.409, 0.35])
 
     def test_external_asset_and_procedural_ground_qualify_in_same_case(self) -> None:
         data = case_spec_v2_fixture()

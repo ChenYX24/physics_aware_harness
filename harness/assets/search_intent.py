@@ -264,6 +264,8 @@ def asset_matches_approx_size(asset: Mapping[str, Any], intent: SearchIntent) ->
     target = intent.must.get("approx_size_m")
     if target is None:
         return True
+    if intent.relaxation_policy.get("allow_uniform_scale_to_approx_size"):
+        return True
     actual = asset.get("bbox_size_m") or asset.get("authored_size_m")
     if not isinstance(target, list) or len(target) != 3 or not isinstance(actual, list) or len(actual) != 3:
         return False

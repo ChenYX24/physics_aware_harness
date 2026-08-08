@@ -12,7 +12,7 @@ from harness.verification.bounce_verifier import verify_bounce
 from harness.verification.constraint_verifier import verify_constraint_motion
 from harness.verification.contact_causality_verifier import verify_contact_causality
 from harness.verification.diagnosis import repair_suggestion
-from harness.verification.domino_verifier import verify_domino
+from harness.verification.ordered_contact_verifier import verify_ordered_contact_propagation
 from harness.verification.elastic_constraint_verifier import verify_elastic_constraint
 from harness.verification.elastic_launch_verifier import verify_elastic_launch
 from harness.verification.falling_verifier import verify_falling
@@ -89,7 +89,7 @@ class PhysicsVerifier:
         if capability_id == "rigid_body_contact_causality":
             failure_type, first_failure, evidence = verify_contact_causality(case_spec, trajectory)
         elif capability_id == "sequential_contact_propagation":
-            failure_type, first_failure, evidence = verify_domino(case_spec, trajectory)
+            failure_type, first_failure, evidence = verify_ordered_contact_propagation(case_spec, trajectory)
         elif capability_id == "rigid_body_gravity_collision":
             failure_type, first_failure, evidence = verify_falling(case_spec, trajectory)
         elif capability_id == "ramp_sliding_friction":

@@ -36,6 +36,7 @@ DYNAMIC_ABOVE_SUPPORT_ROLES = {
 def build_object_node(obj: dict[str, Any], asset_row: dict[str, Any] | None = None) -> dict[str, Any]:
     intent = intent_from_object(obj)
     selected_asset = asset_row.get("selected_asset") if asset_row else None
+    required_asset_unresolved = _required_asset_unresolved(asset_row)
     position = vec3(obj.get("initial_position_m") or obj.get("position_m") or obj.get("position") or [0.0, 0.0, 0.0])
     rotation = vec3(obj.get("rotation_deg") or obj.get("initial_rotation_deg") or [0.0, 0.0, 0.0])
     instance_geometry = resolve_instance_geometry(obj, selected_asset)
@@ -53,7 +54,7 @@ def build_object_node(obj: dict[str, Any], asset_row: dict[str, Any] | None = No
     collision_profile = obj.get("collision_profile")
     if collision_profile is None and isinstance(selected_asset, dict):
         collision_profile = selected_asset.get("collision_profile")
-    if selected_asset is None and asset_row and asset_row.get("fallback_reason"):
+    if selected_asset is None and asset_row and asset_row.get("fallback_reason") and not required_asset_unresolved:
         defaults = analytic_physics_defaults(obj, intent.role)
         mass = mass if mass is not None else defaults["mass_kg"]
         collider = collider if collider is not None else defaults["collider"]
@@ -106,7 +107,11 @@ def build_object_node(obj: dict[str, Any], asset_row: dict[str, Any] | None = No
             "use_ccd": obj.get("use_ccd"),
             "initial_angular_velocity_rad_s": obj.get("initial_angular_velocity_rad_s"),
             "kinematic": bool(obj.get("kinematic", is_support_role(intent.role))),
-            "proxy": bool(selected_asset.get("proxy")) if isinstance(selected_asset, dict) else asset_row is not None and asset_row.get("fallback_reason") is not None,
+            "proxy": (
+                bool(selected_asset.get("proxy"))
+                if isinstance(selected_asset, dict)
+                else bool(asset_row and asset_row.get("fallback_reason") and not required_asset_unresolved)
+            ),
         },
         "asset_binding": {
             "selected_asset_id": asset_id(selected_asset),
@@ -116,7 +121,13 @@ def build_object_node(obj: dict[str, Any], asset_row: dict[str, Any] | None = No
                 or selected_asset.get("type")
                 or selected_asset.get("class_name")
             ) if isinstance(selected_asset, dict) else None,
-            "source_kind": selected_asset.get("source_kind") if isinstance(selected_asset, dict) else "analytic_proxy",
+            "source_kind": (
+                selected_asset.get("source_kind")
+                if isinstance(selected_asset, dict)
+                else None
+                if required_asset_unresolved
+                else "analytic_proxy"
+            ),
             "source_uri": selected_asset.get("source_uri") if isinstance(selected_asset, dict) else None,
             "license": selected_asset.get("license") if isinstance(selected_asset, dict) else None,
             "sha256": selected_asset.get("sha256") if isinstance(selected_asset, dict) else None,
@@ -134,9 +145,21 @@ def build_object_node(obj: dict[str, Any], asset_row: dict[str, Any] | None = No
             "effective_size_m": instance_geometry["effective_size_m"],
             "quality_gate": selected_asset.get("quality_gate") if isinstance(selected_asset, dict) else None,
             "fallback_reason": asset_row.get("fallback_reason") if asset_row else "asset resolution missing",
+            "required_asset_unresolved": required_asset_unresolved,
             "runtime_binding_requirements": asset_row.get("runtime_binding_requirements", []) if asset_row else [],
         },
     }
+
+
+def _required_asset_unresolved(asset_row: dict[str, Any] | None) -> bool:
+    if not isinstance(asset_row, dict) or asset_row.get("selected_asset") is not None:
+        return False
+    acquisition = asset_row.get("acquisition") if isinstance(asset_row.get("acquisition"), dict) else {}
+    requested = acquisition.get("requested") if isinstance(acquisition.get("requested"), dict) else {}
+    return bool(
+        requested.get("requirement") == "required"
+        and requested.get("route") in {"external_site", "procedural_generation", "model_generation"}
+    )
 
 
 def resolve_instance_geometry(

@@ -9,7 +9,7 @@ from harness.core.case_spec_v2 import CaseSpecV2
 
 VERIFIER_BY_CAPABILITY = {
     "rigid_body_contact_causality": "contact_causality_verifier",
-    "sequential_contact_propagation": "domino_verifier",
+    "sequential_contact_propagation": "ordered_contact_verifier",
     "rigid_body_gravity_collision": "falling_verifier",
     "ramp_sliding_friction": "ramp_verifier",
     "projectile_gravity_motion": "projectile_verifier",

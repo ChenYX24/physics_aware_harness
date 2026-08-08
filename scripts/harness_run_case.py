@@ -280,26 +280,29 @@ def main() -> int:
             status="failed",
         )
         raise
+    if not (Path(run_dir) / "harness_verifier.json").is_file():
+        from harness.verification.physics_verifier import PhysicsVerifier
+
+        PhysicsVerifier().verify_run_dir(run_dir, write=True)
+    verification_status = verified_run_status(run_dir)
     if profile:
-        verification_status = verified_run_status(run_dir)
         write_execution_reports(
             run_dir,
             profile,
             wall_seconds=time.perf_counter() - started,
             status=verification_status,
         )
-    else:
-        verification_status = None
+    result_status = "completed" if verification_status == "pass" else "failed_verification"
     write_run_control_page(
         run_dir,
         case.data,
         execution=execution,
         reproduce_command=reproduce_command,
-        status="completed",
+        status="completed" if verification_status == "pass" else "failed",
     )
     videos = ArtifactManager(run_dir).publish_videos(workspace_path(args.video_root, default_relative="review/probes"), case_id=case.case_id, backend=selected_backend)
-    print(json.dumps({"schema_version": "harness_run_case_result_v1", "run_dir": str(run_dir), "case_id": case.case_id, "backend": selected_backend, "status": "completed", "verification_status": verification_status, "profile": profile.name if profile else "custom", "run_control": str(run_dir / "run_control.html"), "videos": [str(path) for path in videos]}, indent=2, ensure_ascii=False))
-    return 0
+    print(json.dumps({"schema_version": "harness_run_case_result_v1", "run_dir": str(run_dir), "case_id": case.case_id, "backend": selected_backend, "status": result_status, "verification_status": verification_status, "profile": profile.name if profile else "custom", "run_control": str(run_dir / "run_control.html"), "videos": [str(path) for path in videos]}, indent=2, ensure_ascii=False))
+    return 0 if verification_status == "pass" else 2
 
 
 def parse_csv(value: str) -> list[str]:

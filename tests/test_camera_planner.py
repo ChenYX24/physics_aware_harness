@@ -81,6 +81,16 @@ class CameraPlannerTests(unittest.TestCase):
         self.assertEqual(plan.views[1].target, (0.0, 0.0, 1.25))
         self.assertEqual(plan.views[1].fov, 45.0)
 
+    def test_side_view_observes_dominant_horizontal_axis_broadside(self) -> None:
+        plan = plan_cameras_for_scene(
+            SceneBounds(center=(0.0, 0.0, 0.7), extent=(6.0, 1.0, 1.4)),
+            requested_views=["side_static"],
+        )
+
+        side = plan.views[0]
+        self.assertEqual(side.location[0], 0.0)
+        self.assertLess(side.location[1], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

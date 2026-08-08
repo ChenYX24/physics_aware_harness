@@ -72,7 +72,13 @@ def plan_cameras_for_scene(
             location = (cx, cy - distance * 1.35, cz + ez * 0.55)
             rotation = look_at_rotation(location, bounds.center)
         elif role in {"side", "side_static"}:
-            location = (cx + distance * 1.35, cy, cz + max(ez * 1.2, radius * 0.55, 0.8))
+            # Observe the dominant horizontal scene axis broadside so motion
+            # along a long ramp or track remains visible instead of end-on.
+            location = (
+                cx if ex >= ey else cx + distance * 1.35,
+                cy - distance * 1.35 if ex >= ey else cy,
+                cz + max(ez * 1.2, radius * 0.55, 0.8),
+            )
             rotation = look_at_rotation(location, bounds.center)
         elif role in {"top", "top_down"}:
             location = (cx, cy, cz + max(distance * 1.8, ez * 3.0, 2.0))

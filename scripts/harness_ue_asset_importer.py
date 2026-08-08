@@ -19,9 +19,11 @@ DEFAULT_TIMEOUT_S = 600.0
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Import one Provider asset through a real Unreal Editor process.")
-    parser.add_argument("--request", required=True)
-    parser.add_argument("--result", required=True)
+    parser = argparse.ArgumentParser(description="Import Provider assets through a real Unreal Editor process.")
+    parser.add_argument("--request")
+    parser.add_argument("--result")
+    parser.add_argument("--batch-request")
+    parser.add_argument("--batch-result")
     parser.add_argument("--ue-executable")
     parser.add_argument("--ue-project")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
@@ -30,6 +32,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.batch_request or args.batch_result:
+        if not args.batch_request or not args.batch_result or args.request or args.result:
+            raise SystemExit("batch import requires --batch-request and --batch-result only")
+        return _main_batch(args)
+    if not args.request or not args.result:
+        raise SystemExit("single import requires --request and --result")
     request_path = Path(args.request).expanduser().resolve()
     result_path = Path(args.result).expanduser().resolve()
     request = json.loads(request_path.read_text(encoding="utf-8"))
@@ -139,6 +147,143 @@ def main() -> int:
     return 0
 
 
+def _main_batch(args: argparse.Namespace) -> int:
+    manifest_path = Path(args.batch_request).expanduser().resolve()
+    batch_result_path = Path(args.batch_result).expanduser().resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    items = manifest.get("items") or []
+    if not isinstance(items, list) or not items:
+        raise SystemExit("batch request contains no import items")
+    requests: list[dict[str, Any]] = []
+    result_paths: list[Path] = []
+    request_paths: list[Path] = []
+    for item in items:
+        request_path = Path(str(item["request_path"])).expanduser().resolve()
+        request_paths.append(request_path)
+        result_paths.append(Path(str(item["result_path"])).expanduser().resolve())
+        requests.append(json.loads(request_path.read_text(encoding="utf-8")))
+    workspace_value = os.environ.get("SIM_HARNESS_WORKSPACE", "").strip()
+    workspace = Path(workspace_value).expanduser().resolve() if workspace_value else None
+    ue_executable = Path(args.ue_executable or os.environ.get("SIM_STUDIO_UE_EXECUTABLE", "")).expanduser()
+    ue_project = Path(
+        args.ue_project
+        or os.environ.get("SIM_STUDIO_UE_PROJECT", "")
+        or (workspace / "ue" / "SimulatorWorkspace.uproject" if workspace is not None else "")
+    ).expanduser()
+    failure = _configuration_failure(requests[0], ue_executable=ue_executable, ue_project=ue_project)
+    if failure is not None:
+        for request, result_path in zip(requests, result_paths):
+            _write_json(
+                result_path,
+                _failure_result(request, code=failure["failure"]["code"], message=failure["failure"]["message"]),
+            )
+        return 0
+    temporary_paths: list[Path] = []
+    prepared_requests: list[dict[str, Any]] = []
+    try:
+        for request_path, request in zip(request_paths, requests):
+            prepared_path, temporary = _prepare_ue_request(request_path, request)
+            temporary_paths.extend(temporary)
+            prepared_requests.append(json.loads(prepared_path.read_text(encoding="utf-8")))
+    except (OSError, ValueError) as exc:
+        for request, result_path in zip(requests, result_paths):
+            _write_json(
+                result_path,
+                _failure_result(
+                    request,
+                    code="backend_asset_import_failed",
+                    message=f"could not normalize source asset for Unreal: {exc}",
+                ),
+            )
+        return 0
+    ue_batch_request_path = manifest_path.with_name(f"{manifest_path.stem}.ue_import.json")
+    _write_json(ue_batch_request_path, {"requests": prepared_requests})
+    temporary_paths.append(ue_batch_request_path)
+    batch_result_path.unlink(missing_ok=True)
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "SIM_HARNESS_UE_IMPORT_BATCH_REQUEST": str(ue_batch_request_path),
+            "SIM_HARNESS_UE_IMPORT_BATCH_RESULT": str(batch_result_path),
+            "SIM_HARNESS_UE_IMPORT_PROJECT_CONTENT": str(ue_project.parent / "Content"),
+        }
+    )
+    command = [
+        str(ue_executable),
+        f"-project={ue_project}",
+        "-RenderOffScreen",
+        "-unattended",
+        "-nosplash",
+        "-NoScreenMessages",
+        "-stdout",
+        "-FullStdOutLogOutput",
+        f"-ExecutePythonScript={UE_SCRIPT}",
+    ]
+    results: list[dict[str, Any]] | None = None
+    try:
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as stdout_file, tempfile.TemporaryFile(
+            mode="w+", encoding="utf-8", errors="replace"
+        ) as stderr_file:
+            try:
+                process = subprocess.Popen(command, stdout=stdout_file, stderr=stderr_file, text=True, shell=False, env=environment)
+            except OSError as exc:
+                results = [
+                    _failure_result(
+                        request,
+                        code="backend_importer_execution_failed",
+                        message=f"could not start Unreal Editor: {exc}",
+                        retriable=True,
+                    )
+                    for request in requests
+                ]
+            else:
+                outcome = _wait_for_result(process, result_path=batch_result_path, timeout_s=float(args.timeout))
+                if outcome == "result":
+                    _stop_process(process)
+                    payload = json.loads(batch_result_path.read_text(encoding="utf-8"))
+                    results = payload.get("results") if isinstance(payload, dict) else None
+                elif outcome == "timeout":
+                    _stop_process(process)
+                    results = [
+                        _failure_result(
+                            request,
+                            code="backend_importer_timeout",
+                            message=f"Unreal asset import exceeded {float(args.timeout):g}s",
+                            retriable=True,
+                        )
+                        for request in requests
+                    ]
+                else:
+                    results = [
+                        _failure_result(
+                            request,
+                            code="backend_importer_execution_failed",
+                            message=f"Unreal Editor exited with code {process.returncode} without an importer result",
+                            retriable=True,
+                        )
+                        for request in requests
+                    ]
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            _emit_output(stdout_file.read(), stderr_file.read())
+    finally:
+        for path in temporary_paths:
+            path.unlink(missing_ok=True)
+    if not isinstance(results, list) or len(results) != len(requests):
+        results = [
+            _failure_result(
+                request,
+                code="backend_importer_result_invalid",
+                message="Unreal batch importer returned the wrong number of results",
+            )
+            for request in requests
+        ]
+    for result, result_path in zip(results, result_paths):
+        _write_json(result_path, result)
+    _write_json(batch_result_path, {"results": results})
+    return 0
+
+
 def _prepare_ue_request(request_path: Path, request: dict[str, Any]) -> tuple[Path, tuple[Path, ...]]:
     sources = request.get("source_files") or []
     if len(sources) != 1:
@@ -244,7 +389,10 @@ def _complete_json_file(path: Path) -> bool:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
-    return isinstance(value, dict) and value.get("status") in {"fulfilled", "blocked", "failed"}
+    return isinstance(value, dict) and (
+        value.get("status") in {"fulfilled", "blocked", "failed"}
+        or isinstance(value.get("results"), list)
+    )
 
 
 def _stop_process(process: subprocess.Popen[str]) -> None:

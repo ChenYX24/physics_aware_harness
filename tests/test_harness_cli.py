@@ -894,6 +894,37 @@ class HarnessCliTests(unittest.TestCase):
             self.assertFalse(readiness["depth_ready"])
             self.assertFalse(readiness["ue_render_real"])
 
+    def test_cli_returns_failure_when_physics_verifier_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = os.environ.copy()
+            env["SIM_HARNESS_WORKSPACE"] = str(root / "workspace")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "harness_run_case.py"),
+                    "cases/falling/negative_floating_block.json",
+                    "--backend",
+                    "fallback",
+                    "--out",
+                    str(root / "runs"),
+                    "--video-root",
+                    str(root / "review"),
+                ],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            summary = json.loads(result.stdout)
+            self.assertEqual(summary["status"], "failed_verification")
+            self.assertEqual(summary["verification_status"], "fail")
+            control = json.loads((Path(summary["run_dir"]) / "run_control.json").read_text(encoding="utf-8"))
+            self.assertEqual(control["status"], "failed")
+
     def test_cli_case_route_keeps_runtime_outside_repo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"

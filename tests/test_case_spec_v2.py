@@ -153,6 +153,23 @@ class CaseSpecV2Tests(unittest.TestCase):
         ramp["initial_state"]["rotation_deg"] = [-12.0, 0.0, 0.0]
         case_spec_v2_from_dict(data)
 
+    def test_box_that_only_mentions_a_ramp_is_not_an_inclined_surface(self) -> None:
+        roles = (
+            "static block supporting high end of ramp",
+            "first target container closest to slope",
+            "third target container farthest from ramp",
+            "ramp support block",
+        )
+        for role in roles:
+            with self.subTest(role=role):
+                data = case_spec_v2_fixture()
+                subject = data["objects"][2]
+                subject["id"] = "ordinary_box"
+                subject["role"] = role
+                subject["geometry"]["shape_hint"] = "box"
+                subject["initial_state"]["rotation_deg"] = [0.0, 0.0, 0.0]
+                case_spec_v2_from_dict(data)
+
     def test_support_relations_project_to_explicit_runtime_support_map(self) -> None:
         data = case_spec_v2_fixture()
         data["relations"].append({"type": "supported_by", "source": "cue_ball", "target": "floor"})
@@ -163,6 +180,32 @@ class CaseSpecV2Tests(unittest.TestCase):
             {"cue_ball": "floor", "target_ball": "floor"},
         )
 
+    def test_nearby_stationary_contact_projects_as_support_not_collision_edge(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["initial_state"]["linear_velocity_m_s"] = [0.0, 0.0, 0.0]
+        data["relations"].append({"type": "contact", "source": "cue_ball", "target": "floor"})
+
+        projection = project_case_spec_v2_to_v1(case_spec_v2_from_dict(data)).data
+
+        self.assertEqual(projection["expected_physics"]["support"]["cue_ball"], "floor")
+        self.assertEqual(
+            projection["expected_physics"]["collision_graph"],
+            [["cue_ball", "target_ball"]],
+        )
+
+    def test_singular_impact_relation_is_canonicalized_and_projected(self) -> None:
+        data = case_spec_v2_fixture()
+        data["relations"] = [{"type": "impact", "source": "cue_ball", "target": "target_ball"}]
+
+        parsed = case_spec_v2_from_dict(data)
+        projection = project_case_spec_v2_to_v1(parsed).data
+
+        self.assertEqual(parsed.data["relations"][0]["type"], "impacts")
+        self.assertEqual(
+            projection["expected_physics"]["collision_graph"],
+            [["cue_ball", "target_ball"]],
+        )
+
     def test_explicit_support_must_contain_subject_horizontal_bounds(self) -> None:
         data = case_spec_v2_fixture()
         data["objects"][0]["initial_state"]["position_m"][0] = 3.0
@@ -170,6 +213,29 @@ class CaseSpecV2Tests(unittest.TestCase):
         with self.assertRaises(CaseSpecV2ValidationError) as context:
             case_spec_v2_from_dict(data)
         self.assertIn("support_footprint_too_small", {issue.code for issue in context.exception.issues})
+
+    def test_static_ramp_can_be_locally_supported_by_smaller_high_end_block(self) -> None:
+        data = case_spec_v2_fixture()
+        ramp = data["objects"][2]
+        ramp["id"] = "ramp"
+        ramp["role"] = "static inclined ramp"
+        ramp["geometry"]["approx_size_m"] = [5.0, 1.0, 0.1]
+        ramp["initial_state"]["position_m"] = [0.0, 0.0, 0.7]
+        ramp["initial_state"]["rotation_deg"] = [15.0, 0.0, 0.0]
+        support = {
+            "id": "support_block",
+            "role": "high end support",
+            "geometry": {"shape_hint": "box", "approx_size_m": [0.5, 1.0, 1.3]},
+            "physics": {"body_type": "static", "collision_required": True},
+            "initial_state": {"position_m": [-2.4, 0.0, 0.65]},
+            "behavior": {},
+        }
+        data["objects"].append(support)
+        data["relations"].append({"type": "supported_by", "source": "ramp", "target": "support_block"})
+
+        parsed = case_spec_v2_from_dict(data)
+
+        self.assertEqual(parsed.data["objects"][-1]["id"], "support_block")
 
     def test_fast_dynamic_body_defaults_to_ccd_but_preserves_explicit_false(self) -> None:
         data = case_spec_v2_fixture()
@@ -180,6 +246,15 @@ class CaseSpecV2Tests(unittest.TestCase):
         data["objects"][0]["physics"]["use_ccd"] = False
         projected = project_case_spec_v2_to_v1(case_spec_v2_from_dict(data)).data
         self.assertFalse(projected["objects"][0]["use_ccd"])
+
+    def test_ccd_must_be_declared_in_physics_not_behavior(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["behavior"]["use_ccd"] = True
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        self.assertIn("misplaced_physics_field", {issue.code for issue in context.exception.issues})
 
     def test_release_event_velocity_overrides_zero_hold_velocity(self) -> None:
         data = case_spec_v2_fixture()

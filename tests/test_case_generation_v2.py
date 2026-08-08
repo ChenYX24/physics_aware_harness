@@ -60,6 +60,33 @@ def expansion_fixture() -> dict[str, Any]:
     }
 
 
+def source_constraint_expansion() -> dict[str, Any]:
+    expansion = expansion_fixture()
+    expansion["object_analysis"] = [
+        {"suggested_id": "cue_ball", "role": "striker"},
+        {"suggested_id": "target_ball", "role": "target"},
+    ]
+    expansion["asset_source_constraints"] = [
+        {
+            "scope": {"object_ids": ["cue_ball"]},
+            "allowed_routes": ["external_site", "model_generation"],
+            "allowed_providers": ["poly_haven", "meshy"],
+            "requirement": "required",
+            "fallback_order": ["meshy"],
+            "allow_proxy": False,
+        },
+        {
+            "scope": {"object_ids": ["target_ball"]},
+            "allowed_routes": ["model_generation"],
+            "allowed_providers": ["meshy", "future_mesh_provider"],
+            "requirement": "preferred",
+            "fallback_order": [],
+            "allow_proxy": True,
+        },
+    ]
+    return expansion
+
+
 class CaseGenerationV2Tests(unittest.TestCase):
     def test_exactly_two_normal_calls_generate_v2(self) -> None:
         request = build_case_request(case_id="generated_v2", text="Make one ball hit another.")
@@ -107,6 +134,8 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertIn("thresholds", contract["field_shapes"]["verification_requirements"])
         expansion_contract = client.calls[0]["payload"]["expansion_contract"]
         self.assertEqual(expansion_contract["field_types"]["object_analysis"], "array")
+        self.assertEqual(expansion_contract["field_types"]["asset_source_constraints"], "array")
+        self.assertIn("allowed_providers", expansion_contract["asset_source_constraint_shape"])
         expansion_prompt = client.calls[0]["system_prompt"]
         self.assertIn("turns a user's natural-language request", expansion_prompt)
         self.assertIn("Unreal Engine (UE)", expansion_prompt)
@@ -122,10 +151,83 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertIn("passed unchanged to the selected verifier", case_prompt)
         self.assertIn("fit_uniform_to_approx_size", case_prompt)
         self.assertIn("positive pitch makes local +X downhill", case_prompt)
+        self.assertIn("A cylinder's authored/analytic axis is local Z", case_prompt)
+        self.assertIn("competing classes as must_not.category exclusions", case_prompt)
+        self.assertIn("Use supported_by, not plain contact", case_prompt)
         structure_example = client.calls[1]["payload"]["case_spec_contract"]["valid_structure_example_do_not_copy_values"]
         self.assertEqual(case_spec_v2_from_dict(structure_example).case_id, "example")
         self.assertEqual(result.case_spec.case_id, "generated_v2")
         self.assertEqual(result.repair_count, 0)
+
+    def test_multiple_structured_source_constraints_are_audited_in_case_spec(self) -> None:
+        generated = case_spec_v2_fixture()
+        generated["objects"][0]["asset"] = {
+            "description": "external striker",
+            "resource_kind": "mesh_3d",
+            "acquisition": {
+                "route": "external_site",
+                "requirement": "required",
+                "origin": "user_explicit",
+                "provider_hint": "poly_haven",
+                "fallback_order": [],
+            },
+        }
+        generated["objects"][1]["asset"] = {
+            "description": "generated target",
+            "resource_kind": "mesh_3d",
+            "acquisition": {
+                "route": "model_generation",
+                "requirement": "preferred",
+                "origin": "llm_inferred",
+                "provider_hint": "meshy",
+                "fallback_order": [],
+            },
+        }
+        request = build_case_request(case_id="multiple_source_constraints", text="Use the explicitly requested sources.")
+        client = FakeJSONClient([source_constraint_expansion(), generated])
+
+        result = generate_case_spec_v2(request, client=client)
+
+        audited = result.case_spec.data["provenance"]["case_generation"]["asset_source_constraints"]
+        self.assertEqual(len(audited), 2)
+        self.assertEqual(audited[0]["allowed_providers"], ["poly_haven", "meshy"])
+
+    def test_required_no_proxy_source_mismatch_enters_existing_bounded_repair(self) -> None:
+        invalid = case_spec_v2_fixture()
+        invalid["objects"][0]["asset"] = {
+            "description": "external striker",
+            "resource_kind": "mesh_3d",
+            "acquisition": {
+                "route": "external_site",
+                "requirement": "preferred",
+                "origin": "llm_inferred",
+                "provider_hint": "unapproved_provider",
+                "fallback_order": [],
+            },
+        }
+        repaired = deepcopy(invalid)
+        repaired["objects"][0]["asset"]["acquisition"].update(
+            requirement="required",
+            origin="user_explicit",
+            provider_hint="poly_haven",
+        )
+        request = build_case_request(case_id="required_source_repair", text="Use the explicitly requested source.")
+        expansion = source_constraint_expansion()
+        expansion["asset_source_constraints"] = expansion["asset_source_constraints"][:1]
+        client = FakeJSONClient([expansion, invalid, repaired])
+
+        result = generate_case_spec_v2(request, client=client)
+
+        self.assertEqual(result.repair_count, 1)
+        errors = client.calls[-1]["payload"]["validation_errors"]["issues"]
+        codes = {item["code"] for item in errors}
+        self.assertIn("asset_source_provider_mismatch", codes)
+        self.assertIn("explicit_asset_source_not_required", codes)
+        self.assertIn("explicit_asset_source_origin_lost", codes)
+        self.assertEqual(
+            client.calls[-1]["payload"]["repair_constraints"]["asset_source_constraints"][0]["scope"]["object_ids"],
+            ["cue_ball"],
+        )
 
     def test_common_mapping_shaped_analysis_is_canonicalized_without_losing_keys(self) -> None:
         expansion = expansion_fixture()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import json
 import math
+import os
 import subprocess
 import sys
 import tempfile
@@ -14,7 +15,60 @@ from harness.assets.providers.local_procedural_mesh import generate_procedural_o
 from scripts.harness_ue_asset_importer import _prepare_ue_request, _stop_process, _wait_for_result
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
 class UEAssetImporterLauncherTests(unittest.TestCase):
+    def test_batch_launcher_reports_configuration_failure_per_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            items = []
+            for index in range(2):
+                request_path = root / f"request_{index}.json"
+                result_path = root / f"result_{index}.json"
+                request_path.write_text(
+                    json.dumps(
+                        {
+                            "request_id": f"backend-import.batch-{index}",
+                            "request_digest": str(index) * 64,
+                            "asset_id": f"asset.batch.{index}",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                items.append({"request_path": str(request_path), "result_path": str(result_path)})
+            manifest = root / "batch.json"
+            aggregate = root / "aggregate.json"
+            manifest.write_text(json.dumps({"items": items}), encoding="utf-8")
+            environment = os.environ.copy()
+            environment.pop("SIM_STUDIO_UE_EXECUTABLE", None)
+            environment.pop("SIM_STUDIO_UE_PROJECT", None)
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "harness_ue_asset_importer.py"),
+                    "--batch-request",
+                    str(manifest),
+                    "--batch-result",
+                    str(aggregate),
+                    "--ue-executable",
+                    str(root / "missing-editor"),
+                    "--ue-project",
+                    str(root / "missing.uproject"),
+                ],
+                cwd=ROOT,
+                env=environment,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            for item in items:
+                result = json.loads(Path(item["result_path"]).read_text(encoding="utf-8"))
+                self.assertEqual(result["status"], "blocked")
+                self.assertEqual(result["failure"]["code"], "backend_importer_unavailable")
+
     def test_external_fbx_bounds_allow_metadata_drift_but_reject_scale_errors(self) -> None:
         source = Path(__file__).resolve().parents[1] / "scripts" / "native_ue_asset_importer.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
@@ -31,6 +85,14 @@ class UEAssetImporterLauncherTests(unittest.TestCase):
         actual = [40.00098991394043, 27.053309440612793, 30.472382032600194]
         expected = [40.00099003314972, 29.232875257730484, 34.710586071014404]
         self.assertTrue(matches(actual, expected, source_kind="external_site"))
+        self.assertTrue(
+            matches(
+                [34.550649642944336, 10.713947296142578, 50.31427764892578],
+                [37.74920701980591, 41.845703125, 50.3142774105072],
+                source_kind="external_site",
+            )
+        )
+        self.assertFalse(matches([1.0, 2.0, 50.31427764892578], [37.75, 41.85, 50.31], source_kind="external_site"))
         self.assertFalse(matches([4000.0, 2700.0, 3000.0], expected, source_kind="external_site"))
         self.assertFalse(matches(actual, expected, source_kind="procedural_generation"))
 

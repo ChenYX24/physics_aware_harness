@@ -23,6 +23,8 @@ MESHY_API_ROOT = "https://api.meshy.ai/openapi/v1"
 POLY_HAVEN_API_ROOT = "https://api.polyhaven.com"
 POLY_HAVEN_USER_AGENT = "PhysicsAwareHarness/0.1 (asset-provider; https://polyhaven.com)"
 MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
+REMOTE_RETRY_ATTEMPTS = 3
+REMOTE_RETRY_BASE_DELAY_S = 0.25
 
 
 class RemoteProviderError(RuntimeError):
@@ -114,6 +116,16 @@ class UrllibRemoteTransport:
         if parsed.scheme != "https" or not parsed.netloc:
             raise RemoteProviderError("download_url_invalid", "provider download URL must use HTTPS")
         destination.parent.mkdir(parents=True, exist_ok=True)
+        if expected_md5 and destination.is_file():
+            actual_md5 = _md5_file(destination)
+            if actual_md5.casefold() == expected_md5.casefold():
+                return {
+                    "path": destination,
+                    "sha256": _sha256_file(destination),
+                    "md5": actual_md5,
+                    "byte_size": destination.stat().st_size,
+                    "cache_hit": True,
+                }
         partial = destination.with_name(f"{destination.name}.part")
         request = urllib.request.Request(url, headers={**headers, "Accept": "*/*"})
         sha256 = hashlib.sha256()
@@ -385,7 +397,7 @@ class MeshyModelGenerationAdapter:
 
 class PolyHavenExternalSiteAdapter:
     provider_id = "poly_haven_external_site_v1"
-    provider_version = "2026-08-07.2"
+    provider_version = "2026-08-08.3"
     source_kind = "external_site"
 
     def __init__(self, *, transport: RemoteTransport | None = None, resolution: str = "1k") -> None:
@@ -401,7 +413,7 @@ class PolyHavenExternalSiteAdapter:
     ) -> RemoteAcquisition:
         del workspace
         hint = str(request.get("provider_hint") or "").strip().casefold()
-        if hint and hint not in {"polyhaven", "poly_haven", "poly_haven_v1", self.provider_id} and not hint.startswith("polyhaven:"):
+        if not _is_poly_haven_provider_hint(hint, provider_id=self.provider_id):
             raise RemoteProviderError("unsupported_provider_hint", f"external_site provider is not supported: {hint}", status="blocked")
         cached = _load_cached_acquisition(
             destination,
@@ -412,37 +424,47 @@ class PolyHavenExternalSiteAdapter:
         if cached is not None:
             return cached
         headers = {"User-Agent": POLY_HAVEN_USER_AGENT}
-        assets = self.transport.request_json("GET", f"{POLY_HAVEN_API_ROOT}/assets", headers=headers)
+        assets, assets_attempts = _retry_remote_operation(
+            lambda: self.transport.request_json("GET", f"{POLY_HAVEN_API_ROOT}/assets", headers=headers)
+        )
         asset_id, metadata, discovery = _select_poly_haven_asset(request, assets)
-        files_response = self.transport.request_json(
-            "GET",
-            f"{POLY_HAVEN_API_ROOT}/files/{urllib.parse.quote(asset_id, safe='')}",
-            headers=headers,
+        files_response, files_attempts = _retry_remote_operation(
+            lambda: self.transport.request_json(
+                "GET",
+                f"{POLY_HAVEN_API_ROOT}/files/{urllib.parse.quote(asset_id, safe='')}",
+                headers=headers,
+            )
         )
         destination.mkdir(parents=True, exist_ok=True)
         write_json(destination / "discovery.json", discovery)
         write_json(destination / "asset_metadata.json", {"asset_id": asset_id, **metadata})
         write_json(destination / "files_response.json", files_response)
         selected = _poly_haven_fbx(files_response, resolution=self.resolution)
-        source = self.transport.download(
-            str(selected["url"]),
-            destination / f"{asset_id}.fbx",
-            headers=headers,
-            expected_md5=str(selected.get("md5") or "") or None,
+        source, source_attempts = _retry_remote_operation(
+            lambda: self.transport.download(
+                str(selected["url"]),
+                destination / f"{asset_id}.fbx",
+                headers=headers,
+                expected_md5=str(selected.get("md5") or "") or None,
+            )
         )
         files = [_download_record(source, role="import_source", file_format="fbx")]
+        download_attempts = {f"{asset_id}.fbx": source_attempts}
         includes = selected.get("include") if isinstance(selected.get("include"), Mapping) else {}
         for relative_name, record in sorted(includes.items()):
             if not isinstance(record, Mapping):
                 raise RemoteProviderError("provider_response_invalid", "Poly Haven dependency record is invalid")
             relative = _safe_relative_path(str(relative_name))
-            downloaded = self.transport.download(
-                str(record.get("url") or ""),
-                destination / relative,
-                headers=headers,
-                expected_md5=str(record.get("md5") or "") or None,
+            downloaded, attempt_count = _retry_remote_operation(
+                lambda record=record, relative=relative: self.transport.download(
+                    str(record.get("url") or ""),
+                    destination / relative,
+                    headers=headers,
+                    expected_md5=str(record.get("md5") or "") or None,
+                )
             )
             files.append(_download_record(downloaded, role="source_dependency", file_format=relative.suffix.lstrip(".")))
+            download_attempts[relative.as_posix()] = attempt_count
         source_version = str(metadata.get("files_hash") or stable_digest(files_response))
         canonical = destination / f"{asset_id}.fbx"
         acquisition = RemoteAcquisition(
@@ -475,6 +497,11 @@ class PolyHavenExternalSiteAdapter:
                 "tags": list(metadata.get("tags") or []),
                 "authors": dict(metadata.get("authors") or {}),
                 "api_attribution": "Poly Haven",
+                "remote_attempts": {
+                    "assets_metadata": assets_attempts,
+                    "files_metadata": files_attempts,
+                    "downloads": download_attempts,
+                },
                 "discovery": discovery,
             },
         )
@@ -665,6 +692,37 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _md5_file(path: Path) -> str:
+    digest = hashlib.md5(usedforsecurity=False)
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _retry_remote_operation(operation: Callable[[], Any]) -> tuple[Any, int]:
+    for attempt in range(1, REMOTE_RETRY_ATTEMPTS + 1):
+        try:
+            return operation(), attempt
+        except RemoteProviderError as exc:
+            if not exc.retriable or attempt >= REMOTE_RETRY_ATTEMPTS:
+                exc.details["attempt_count"] = attempt
+                exc.details["maximum_attempts"] = REMOTE_RETRY_ATTEMPTS
+                raise
+            time.sleep(REMOTE_RETRY_BASE_DELAY_S * attempt)
+    raise AssertionError("remote retry loop exhausted without returning or raising")
+
+
+def _is_poly_haven_provider_hint(value: Any, *, provider_id: str) -> bool:
+    hint = str(value or "").strip().casefold()
+    if not hint or hint in {"polyhaven", "poly_haven", "poly_haven_v1", provider_id}:
+        return True
+    if hint.startswith("polyhaven:"):
+        return True
+    parsed = urllib.parse.urlparse(hint if "://" in hint else f"https://{hint}")
+    return parsed.hostname in {"polyhaven.com", "www.polyhaven.com"} and parsed.path in {"", "/"}
+
+
 def _meshy_references(value: Any, *, workspace: Path) -> tuple[list[str], list[dict[str, str]]]:
     if not isinstance(value, list) or not 1 <= len(value) <= 4:
         raise RemoteProviderError("reference_inputs_required", "Meshy multi-image generation requires 1 to 4 reference inputs", status="blocked")
@@ -708,6 +766,7 @@ def _select_poly_haven_asset(
     request: Mapping[str, Any],
     assets: Mapping[str, Any],
 ) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    _reject_contradictory_poly_haven_constraints(request)
     models = {str(key): dict(value) for key, value in assets.items() if isinstance(value, Mapping) and value.get("type") == 2}
     explicit = _poly_haven_explicit_id(request)
     if explicit:
@@ -729,15 +788,35 @@ def _select_poly_haven_asset(
         raise RemoteProviderError("external_search_query_missing", "Poly Haven discovery requires a search query", status="blocked")
     taxonomy = search.get("taxonomy") if isinstance(search.get("taxonomy"), Mapping) else {}
     context_tokens = _poly_haven_semantic_tokens(" ".join(str(value) for value in taxonomy.values()))
+    identity_value = _poly_haven_identity_value(taxonomy)
+    identity_tokens = _poly_haven_semantic_tokens(identity_value)
+    must_not = search.get("must_not") if isinstance(search.get("must_not"), Mapping) else {}
+    excluded_category_tokens = _poly_haven_exclusion_tokens(" ".join(_string_values(must_not.get("category"))))
+    requested_geometry_type = _poly_haven_requested_geometry_type(search)
+    enforce_authored_size = _poly_haven_enforce_authored_size(request)
     requested_size = _poly_haven_requested_size(request, search)
     ranked: list[tuple[float, str, dict[str, Any], dict[str, float]]] = []
     size_rejected_count = 0
+    geometry_rejected_count = 0
+    identity_rejected_count = 0
+    exclusion_rejected_count = 0
     for asset_id, metadata in models.items():
+        candidate_tokens = _poly_haven_candidate_tokens(asset_id, metadata)
+        if excluded_category_tokens and excluded_category_tokens & candidate_tokens:
+            exclusion_rejected_count += 1
+            continue
+        if identity_tokens and not identity_tokens & candidate_tokens:
+            identity_rejected_count += 1
+            continue
+        if requested_geometry_type and not _poly_haven_candidate_matches_geometry(requested_geometry_type, metadata):
+            geometry_rejected_count += 1
+            continue
         actual_size = _poly_haven_size(metadata)
         components = _score_poly_haven_candidate(
             query=query,
             query_tokens=tokens,
             context_tokens=context_tokens,
+            identity_tokens=identity_tokens,
             requested_size=requested_size,
             asset_id=asset_id,
             metadata=metadata,
@@ -746,7 +825,8 @@ def _select_poly_haven_asset(
         if lexical_score <= 0:
             continue
         if (
-            requested_size is not None
+            enforce_authored_size
+            and requested_size is not None
             and actual_size is not None
             and not _poly_haven_size_matches(requested_size, actual_size)
         ):
@@ -760,16 +840,23 @@ def _select_poly_haven_asset(
     tie_count = sum(1 for score, *_ in ranked if score == winning_score)
     discovery = {
         "schema_version": "harness_poly_haven_discovery_v1",
-        "selection_policy": "highest_relevance_then_asset_id_v1",
+        "selection_policy": "specific_identity_geometry_exclusion_then_relevance_v4",
         "query": query,
         "query_tokens": sorted(tokens),
         "context_tokens": sorted(context_tokens),
+        "identity_tokens": sorted(identity_tokens),
+        "excluded_category_tokens": sorted(excluded_category_tokens),
+        "requested_geometry_type": requested_geometry_type or None,
+        "enforce_authored_size": enforce_authored_size,
         "requested_size_m": list(requested_size) if requested_size is not None else None,
         "selected_asset_id": ranked[0][1],
         "selected_score": winning_score,
         "selection_reason": "stable_asset_id_tiebreak" if tie_count > 1 else "highest_relevance_score",
         "candidate_count": len(ranked),
         "size_rejected_count": size_rejected_count,
+        "geometry_rejected_count": geometry_rejected_count,
+        "identity_rejected_count": identity_rejected_count,
+        "exclusion_rejected_count": exclusion_rejected_count,
         "tie_count": tie_count,
         "ranked_candidates": [
             {
@@ -789,6 +876,7 @@ def _score_poly_haven_candidate(
     query: str,
     query_tokens: set[str],
     context_tokens: set[str],
+    identity_tokens: set[str],
     requested_size: tuple[float, float, float] | None,
     asset_id: str,
     metadata: Mapping[str, Any],
@@ -808,6 +896,9 @@ def _score_poly_haven_candidate(
     category_overlap = 2.0 * len((query_tokens | context_tokens) & category_tokens)
     description_overlap = 1.0 * len(query_tokens & description_tokens)
     context_overlap = 1.5 * len(context_tokens & (name_tokens | tag_tokens | category_tokens))
+    identity_name_overlap = 20.0 * len(identity_tokens & name_tokens)
+    identity_tag_overlap = 6.0 * len(identity_tokens & tag_tokens)
+    identity_category_overlap = 4.0 * len(identity_tokens & category_tokens)
     actual_size = _poly_haven_size(metadata)
     size_similarity = _poly_haven_size_similarity(requested_size, actual_size)
     return {
@@ -819,23 +910,153 @@ def _score_poly_haven_candidate(
         "category_overlap": category_overlap,
         "description_overlap": description_overlap,
         "context_overlap": context_overlap,
+        "identity_name_overlap": identity_name_overlap,
+        "identity_tag_overlap": identity_tag_overlap,
+        "identity_category_overlap": identity_category_overlap,
         "size_similarity": size_similarity,
     }
 
 
 def _poly_haven_semantic_tokens(text: str) -> set[str]:
     """Expand a small set of high-confidence object-name aliases for discovery."""
+    return _poly_haven_expanded_tokens(text, include_cylinder_aliases=True)
+
+
+def _poly_haven_exclusion_tokens(text: str) -> set[str]:
+    """Expand exclusions down a generic hierarchy, never sideways to siblings."""
+    return _poly_haven_expanded_tokens(text, include_cylinder_aliases=False)
+
+
+def _poly_haven_expanded_tokens(text: str, *, include_cylinder_aliases: bool) -> set[str]:
     tokens = set(_search_tokens(text))
-    alias_groups = (
-        {"barrel", "drum", "drums"},
+    original_tokens = set(tokens)
+    barrel_aliases = {"barrel", "drum", "drums"}
+    if include_cylinder_aliases:
+        barrel_aliases.update({"cylinder", "cylindrical"})
+    for group in (
+        barrel_aliases,
         {"box", "carton"},
         {"crate", "basket"},
-        {"football", "soccer"},
-    )
-    for group in alias_groups:
-        if tokens & group:
+        {"sphere", "spherical", "ball", "round", "football", "soccer"},
+    ):
+        if original_tokens & group:
             tokens.update(group)
+    if original_tokens & {"container", "containers", "storage", "vessel"}:
+        tokens.update(
+            {
+                "container",
+                "containers",
+                "storage",
+                "vessel",
+                "vase",
+                "jug",
+                "pitcher",
+                "pot",
+                "bucket",
+                "barrel",
+                "drum",
+                "bottle",
+                "can",
+                "tin",
+            }
+        )
     return tokens
+
+
+def _reject_contradictory_poly_haven_constraints(request: Mapping[str, Any]) -> None:
+    search = request.get("search_intent") if isinstance(request.get("search_intent"), Mapping) else {}
+    taxonomy = search.get("taxonomy") if isinstance(search.get("taxonomy"), Mapping) else {}
+    identity_value = _poly_haven_identity_value(taxonomy)
+    must_not = search.get("must_not") if isinstance(search.get("must_not"), Mapping) else {}
+    excluded_values = _string_values(must_not.get("category"))
+    if not identity_value or not excluded_values:
+        return
+    positive_raw = sorted(set(_search_tokens(identity_value)))
+    excluded_raw = sorted(set(_search_tokens(" ".join(excluded_values))))
+    for positive_token in positive_raw:
+        positive_tokens = _poly_haven_exclusion_tokens(positive_token)
+        for excluded_token in excluded_raw:
+            overlap = sorted(positive_tokens & _poly_haven_exclusion_tokens(excluded_token))
+            if not overlap:
+                continue
+            request_id = str(request.get("request_id") or "<unknown_request>")
+            object_id = str(request.get("object_id") or "<unknown_object>")
+            raise RemoteProviderError(
+                "contradictory_asset_constraints",
+                (
+                    f"asset request {request_id} for object {object_id} requires identity token "
+                    f"{positive_token!r} but excludes {excluded_token!r}"
+                ),
+                status="blocked",
+                details={
+                    "request_id": request_id,
+                    "object_id": object_id,
+                    "positive_token": positive_token,
+                    "excluded_token": excluded_token,
+                    "conflicting_tokens": overlap,
+                },
+            )
+
+
+def _poly_haven_identity_value(taxonomy: Mapping[str, Any]) -> str:
+    """Use the most specific meaningful taxonomy layer as hard identity."""
+    generic = {"container", "containers", "obstacle", "object", "objects", "prop", "props", "general"}
+    fallback = ""
+    for key in ("subcategory", "object_type", "category"):
+        value = str(taxonomy.get(key) or "").strip()
+        if not value:
+            continue
+        fallback = fallback or value
+        if set(_search_tokens(value)) - generic:
+            return value
+    return fallback
+
+
+def _poly_haven_requested_geometry_type(search: Mapping[str, Any]) -> str:
+    must = search.get("must") if isinstance(search.get("must"), Mapping) else {}
+    return str(must.get("geometry_type") or "").strip().casefold()
+
+
+def _poly_haven_candidate_matches_geometry(
+    requested_geometry_type: str,
+    metadata: Mapping[str, Any],
+) -> bool:
+    geometry_type = requested_geometry_type.replace("-", "_").replace(" ", "_")
+    if geometry_type not in {"sphere", "spherical", "ball"}:
+        return True
+    size = _poly_haven_size(metadata)
+    if size is None:
+        return False
+    return max(size) / min(size) <= 1.15
+
+
+def _poly_haven_enforce_authored_size(request: Mapping[str, Any]) -> bool:
+    generation_spec = request.get("generation_spec") if isinstance(request.get("generation_spec"), Mapping) else {}
+    return str(generation_spec.get("scale_policy") or "preserve_authored") != "fit_uniform_to_approx_size"
+
+
+def _poly_haven_candidate_tokens(asset_id: str, metadata: Mapping[str, Any]) -> set[str]:
+    return set(
+        _search_tokens(
+            " ".join(
+                [
+                    asset_id,
+                    str(metadata.get("name") or ""),
+                    str(metadata.get("category") or ""),
+                    str(metadata.get("description") or ""),
+                    *(str(tag) for tag in metadata.get("tags") or []),
+                ]
+            )
+        )
+    )
+
+
+def _string_values(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if str(item).strip()]
+    return [str(value)] if str(value).strip() else []
 
 
 def _poly_haven_requested_size(

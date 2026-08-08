@@ -81,6 +81,47 @@ Path(args.result).write_text(json.dumps(result), encoding="utf-8")
 print("fake importer completed", args.mode)
 '''
 
+BATCH_FAKE_IMPORTER = r'''from __future__ import annotations
+import argparse, hashlib, json
+from pathlib import Path
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--batch-request", required=True)
+parser.add_argument("--batch-result", required=True)
+args = parser.parse_args()
+manifest = json.loads(Path(args.batch_request).read_text(encoding="utf-8"))
+results = []
+for item in manifest["items"]:
+    request = json.loads(Path(item["request_path"]).read_text(encoding="utf-8"))
+    result_path = Path(item["result_path"])
+    asset_file = result_path.parent / f"{request['asset_id'].replace('.', '_')}.uasset"
+    payload = request["asset_id"].encode("utf-8")
+    asset_file.write_bytes(payload)
+    result = {
+        "schema_version": "harness_backend_asset_import_result_v1",
+        "request_id": request["request_id"],
+        "request_digest": request["request_digest"],
+        "asset_id": request["asset_id"],
+        "status": "fulfilled",
+        "object_path": f"/Game/Generated/{request['asset_id'].replace('.', '_')}.{request['asset_id'].replace('.', '_')}",
+        "class_name": "StaticMesh",
+        "materialized": True,
+        "runtime_ready": True,
+        "files": [{
+            "role": "primary",
+            "local_path": str(asset_file),
+            "format": "uasset",
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "byte_size": len(payload),
+            "materialized": True,
+        }],
+        "dependencies": [],
+    }
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+    results.append(result)
+Path(args.batch_result).write_text(json.dumps({"results": results}), encoding="utf-8")
+'''
+
 
 class LocalProceduralProviderTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -93,6 +134,8 @@ class LocalProceduralProviderTests(unittest.TestCase):
         self.registry = AssetRegistry(self.catalog_path)
         self.importer_script = self.root / "fake_importer.py"
         self.importer_script.write_text(FAKE_IMPORTER, encoding="utf-8")
+        self.batch_importer_script = self.root / "fake_batch_importer.py"
+        self.batch_importer_script.write_text(BATCH_FAKE_IMPORTER, encoding="utf-8")
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -103,6 +146,74 @@ class LocalProceduralProviderTests(unittest.TestCase):
     def test_default_adapter_timeout_outlives_real_ue_launcher_timeout(self) -> None:
         self.assertGreater(DEFAULT_TIMEOUT_S, 600.0)
         self.assertEqual(UECommandImporterAdapter([]).timeout_s, DEFAULT_TIMEOUT_S)
+
+    def test_command_importer_batches_multiple_requests_into_one_command(self) -> None:
+        inputs = []
+        for index in range(2):
+            work_dir = self.workspace / f"batch_{index}"
+            work_dir.mkdir()
+            source = work_dir / "source.obj"
+            source.write_text("v 0 0 0\nv 1 1 1\nf 1 2 2\n", encoding="utf-8")
+            payload = source.read_bytes()
+            request_payload = {
+                "schema_version": BACKEND_IMPORT_REQUEST_SCHEMA,
+                "request_id": f"backend-import.batch-{index}",
+                "request_digest": hashlib.sha256(f"batch-{index}".encode()).hexdigest(),
+                "asset_id": f"generated.batch.asset_{index}",
+                "target_backend": "ue",
+                "class_name": "StaticMesh",
+                "source_files": [{
+                    "role": "source",
+                    "local_path": str(source),
+                    "format": "obj",
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "byte_size": len(payload),
+                    "materialized": True,
+                }],
+            }
+            inputs.append((BackendImportRequest.from_dict(request_payload), work_dir))
+        importer = UECommandImporterAdapter([sys.executable, str(self.batch_importer_script)], timeout_s=10)
+
+        results = importer.import_assets(inputs, workspace=self.workspace)
+
+        self.assertEqual([result.data["status"] for result in results], ["fulfilled", "fulfilled"])
+        self.assertTrue(all(result.data["batch_size"] == 2 for result in results))
+
+    def test_case_provider_batches_all_import_misses_and_reuses_them(self) -> None:
+        data = case_spec_v2_fixture()
+        recipes = {"sphere": "sphere_mesh_v1", "box": "box_mesh_v1"}
+        for obj in data["objects"]:
+            shape = obj["geometry"]["shape_hint"]
+            obj["asset"] = {
+                "description": f"generated {shape}",
+                "resource_kind": "mesh_3d",
+                "must": {},
+                "acquisition": {
+                    "route": "procedural_generation",
+                    "requirement": "required",
+                    "origin": "user_explicit",
+                    "provider_hint": recipes[shape],
+                    "reference_inputs": [],
+                    "fallback_order": [],
+                },
+            }
+        case = case_spec_v2_from_dict(data)
+        other_data = json.loads(json.dumps(data))
+        other_data["identity"]["case_id"] = "v2_ball_contact_reuse"
+        other_case = case_spec_v2_from_dict(other_data)
+        importer = UECommandImporterAdapter([sys.executable, str(self.batch_importer_script)], timeout_s=10)
+        orchestrator = AssetProviderOrchestrator(workspace=self.workspace, importer=importer)
+
+        with patch.dict(os.environ, {"SIM_HARNESS_ALLOW_LOCAL_PREVIEW_ASSETS": "1"}):
+            first = compile_runtime_case(case, requested_backend="ue", registry=self.registry, provider_orchestrator=orchestrator)
+            second = compile_runtime_case(other_case, requested_backend="ue", registry=self.registry, provider_orchestrator=orchestrator)
+
+        first_summary = first.artifacts["asset_provider_batch"]["import_summary"]
+        second_summary = second.artifacts["asset_provider_batch"]["import_summary"]
+        self.assertEqual(first_summary["batch_imported_count"], 3)
+        self.assertEqual(first_summary["importer_invocation_count"], 1)
+        self.assertEqual(second_summary["cache_hit_count"], 3)
+        self.assertEqual(second_summary["importer_invocation_count"], 0)
 
     def provider_case(
         self,
@@ -206,6 +317,25 @@ class LocalProceduralProviderTests(unittest.TestCase):
                 )
                 self.assertEqual(node["bounds"]["extents_m"], [value / 2.0 for value in size])
                 self.assertEqual(compilation.provider_receipts[0]["recipe_parameters"]["shape"], canonical_shape)
+
+    def test_generic_local_provider_alias_resolves_shape_recipe(self) -> None:
+        with patch.dict(os.environ, {"SIM_HARNESS_ALLOW_LOCAL_PREVIEW_ASSETS": "1"}):
+            compilation = compile_runtime_case(
+                self.provider_case(
+                    shape="box",
+                    size_m=[6.0, 2.2, 0.1],
+                    provider_hint="deterministic_local",
+                ),
+                requested_backend="ue",
+                registry=self.registry,
+                provider_orchestrator=self.orchestrator(),
+            )
+
+        request = compilation.artifacts["asset_provider_batch"]["requests"][0]
+        result = compilation.artifacts["asset_provider_batch"]["results"][0]
+        self.assertEqual(request["provider_hint"], "deterministic_local")
+        self.assertEqual(request["generation_spec"]["recipe_id"], "box_mesh_v1")
+        self.assertEqual(result["status"], "fulfilled")
 
     def test_provider_candidate_honors_canonical_source_and_geometry_hard_filters(self) -> None:
         compilation = compile_runtime_case(
@@ -574,7 +704,13 @@ class LocalProceduralProviderTests(unittest.TestCase):
         with patch.dict(os.environ, {"SIM_HARNESS_ALLOW_LOCAL_PREVIEW_ASSETS": "1"}):
             first = compile_runtime_case(case, requested_backend="ue", registry=self.registry, provider_orchestrator=orchestrator)
             second = compile_runtime_case(case, requested_backend="ue", registry=self.registry, provider_orchestrator=orchestrator)
-        self.assertEqual(first.provider_receipts, second.provider_receipts)
+        self.assertEqual(
+            first.artifacts["asset_provider_batch"]["results"][0]["catalog_asset_ids"],
+            second.artifacts["asset_provider_batch"]["results"][0]["catalog_asset_ids"],
+        )
+        self.assertEqual(first.artifacts["asset_provider_batch"]["import_summary"]["importer_invocation_count"], 1)
+        self.assertEqual(second.artifacts["asset_provider_batch"]["import_summary"]["importer_invocation_count"], 0)
+        self.assertTrue(second.provider_receipts[0]["importer_execution"]["cache_hit"])
         with closing(sqlite3.connect(self.catalog_path)) as connection:
             count = connection.execute("SELECT count(*) FROM assets WHERE asset_id LIKE 'generated.local.box_mesh_v1.%'").fetchone()[0]
         self.assertEqual(count, 1)

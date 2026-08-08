@@ -203,6 +203,56 @@ class StaticScenePlacementTests(unittest.TestCase):
         self.assertEqual(adjustments, [])
         self.assertEqual(ramp["transform"]["position_m"], [-2.4, 0.0, 0.74])
 
+    def test_v2_resolved_bounds_fit_supported_body_inside_inclined_ramp(self) -> None:
+        from harness.planning.static_scene_builder import align_v2_explicit_supports, support_relation
+
+        subject = {
+            "object_id": "heavy_cylinder",
+            "role": "20 kg metal rolling weight",
+            "shape": "cylinder",
+            "transform": {"position_m": [-2.493, 0.0, 1.5355]},
+            "bounds": {"extents_m": [0.300322, 0.317071, 0.307039], "bottom_z": 1.228461, "top_z": 1.842539},
+            "physics": {"body_type": "dynamic", "collision_required": True},
+        }
+        ramp = {
+            "object_id": "ramp",
+            "role": "inclined plane for rolling",
+            "shape": "box",
+            "transform": {"position_m": [0.0, 0.0, 0.6953], "rotation_deg": [15.0, 0.0, 0.0]},
+            "bounds": {"extents_m": [2.75, 1.0, 0.05], "bottom_z": 0.6453, "top_z": 0.7453},
+            "physics": {"body_type": "static", "collision_required": True},
+        }
+        case = {
+            "v2_projection": {"source_schema_version": "harness_case_spec_v2"},
+            "expected_physics": {"support": {"heavy_cylinder": "ramp"}},
+        }
+
+        adjustments = align_v2_explicit_supports(case, [subject, ramp])
+
+        self.assertEqual(support_relation(subject, ramp)["status"], "contact_at_rest")
+        footprint_fit = next(row for row in adjustments if row["type"] == "explicit_support_footprint_fit")
+        self.assertGreater(footprint_fit["delta_position_m"][0], 0.0)
+        self.assertLess(footprint_fit["delta_position_m"][2], 0.0)
+
+    def test_v2_support_fit_does_not_move_body_whose_center_is_outside_support(self) -> None:
+        from harness.planning.static_scene_builder import fit_dynamic_to_support_footprint
+
+        subject = {
+            "object_id": "crate",
+            "transform": {"position_m": [3.1, 0.0, 0.3]},
+            "bounds": {"extents_m": [0.4, 0.3, 0.3], "bottom_z": 0.0, "top_z": 0.6},
+        }
+        support = {
+            "object_id": "table",
+            "transform": {"position_m": [0.0, 0.0, 0.0]},
+            "bounds": {"extents_m": [2.5, 1.0, 0.05]},
+        }
+
+        adjustment = fit_dynamic_to_support_footprint(subject, support)
+
+        self.assertIsNone(adjustment)
+        self.assertEqual(subject["transform"]["position_m"], [3.1, 0.0, 0.3])
+
     def test_v2_uniform_fit_and_resolved_bounds_separate_dynamic_chain(self) -> None:
         from harness.planning.static_scene_builder import build_static_scene_layout
 
@@ -325,6 +375,251 @@ class StaticScenePlacementTests(unittest.TestCase):
 
         self.assertEqual(adjustments, [])
         self.assertEqual(nodes[0]["transform"]["position_m"], nodes[1]["transform"]["position_m"])
+
+    def test_v2_chain_clears_static_boundary_and_preserves_downstream_spacing(self) -> None:
+        from harness.planning.static_scene_builder import separate_v2_chain_from_static_obstacles
+
+        nodes = [
+            {
+                "object_id": "driver",
+                "physics_critical": True,
+                "transform": {"position_m": [-2.0, 0.0, 0.4]},
+                "bounds": {"extents_m": [0.2, 0.2, 0.2]},
+                "physics": {"body_type": "dynamic", "collision_required": True},
+            },
+            {
+                "object_id": "target_1",
+                "physics_critical": True,
+                "transform": {"position_m": [2.6, 0.0, 0.35]},
+                "bounds": {"extents_m": [0.25, 0.2, 0.3]},
+                "physics": {"body_type": "dynamic", "collision_required": True},
+            },
+            {
+                "object_id": "target_2",
+                "physics_critical": True,
+                "transform": {"position_m": [3.2, 0.0, 0.35]},
+                "bounds": {"extents_m": [0.25, 0.2, 0.3]},
+                "physics": {"body_type": "dynamic", "collision_required": True},
+            },
+            {
+                "object_id": "ramp",
+                "role": "inclined_plane",
+                "shape": "box",
+                "physics_critical": True,
+                "transform": {"position_m": [0.0, 0.0, 0.7], "rotation_deg": [15.0, 0.0, 0.0]},
+                "bounds": {"extents_m": [2.5, 0.5, 0.05]},
+                "physics": {"body_type": "static", "collision_required": True},
+            },
+            {
+                "object_id": "ground",
+                "role": "ground",
+                "physics_critical": True,
+                "transform": {"position_m": [0.0, 0.0, 0.0]},
+                "bounds": {"extents_m": [10.0, 10.0, 0.05]},
+                "physics": {"body_type": "static", "collision_required": True},
+            },
+        ]
+        case = {
+            "v2_projection": {"source_schema_version": "harness_case_spec_v2"},
+            "expected_physics": {"support": {"driver": "ramp", "target_1": "ground", "target_2": "ground"}},
+        }
+        original_spacing = nodes[2]["transform"]["position_m"][0] - nodes[1]["transform"]["position_m"][0]
+
+        adjustments = separate_v2_chain_from_static_obstacles(
+            case,
+            nodes,
+            [["driver", "target_1"], ["target_1", "target_2"]],
+        )
+
+        self.assertEqual(len(adjustments), 1)
+        self.assertEqual(adjustments[0]["obstacle_id"], "ramp")
+        self.assertGreater(adjustments[0]["delta_m"], 0.0)
+        self.assertAlmostEqual(
+            nodes[2]["transform"]["position_m"][0] - nodes[1]["transform"]["position_m"][0],
+            original_spacing,
+        )
+
+    def test_v2_does_not_infer_collision_edges_from_object_order(self) -> None:
+        from harness.planning.static_scene_builder import build_static_scene_layout
+
+        case = {
+            "case_id": "v2_without_declared_edges",
+            "capability_id": "sequential_contact_propagation",
+            "v2_projection": {"source_schema_version": "harness_case_spec_v2"},
+            "expected_physics": {},
+            "objects": [
+                {
+                    "id": "body",
+                    "role": "dynamic body",
+                    "shape": "box",
+                    "size_m": [0.2, 0.2, 0.2],
+                    "initial_position_m": [0.0, 0.0, 0.2],
+                    "body_type": "dynamic",
+                    "collision_required": True,
+                },
+                {
+                    "id": "floor",
+                    "role": "ground",
+                    "shape": "box",
+                    "size_m": [2.0, 2.0, 0.1],
+                    "initial_position_m": [0.0, 0.0, 0.0],
+                    "body_type": "static",
+                    "collision_required": True,
+                },
+            ],
+        }
+
+        layout = build_static_scene_layout(case)
+
+        self.assertEqual(layout["physics_graph"]["collision_edges"], [])
+
+    def test_v2_transverse_targets_are_aligned_to_primary_chain_axis(self) -> None:
+        from harness.planning.static_scene_builder import align_v2_ordered_dynamic_chain
+
+        nodes = [
+            {
+                "object_id": object_id,
+                "physics_critical": True,
+                "transform": {"position_m": list(position)},
+                "bounds": {"extents_m": [0.1, 0.1, 0.2]},
+                "physics": {"body_type": "dynamic", "collision_required": True},
+            }
+            for object_id, position in (
+                ("driver", (-2.0, 0.0, 0.3)),
+                ("target_1", (0.0, -0.2, 0.3)),
+                ("target_2", (0.0, 0.2, 0.3)),
+                ("target_3", (0.0, 0.6, 0.3)),
+            )
+        ]
+        edges = [["driver", "target_1"], ["target_1", "target_2"], ["target_2", "target_3"]]
+        case = {
+            "capability_id": "sequential_contact_propagation",
+            "v2_projection": {"source_schema_version": "harness_case_spec_v2"},
+        }
+
+        adjustments = align_v2_ordered_dynamic_chain(case, nodes, edges)
+
+        self.assertEqual(len(adjustments), 2)
+        self.assertEqual(nodes[2]["transform"]["position_m"][1], -0.2)
+        self.assertEqual(nodes[3]["transform"]["position_m"][1], -0.2)
+        self.assertGreater(nodes[2]["transform"]["position_m"][0], nodes[1]["transform"]["position_m"][0])
+        self.assertGreater(nodes[3]["transform"]["position_m"][0], nodes[2]["transform"]["position_m"][0])
+
+    def test_v2_ordered_chain_tightens_second_and_later_edges_using_resolved_bounds(self) -> None:
+        from harness.planning.static_scene_builder import align_v2_ordered_dynamic_chain
+
+        object_ids = ["driver", "target_1", "target_2", "target_3", "target_4"]
+        x_extents = [0.1, 0.15, 0.2, 0.25, 0.3]
+        nodes = [
+            {
+                "object_id": object_id,
+                "physics_critical": True,
+                "transform": {"position_m": [0.5 + index, 0.0, 0.35]},
+                "bounds": {"extents_m": [x_extents[index], 0.2, 0.3]},
+                "physics": {"body_type": "dynamic", "collision_required": True},
+            }
+            for index, object_id in enumerate(object_ids)
+        ]
+        edges = [[object_ids[index], object_ids[index + 1]] for index in range(len(object_ids) - 1)]
+        case = {
+            "capability_id": "sequential_contact_propagation",
+            "v2_projection": {"source_schema_version": "harness_case_spec_v2"},
+        }
+
+        adjustments = align_v2_ordered_dynamic_chain(case, nodes, edges)
+
+        self.assertEqual(nodes[0]["transform"]["position_m"][0], 0.5)
+        self.assertEqual(nodes[1]["transform"]["position_m"][0], 1.5)
+        self.assertEqual(len(adjustments), 3)
+        by_id = {node["object_id"]: node for node in nodes}
+        for source_id, target_id in edges[1:]:
+            source = by_id[source_id]
+            target = by_id[target_id]
+            center_distance = target["transform"]["position_m"][0] - source["transform"]["position_m"][0]
+            surface_gap = center_distance - source["bounds"]["extents_m"][0] - target["bounds"]["extents_m"][0]
+            self.assertAlmostEqual(surface_gap, 0.005, places=6)
+            self.assertEqual(target["transform"]["position_m"][1], source["transform"]["position_m"][1])
+
+    def test_v2_ordered_chain_does_not_guess_for_branching_graph(self) -> None:
+        from harness.planning.static_scene_builder import align_v2_ordered_dynamic_chain
+
+        nodes = [
+            {
+                "object_id": object_id,
+                "physics_critical": True,
+                "transform": {"position_m": list(position)},
+                "bounds": {"extents_m": [0.1, 0.1, 0.1]},
+                "physics": {"body_type": "dynamic", "collision_required": True},
+            }
+            for object_id, position in (
+                ("driver", (0.0, 0.0, 0.2)),
+                ("target_1", (1.0, 0.0, 0.2)),
+                ("target_2", (2.0, -1.0, 0.2)),
+                ("target_3", (2.0, 1.0, 0.2)),
+            )
+        ]
+        original_positions = [list(node["transform"]["position_m"]) for node in nodes]
+
+        adjustments = align_v2_ordered_dynamic_chain(
+            {
+                "capability_id": "sequential_contact_propagation",
+                "v2_projection": {"source_schema_version": "harness_case_spec_v2"},
+            },
+            nodes,
+            [["driver", "target_1"], ["target_1", "target_2"], ["target_1", "target_3"]],
+        )
+
+        self.assertEqual(adjustments, [])
+        self.assertEqual([node["transform"]["position_m"] for node in nodes], original_positions)
+
+    def test_v2_chain_head_moves_clear_of_non_support_static_obstacle(self) -> None:
+        from harness.planning.static_scene_builder import separate_v2_chain_from_static_obstacles
+
+        nodes = [
+            {
+                "object_id": "driver",
+                "physics_critical": True,
+                "transform": {"position_m": [-1.7, 0.0, 0.5]},
+                "bounds": {"extents_m": [0.2, 0.2, 0.2]},
+                "physics": {"body_type": "dynamic", "collision_required": True},
+            },
+            {
+                "object_id": "target",
+                "physics_critical": True,
+                "transform": {"position_m": [1.0, 0.0, 0.3]},
+                "bounds": {"extents_m": [0.2, 0.2, 0.2]},
+                "physics": {"body_type": "dynamic", "collision_required": True},
+            },
+            {
+                "object_id": "ramp",
+                "role": "inclined ramp",
+                "physics_critical": True,
+                "transform": {"position_m": [0.0, 0.0, 0.2]},
+                "bounds": {"extents_m": [2.5, 0.5, 0.05]},
+                "physics": {"body_type": "static", "collision_required": True},
+            },
+            {
+                "object_id": "blocker",
+                "role": "static block",
+                "physics_critical": True,
+                "transform": {"position_m": [-1.8, 0.0, 0.5]},
+                "bounds": {"extents_m": [0.3, 0.3, 0.3]},
+                "physics": {"body_type": "static", "collision_required": True},
+            },
+        ]
+        case = {
+            "v2_projection": {"source_schema_version": "harness_case_spec_v2"},
+            "expected_physics": {"support": {"driver": "ramp"}},
+        }
+        original_target_x = nodes[1]["transform"]["position_m"][0]
+
+        adjustments = separate_v2_chain_from_static_obstacles(case, nodes, [["driver", "target"]])
+
+        self.assertEqual(len(adjustments), 1)
+        self.assertEqual(adjustments[0]["object_id"], "driver")
+        self.assertEqual(adjustments[0]["obstacle_id"], "blocker")
+        self.assertGreater(nodes[0]["transform"]["position_m"][0], -1.7)
+        self.assertGreater(nodes[1]["transform"]["position_m"][0], original_target_x)
 
     def test_static_scene_cli_writes_layout_and_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

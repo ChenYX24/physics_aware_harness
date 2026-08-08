@@ -12,13 +12,26 @@ from typing import Any
 import unreal
 
 
-REQUEST_PATH = Path(os.environ["SIM_HARNESS_UE_IMPORT_REQUEST"]).expanduser().resolve()
-RESULT_PATH = Path(os.environ["SIM_HARNESS_UE_IMPORT_RESULT"]).expanduser().resolve()
+REQUEST_PATH = Path(os.environ["SIM_HARNESS_UE_IMPORT_REQUEST"]).expanduser().resolve() if os.environ.get("SIM_HARNESS_UE_IMPORT_REQUEST") else None
+RESULT_PATH = Path(os.environ["SIM_HARNESS_UE_IMPORT_RESULT"]).expanduser().resolve() if os.environ.get("SIM_HARNESS_UE_IMPORT_RESULT") else None
+BATCH_REQUEST_PATH = Path(os.environ["SIM_HARNESS_UE_IMPORT_BATCH_REQUEST"]).expanduser().resolve() if os.environ.get("SIM_HARNESS_UE_IMPORT_BATCH_REQUEST") else None
+BATCH_RESULT_PATH = Path(os.environ["SIM_HARNESS_UE_IMPORT_BATCH_RESULT"]).expanduser().resolve() if os.environ.get("SIM_HARNESS_UE_IMPORT_BATCH_RESULT") else None
 CONTENT_ROOT = Path(os.environ["SIM_HARNESS_UE_IMPORT_PROJECT_CONTENT"]).expanduser().resolve()
 
 
 def main() -> None:
+    if BATCH_REQUEST_PATH is not None and BATCH_RESULT_PATH is not None:
+        payload = json.loads(BATCH_REQUEST_PATH.read_text(encoding="utf-8"))
+        requests = payload.get("requests") or []
+        _write_result({"results": [_import_one(request) for request in requests]}, BATCH_RESULT_PATH)
+        return
+    if REQUEST_PATH is None or RESULT_PATH is None:
+        raise RuntimeError("Unreal importer request/result environment is incomplete")
     request = json.loads(REQUEST_PATH.read_text(encoding="utf-8"))
+    _write_result(_import_one(request), RESULT_PATH)
+
+
+def _import_one(request: dict[str, Any]) -> dict[str, Any]:
     try:
         source = _source_file(request)
         asset_name = _safe_asset_name(str(request.get("desired_name") or request["asset_id"]))
@@ -129,7 +142,7 @@ def main() -> None:
             },
             "traceback": traceback.format_exc(limit=20),
         }
-    _write_result(result)
+    return result
 
 
 def _source_file(request: dict[str, Any]) -> Path:
@@ -190,21 +203,23 @@ def _dimensions_match_source(
         return False
     if any(not math.isfinite(value) or value <= 0.0 for value in [*actual_size_cm, *expected_size_cm]):
         return False
-    # Poly Haven's API dimensions can include source-node transforms or small
-    # non-rendering parts that are absent from the combined FBX StaticMesh.
-    # Validate that import retained the same physical scale without distorting
-    # the authored FBX to reproduce advisory metadata exactly.  Sorting also
-    # tolerates source/up-axis conventions.  Procedural and fitted sources keep
-    # the strict per-axis contract.
+    # Poly Haven's API dimensions can include rig/open-pose transforms that are
+    # absent from the imported static pose. Validate the global physical scale
+    # using the longest dimension and at least one other axis. Sorting tolerates
+    # source/up-axis conventions. Procedural and fitted sources keep the strict
+    # per-axis contract.
     external_fbx = str(source_kind).casefold() == "external_site"
     actual_values = sorted(actual_size_cm) if external_fbx else actual_size_cm
     expected_values = sorted(expected_size_cm) if external_fbx else expected_size_cm
     relative_tolerance = 0.20 if external_fbx else 0.01
     absolute_tolerance_cm = 1.0 if external_fbx else 0.1
-    return all(
+    matches = [
         abs(actual - expected) <= max(absolute_tolerance_cm, abs(expected) * relative_tolerance)
         for actual, expected in zip(actual_values, expected_values)
-    )
+    ]
+    if external_fbx:
+        return matches[-1] and sum(matches) >= 2
+    return all(matches)
 
 
 def _validate_dimensions(asset: Any, expected_size_m: Any, *, source_kind: str = "") -> list[float]:
@@ -228,12 +243,15 @@ def _validate_dimensions(asset: Any, expected_size_m: Any, *, source_kind: str =
     return actual_size_cm
 
 
-def _write_result(result: dict[str, Any]) -> None:
-    RESULT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temporary = RESULT_PATH.with_suffix(RESULT_PATH.suffix + ".tmp")
+def _write_result(result: dict[str, Any], result_path: Path) -> None:
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = result_path.with_suffix(result_path.suffix + ".tmp")
     temporary.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(RESULT_PATH)
-    print(json.dumps({"status": result["status"], "asset_id": result.get("asset_id")}))
+    temporary.replace(result_path)
+    if "results" in result:
+        print(json.dumps({"status": "complete", "result_count": len(result["results"])}))
+    else:
+        print(json.dumps({"status": result["status"], "asset_id": result.get("asset_id")}))
 
 
 try:
