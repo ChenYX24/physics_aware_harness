@@ -16,8 +16,8 @@ if str(ROOT) not in sys.path:
 
 from harness.core.case_spec import load_case_spec
 from harness.core.workspace import workspace_path
-from harness.runtime.fluid_container_geometry import (
-    compile_container_transfer,
+from harness.runtime.rigid_sph_scene import (
+    compile_rigid_sph_scene,
     matrix_vector,
     profile_collision_parts,
     point_inside_profile,
@@ -33,15 +33,14 @@ from scripts.harness_genesis_fluid import (
 )
 
 
-def simulate_container_transfer(case_spec: dict[str, Any]) -> dict[str, Any]:
+def simulate_rigid_sph_scene(case_spec: dict[str, Any]) -> dict[str, Any]:
     wake_macos_display()
     import genesis as gs
     import numpy as np
     import pysplashsurf
 
-    compiled = compile_container_transfer(case_spec)
+    compiled = compile_rigid_sph_scene(case_spec)
     options = case_spec.get("backend_options") if isinstance(case_spec.get("backend_options"), dict) else {}
-    expected = case_spec.get("expected_physics") if isinstance(case_spec.get("expected_physics"), dict) else {}
     physical = case_spec.get("physical_parameters") if isinstance(case_spec.get("physical_parameters"), dict) else {}
     fps = int(options.get("fps") or 24)
     duration_s = float(options.get("duration_s") or 2.0)
@@ -70,19 +69,39 @@ def simulate_container_transfer(case_spec: dict[str, Any]) -> dict[str, Any]:
         profiling_options=gs.options.ProfilingOptions(show_FPS=False),
         show_viewer=False,
     )
-    container_material = gs.materials.Rigid(
+    rigid_material = gs.materials.Rigid(
         needs_coup=True,
         coup_friction=0.08,
         coup_softness=0.002,
         gravity_compensation=1.0,
     )
-    floor_z = 0.0
-    scene.add_entity(
-        morph=gs.morphs.Plane(pos=(0.0, 0.0, floor_z), normal=(0.0, 0.0, 1.0)),
-        material=container_material,
-    )
-    source_entity = add_moving_container_collision(scene, gs, container_material, compiled["source"])
-    add_container_collision(scene, gs, container_material, compiled["receiver"], fixed=True)
+    plane_bodies = [body for body in compiled["rigid_bodies"] if body["collision"]["type"] == "plane"]
+    if not plane_bodies:
+        raise RuntimeError("rigid_sph scene requires at least one plane collision")
+    for body in plane_bodies:
+        collision = body["collision"]
+        scene.add_entity(
+            morph=gs.morphs.Plane(pos=tuple(collision["position_m"]), normal=tuple(collision["normal"])),
+            material=rigid_material,
+        )
+    horizontal_planes = [
+        body
+        for body in plane_bodies
+        if abs(float(body["collision"]["normal"][0])) <= 1e-6
+        and abs(float(body["collision"]["normal"][1])) <= 1e-6
+        and float(body["collision"]["normal"][2]) > 0.0
+    ]
+    if not horizontal_planes:
+        raise RuntimeError("surface reconstruction requires a declared upward horizontal plane")
+    floor_z = min(float(body["collision"]["position_m"][2]) for body in horizontal_planes)
+    kinematic_entities: dict[str, Any] = {}
+    for body in compiled["rigid_bodies"]:
+        if body["collision"]["type"] != "axisymmetric_profile":
+            continue
+        if body["mobility"] == "kinematic":
+            kinematic_entities[body["id"]] = add_kinematic_axisymmetric_collision(scene, gs, rigid_material, body)
+        else:
+            add_static_axisymmetric_collision(scene, gs, rigid_material, body)
     fluid_spec = compiled["fluid"]
     liquid = scene.add_entity(
         morph=gs.morphs.Cylinder(
@@ -95,42 +114,34 @@ def simulate_container_transfer(case_spec: dict[str, Any]) -> dict[str, Any]:
     )
     scene.build()
     for _ in range(max(0, int(round(pre_roll_s / solver_dt)))):
-        set_container_pose(source_entity, compiled["source"], 0.0)
+        for body in compiled["rigid_bodies"]:
+            if body["id"] in kinematic_entities:
+                set_rigid_body_pose(kinematic_entities[body["id"]], body, 0.0)
         scene.step()
-    set_container_pose(source_entity, compiled["source"], 0.0)
-    preflight_positions = tensor_rows(liquid.get_particles_pos())
-    preflight_transfer = classify_particles(
-        preflight_positions,
-        compiled["source"],
-        compiled["receiver"],
-        particle_size,
-    )
-    minimum_initial_source = float(expected.get("minimum_initial_source_fraction") or 0.0)
-    if float(preflight_transfer["source_fraction"]) < minimum_initial_source:
-        centroid = [sum(row[axis] for row in preflight_positions) / len(preflight_positions) for axis in range(3)]
-        bounds = {
-            "min_m": [min(row[axis] for row in preflight_positions) for axis in range(3)],
-            "max_m": [max(row[axis] for row in preflight_positions) for axis in range(3)],
-        }
-        raise RuntimeError(
-            "container pre-roll leaked before capture: "
-            f"source_fraction={preflight_transfer['source_fraction']:.6f}, required={minimum_initial_source:.6f}, "
-            f"particle_centroid_m={centroid}, particle_bounds_m={bounds}"
-        )
+    for body in compiled["rigid_bodies"]:
+        if body["id"] in kinematic_entities:
+            set_rigid_body_pose(kinematic_entities[body["id"]], body, 0.0)
 
     frame_count = max(1, int(round(duration_s * fps)))
     frames: list[dict[str, Any]] = []
     for frame_index in range(frame_count + 1):
         positions = tensor_rows(liquid.get_particles_pos())
         velocities = tensor_rows(liquid.get_particles_vel())
-        source_position, solver_rotation, ue_rotation = container_pose_at_time(compiled["source"], frame_index / fps)
-        source_at_frame = container_at_pose(compiled["source"], source_position, solver_rotation, ue_rotation)
-        transfer_state = classify_particles(
-            positions,
-            source_at_frame,
-            compiled["receiver"],
-            particle_size,
-        )
+        bodies_at_frame: dict[str, dict[str, Any]] = {}
+        rigid_states: dict[str, dict[str, Any]] = {}
+        for body in compiled["rigid_bodies"]:
+            if body["mobility"] == "kinematic":
+                position, solver_rotation, ue_rotation = rigid_body_pose_at_time(body, frame_index / fps)
+                bodies_at_frame[body["id"]] = rigid_body_at_pose(body, position, solver_rotation, ue_rotation)
+                rigid_states[body["id"]] = {
+                    "position_m": position,
+                    "solver_rotation_xyz_deg": solver_rotation,
+                    "ue_rotation_pyr_deg": ue_rotation,
+                    "kinematic": True,
+                }
+            else:
+                bodies_at_frame[body["id"]] = body
+        measurements = evaluate_measurements(positions, bodies_at_frame, compiled["measurements"])
         reconstruction_positions = np.asarray(positions, dtype=np.float32)
         reconstruction = pysplashsurf.reconstruct_surface(
             reconstruction_positions,
@@ -158,15 +169,8 @@ def simulate_container_transfer(case_spec: dict[str, Any]) -> dict[str, Any]:
                 "time_s": round(frame_index / fps, 8),
                 "positions_m": positions,
                 "velocities_m_s": velocities,
-                "rigid_objects": {
-                    str(compiled["source"]["id"]): {
-                        "position_m": source_position,
-                        "solver_rotation_xyz_deg": solver_rotation,
-                        "ue_rotation_pyr_deg": ue_rotation,
-                        "kinematic": True,
-                    }
-                },
-                "transfer_state": transfer_state,
+                "rigid_objects": rigid_states,
+                "measurements": measurements,
                 "surface_arrays": {
                     "vertices": surface_vertices,
                     "triangles": mesh.triangles,
@@ -186,7 +190,9 @@ def simulate_container_transfer(case_spec: dict[str, Any]) -> dict[str, Any]:
             for substep in range(steps_per_frame):
                 current_time = (frame_index + substep / steps_per_frame) / fps
                 next_time = (frame_index + (substep + 1) / steps_per_frame) / fps
-                set_container_pose(source_entity, compiled["source"], current_time, next_time_s=next_time)
+                for body in compiled["rigid_bodies"]:
+                    if body["id"] in kinematic_entities:
+                        set_rigid_body_pose(kinematic_entities[body["id"]], body, current_time, next_time_s=next_time)
                 scene.step()
 
     particle_count = len(frames[0]["positions_m"])
@@ -215,30 +221,23 @@ def simulate_container_transfer(case_spec: dict[str, Any]) -> dict[str, Any]:
             "rest_density_kg_m3": 1000.0,
         },
         "environment": {
-            "type": "asset_bound_container_transfer",
-            "center_xy_m": [-0.06, 0.0],
-            "wall_half_extent_m": 0.36,
+            "type": "rigid_sph_scene",
             "floor_z_m": floor_z,
             "workspace_bounds_m": compiled["workspace_bounds_m"],
             "penetration_tolerance_m": particle_size,
-            "collision_backend": "genesis_rigid_sph_legacy_coupler",
-            "collision_representation": "asset_fitted_axisymmetric_profile_panels",
-            "source_container": without_parts(compiled["source"]),
-            "receiver_container": without_parts(compiled["receiver"]),
+            "collision_backend": "genesis_rigid_sph_coupler",
+            "collision_representation": "declared_rigid_body_colliders",
+            "rigid_bodies": [without_parts(body) for body in compiled["rigid_bodies"]],
+            "measurements": compiled["measurements"],
+            "assertions": compiled["assertions"],
             "initial_condition": {
                 "type": "bounded_volume",
                 "shape": "cylinder",
-                "frame": "source_container_local",
+                "frame": fluid_spec["frame"],
                 "velocity_field": {"type": "still"},
             },
             "initial_liquid_position_m": fluid_spec["world_position_m"],
             "initial_liquid_volume_m3": initial_volume,
-            "minimum_initial_source_fraction": float(expected.get("minimum_initial_source_fraction") or 0.0),
-            "minimum_final_receiver_fraction": float(expected.get("minimum_final_receiver_fraction") or 0.0),
-            "minimum_source_fraction_decrease": float(expected.get("minimum_source_fraction_decrease") or 0.0),
-            "maximum_final_spill_fraction": float(expected.get("maximum_final_spill_fraction") or 1.0),
-            "minimum_source_evacuation_duration_s": float(expected.get("minimum_source_evacuation_duration_s") or 0.0),
-            "maximum_source_fraction_drop_per_frame": float(expected.get("maximum_source_fraction_drop_per_frame") or 0.0),
             "surface_container_intersection_metric": "not_applied_for_boundary_contacting_fluid",
             "minimum_splash_rise_m": 0.0,
             "minimum_float_sink_separation_m": 0.0,
@@ -256,30 +255,28 @@ def simulate_container_transfer(case_spec: dict[str, Any]) -> dict[str, Any]:
             "smoothing_length_in_particle_radii": smoothing,
             "cube_size_in_particle_radii": cube_size,
             "iso_surface_threshold": iso_threshold,
-            "surface_boundary_projection": "floor_only; no x/y container clipping",
+            "surface_boundary_projection": "lowest_horizontal_plane_only",
             "representation": "per-frame OBJ surface mesh",
-            "ue_next_step": "replay surface and identical asset-bound container transforms",
+            "ue_next_step": "replay surface and declared rigid-body transforms",
         },
         "frames": frames,
     }
 
 
-def add_container_collision(
+def add_static_axisymmetric_collision(
     scene: Any,
     gs: Any,
     material: Any,
-    container: dict[str, Any],
-    *,
-    fixed: bool,
+    body: dict[str, Any],
 ) -> list[Any]:
     entities = []
-    for part in container["collision"]["parts"]:
+    for part in body["collision"]["parts"]:
         if part["kind"] == "box":
             morph = gs.morphs.Box(
                 size=tuple(part["size_m"]),
                 pos=tuple(part["position_m"]),
                 quat=tuple(part["quaternion_wxyz"]),
-                fixed=fixed,
+                fixed=True,
                 visualization=False,
             )
         else:
@@ -288,15 +285,15 @@ def add_container_collision(
                 height=float(part["height_m"]),
                 pos=tuple(part["position_m"]),
                 quat=tuple(part["quaternion_wxyz"]),
-                fixed=fixed,
+                fixed=True,
                 visualization=False,
             )
         entities.append(scene.add_entity(morph=morph, material=material))
     return entities
 
 
-def add_moving_container_collision(scene: Any, gs: Any, material: Any, container: dict[str, Any]) -> Any:
-    collision = container["collision"]
+def add_kinematic_axisymmetric_collision(scene: Any, gs: Any, material: Any, body: dict[str, Any]) -> Any:
+    collision = body["collision"]
     parts = profile_collision_parts(
         [0.0, 0.0, 0.0],
         rotation_matrix_xyz([0.0, 0.0, 0.0]),
@@ -314,11 +311,11 @@ def add_moving_container_collision(scene: Any, gs: Any, material: Any, container
         else:
             size = f'{part["radius_m"]} {float(part["height_m"]) / 2.0}'
             geoms.append(f'<geom type="cylinder" pos="{pos}" quat="{quat}" size="{size}"/>')
-    body_pos = " ".join(str(value) for value in container["transform"]["position_m"])
-    body_quat = " ".join(str(value) for value in quaternion_from_matrix(rotation_matrix_xyz(container["transform"]["euler_xyz_deg"])))
+    body_pos = " ".join(str(value) for value in body["transform"]["position_m"])
+    body_quat = " ".join(str(value) for value in quaternion_from_matrix(rotation_matrix_xyz(body["transform"]["euler_xyz_deg"])))
     xml = (
-        '<mujoco model="container"><worldbody>'
-        f'<body name="container" pos="{body_pos}" quat="{body_quat}">'
+        '<mujoco model="rigid_body"><worldbody>'
+        f'<body name="rigid_body" pos="{body_pos}" quat="{body_quat}">'
         '<freejoint/><inertial pos="0 0 0" mass="1" diaginertia="0.01 0.01 0.01"/>'
         + "".join(geoms)
         + "</body></worldbody></mujoco>"
@@ -329,21 +326,21 @@ def add_moving_container_collision(scene: Any, gs: Any, material: Any, container
     )
 
 
-def set_container_pose(
+def set_rigid_body_pose(
     entity: Any,
-    container: dict[str, Any],
+    body: dict[str, Any],
     time_s: float,
     *,
     next_time_s: float | None = None,
 ) -> None:
-    position, solver_rotation, _ue_rotation = container_pose_at_time(container, time_s)
+    position, solver_rotation, _ue_rotation = rigid_body_pose_at_time(body, time_s)
     linear_velocity = [0.0, 0.0, 0.0]
     angular_velocity = [0.0, 0.0, 0.0]
     if next_time_s is not None:
         dt = float(next_time_s) - float(time_s)
         if dt <= 0.0:
-            raise ValueError("container pose next_time_s must be greater than time_s")
-        next_position, next_rotation, _next_ue_rotation = container_pose_at_time(container, next_time_s)
+            raise ValueError("rigid-body pose next_time_s must be greater than time_s")
+        next_position, next_rotation, _next_ue_rotation = rigid_body_pose_at_time(body, next_time_s)
         linear_velocity = [(after - before) / dt for before, after in zip(position, next_position, strict=True)]
         angular_velocity = [math.radians(after - before) / dt for before, after in zip(solver_rotation, next_rotation, strict=True)]
     entity.set_pos(
@@ -361,11 +358,11 @@ def set_container_pose(
     entity.set_dofs_velocity((*linear_velocity, *angular_velocity), skip_forward=False)
 
 
-def container_pose_at_time(container: dict[str, Any], time_s: float) -> tuple[list[float], list[float], list[float]]:
-    solver_rotation, ue_rotation = container_rotations_at_time(container, time_s)
-    motion = container.get("kinematic_motion")
+def rigid_body_pose_at_time(body: dict[str, Any], time_s: float) -> tuple[list[float], list[float], list[float]]:
+    solver_rotation, ue_rotation = rigid_body_rotations_at_time(body, time_s)
+    motion = body.get("motion")
     if not isinstance(motion, dict):
-        return list(container["transform"]["position_m"]), solver_rotation, ue_rotation
+        return list(body["transform"]["position_m"]), solver_rotation, ue_rotation
     position = subtract(
         motion["pivot_world_m"],
         matrix_vector(rotation_matrix_xyz(solver_rotation), motion["pivot_local_m"]),
@@ -373,9 +370,9 @@ def container_pose_at_time(container: dict[str, Any], time_s: float) -> tuple[li
     return position, solver_rotation, ue_rotation
 
 
-def container_rotations_at_time(container: dict[str, Any], time_s: float) -> tuple[list[float], list[float]]:
-    transform = container["transform"]
-    motion = container.get("kinematic_motion")
+def rigid_body_rotations_at_time(body: dict[str, Any], time_s: float) -> tuple[list[float], list[float]]:
+    transform = body["transform"]
+    motion = body.get("motion")
     solver_start = list(transform["euler_xyz_deg"])
     ue_start = list(transform["ue_rotation_pyr_deg"])
     if not isinstance(motion, dict):
@@ -393,16 +390,16 @@ def interpolate_rotation(start: list[float], end: list[float], fraction: float) 
     return [float(start[index]) + (float(end[index]) - float(start[index])) * fraction for index in range(3)]
 
 
-def container_at_pose(
-    container: dict[str, Any],
+def rigid_body_at_pose(
+    body: dict[str, Any],
     position: list[float],
     solver_rotation: list[float],
     ue_rotation: list[float],
 ) -> dict[str, Any]:
     return {
-        **container,
+        **body,
         "transform": {
-            **container["transform"],
+            **body["transform"],
             "position_m": list(position),
             "euler_xyz_deg": list(solver_rotation),
             "ue_rotation_pyr_deg": list(ue_rotation),
@@ -410,30 +407,44 @@ def container_at_pose(
     }
 
 
-def classify_particles(
+def evaluate_measurements(
     positions: list[list[float]],
-    source: dict[str, Any],
-    receiver: dict[str, Any],
-    particle_size: float,
-) -> dict[str, Any]:
-    source_count = sum(point_inside_profile(row, source) for row in positions)
-    receiver_count = sum(point_inside_profile(row, receiver) for row in positions)
+    bodies: dict[str, dict[str, Any]],
+    definitions: list[dict[str, Any]],
+) -> dict[str, float]:
     total = max(1, len(positions))
-    outside = max(0, len(positions) - source_count - receiver_count)
-    return {
-        "source_particle_count": source_count,
-        "receiver_particle_count": receiver_count,
-        "outside_both_particle_count": outside,
-        "source_fraction": source_count / total,
-        "receiver_fraction": receiver_count / total,
-        "outside_both_fraction": outside / total,
-    }
+    result: dict[str, float] = {}
+    for definition in definitions:
+        kind = definition["type"]
+        if kind == "body_interior_fraction":
+            count = sum(point_inside_profile(row, bodies[definition["body_id"]]) for row in positions)
+            value = count / total
+        elif kind == "outside_body_interiors_fraction":
+            selected = [bodies[body_id] for body_id in definition["body_ids"]]
+            count = sum(not any(point_inside_profile(row, body) for body in selected) for row in positions)
+            value = count / total
+        elif kind == "plane_proximity_fraction":
+            collision = bodies[definition["body_id"]]["collision"]
+            normal_length = math.sqrt(sum(float(value) ** 2 for value in collision["normal"]))
+            normal = [float(value) / normal_length for value in collision["normal"]]
+            origin = collision["position_m"]
+            distance = float(definition["distance_m"])
+            count = sum(abs(sum((float(row[axis]) - float(origin[axis])) * normal[axis] for axis in range(3))) <= distance for row in positions)
+            value = count / total
+        else:
+            axis_indices = {"x": 0, "y": 1, "z": 2}
+            value = max(
+                max(float(row[axis_indices[axis]]) for row in positions) - min(float(row[axis_indices[axis]]) for row in positions)
+                for axis in definition["axes"]
+            ) if positions else 0.0
+        result[definition["id"]] = value
+    return result
 
 
-def without_parts(container: dict[str, Any]) -> dict[str, Any]:
-    collision = dict(container["collision"])
+def without_parts(body: dict[str, Any]) -> dict[str, Any]:
+    collision = dict(body["collision"])
     collision.pop("parts", None)
-    return {**container, "collision": collision}
+    return {**body, "collision": collision}
 
 
 def wake_macos_display() -> None:
@@ -444,20 +455,20 @@ def wake_macos_display() -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run an asset-bound Genesis container transfer and export canonical particle/surface truth.")
+    parser = argparse.ArgumentParser(description="Run a declarative Genesis rigid-body/SPH scene and export canonical truth.")
     parser.add_argument("--case", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--skip-publish", action="store_true")
     args = parser.parse_args()
     case = load_case_spec(args.case)
-    output_dir = workspace_path(args.output_dir, default_relative="runs/fluid/container_transfer")
-    compiled = compile_container_transfer(case.data)
-    (output_dir / "container_transfer_compilation.json").parent.mkdir(parents=True, exist_ok=True)
-    (output_dir / "container_transfer_compilation.json").write_text(
+    output_dir = workspace_path(args.output_dir, default_relative="runs/fluid/rigid_sph")
+    compiled = compile_rigid_sph_scene(case.data)
+    (output_dir / "rigid_sph_scene.json").parent.mkdir(parents=True, exist_ok=True)
+    (output_dir / "rigid_sph_scene.json").write_text(
         json.dumps(compiled, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    report = write_fluid_cache(simulate_container_transfer(case.data), output_dir)
+    report = write_fluid_cache(simulate_rigid_sph_scene(case.data), output_dir)
     print(json.dumps({"status": report["status"], "output_dir": str(output_dir), **report["checks"]}, indent=2))
     return 0 if report["status"] == "pass" else 2
 

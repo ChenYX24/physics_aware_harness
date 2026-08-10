@@ -46,7 +46,8 @@ def _import_one(request: dict[str, Any]) -> dict[str, Any]:
         task.replace_existing_settings = True
         task.save = True
         options = unreal.FbxImportUI()
-        remote_asset = str(request.get("source_kind") or "") in {"external_site", "model_generation"}
+        source_kind = str(request.get("source_kind") or "")
+        remote_asset = source_kind in {"external_site", "model_generation", "user_file"}
         options.import_as_skeletal = False
         options.import_mesh = True
         options.import_materials = remote_asset
@@ -56,7 +57,10 @@ def _import_one(request: dict[str, Any]) -> dict[str, Any]:
         options.static_mesh_import_data.auto_generate_collision = True
         # The outer launcher materializes a temporary centimeter-normalized OBJ.
         # UE 5.7's OBJ/Interchange path ignores FbxImportUI's meter scale.
-        options.static_mesh_import_data.import_uniform_scale = 1.0
+        import_uniform_scale = float(request.get("import_uniform_scale") or 1.0)
+        if not math.isfinite(import_uniform_scale) or import_uniform_scale <= 0.0:
+            raise RuntimeError("import_uniform_scale must be finite and positive")
+        options.static_mesh_import_data.import_uniform_scale = import_uniform_scale
         task.options = options
         unreal.AssetToolsHelpers.get_asset_tools().import_asset_tasks([task])
 
@@ -124,6 +128,7 @@ def _import_one(request: dict[str, Any]) -> dict[str, Any]:
                 "obj_meter_to_ue_centimeter_scale": 100.0,
                 "normalized_source_unit": "centimeter",
                 "source_format": source.suffix.lstrip(".").casefold(),
+                "import_uniform_scale": import_uniform_scale,
                 "materials_imported": remote_asset,
                 "textures_imported": remote_asset,
             },
@@ -208,16 +213,16 @@ def _dimensions_match_source(
     # using the longest dimension and at least one other axis. Sorting tolerates
     # source/up-axis conventions. Procedural and fitted sources keep the strict
     # per-axis contract.
-    external_fbx = str(source_kind).casefold() == "external_site"
-    actual_values = sorted(actual_size_cm) if external_fbx else actual_size_cm
-    expected_values = sorted(expected_size_cm) if external_fbx else expected_size_cm
-    relative_tolerance = 0.20 if external_fbx else 0.01
-    absolute_tolerance_cm = 1.0 if external_fbx else 0.1
+    fbx_with_authored_axes = str(source_kind).casefold() in {"external_site", "user_file"}
+    actual_values = sorted(actual_size_cm) if fbx_with_authored_axes else actual_size_cm
+    expected_values = sorted(expected_size_cm) if fbx_with_authored_axes else expected_size_cm
+    relative_tolerance = 0.20 if str(source_kind).casefold() == "external_site" else 0.05 if fbx_with_authored_axes else 0.01
+    absolute_tolerance_cm = 1.0 if str(source_kind).casefold() == "external_site" else 0.2 if fbx_with_authored_axes else 0.1
     matches = [
         abs(actual - expected) <= max(absolute_tolerance_cm, abs(expected) * relative_tolerance)
         for actual, expected in zip(actual_values, expected_values)
     ]
-    if external_fbx:
+    if fbx_with_authored_axes:
         return matches[-1] and sum(matches) >= 2
     return all(matches)
 

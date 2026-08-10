@@ -80,29 +80,32 @@ def main() -> int:
     particle_cache = read_json(Path(args.particle_cache))
     environment = particle_cache.get("environment") if isinstance(particle_cache.get("environment"), dict) else {}
     basin_scale_xyz = args.basin_scale_xyz or ([args.basin_scale] * 3 if args.basin_scale is not None else None)
-    transfer_mode = environment.get("type") == "asset_bound_container_transfer"
+    rigid_scene_mode = environment.get("type") == "rigid_sph_scene"
     solver_basin_geometry = (
-        "asset_bound_pair"
-        if transfer_mode
+        "declared_rigid_bodies"
+        if rigid_scene_mode
         else "round" if environment.get("type") == "cylindrical_basin" else "rectangular"
     )
-    if transfer_mode:
-        transfer_containers = [environment.get("source_container"), environment.get("receiver_container")]
-        asset_geometry_match = all(
+    if rigid_scene_mode:
+        declared_rigid_bodies = [item for item in environment.get("rigid_bodies") or [] if isinstance(item, dict)]
+        asset_geometry_match = bool(declared_rigid_bodies) and all(
             isinstance(item, dict)
             and ((item.get("collision") or {}).get("asset_geometry_match") is True)
             and str(((item.get("asset") or {}).get("ue_path") or "")).startswith("/Game/")
             and len((item.get("transform") or {}).get("position_m") or []) == 3
             and len((item.get("transform") or {}).get("ue_rotation_pyr_deg") or []) == 3
-            for item in transfer_containers
+            and len((item.get("transform") or {}).get("scale") or []) == 3
+            and all(float(value) > 0.0 for value in ((item.get("transform") or {}).get("scale") or []))
+            for item in declared_rigid_bodies
         )
     else:
-        transfer_containers = []
+        declared_rigid_bodies = []
         if not all((args.basin_asset, args.basin_geometry, basin_scale_xyz, args.basin_pivot_to_rim_m)):
-            raise SystemExit("non-transfer fluid replay requires --basin-asset/geometry/scale-or-scale-xyz/pivot-to-rim-m")
+            raise SystemExit("legacy basin replay requires --basin-asset/geometry/scale-or-scale-xyz/pivot-to-rim-m")
         asset_geometry_match = args.basin_geometry == solver_basin_geometry
     case = load_case_spec(ROOT / args.case if not Path(args.case).is_absolute() else args.case)
     case_spec = dict(case.data)
+    fluid_visual = fluid_visual_parameters(case_spec)
     fps = int((replay.get("timebase") or {}).get("fps") or 0)
     frame_count = int((replay.get("timebase") or {}).get("frame_count") or 0)
     if fps <= 0 or frame_count <= 0 or len(replay.get("frames") or []) != frame_count:
@@ -178,14 +181,11 @@ def main() -> int:
                 },
             )
         )
-    transfer_runtime_objects = (
-        transfer_container_runtime_objects(particle_cache, render_z_offset_m=args.scene_z_offset_m)
-        if transfer_mode
-        else []
+    declared_dynamic_runtime, declared_static_runtime = (
+        rigid_body_runtime_objects(particle_cache, render_z_offset_m=args.scene_z_offset_m)
+        if rigid_scene_mode
+        else ([], [])
     )
-    transfer_source_runtime = transfer_runtime_objects[:1]
-    transfer_static_runtime = transfer_runtime_objects[1:]
-    support_runtime = support_surface_runtime_objects(case_spec, render_z_offset_m=args.scene_z_offset_m) if transfer_mode else []
     precomputed_trajectory = [
         {
             "frame": index,
@@ -214,23 +214,21 @@ def main() -> int:
                     }
                     for item in rigid_specs
                 },
-                **(
-                    {
-                        str(environment["source_container"]["id"]): {
+                **{
+                        str(body["id"]): {
                             "position": offset_z(
-                                particle_cache["frames"][index]["rigid_objects"][str(environment["source_container"]["id"])]["position_m"],
+                                particle_cache["frames"][index]["rigid_objects"][str(body["id"])]["position_m"],
                                 args.scene_z_offset_m,
                             ),
                             "rotation_degrees": list(
-                                particle_cache["frames"][index]["rigid_objects"][str(environment["source_container"]["id"])]["ue_rotation_pyr_deg"]
+                                particle_cache["frames"][index]["rigid_objects"][str(body["id"])]["ue_rotation_pyr_deg"]
                             ),
                             "velocity": [0.0, 0.0, 0.0],
-                            "source": "genesis_kinematic_container_frame",
+                            "source": "genesis_kinematic_rigid_body_frame",
                         }
-                    }
-                    if transfer_mode
-                    else {}
-                ),
+                    for body in declared_rigid_bodies
+                    if body.get("mobility") == "kinematic"
+                },
             },
             "contacts": [],
         }
@@ -292,22 +290,22 @@ def main() -> int:
                     "disallow_nanite": True,
                     "preserve_material": False,
                     "generate_solid_material": True,
-                    "generated_material_name": "M_Harness_FluidSurface_OpaqueBlue_TwoSided_V3_DeepTank",
+                    "generated_material_name": fluid_visual["generated_material_name"],
                     "fixed_material_color": True,
                     "two_sided_material": True,
-                    "color_rgb": [0.03, 0.30, 0.78],
-                    "roughness": 0.12,
+                    "color_rgb": fluid_visual["color_rgb"],
+                    "roughness": fluid_visual["roughness"],
                     "metallic": 0.0,
-                    "emissive": 0.18,
+                    "emissive": fluid_visual["emissive"],
                     "segmentation_identity": "fluid_surface",
                 },
             ),
-            *transfer_source_runtime,
+            *declared_dynamic_runtime,
             *rigid_runtime_objects,
         ],
         "static_objects": (
-            [*transfer_static_runtime, *support_runtime]
-            if transfer_mode
+            declared_static_runtime
+            if rigid_scene_mode
             else basin_runtime_objects(
                 particle_cache,
                 basin_floor_material,
@@ -329,9 +327,8 @@ def main() -> int:
         "surface_replay_manifest": str(Path(args.replay_manifest).resolve()),
         "particle_cache": str(Path(args.particle_cache).resolve()),
         "render_assets": {
-            "containers": [str((item.get("asset") or {}).get("ue_path")) for item in transfer_containers] if transfer_mode else [],
-            "support_surface": [item["ue5_path"] for item in support_runtime],
-            "basin": None if transfer_mode else args.basin_asset,
+            "rigid_bodies": [str((item.get("asset") or {}).get("ue_path")) for item in declared_rigid_bodies],
+            "basin": None if rigid_scene_mode else args.basin_asset,
             "rigid_objects": [item["ue5_path"] for item in rigid_runtime_objects],
         },
     }
@@ -350,9 +347,9 @@ def main() -> int:
         raise SystemExit(f"particle cache surface_frames directory is missing: {source_surface_frames}")
     shutil.copytree(source_surface_frames, run_dir / "surface_frames", dirs_exist_ok=True)
     shutil.copyfile(args.replay_manifest, run_dir / "fluid_surface_replay.json")
-    container_resolution_entries = (
-        container_asset_resolution_entries(transfer_containers)
-        if transfer_mode
+    rigid_body_resolution_entries = (
+        rigid_body_asset_resolution_entries(declared_rigid_bodies)
+        if rigid_scene_mode
         else [
             {
                 "object_id": "basin",
@@ -384,19 +381,7 @@ def main() -> int:
                         "provenance": "particle_cache.json + fluid_surface_replay.json",
                     },
                 },
-                *container_resolution_entries,
-                *[
-                    {
-                        "object_id": item["id"],
-                        "selected_asset": {
-                            "asset_id": item["ue5_path"].rsplit(".", 1)[0],
-                            "ue5_path": item["ue5_path"],
-                            "proxy": False,
-                            "provenance": "mounted AgenticDataPlatform UE asset catalog",
-                        },
-                    }
-                    for item in support_runtime
-                ],
+                *rigid_body_resolution_entries,
                 *[
                     {
                         "object_id": item["id"],
@@ -412,7 +397,7 @@ def main() -> int:
             ],
             "quality_gate": {
                 "reference_assets_ready": False,
-                "local_preview_count": (len(transfer_containers) if transfer_mode else 1) + len(rigid_runtime_objects),
+                "local_preview_count": (len(declared_rigid_bodies) if rigid_scene_mode else 1) + len(rigid_runtime_objects),
                 "geometry_match": asset_geometry_match,
                 "reason": "real UE scene assets with a derived fluid surface; particle cache remains state truth",
             },
@@ -524,7 +509,7 @@ def main() -> int:
     verifier = PhysicsVerifier().verify_run_dir(run_dir, write=True)
     rgb_observability = verify_expected_color_observability(
         run_dir,
-        expected_rgb=[0.03, 0.30, 0.78],
+        expected_rgb=fluid_visual["color_rgb"],
         view_ids=requested_views,
         write=True,
     )
@@ -589,8 +574,7 @@ def main() -> int:
             "ue_project": str(ue_project),
             "opened_map": args.map.split(".", 1)[0],
             "real_3d_assets": [
-                *([str((item.get("asset") or {}).get("ue_path")) for item in transfer_containers] if transfer_mode else [args.basin_asset]),
-                *[item["ue5_path"] for item in support_runtime],
+                *([str((item.get("asset") or {}).get("ue_path")) for item in declared_rigid_bodies] if rigid_scene_mode else [args.basin_asset]),
                 *[item["ue5_path"] for item in rigid_runtime_objects],
             ],
             "scene_z_offset_m": args.scene_z_offset_m,
@@ -731,6 +715,27 @@ def offset_z(position: list[float], amount: float) -> list[float]:
     return [float(position[0]), float(position[1]), float(position[2]) + amount]
 
 
+def fluid_visual_parameters(case_spec: dict) -> dict:
+    fluid = next(
+        (
+            item
+            for item in case_spec.get("objects") or []
+            if isinstance(item, dict) and str(item.get("role") or "") in {"fluid", "fluid_volume"}
+        ),
+        {},
+    )
+    visual = fluid.get("visual") if isinstance(fluid.get("visual"), dict) else {}
+    color = visual.get("color_rgb", [0.03, 0.30, 0.78])
+    if not isinstance(color, list) or len(color) != 3:
+        raise ValueError("fluid visual color_rgb must contain three values")
+    return {
+        "generated_material_name": f"M_Harness_FluidSurface_{str(case_spec.get('case_id') or 'Fluid')}_V1",
+        "color_rgb": [float(value) for value in color],
+        "roughness": float(visual.get("roughness", 0.12)),
+        "emissive": float(visual.get("emissive", 0.18)),
+    }
+
+
 def runtime_object(object_id: str, path: str, position: list[float], scale: list[float], params: dict) -> dict:
     return {
         "id": object_id,
@@ -751,87 +756,57 @@ def runtime_object(object_id: str, path: str, position: list[float], scale: list
     }
 
 
-def transfer_container_runtime_objects(cache: dict, *, render_z_offset_m: float) -> list[dict]:
+def rigid_body_runtime_objects(cache: dict, *, render_z_offset_m: float) -> tuple[list[dict], list[dict]]:
     environment = cache.get("environment") if isinstance(cache.get("environment"), dict) else {}
-    objects: list[dict] = []
-    for key in ("source_container", "receiver_container"):
-        container = environment.get(key) if isinstance(environment.get(key), dict) else {}
-        asset = container.get("asset") if isinstance(container.get("asset"), dict) else {}
-        transform = container.get("transform") if isinstance(container.get("transform"), dict) else {}
+    dynamic_objects: list[dict] = []
+    static_objects: list[dict] = []
+    for body in environment.get("rigid_bodies") or []:
+        if not isinstance(body, dict):
+            continue
+        asset = body.get("asset") if isinstance(body.get("asset"), dict) else {}
+        transform = body.get("transform") if isinstance(body.get("transform"), dict) else {}
         if len(transform.get("position_m") or []) != 3 or len(transform.get("ue_rotation_pyr_deg") or []) != 3:
-            raise ValueError(f"asset-bound transfer container is missing an explicit UE transform: {container.get('id')}")
+            raise ValueError(f"declared rigid body is missing an explicit UE transform: {body.get('id')}")
+        scale = transform.get("scale") or []
+        if len(scale) != 3 or any(float(value) <= 0.0 for value in scale):
+            raise ValueError(f"declared rigid body has invalid scale: {body.get('id')}")
         runtime = runtime_object(
-            str(container.get("id") or key),
+            str(body.get("id") or "rigid_body"),
             str(asset.get("ue_path") or ""),
             offset_z(transform.get("position_m") or [0.0, 0.0, 0.0], render_z_offset_m),
-            [1.0, 1.0, 1.0],
+            [float(value) for value in scale],
             {
                 "base_rotation_degrees": (
                     [0.0, 0.0, 0.0]
-                    if isinstance(container.get("kinematic_motion"), dict)
+                    if body.get("mobility") == "kinematic" and isinstance(body.get("motion"), dict)
                     else list(transform["ue_rotation_pyr_deg"])
                 ),
                 "preserve_authored_scale": True,
                 "preserve_material": True,
                 "visual_material_path": str(asset.get("material_path") or ""),
-                "segmentation_identity": str(container.get("id") or key),
-                "asset_geometry_match": ((container.get("collision") or {}).get("asset_geometry_match") is True),
+                "segmentation_identity": str(body.get("id") or "rigid_body"),
+                "asset_geometry_match": ((body.get("collision") or {}).get("asset_geometry_match") is True),
             },
         )
-        objects.append(runtime)
-    return objects
+        (dynamic_objects if body.get("mobility") == "kinematic" else static_objects).append(runtime)
+    return dynamic_objects, static_objects
 
 
-def support_surface_runtime_objects(case_spec: dict, *, render_z_offset_m: float) -> list[dict]:
-    scene = case_spec.get("scene") if isinstance(case_spec.get("scene"), dict) else {}
-    support = scene.get("support_surface") if isinstance(scene.get("support_surface"), dict) else None
-    if support is None:
-        return []
-    asset = support.get("asset") if isinstance(support.get("asset"), dict) else {}
-    position = support.get("position_m")
-    scale = support.get("scale")
-    if not isinstance(position, list) or len(position) != 3 or not isinstance(scale, list) or len(scale) != 3:
-        raise ValueError("transfer support surface requires position_m and scale vectors")
-    surface_height = float(support.get("solver_floor_to_surface_m") or 0.0)
-    if abs(surface_height - float(render_z_offset_m)) > 0.005:
-        raise ValueError(
-            "transfer render offset must place solver floor on support surface: "
-            f"offset_m={render_z_offset_m:.6f}, surface_m={surface_height:.6f}"
-        )
-    path = str(asset.get("ue_path") or "")
-    if not path.startswith("/Game/") or asset.get("proxy") is not False:
-        raise ValueError("transfer support surface requires a non-proxy /Game asset")
-    return [
-        runtime_object(
-            str(support.get("id") or "support_surface"),
-            path,
-            [float(value) for value in position],
-            [float(value) for value in scale],
-            {
-                "preserve_authored_scale": True,
-                "preserve_material": True,
-                "segmentation_identity": str(support.get("id") or "support_surface"),
-                "supports_solver_floor": True,
-            },
-        )
-    ]
-
-
-def container_asset_resolution_entries(containers: list[dict]) -> list[dict]:
+def rigid_body_asset_resolution_entries(bodies: list[dict]) -> list[dict]:
     return [
         {
-            "object_id": str(container.get("id") or "container"),
+            "object_id": str(body.get("id") or "rigid_body"),
             "selected_asset": {
-                "asset_id": str((container.get("asset") or {}).get("ue_path") or "").rsplit(".", 1)[0],
-                "ue5_path": str((container.get("asset") or {}).get("ue_path") or ""),
-                "sha256": str((container.get("asset") or {}).get("sha256") or ""),
+                "asset_id": str((body.get("asset") or {}).get("ue_path") or "").rsplit(".", 1)[0],
+                "ue5_path": str((body.get("asset") or {}).get("ue_path") or ""),
+                "sha256": str((body.get("asset") or {}).get("sha256") or ""),
                 "proxy": False,
-                "provenance": str((container.get("asset") or {}).get("catalog_source") or "mounted AgenticDataPlatform UE asset catalog"),
-                "collision_representation": str((container.get("collision") or {}).get("type") or ""),
-                "asset_geometry_match": ((container.get("collision") or {}).get("asset_geometry_match") is True),
+                "provenance": str((body.get("asset") or {}).get("catalog_source") or "mounted AgenticDataPlatform UE asset catalog"),
+                "collision_representation": str((body.get("collision") or {}).get("type") or ""),
+                "asset_geometry_match": ((body.get("collision") or {}).get("asset_geometry_match") is True),
             },
         }
-        for container in containers
+        for body in bodies
     ]
 
 

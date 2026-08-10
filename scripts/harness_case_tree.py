@@ -26,7 +26,7 @@ FOLDER_DESCRIPTIONS = {
     "fluid": "流体粒子动力学：solver 粒子真值、表面重建、UE/Blender 渲染与传感器。",
     "fluid/fluid_drop_height_matrix": "流体落高 OFAT：只改变初始高度，比较触底时间与碰前速度。",
     "fluid/container_fill_stirring": "容器内搅拌：预填充后只初始化一次旋涡速度场，之后由 Genesis 自主演化。",
-    "fluid/container_to_container_transfer": "容器转移：v001 验证有限液柱，v002 用真实高脚杯/普通杯资产、分段轴对称内腔和动态倾倒验证重力转移。",
+    "fluid/container_to_container_transfer": "刚体-SPH 场景：v001 验证有限液柱，v002 以真实资产、声明式轴对称碰撞和刚体运动验证统一求解契约。",
     "fluid/fountain": "喷泉：v001 是有限竖直喷流脉冲；连续 emitter 必须先完成 active-particle lineage。",
     "fluid/drop_in_liquid": "深水容器中的流固耦合：静水预滚动后一次释放，按有效密度验证上浮、下沉与入水水花；workspace v003 使用真实方形石质 Planter_A。",
     "fracture": "脆性破碎：验证先碰撞、再过能量门、再破碎。",

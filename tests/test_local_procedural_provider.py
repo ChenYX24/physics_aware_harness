@@ -19,7 +19,7 @@ from harness.assets.providers.local_procedural_mesh import generate_box_obj, gen
 from harness.assets.providers.orchestrator import AssetProviderOrchestrator
 from harness.assets.sqlite_catalog import initialize_catalog
 from harness.core.case_spec import load_case_spec
-from harness.core.case_spec_v2 import case_spec_v2_from_dict, project_case_spec_v2_to_v1
+from harness.core.case_spec_v2 import CaseSpecV2ValidationError, case_spec_v2_from_dict, project_case_spec_v2_to_v1
 from harness.planning.runtime_compiler import compile_runtime_case
 from harness.runtime.ue_backend import UEBackend, UEBackendUnavailable
 from tests.case_spec_v2_fixture import case_spec_v2_fixture
@@ -178,6 +178,50 @@ class LocalProceduralProviderTests(unittest.TestCase):
 
         self.assertEqual([result.data["status"] for result in results], ["fulfilled", "fulfilled"])
         self.assertTrue(all(result.data["batch_size"] == 2 for result in results))
+
+    def test_batch_command_failure_does_not_reuse_stale_item_results(self) -> None:
+        inputs = []
+        for index in range(2):
+            work_dir = self.workspace / f"stale_batch_{index}"
+            work_dir.mkdir()
+            source = work_dir / "source.obj"
+            source.write_text("v 0 0 0\nv 1 1 1\nf 1 2 2\n", encoding="utf-8")
+            payload = source.read_bytes()
+            request_payload = {
+                "schema_version": BACKEND_IMPORT_REQUEST_SCHEMA,
+                "request_id": f"backend-import.stale-{index}",
+                "request_digest": hashlib.sha256(f"stale-{index}".encode()).hexdigest(),
+                "asset_id": f"generated.stale.asset_{index}",
+                "target_backend": "ue",
+                "class_name": "StaticMesh",
+                "source_files": [{
+                    "role": "source",
+                    "local_path": str(source),
+                    "format": "obj",
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "byte_size": len(payload),
+                    "materialized": True,
+                }],
+            }
+            request = BackendImportRequest.from_dict(request_payload)
+            (work_dir / "backend_import_result.json").write_text(json.dumps({
+                "schema_version": "harness_backend_asset_import_result_v1",
+                "request_id": request.data["request_id"],
+                "request_digest": request.data["request_digest"],
+                "asset_id": request.data["asset_id"],
+                "status": "blocked",
+                "failure": {"code": "stale_failure", "message": "old result", "retriable": False},
+            }), encoding="utf-8")
+            inputs.append((request, work_dir))
+        importer = UECommandImporterAdapter([sys.executable, "-c", "raise SystemExit(2)"], timeout_s=10)
+
+        results = importer.import_assets(inputs, workspace=self.workspace)
+
+        self.assertEqual([result.data["failure"]["code"] for result in results], [
+            "backend_importer_execution_failed",
+            "backend_importer_execution_failed",
+        ])
+        self.assertTrue(all(result.data["returncode"] == 2 for result in results))
 
     def test_case_provider_batches_all_import_misses_and_reuses_them(self) -> None:
         data = case_spec_v2_fixture()
@@ -385,21 +429,19 @@ class LocalProceduralProviderTests(unittest.TestCase):
 
     def test_sphere_and_cylinder_dimension_rules_fail_structurally(self) -> None:
         invalid = [
-            ("sphere", "sphere_mesh_v1", [0.2, 0.3, 0.2]),
-            ("cylinder", "cylinder_mesh_v1", [0.2, 0.3, 1.0]),
+            ("sphere", "sphere_mesh_v1", [0.2, 0.3, 0.2], "procedural_sphere_size_mismatch"),
+            (
+                "cylinder",
+                "cylinder_mesh_v1",
+                [0.2, 0.3, 1.0],
+                "procedural_cylinder_local_axis_size_mismatch",
+            ),
         ]
-        for shape, recipe_id, size in invalid:
+        for shape, recipe_id, size, issue_code in invalid:
             with self.subTest(shape=shape):
-                compilation = compile_runtime_case(
-                    self.provider_case(shape=shape, size_m=size, provider_hint=recipe_id),
-                    requested_backend="ue",
-                    registry=self.registry,
-                    provider_orchestrator=self.orchestrator(),
-                )
-                result = compilation.artifacts["asset_provider_batch"]["results"][0]
-                self.assertEqual(result["status"], "failed")
-                self.assertEqual(result["failure"]["code"], "invalid_generation_spec")
-                self.assertEqual(compilation.report["asset_resolve_invocation_count"], 1)
+                with self.assertRaises(CaseSpecV2ValidationError) as context:
+                    self.provider_case(shape=shape, size_m=size, provider_hint=recipe_id)
+                self.assertIn(issue_code, {issue.code for issue in context.exception.issues})
 
     def test_fake_import_register_lookup_qualify_and_resolver_select(self) -> None:
         case = self.provider_case()
@@ -575,8 +617,17 @@ class LocalProceduralProviderTests(unittest.TestCase):
 
     def test_preferred_failure_searches_local_only_with_explicit_fallback(self) -> None:
         self._register_local_box()
-        with_fallback = self.provider_case(requirement="preferred", shape="sphere", fallback_order=["local_catalog"])
-        without_fallback = self.provider_case(requirement="preferred", shape="sphere")
+        with_fallback = self.provider_case(
+            requirement="preferred",
+            shape="box",
+            provider_hint="unsupported_recipe",
+            fallback_order=["local_catalog"],
+        )
+        without_fallback = self.provider_case(
+            requirement="preferred",
+            shape="box",
+            provider_hint="unsupported_recipe",
+        )
         first = compile_runtime_case(
             with_fallback,
             requested_backend="ue",
@@ -734,6 +785,7 @@ class LocalProceduralProviderTests(unittest.TestCase):
                 "materialized": True,
                 "ue_path": "/Engine/BasicShapes/Cube.Cube",
                 "bbox_size_m": [0.4, 0.6, 0.8],
+                "shape": "box",
                 "collider": "box",
                 "collision_profile": "PhysicsActor",
                 "mass_kg": 1.0,

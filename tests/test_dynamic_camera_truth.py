@@ -23,6 +23,7 @@ def load_camera_functions() -> dict:
     path = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     wanted = {
+        "apply_explicit_runtime_visual_appearance",
         "actor_runtime_component",
         "bool_control",
         "camera_view_for_frame",
@@ -33,7 +34,9 @@ def load_camera_functions() -> dict:
         "interpolate_values",
         "initialize_gasp_locomotion",
         "projectile_hold_position",
+        "released_body_gravity_enabled",
         "runtime_physics_controls",
+        "runtime_object_color",
         "runtime_gasp_objects",
         "runtime_subject_delta_cm",
         "runtime_vec3",
@@ -49,17 +52,48 @@ def load_camera_functions() -> dict:
         "os": os,
         "unreal": types.SimpleNamespace(
             Vector=Vector,
+            LinearColor=lambda *values: tuple(values),
             CollisionEnabled=types.SimpleNamespace(
                 NO_COLLISION="no_collision",
                 QUERY_AND_PHYSICS="query_and_physics",
             ),
         ),
+        "set_actor_material": lambda actor, material: actor.events.append(("material", material)),
+        "set_actor_color": lambda actor, color: actor.events.append(("color", color)),
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), namespace)
     return namespace
 
 
 class DynamicCameraTruthTests(unittest.TestCase):
+    def test_explicit_color_is_applied_to_the_visible_runtime_proxy_only_when_declared(self) -> None:
+        apply_appearance = load_camera_functions()["apply_explicit_runtime_visual_appearance"]
+
+        colored = types.SimpleNamespace(events=[])
+        self.assertTrue(
+            apply_appearance(
+                {"behavior": "llm_rigid_body", "params": {"color_rgb": [1.0, 0.2, 0.05]}},
+                colored,
+                {"runtime_air_sphere": "sphere_material"},
+            )
+        )
+        self.assertEqual(colored.events[0], ("material", "sphere_material"))
+        self.assertEqual(colored.events[1], ("color", (1.0, 0.2, 0.05, 1.0)))
+
+        authored = types.SimpleNamespace(events=[])
+        self.assertFalse(apply_appearance({"params": {"preserve_material": True}}, authored, {}))
+        self.assertEqual(authored.events, [])
+
+    def test_delayed_release_defaults_null_gravity_to_enabled(self) -> None:
+        released_body_gravity_enabled = load_camera_functions()["released_body_gravity_enabled"]
+
+        self.assertTrue(released_body_gravity_enabled({}))
+        self.assertTrue(released_body_gravity_enabled({"enable_gravity": None}))
+        self.assertTrue(released_body_gravity_enabled({"enable_gravity": True}))
+        self.assertFalse(released_body_gravity_enabled({"enable_gravity": False}))
+        self.assertFalse(released_body_gravity_enabled({}, {"gravity_enabled": False}))
+        self.assertTrue(released_body_gravity_enabled({"enable_gravity": True}, {"gravity_enabled": False}))
+
     def test_scheduled_release_disables_collision_while_held_and_restores_it_on_release(self) -> None:
         set_collision = load_camera_functions()["set_delayed_release_collision_enabled"]
 

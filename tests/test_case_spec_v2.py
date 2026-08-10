@@ -30,6 +30,22 @@ class CaseSpecV2Tests(unittest.TestCase):
         self.assertTrue(projection.data["objects"][0]["collision_required"])
         self.assertEqual(projection.data["objects"][2]["body_type"], "static")
 
+    def test_gravity_projection_canonicalizes_dynamic_role_without_language_matching(self) -> None:
+        data = case_spec_v2_fixture()
+        data["capabilities"] = {
+            "primary": "rigid_body_gravity_collision",
+            "required": ["rigid_body_gravity_collision"],
+        }
+        data["objects"][0]["role"] = "自由描述的下落物体"
+        data["objects"][0]["initial_state"]["linear_velocity_m_s"] = [0.0, 0.0, 0.0]
+
+        projection = project_case_spec_v2_to_v1(case_spec_v2_from_dict(data)).data
+        subject = projection["objects"][0]
+
+        self.assertEqual(subject["role"], "自由描述的下落物体")
+        self.assertEqual(subject["verification_role"], "falling_body")
+        self.assertEqual(projection["objects"][2]["role"], "support")
+
     def test_uniform_asset_scale_policy_is_validated_and_projected(self) -> None:
         data = case_spec_v2_fixture()
         data["objects"][0]["geometry"]["scale_policy"] = "fit_uniform_to_approx_size"
@@ -45,6 +61,27 @@ class CaseSpecV2Tests(unittest.TestCase):
         with self.assertRaises(CaseSpecV2ValidationError) as context:
             case_spec_v2_from_dict(data)
         self.assertIn("invalid_enum", {issue.code for issue in context.exception.issues})
+
+    def test_explicit_object_color_is_validated_and_projected(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["color_rgb"] = [1.0, 0.2, 0.05]
+        data["objects"][0]["fixed_material_color"] = True
+
+        projection = project_case_spec_v2_to_v1(case_spec_v2_from_dict(data))
+
+        self.assertEqual(projection.data["objects"][0]["color_rgb"], [1.0, 0.2, 0.05])
+        self.assertTrue(projection.data["objects"][0]["fixed_material_color"])
+
+        data["objects"][0]["color_rgb"] = [1.01, 0.2, 0.05]
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("invalid_color", {issue.code for issue in context.exception.issues})
+
+        data["objects"][0]["color_rgb"] = [1.0, 0.2, 0.05]
+        data["objects"][0]["fixed_material_color"] = "yes"
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("invalid_type", {issue.code for issue in context.exception.issues})
 
     def test_uniform_asset_scale_policy_requires_a_target_size(self) -> None:
         data = case_spec_v2_fixture()
@@ -97,6 +134,39 @@ class CaseSpecV2Tests(unittest.TestCase):
         case = case_spec_v2_from_dict(data, available_input_ids=["request_image_0"])
         reference = case.data["objects"][0]["asset"]["acquisition"]["reference_inputs"][0]
         self.assertFalse(reference["allow_similarity_search"])
+
+    def test_meshy_texture_prompt_is_optional_and_limited_to_600_characters(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["asset"] = {
+            "description": "a generated ball",
+            "resource_kind": "mesh_3d",
+            "acquisition": {
+                "route": "model_generation",
+                "requirement": "required",
+                "origin": "user_explicit",
+                "provider_hint": "meshy",
+                "reference_inputs": [],
+                "fallback_order": [],
+                "texture_prompt": "matte red painted wood",
+            },
+        }
+        acquisition = data["objects"][0]["asset"]["acquisition"]
+        case = case_spec_v2_from_dict(data)
+        self.assertEqual(
+            case.data["objects"][0]["asset"]["acquisition"]["texture_prompt"],
+            "matte red painted wood",
+        )
+
+        acquisition["texture_prompt"] = "x" * 601
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("texture_prompt_too_long", {issue.code for issue in context.exception.issues})
+
+        acquisition["texture_prompt"] = "red"
+        acquisition["route"] = "procedural_generation"
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("texture_prompt_route_mismatch", {issue.code for issue in context.exception.issues})
 
     def test_llm_inferred_route_cannot_become_a_hard_requirement(self) -> None:
         data = case_spec_v2_fixture()
@@ -206,6 +276,33 @@ class CaseSpecV2Tests(unittest.TestCase):
             [["cue_ball", "target_ball"]],
         )
 
+    def test_explicit_collision_surface_gap_is_validated_and_projected(self) -> None:
+        data = case_spec_v2_fixture()
+        data["relations"][0]["surface_gap_m"] = 0.12
+
+        projection = project_case_spec_v2_to_v1(case_spec_v2_from_dict(data)).data
+
+        self.assertEqual(
+            projection["expected_physics"]["collision_surface_gaps_m"],
+            [{"source": "cue_ball", "target": "target_ball", "surface_gap_m": 0.12}],
+        )
+
+        data["relations"][0]["surface_gap_m"] = -0.1
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("invalid_surface_gap", {issue.code for issue in context.exception.issues})
+
+        data = case_spec_v2_fixture()
+        data["relations"].append({
+            "type": "supported_by",
+            "source": "cue_ball",
+            "target": "floor",
+            "surface_gap_m": 0.01,
+        })
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("surface_gap_requires_collision_relation", {issue.code for issue in context.exception.issues})
+
     def test_explicit_support_must_contain_subject_horizontal_bounds(self) -> None:
         data = case_spec_v2_fixture()
         data["objects"][0]["initial_state"]["position_m"][0] = 3.0
@@ -274,6 +371,24 @@ class CaseSpecV2Tests(unittest.TestCase):
         self.assertEqual(ball["release_velocity_m_s"], [1.2, 0.0, 0.0])
         self.assertEqual(ball["release_angular_velocity_deg_s"], [0.0, 57.29577951308232, 0.0])
 
+    def test_release_event_infers_active_body_without_language_specific_role(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["role"] = "撞击球"
+        data["objects"][0]["initial_state"]["linear_velocity_m_s"] = [0.0, 0.0, 0.0]
+        data["objects"][1]["role"] = "第一个目标"
+        data["objects"][2]["role"] = "桌面"
+        data["events"] = [{
+            "type": "release",
+            "object": "cue_ball",
+            "time_s": 0.5,
+            "linear_velocity_m_s": [1.2, 0.0, 0.0],
+        }]
+
+        projection = project_case_spec_v2_to_v1(case_spec_v2_from_dict(data)).data
+
+        self.assertEqual(projection["active_objects"], ["cue_ball"])
+        self.assertEqual(projection["passive_objects"], ["target_ball"])
+
     def test_release_event_rejects_invalid_velocity(self) -> None:
         data = case_spec_v2_fixture()
         data["events"] = [{
@@ -285,6 +400,27 @@ class CaseSpecV2Tests(unittest.TestCase):
         with self.assertRaises(CaseSpecV2ValidationError) as context:
             case_spec_v2_from_dict(data)
         self.assertIn("invalid_vector", {issue.code for issue in context.exception.issues})
+
+    def test_release_velocity_must_point_toward_single_impacts_target(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["initial_state"]["linear_velocity_m_s"] = [0.0, 0.0, 0.0]
+        data["relations"] = [{"type": "impacts", "source": "cue_ball", "target": "target_ball"}]
+        data["events"] = [{
+            "type": "release",
+            "object": "cue_ball",
+            "time_s": 0.4,
+            "linear_velocity_m_s": [-1.2, 0.0, 0.0],
+        }]
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        self.assertIn(
+            "release_velocity_points_away_from_impact_target",
+            {issue.code for issue in context.exception.issues},
+        )
+        data["events"][0]["linear_velocity_m_s"] = [1.2, 0.0, 0.0]
+        case_spec_v2_from_dict(data)
 
     def test_invalid_energy_inputs_remain_structured_validation_errors(self) -> None:
         data = case_spec_v2_fixture()

@@ -12,14 +12,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class FluidBatchVerifierTests(unittest.TestCase):
-    def test_fluid_capability_preserves_solver_to_ue_transfer_contract(self) -> None:
+    def test_fluid_capability_preserves_unified_solver_to_ue_contract(self) -> None:
         capability = json.loads((ROOT / "capabilities" / "fluid_particle_dynamics.json").read_text(encoding="utf-8"))
 
-        self.assertIn("source_container_occupancy", capability["required_signals"])
+        self.assertIn("declared_measurements", capability["required_signals"])
         self.assertIn("surface_import_fingerprint", capability["required_signals"])
-        self.assertIn("container_asset_scale_xyz", capability["required_signals"])
-        self.assertTrue(any("open interior" in rule for rule in capability["physical_assumptions"]))
-        self.assertTrue(any("maximum one-frame source-fraction drop" in rule for rule in capability["verifier_rules"]))
+        self.assertIn("rigid_body_asset_scale_xyz", capability["required_signals"])
+        self.assertTrue(any("rigid collider" in rule for rule in capability["physical_assumptions"]))
+        self.assertTrue(any("generic time-series reductions" in rule for rule in capability["verifier_rules"]))
         self.assertIn("solver_ue_rotation_mapping_mismatch", capability["failure_taxonomy"])
         self.assertIn(
             "cases/fluid/container_to_container_transfer/v002_wine_glass_to_teacup.json",
@@ -71,10 +71,13 @@ class FluidBatchVerifierTests(unittest.TestCase):
         self.assertIn("process.terminate()", renderer)
 
     def test_ue_replay_uses_a_uv_independent_opaque_surface_material(self) -> None:
+        from scripts.harness_render_fluid_ue import fluid_visual_parameters
+
         renderer = (ROOT / "scripts" / "harness_render_fluid_ue.py").read_text(encoding="utf-8")
         native = (ROOT / "scripts" / "native_ue_physics_phenomena_scene.py").read_text(encoding="utf-8")
 
-        self.assertIn('"generated_material_name": "M_Harness_FluidSurface_OpaqueBlue_TwoSided_V3_DeepTank"', renderer)
+        self.assertEqual(fluid_visual_parameters({"case_id": "water", "objects": []})["color_rgb"], [0.03, 0.30, 0.78])
+        self.assertIn('"generated_material_name": fluid_visual["generated_material_name"]', renderer)
         self.assertIn('"fixed_material_color": True', renderer)
         self.assertIn('"two_sided_material": True', renderer)
         self.assertIn("quantize_native_instance_segmentation", renderer)
@@ -166,50 +169,47 @@ class FluidBatchVerifierTests(unittest.TestCase):
         self.assertEqual(summary["artifact_completeness"]["trajectory_empty"], 0)
         self.assertEqual(summary["cases"][0]["artifact_kind"], "particle_surface_cache")
 
-    def test_asset_bound_transfer_replays_the_same_two_real_ue_containers(self) -> None:
+    def test_rigid_sph_replays_declared_real_ue_bodies(self) -> None:
         from scripts.harness_render_fluid_ue import (
-            container_asset_resolution_entries,
-            support_surface_runtime_objects,
-            transfer_container_runtime_objects,
+            rigid_body_asset_resolution_entries,
+            rigid_body_runtime_objects,
         )
-        from harness.core.case_spec import load_case_spec
 
-        containers = [
+        bodies = [
             {
-                "id": "source",
+                "id": "moving_body",
+                "mobility": "kinematic",
                 "asset": {"ue_path": "/Game/Props/Dining/SM_Glass04.SM_Glass04", "sha256": "a" * 64},
-                "transform": {"position_m": [-0.25, 0.0, 0.35], "ue_rotation_pyr_deg": [105.0, 0.0, 0.0]},
+                "transform": {"position_m": [-0.25, 0.0, 0.35], "ue_rotation_pyr_deg": [0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0]},
+                "motion": {"type": "pivot_rotation"},
                 "collision": {"type": "axisymmetric_profile", "asset_geometry_match": True},
             },
             {
-                "id": "receiver",
+                "id": "static_body",
+                "mobility": "static",
                 "asset": {"ue_path": "/Game/Props/Dining/SM_Glass01.SM_Glass01", "sha256": "b" * 64},
-                "transform": {"position_m": [0.02, 0.0, 0.0], "ue_rotation_pyr_deg": [0.0, 0.0, 0.0]},
-                "collision": {"type": "axisymmetric_profile", "asset_geometry_match": True},
+                "transform": {"position_m": [0.02, 0.0, -0.025], "ue_rotation_pyr_deg": [0.0, 0.0, 0.0], "scale": [2.0, 1.0, 0.5]},
+                "motion": None,
+                "collision": {"type": "plane", "asset_geometry_match": True},
             },
         ]
-        cache = {"environment": {"source_container": containers[0], "receiver_container": containers[1]}}
+        cache = {"environment": {"rigid_bodies": bodies}}
 
-        runtime = transfer_container_runtime_objects(cache, render_z_offset_m=0.0)
-        resolution = container_asset_resolution_entries(containers)
+        dynamic, static = rigid_body_runtime_objects(cache, render_z_offset_m=0.025)
+        resolution = rigid_body_asset_resolution_entries(bodies)
 
-        self.assertEqual([item["ue5_path"] for item in runtime], [containers[0]["asset"]["ue_path"], containers[1]["asset"]["ue_path"]])
-        self.assertEqual(runtime[0]["params"]["base_rotation_degrees"], [105.0, 0.0, 0.0])
-        self.assertTrue(runtime[0]["params"]["asset_geometry_match"])
+        self.assertEqual(dynamic[0]["ue5_path"], bodies[0]["asset"]["ue_path"])
+        self.assertEqual(static[0]["ue5_path"], bodies[1]["asset"]["ue_path"])
+        self.assertEqual(dynamic[0]["params"]["base_rotation_degrees"], [0.0, 0.0, 0.0])
+        self.assertEqual(static[0]["scale"], [2.0, 1.0, 0.5])
+        self.assertEqual(static[0]["initial_position_m"], [0.02, 0.0, 0.0])
+        self.assertTrue(dynamic[0]["params"]["asset_geometry_match"])
         self.assertEqual(resolution[0]["selected_asset"]["collision_representation"], "axisymmetric_profile")
         self.assertFalse(resolution[0]["selected_asset"]["proxy"])
 
-        case = load_case_spec(ROOT / "cases/fluid/container_to_container_transfer/v002_wine_glass_to_teacup.json")
-        support = support_surface_runtime_objects(case.data, render_z_offset_m=0.9418984985)
-        self.assertEqual(support[0]["ue5_path"], "/Game/Maps/UrbanDowntown/Meshes/PatioFurniture_Table_A.PatioFurniture_Table_A")
-        self.assertEqual(support[0]["initial_position_m"], [-0.24, 0.0, 0.0])
-
-        with self.assertRaisesRegex(ValueError, "solver floor"):
-            support_surface_runtime_objects(case.data, render_z_offset_m=0.0)
-
-        del containers[0]["transform"]["ue_rotation_pyr_deg"]
+        del bodies[0]["transform"]["ue_rotation_pyr_deg"]
         with self.assertRaisesRegex(ValueError, "missing an explicit UE transform"):
-            transfer_container_runtime_objects(cache, render_z_offset_m=0.0)
+            rigid_body_runtime_objects(cache, render_z_offset_m=0.0)
 
 
 def particle_cache() -> dict:

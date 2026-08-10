@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from harness.core.artifact_schema import write_json
 from harness.core.case_spec import load_case_spec
 from harness.runtime.fallback_backend import FallbackBackend, trajectory_for_case
 from harness.verification.physics_verifier import PhysicsVerifier
@@ -68,6 +69,25 @@ class HarnessBilliardsVerifierTests(unittest.TestCase):
 
         self.assertEqual(report["status"], "fail")
         self.assertEqual(report["first_failure"]["metric"], "full_rack_passive_contact_missing")
+
+    def test_run_dir_prefers_current_root_trajectory_over_stale_backend_copy(self) -> None:
+        case = load_case_spec(ROOT / "cases/billiards/low_speed_single_contact.json")
+        current_trajectory = trajectory_for_case(case.data)
+        stale_trajectory = trajectory_for_case(case.data)
+        for frame in stale_trajectory:
+            frame["contacts"] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "ue_output").mkdir()
+            write_json(run_dir / "case_spec.json", case.data)
+            write_json(run_dir / "trajectory.json", current_trajectory)
+            write_json(run_dir / "ue_output" / "trajectory.json", stale_trajectory)
+            write_json(run_dir / "ue_backend_report.json", {"status": "completed"})
+
+            report = PhysicsVerifier().verify_run_dir(run_dir)
+
+        self.assertEqual(report["status"], "pass", report)
 
 
 def run_case(rel_path: str) -> dict:

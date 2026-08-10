@@ -172,7 +172,11 @@ def falling_trajectory(case_id: str, case_spec: dict[str, Any]) -> list[dict[str
     if not negative_mode and ("negative" in case_id or "floating" in case_id):
         negative_mode = "floating_block"
     object_specs = {str(obj.get("id")): obj for obj in case_spec.get("objects", []) if isinstance(obj, dict)}
-    falling_ids = [oid for oid, obj in object_specs.items() if str(obj.get("role") or "") in {"falling_body", "stack_block"}]
+    falling_ids = [
+        oid
+        for oid, obj in object_specs.items()
+        if str(obj.get("verification_role") or obj.get("role") or "") in {"falling_body", "stack_block"}
+    ]
     if not falling_ids:
         falling_ids = ["falling_block"]
         object_specs["falling_block"] = {"initial_position_m": [0, 0, 1.2]}

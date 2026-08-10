@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import sys
 import tempfile
@@ -173,6 +174,32 @@ class StaticScenePlacementTests(unittest.TestCase):
         adjustments = align_v2_explicit_supports(case, [subject, ramp])
         self.assertEqual(len(adjustments), 1)
         self.assertEqual(support_relation(subject, ramp)["status"], "contact_at_rest")
+
+    def test_v2_explicit_support_snap_does_not_add_a_settling_gap(self) -> None:
+        from harness.planning.static_scene_builder import align_v2_explicit_supports
+
+        ball = {
+            "object_id": "ball",
+            "transform": {"position_m": [0.0, 0.0, 0.06]},
+            "bounds": {"extents_m": [0.057, 0.057, 0.057], "bottom_z": 0.003, "top_z": 0.117},
+            "physics": {"body_type": "dynamic", "collision_required": True},
+        }
+        table = {
+            "object_id": "table",
+            "transform": {"position_m": [0.0, 0.0, -0.025]},
+            "bounds": {"extents_m": [1.4, 0.7, 0.025], "bottom_z": -0.05, "top_z": 0.0},
+            "physics": {"body_type": "static", "collision_required": True},
+        }
+        case = {
+            "v2_projection": {"source_schema_version": "harness_case_spec_v2"},
+            "expected_physics": {"support": {"ball": "table"}},
+        }
+
+        adjustments = align_v2_explicit_supports(case, [ball, table])
+
+        self.assertEqual(ball["transform"]["position_m"][2], 0.057)
+        self.assertEqual(ball["bounds"]["bottom_z"], 0.0)
+        self.assertEqual(adjustments[0]["clearance_m"], 0.0)
 
     def test_v2_static_support_transform_is_not_rewritten_by_single_support_snap(self) -> None:
         from harness.planning.static_scene_builder import align_v2_explicit_supports
@@ -376,6 +403,107 @@ class StaticScenePlacementTests(unittest.TestCase):
         self.assertEqual(adjustments, [])
         self.assertEqual(nodes[0]["transform"]["position_m"], nodes[1]["transform"]["position_m"])
 
+    def test_v2_tight_triangular_sphere_rack_is_not_moved_by_aabb_overlap(self) -> None:
+        from harness.planning.static_scene_builder import build_static_scene_layout
+
+        rack_positions = {
+            "ball_1": [1.2, 0.0, 0.057],
+            "ball_2": [1.2987, 0.057, 0.057],
+            "ball_3": [1.2987, -0.057, 0.057],
+            "ball_4": [1.3974, 0.114, 0.057],
+            "ball_5": [1.3974, 0.0, 0.057],
+            "ball_6": [1.3974, -0.114, 0.057],
+        }
+        case = {
+            "case_id": "tight_sphere_rack",
+            "capability_id": "rigid_body_contact_causality",
+            "v2_projection": {"source_schema_version": "harness_case_spec_v2"},
+            "expected_physics": {
+                "support": {object_id: "table" for object_id in rack_positions},
+                "collision_graph": [["ball_1", "ball_2"]],
+            },
+            "objects": [
+                {
+                    "id": object_id,
+                    "role": "target_ball",
+                    "shape": "sphere",
+                    "size_m": [0.114, 0.114, 0.114],
+                    "radius_m": 0.057,
+                    "initial_position_m": position,
+                    "body_type": "dynamic",
+                    "collision_required": True,
+                    "collider": "sphere",
+                }
+                for object_id, position in rack_positions.items()
+            ] + [
+                {
+                    "id": "table",
+                    "role": "support",
+                    "shape": "box",
+                    "size_m": [2.92, 1.4, 0.05],
+                    "initial_position_m": [0.0, 0.0, -0.025],
+                    "body_type": "static",
+                    "collision_required": True,
+                    "collider": "box",
+                }
+            ],
+        }
+
+        layout = build_static_scene_layout(case)
+
+        nodes = {node["object_id"]: node for node in layout["object_nodes"]}
+        self.assertEqual(layout["overlap_pairs"], [])
+        self.assertFalse(
+            any(
+                adjustment["type"] == "dynamic_overlap_bounds_separation"
+                for adjustment in layout["placement_adjustments"]
+            )
+        )
+        for object_id, position in rack_positions.items():
+            self.assertEqual(nodes[object_id]["transform"]["position_m"][:2], position[:2])
+
+    def test_v2_true_sphere_overlap_is_separated_radially(self) -> None:
+        from harness.planning.static_scene_builder import separate_v2_dynamic_overlaps
+
+        nodes = [
+            {
+                "object_id": object_id,
+                "shape": "sphere",
+                "physics_critical": True,
+                "transform": {"position_m": position},
+                "bounds": {"extents_m": [0.057, 0.057, 0.057]},
+                "physics": {
+                    "body_type": "dynamic",
+                    "collision_required": True,
+                    "collider": "sphere",
+                },
+            }
+            for object_id, position in (
+                ("left", [0.0, 0.0, 0.057]),
+                ("right", [0.09, 0.04, 0.057]),
+            )
+        ]
+        case = {
+            "v2_projection": {"source_schema_version": "harness_case_spec_v2"},
+            "expected_physics": {
+                "support": {"left": "table", "right": "table"},
+                "collision_graph": [["left", "right"]],
+            },
+        }
+
+        adjustments = separate_v2_dynamic_overlaps(case, nodes, [["left", "right"]])
+
+        self.assertEqual(len(adjustments), 1)
+        self.assertEqual(adjustments[0]["overlap_test"], "sphere_center_distance")
+        self.assertAlmostEqual(
+            math.dist(
+                nodes[0]["transform"]["position_m"],
+                nodes[1]["transform"]["position_m"],
+            ),
+            0.119,
+            places=5,
+        )
+
     def test_v2_chain_clears_static_boundary_and_preserves_downstream_spacing(self) -> None:
         from harness.planning.static_scene_builder import separate_v2_chain_from_static_obstacles
 
@@ -539,6 +667,49 @@ class StaticScenePlacementTests(unittest.TestCase):
             surface_gap = center_distance - source["bounds"]["extents_m"][0] - target["bounds"]["extents_m"][0]
             self.assertAlmostEqual(surface_gap, 0.005, places=6)
             self.assertEqual(target["transform"]["position_m"][1], source["transform"]["position_m"][1])
+
+    def test_v2_ordered_chain_preserves_explicit_downstream_surface_gaps(self) -> None:
+        from harness.planning.static_scene_builder import align_v2_ordered_dynamic_chain
+
+        object_ids = ["driver", "target_1", "target_2", "target_3"]
+        nodes = [
+            {
+                "object_id": object_id,
+                "physics_critical": True,
+                "transform": {"position_m": [float(index), 0.0, 0.3]},
+                "bounds": {"extents_m": [0.15, 0.15, 0.15]},
+                "physics": {"body_type": "dynamic", "collision_required": True},
+            }
+            for index, object_id in enumerate(object_ids)
+        ]
+        edges = [[object_ids[index], object_ids[index + 1]] for index in range(len(object_ids) - 1)]
+        case = {
+            "capability_id": "sequential_contact_propagation",
+            "v2_projection": {"source_schema_version": "harness_case_spec_v2"},
+            "expected_physics": {
+                "collision_surface_gaps_m": [
+                    {"source": "target_1", "target": "target_2", "surface_gap_m": 0.12},
+                    {"source": "target_2", "target": "target_3", "surface_gap_m": 0.1},
+                ]
+            },
+        }
+
+        adjustments = align_v2_ordered_dynamic_chain(case, nodes, edges)
+
+        self.assertEqual(nodes[0]["transform"]["position_m"][0], 0.0)
+        self.assertEqual(nodes[1]["transform"]["position_m"][0], 1.0)
+        self.assertEqual(len(adjustments), 2)
+        by_id = {node["object_id"]: node for node in nodes}
+        for source_id, target_id, expected_gap in (
+            ("target_1", "target_2", 0.12),
+            ("target_2", "target_3", 0.1),
+        ):
+            source = by_id[source_id]
+            target = by_id[target_id]
+            center_distance = target["transform"]["position_m"][0] - source["transform"]["position_m"][0]
+            surface_gap = center_distance - source["bounds"]["extents_m"][0] - target["bounds"]["extents_m"][0]
+            self.assertAlmostEqual(surface_gap, expected_gap, places=6)
+        self.assertTrue(all(row["explicit_surface_gap"] for row in adjustments))
 
     def test_v2_ordered_chain_does_not_guess_for_branching_graph(self) -> None:
         from harness.planning.static_scene_builder import align_v2_ordered_dynamic_chain

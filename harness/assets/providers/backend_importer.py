@@ -22,7 +22,7 @@ from harness.core.artifact_schema import write_json
 # outer command timeout longer so it does not terminate the launcher first.
 DEFAULT_TIMEOUT_S = 660.0
 IMPORTER_COMMAND_ENV = "SIM_HARNESS_UE_ASSET_IMPORTER_CMD"
-IMPORTER_CONTRACT_VERSION = "ue_static_mesh_import_v2"
+IMPORTER_CONTRACT_VERSION = "ue_static_mesh_import_v3"
 
 
 class BackendImporterAdapter:
@@ -204,6 +204,9 @@ class UECommandImporterAdapter(BackendImporterAdapter):
         batch_dir.mkdir(parents=True, exist_ok=True)
         batch_request_path = batch_dir / "backend_import_batch_request.json"
         batch_result_path = batch_dir / "backend_import_batch_result.json"
+        batch_result_path.unlink(missing_ok=True)
+        for _, _, result_path in prepared:
+            result_path.unlink(missing_ok=True)
         write_json(
             batch_request_path,
             {
@@ -238,36 +241,62 @@ class UECommandImporterAdapter(BackendImporterAdapter):
             stderr = _safe_output(exc.stderr)
             returncode = None
         for request, _, result_path in prepared:
-            try:
-                raw = json.loads(result_path.read_text(encoding="utf-8"))
-                if not isinstance(raw, Mapping):
-                    raise ValueError("result root must be an object")
-                result = dict(raw)
-                result.update(
-                    {
-                        "stdout": stdout,
-                        "stderr": stderr,
-                        "returncode": returncode,
-                        "batch_size": len(prepared),
-                        "cache_hit": False,
-                        "importer_invoked": True,
-                    }
-                )
-                parsed = BackendImportResult.from_dict(result)
-                validate_import_result(request, parsed, workspace=workspace)
-            except (OSError, json.JSONDecodeError, BackendImportValidationError, ValueError) as exc:
+            if returncode is None:
                 parsed = BackendImportResult.from_dict(
                     _failure_result(
                         request.data,
                         status="failed",
-                        code="backend_importer_timeout" if returncode is None else "backend_importer_result_invalid",
-                        message=(f"backend importer exceeded {self.timeout_s:g}s" if returncode is None else str(exc)),
-                        retriable=returncode is None,
+                        code="backend_importer_timeout",
+                        message=f"backend importer exceeded {self.timeout_s:g}s",
+                        retriable=True,
                         stdout=stdout,
                         stderr=stderr,
                         returncode=returncode,
                     )
                 )
+            elif returncode != 0:
+                parsed = BackendImportResult.from_dict(
+                    _failure_result(
+                        request.data,
+                        status="failed",
+                        code="backend_importer_execution_failed",
+                        message=f"backend importer exited with code {returncode}",
+                        retriable=True,
+                        stdout=stdout,
+                        stderr=stderr,
+                        returncode=returncode,
+                    )
+                )
+            else:
+                try:
+                    raw = json.loads(result_path.read_text(encoding="utf-8"))
+                    if not isinstance(raw, Mapping):
+                        raise ValueError("result root must be an object")
+                    result = dict(raw)
+                    result.update(
+                        {
+                            "stdout": stdout,
+                            "stderr": stderr,
+                            "returncode": returncode,
+                            "batch_size": len(prepared),
+                            "cache_hit": False,
+                            "importer_invoked": True,
+                        }
+                    )
+                    parsed = BackendImportResult.from_dict(result)
+                    validate_import_result(request, parsed, workspace=workspace)
+                except (OSError, json.JSONDecodeError, BackendImportValidationError, ValueError) as exc:
+                    parsed = BackendImportResult.from_dict(
+                        _failure_result(
+                            request.data,
+                            status="failed",
+                            code="backend_importer_result_invalid",
+                            message=str(exc),
+                            stdout=stdout,
+                            stderr=stderr,
+                            returncode=returncode,
+                        )
+                    )
             write_json(result_path, parsed.to_dict())
             direct[request.data["request_digest"]] = parsed
         return [direct[request.data["request_digest"]] for request, _ in requests]

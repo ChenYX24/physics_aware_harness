@@ -472,6 +472,9 @@ class HarnessCliTests(unittest.TestCase):
             env = ue_env_without_config()
             env.pop("SIM_HARNESS_WORKSPACE", None)
             env["HOME"] = tmp
+            stale_view = Path(tmp) / "low_speed_single_contact_ue" / "views" / "front_static" / "rgb.mp4"
+            stale_view.parent.mkdir(parents=True)
+            stale_view.write_bytes(b"\x00\x00\x00\x18ftypisom00000000")
             result = subprocess.run(
                 [
                     sys.executable,
@@ -494,6 +497,7 @@ class HarnessCliTests(unittest.TestCase):
             self.assertEqual(summary["failure_type"], "F1_UPROJECT_MISSING")
             self.assertEqual(summary["failure_category"], "preflight_failure")
             self.assertFalse(summary["real_ue_invoked"])
+            self.assertEqual(summary["videos"], [])
             run_dir = Path(summary["run_dir"])
             self.assertTrue((run_dir / "scene_spec.json").exists())
             self.assertTrue((run_dir / "harness_artifact.json").exists())
@@ -799,6 +803,7 @@ class HarnessCliTests(unittest.TestCase):
             scene_spec = json.loads((run_dir / "scene_spec.json").read_text(encoding="utf-8"))
             received = json.loads((run_dir / "runner_received_args.json").read_text(encoding="utf-8"))
             readiness = json.loads((run_dir / "run_readiness.json").read_text(encoding="utf-8"))
+            verifier = json.loads((run_dir / "verifier_report.json").read_text(encoding="utf-8"))
             self.assertEqual(backend_report["status"], "completed")
             self.assertEqual(scene_spec["map"]["requested_package"], "/Game/Maps/HarnessSmoke")
             self.assertTrue(backend_report["whether_real_ue_invoked"])
@@ -814,6 +819,8 @@ class HarnessCliTests(unittest.TestCase):
             self.assertTrue(readiness["multi_view_sync_ok"])
             self.assertTrue(readiness["render_pass_valid"])
             self.assertEqual(readiness["render_observability_fail"], 0)
+            self.assertTrue(verifier["artifact_completeness"]["run_readiness"])
+            self.assertTrue((run_dir / "ue_output" / "run_readiness.json").exists())
             self.assertTrue((run_dir / "views" / "front_static" / "rgb.mp4").exists())
             self.assertTrue((run_dir / "views" / "front_static" / "depth.exr").exists())
             self.assertTrue((run_dir / "views" / "front_static" / "segmentation.exr").exists())

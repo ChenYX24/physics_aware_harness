@@ -295,10 +295,22 @@ def _prepare_ue_request(request_path: Path, request: dict[str, Any]) -> tuple[Pa
         return request_path, ()
     normalized_obj = request_path.with_name(f"{request_path.stem}.ue_centimeters.obj")
     if str(request.get("source_kind") or "") in {"external_site", "model_generation"} and request.get("expected_size_m"):
-        _write_fitted_obj(source, normalized_obj, expected_size_m=request["expected_size_m"])
+        fitted_size_m = _write_fitted_obj(
+            source,
+            normalized_obj,
+            expected_size_m=request["expected_size_m"],
+            source_up_axis=(
+                "y"
+                if str(request.get("provider_id") or "").casefold() == "meshy_model_generation_v1"
+                else "z"
+            ),
+        )
     else:
         _write_scaled_obj(source, normalized_obj, scale=100.0)
+        fitted_size_m = None
     ue_request = json.loads(json.dumps(request))
+    if fitted_size_m is not None:
+        ue_request["expected_size_m"] = fitted_size_m
     payload = normalized_obj.read_bytes()
     ue_request["source_files"][0].update(
         {
@@ -313,7 +325,13 @@ def _prepare_ue_request(request_path: Path, request: dict[str, Any]) -> tuple[Pa
     return ue_request_path, (normalized_obj, ue_request_path)
 
 
-def _write_fitted_obj(source: Path, destination: Path, *, expected_size_m: object) -> None:
+def _write_fitted_obj(
+    source: Path,
+    destination: Path,
+    *,
+    expected_size_m: object,
+    source_up_axis: str = "z",
+) -> list[float]:
     if not isinstance(expected_size_m, list) or len(expected_size_m) != 3:
         raise ValueError("remote OBJ normalization requires three expected_size_m values")
     expected_cm = [float(value) * 100.0 for value in expected_size_m]
@@ -332,24 +350,43 @@ def _write_fitted_obj(source: Path, destination: Path, *, expected_size_m: objec
             vertices.append(vertex)
     if not vertices:
         raise ValueError("OBJ contains no vertices")
-    minima = [min(vertex[axis] for vertex in vertices) for axis in range(3)]
-    maxima = [max(vertex[axis] for vertex in vertices) for axis in range(3)]
+    oriented_vertices = [_orient_obj_vector(vertex, source_up_axis=source_up_axis) for vertex in vertices]
+    minima = [min(vertex[axis] for vertex in oriented_vertices) for axis in range(3)]
+    maxima = [max(vertex[axis] for vertex in oriented_vertices) for axis in range(3)]
     extents = [maxima[axis] - minima[axis] for axis in range(3)]
     if any(value <= 0 for value in extents):
         raise ValueError("OBJ bounds must be non-degenerate on every axis")
     centers = [(minima[axis] + maxima[axis]) / 2.0 for axis in range(3)]
-    scales = [expected_cm[axis] / extents[axis] for axis in range(3)]
-    output: list[str] = ["# fitted to CaseSpec bounds and centered for Unreal import"]
+    source_diagonal = math.sqrt(sum(value * value for value in extents))
+    target_diagonal = math.sqrt(sum(value * value for value in expected_cm))
+    scale = target_diagonal / source_diagonal
+    fitted_size_cm = [value * scale for value in extents]
+    output: list[str] = [f"# uniformly fitted to CaseSpec size; source_up_axis={source_up_axis}"]
     vertex_index = 0
     for line in lines:
         if line.startswith("v "):
-            vertex = vertices[vertex_index]
+            vertex = oriented_vertices[vertex_index]
             line = "v " + " ".join(
-                _format_float((vertex[axis] - centers[axis]) * scales[axis]) for axis in range(3)
+                _format_float((vertex[axis] - centers[axis]) * scale) for axis in range(3)
             )
             vertex_index += 1
+        elif line.startswith("vn "):
+            fields = line.split()
+            if len(fields) < 4:
+                raise ValueError(f"unsupported OBJ normal record: {line}")
+            normal = _orient_obj_vector([float(value) for value in fields[1:4]], source_up_axis=source_up_axis)
+            line = "vn " + " ".join(_format_float(value) for value in normal)
         output.append(line)
     destination.write_text("\n".join(output) + "\n", encoding="utf-8", newline="\n")
+    return [value / 100.0 for value in fitted_size_cm]
+
+
+def _orient_obj_vector(vector: list[float], *, source_up_axis: str) -> list[float]:
+    if source_up_axis == "z":
+        return list(vector)
+    if source_up_axis == "y":
+        return [vector[0], -vector[2], vector[1]]
+    raise ValueError(f"unsupported OBJ source up axis: {source_up_axis}")
 
 
 def _write_scaled_obj(source: Path, destination: Path, *, scale: float) -> None:

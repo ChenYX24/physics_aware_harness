@@ -28,6 +28,18 @@ SOURCE_KIND_ALIASES = {
     "local_procedural": "procedural_generation",
     "generated_procedural": "procedural_generation",
 }
+GEOMETRY_TYPE_ALIASES = {
+    "ball": "sphere",
+    "cube": "box",
+    "cuboid": "box",
+    "disc": "cylinder",
+    "disk": "cylinder",
+    "plate": "box",
+    "rod": "cylinder",
+    "pole": "cylinder",
+    "column": "cylinder",
+    "wall": "box",
+}
 
 
 @dataclass(frozen=True)
@@ -99,7 +111,7 @@ def compile_v2_asset_intents(
 
 def normalized_acquisition(value: Any) -> dict[str, Any]:
     acquisition = dict(value) if isinstance(value, Mapping) else {}
-    return {
+    normalized = {
         "route": str(acquisition.get("route") or "default"),
         "requirement": str(acquisition.get("requirement") or "preferred"),
         "origin": str(acquisition.get("origin") or "system_default"),
@@ -108,6 +120,9 @@ def normalized_acquisition(value: Any) -> dict[str, Any]:
         "reference_inputs": [dict(item) for item in acquisition.get("reference_inputs") or [] if isinstance(item, Mapping)],
         "fallback_order": [str(item) for item in acquisition.get("fallback_order") or []],
     }
+    if "texture_prompt" in acquisition:
+        normalized["texture_prompt"] = acquisition.get("texture_prompt")
+    return normalized
 
 
 def local_catalog_allowed(acquisition: Mapping[str, Any], *, allow_local: bool = True) -> bool:
@@ -138,10 +153,21 @@ def _compile_search_intent(
     if not request:
         return search_intent_from_asset_intent(legacy_intent, backend=target_backend)
     description = str(request.get("description") or legacy_intent.query).strip()
+    acquisition = request.get("acquisition") if isinstance(request.get("acquisition"), Mapping) else {}
     raw_must = request.get("must") if isinstance(request.get("must"), Mapping) else {}
     must = dict(raw_must)
     if must.get("source_kind") is not None:
-        must["source_kind"] = _canonical_source_kind(must["source_kind"])
+        must["source_kind"] = _canonical_source_kind(
+            must["source_kind"],
+            acquisition_route=str(acquisition.get("route") or ""),
+        )
+    raw_must_not = request.get("must_not") if isinstance(request.get("must_not"), Mapping) else {}
+    must_not = dict(raw_must_not)
+    if must_not.get("source_kind") is not None:
+        must_not["source_kind"] = _canonical_source_kind(
+            must_not["source_kind"],
+            acquisition_route=str(acquisition.get("route") or ""),
+        )
     must.setdefault("backend", target_backend)
     resource_kind = str(request.get("resource_kind") or "").strip()
     if resource_kind in RESOURCE_KIND_TO_ASSET_TYPE:
@@ -151,6 +177,10 @@ def _compile_search_intent(
         must.setdefault("collision", True)
         must.setdefault("real_3d_geometry", True)
     geometry = obj.get("geometry") if isinstance(obj.get("geometry"), Mapping) else {}
+    raw_shape_hint = str(geometry.get("shape_hint") or "").strip().casefold()
+    shape_hint = GEOMETRY_TYPE_ALIASES.get(raw_shape_hint, raw_shape_hint)
+    if shape_hint and acquisition.get("route") == "external_site":
+        must.setdefault("geometry_type", shape_hint)
     if isinstance(geometry.get("approx_size_m"), list):
         must.setdefault("approx_size_m", list(geometry["approx_size_m"]))
     if required_license_tier == "reference":
@@ -181,7 +211,7 @@ def _compile_search_intent(
             "taxonomy": dict(taxonomy) or {"category": legacy_intent.category},
             "must": must,
             "should": [item.to_dict() for item in should],
-            "must_not": request.get("must_not") or {},
+            "must_not": must_not,
             "semantic_text": str(request.get("semantic_text") or description),
             "reference_image": _similarity_reference(request),
             "relaxation_policy": relaxation_policy,
@@ -200,8 +230,10 @@ def _similarity_reference(request: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _canonical_source_kind(value: Any) -> Any:
+def _canonical_source_kind(value: Any, *, acquisition_route: str = "") -> Any:
     if isinstance(value, list):
-        return [_canonical_source_kind(item) for item in value]
+        return [_canonical_source_kind(item, acquisition_route=acquisition_route) for item in value]
     normalized = str(value).strip().casefold()
+    if normalized == "external" and acquisition_route in {"external_site", "model_generation"}:
+        return acquisition_route
     return SOURCE_KIND_ALIASES.get(normalized, value)

@@ -104,9 +104,10 @@ def validate_fluid_initial_conditions(data: dict[str, Any]) -> None:
     ]
     if not fluids:
         raise ValueError("fluid_particle_dynamics requires at least one fluid object")
-    roles = {str(obj.get("role") or "") for obj in data.get("objects") or [] if isinstance(obj, dict)}
-    if {"source_container", "receiver_container"}.intersection(roles):
-        validate_container_transfer_contract(data)
+    if isinstance(data.get("solver_scene"), dict):
+        from harness.runtime.rigid_sph_scene import compile_rigid_sph_scene
+
+        compile_rigid_sph_scene(data)
     for fluid in fluids:
         initial = fluid.get("initial_condition")
         if initial is None:
@@ -144,97 +145,6 @@ def validate_fluid_initial_conditions(data: dict[str, Any]) -> None:
         velocity_field = initial.get("velocity_field")
         if velocity_field is not None:
             validate_fluid_velocity_field(velocity_field)
-
-
-def validate_container_transfer_contract(data: dict[str, Any]) -> None:
-    objects = [obj for obj in data.get("objects") or [] if isinstance(obj, dict)]
-    for role in ("source_container", "receiver_container"):
-        matches = [obj for obj in objects if str(obj.get("role") or "") == role]
-        if len(matches) != 1:
-            raise ValueError(f"container transfer requires exactly one {role}")
-        container = matches[0]
-        asset = container.get("asset") if isinstance(container.get("asset"), dict) else {}
-        collision = container.get("collision") if isinstance(container.get("collision"), dict) else {}
-        if not str(asset.get("ue_path") or "").startswith("/Game/") or asset.get("proxy") is not False:
-            raise ValueError("container transfer requires a non-proxy /Game UE asset")
-        digest = str(asset.get("sha256") or "")
-        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest.lower()):
-            raise ValueError("container transfer asset requires a sha256 digest")
-        if collision.get("type") != "axisymmetric_profile" or collision.get("asset_geometry_match") is not True:
-            raise ValueError("container transfer requires an asset-matched axisymmetric_profile collider")
-        if int(collision.get("panel_count") or 0) < 12:
-            raise ValueError("container transfer collider requires at least 12 wall panels")
-        profile = collision.get("inner_profile")
-        if not isinstance(profile, list) or len(profile) < 2:
-            raise ValueError("container transfer collider requires at least two inner_profile points")
-        previous_z = -math.inf
-        for point in profile:
-            if not isinstance(point, dict):
-                raise ValueError("container inner_profile points must be objects")
-            z_m = point.get("z_m")
-            radius_m = point.get("radius_m")
-            if not isinstance(z_m, (int, float)) or not math.isfinite(float(z_m)) or float(z_m) <= previous_z:
-                raise ValueError("container inner_profile z_m values must be finite and strictly increasing")
-            if not isinstance(radius_m, (int, float)) or not math.isfinite(float(radius_m)) or float(radius_m) <= 0.0:
-                raise ValueError("container inner_profile radius_m values must be positive")
-            previous_z = float(z_m)
-        if not vector3(container.get("solver_rotation_xyz_deg")) or not vector3(container.get("ue_rotation_pyr_deg")):
-            raise ValueError("container transfer requires explicit solver XYZ and UE pitch/yaw/roll rotations")
-        motion = container.get("kinematic_motion")
-        if motion is not None:
-            if not isinstance(motion, dict) or motion.get("type") != "tilt":
-                raise ValueError("container transfer kinematic_motion must be a tilt object")
-            if not vector3(motion.get("solver_end_rotation_xyz_deg")) or not vector3(motion.get("ue_end_rotation_pyr_deg")):
-                raise ValueError("container tilt requires solver and UE end rotations")
-            if float(motion.get("start_time_s") or -1.0) < 0.0 or float(motion.get("duration_s") or 0.0) <= 0.0:
-                raise ValueError("container tilt requires non-negative start_time_s and positive duration_s")
-            pivot = motion.get("pivot_local_m")
-            if not vector3(pivot):
-                raise ValueError("container tilt requires a pivot_local_m 3-vector")
-            rim = profile[-1]
-            if not math.isclose(float(pivot[2]), float(rim["z_m"]), abs_tol=1e-6):
-                raise ValueError("container tilt pivot_local_m must lie at the fitted rim height")
-            pivot_radius = math.hypot(float(pivot[0]), float(pivot[1]))
-            if not math.isclose(pivot_radius, float(rim["radius_m"]), abs_tol=1e-6):
-                raise ValueError("container tilt pivot_local_m must lie on the fitted rim radius")
-            landing = motion.get("expected_stream_landing_xy_m")
-            if not isinstance(landing, list) or len(landing) != 2 or not all(isinstance(value, (int, float)) for value in landing):
-                raise ValueError("container tilt requires expected_stream_landing_xy_m from a solver probe")
-            solver_end = motion["solver_end_rotation_xyz_deg"]
-            ue_end = motion["ue_end_rotation_pyr_deg"]
-            if not (
-                math.isclose(float(solver_end[0]), 0.0, abs_tol=1e-6)
-                and math.isclose(float(solver_end[2]), 0.0, abs_tol=1e-6)
-                and math.isclose(float(ue_end[0]), -float(solver_end[1]), abs_tol=1e-6)
-                and math.isclose(float(ue_end[1]), 0.0, abs_tol=1e-6)
-                and math.isclose(float(ue_end[2]), 0.0, abs_tol=1e-6)
-            ):
-                raise ValueError("container solver +Y tilt must map to negative UE pitch")
-    fluid = next(obj for obj in objects if str(obj.get("role") or "") in {"fluid", "fluid_volume"})
-    initial = fluid.get("initial_condition") if isinstance(fluid.get("initial_condition"), dict) else {}
-    if initial.get("frame") != "source_container_local" or not vector3(initial.get("local_position_m")):
-        raise ValueError("container transfer fluid requires source_container_local local_position_m")
-    bounds = data.get("workspace_bounds_m") if isinstance(data.get("workspace_bounds_m"), dict) else {}
-    if not vector3(bounds.get("min_m")) or not vector3(bounds.get("max_m")):
-        raise ValueError("container transfer requires workspace_bounds_m min_m/max_m")
-    expected = data.get("expected_physics") if isinstance(data.get("expected_physics"), dict) else {}
-    evacuation_duration = expected.get("minimum_source_evacuation_duration_s")
-    maximum_drop = expected.get("maximum_source_fraction_drop_per_frame")
-    if not isinstance(evacuation_duration, (int, float)) or float(evacuation_duration) <= 0.0:
-        raise ValueError("container transfer requires positive minimum_source_evacuation_duration_s")
-    if not isinstance(maximum_drop, (int, float)) or not 0.0 < float(maximum_drop) <= 1.0:
-        raise ValueError("container transfer maximum_source_fraction_drop_per_frame must be in (0, 1]")
-    scene = data.get("scene") if isinstance(data.get("scene"), dict) else {}
-    support = scene.get("support_surface") if isinstance(scene.get("support_surface"), dict) else {}
-    support_asset = support.get("asset") if isinstance(support.get("asset"), dict) else {}
-    support_path = str(support_asset.get("ue_path") or "")
-    if not support_path.startswith("/Game/") or support_asset.get("proxy") is not False:
-        raise ValueError("asset-bound container transfer requires a non-proxy /Game support surface")
-    if not vector3(support_asset.get("bbox_m")) or not vector3(support.get("position_m")) or not vector3(support.get("scale")):
-        raise ValueError("container transfer support surface requires bbox_m, position_m, and scale")
-    floor_to_surface = support.get("solver_floor_to_surface_m")
-    if not isinstance(floor_to_surface, (int, float)) or not math.isfinite(float(floor_to_surface)) or float(floor_to_surface) <= 0.0:
-        raise ValueError("container transfer support surface requires positive solver_floor_to_surface_m")
 
 
 def validate_fluid_velocity_field(field: Any) -> None:

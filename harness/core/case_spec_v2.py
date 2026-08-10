@@ -418,6 +418,18 @@ def collect_case_spec_v2_issues(
         if object_id:
             object_ids.append(object_id)
         _nonempty_string(obj.get("role"), f"{path}/role", issues)
+        color_rgb = obj.get("color_rgb")
+        if color_rgb is not None:
+            color_values = _finite_vec3(color_rgb, f"{path}/color_rgb", issues)
+            if color_values and any(value < 0.0 or value > 1.0 for value in color_values):
+                _issue(
+                    issues,
+                    f"{path}/color_rgb",
+                    "invalid_color",
+                    "components must be between 0 and 1",
+                )
+        if obj.get("fixed_material_color") is not None and not isinstance(obj.get("fixed_material_color"), bool):
+            _issue(issues, f"{path}/fixed_material_color", "invalid_type", "must be boolean")
         geometry = _mapping(obj.get("geometry"), f"{path}/geometry", issues, required=False)
         if geometry.get("approx_size_m") is not None:
             _positive_vec3(geometry.get("approx_size_m"), f"{path}/geometry/approx_size_m", issues)
@@ -492,24 +504,28 @@ def collect_case_spec_v2_issues(
                 "unsupported_asset_shape",
                 "V2 currently supports one direct asset request per object",
             )
-        if not asset_requests(raw_asset) and not policy.get("allow_analytic_proxy"):
+        requests = asset_requests(raw_asset)
+        if not requests and not policy.get("allow_analytic_proxy"):
             _issue(
                 issues,
                 f"{path}/asset",
                 "asset_required",
                 "an asset request is required when analytic proxies are disabled",
             )
-        for request_index, request in enumerate(asset_requests(raw_asset)):
+        for request_index, request in enumerate(requests):
             request_path = f"{path}/asset" if request_index == 0 else f"{path}/asset/slot_{request_index}"
             _validate_asset_request(request, request_path, policy, allowed_inputs, issues)
+        _validate_procedural_primitive_size(geometry, requests, path, issues)
 
     duplicates = sorted({value for value in object_ids if object_ids.count(value) > 1})
     if duplicates:
         _issue(issues, "/objects", "duplicate_object_ids", f"duplicate ids: {', '.join(duplicates)}")
     known_objects = set(object_ids)
     _validate_references(data.get("relations"), "/relations", known_objects, issues)
+    _validate_relation_surface_gaps(data.get("relations"), issues)
     _validate_references(data.get("events"), "/events", known_objects, issues)
     _validate_event_payloads(data.get("events"), issues)
+    _validate_release_impact_directions(objects, data.get("relations"), data.get("events"), issues)
     _validate_support_footprints(objects, data.get("relations"), issues)
     verification = _mapping(data.get("verification_requirements"), "/verification_requirements", issues)
     assertions = verification.get("assertions")
@@ -572,6 +588,7 @@ def collect_case_spec_v2_issues(
 def project_case_spec_v2_to_v1(case_spec: CaseSpecV2) -> CaseSpec:
     data = case_spec.data
     allow_analytic_proxy = bool((data.get("asset_policy") or {}).get("allow_analytic_proxy"))
+    capability_id = case_spec.capability_id
     projected_objects = [
         _project_object(
             obj,
@@ -579,9 +596,9 @@ def project_case_spec_v2_to_v1(case_spec: CaseSpecV2) -> CaseSpec:
         )
         for obj in case_spec.objects
     ]
+    _canonicalize_projected_roles(capability_id, projected_objects)
     _project_release_events(data.get("events") or [], projected_objects)
     active, passive = _infer_active_passive(projected_objects)
-    capability_id = case_spec.capability_id
     capability = CapabilityStore().get(capability_id)
     observation = data.get("observation_requirements") or {}
     expected = copy.deepcopy(data.get("expected_behavior") or {})
@@ -589,6 +606,9 @@ def project_case_spec_v2_to_v1(case_spec: CaseSpecV2) -> CaseSpec:
     collision_graph = _collision_graph(data.get("relations") or [])
     if collision_graph and "collision_graph" not in expected:
         expected["collision_graph"] = collision_graph
+    collision_surface_gaps = _collision_surface_gaps(data.get("relations") or [])
+    if collision_surface_gaps:
+        expected["collision_surface_gaps_m"] = collision_surface_gaps
     support_map = _support_map(data.get("relations") or [])
     for object_id, support_id in _initial_contact_support_map(
         data.get("objects") or [],
@@ -700,6 +720,9 @@ def _project_object(
         "initial_velocity_m_s": _vec3_or_default(initial.get("linear_velocity_m_s"), [0.0, 0.0, 0.0]),
         "asset_query": str(primary.get("description") or obj.get("role") or obj.get("id") or "asset"),
     }
+    for appearance_field in ("color_rgb", "fixed_material_color"):
+        if obj.get(appearance_field) is not None:
+            projected[appearance_field] = copy.deepcopy(obj[appearance_field])
     if force_analytic_proxy:
         projected["force_analytic_proxy"] = True
         projected["asset_policy"] = "analytic_proxy"
@@ -750,13 +773,30 @@ def _infer_active_passive(objects: list[dict[str, Any]]) -> tuple[list[str], lis
     for obj in objects:
         object_id = str(obj.get("id") or "")
         role = str(obj.get("role") or "").casefold()
+        if obj.get("kinematic") is True or str(obj.get("body_type") or "").casefold() in {"static", "kinematic"}:
+            continue
         velocity = obj.get("initial_velocity_m_s") or [0.0, 0.0, 0.0]
+        release_velocity = obj.get("release_velocity_m_s") or [0.0, 0.0, 0.0]
         moving = any(abs(float(value)) > 1e-9 for value in velocity)
-        if moving or any(token in role for token in ("active", "projectile", "striker", "driver", "falling", "launched")):
+        released = obj.get("release_time_s") is not None
+        release_moving = any(abs(float(value)) > 1e-9 for value in release_velocity)
+        if moving or released or release_moving or any(
+            token in role for token in ("active", "projectile", "striker", "driver", "falling", "launched")
+        ):
             active.append(object_id)
-        elif not any(token in role for token in ("support", "floor", "ground", "field", "anchor")):
+        else:
             passive.append(object_id)
     return active, passive
+
+
+def _canonicalize_projected_roles(capability_id: str, objects: list[dict[str, Any]]) -> None:
+    if capability_id != "rigid_body_gravity_collision":
+        return
+    for obj in objects:
+        if obj.get("kinematic") is True or str(obj.get("body_type") or "").casefold() != "dynamic":
+            continue
+        role = str(obj.get("role") or "")
+        obj["verification_role"] = role if role in {"falling_body", "stack_block"} else "falling_body"
 
 
 def _project_release_events(events: Iterable[Any], objects: list[dict[str, Any]]) -> None:
@@ -818,6 +858,27 @@ def _collision_graph(relations: Iterable[Any]) -> list[list[str]]:
         pair = [str(value) for value in values if value]
         if len(pair) >= 2:
             result.append(pair[:2])
+    return result
+
+
+def _collision_surface_gaps(relations: Iterable[Any]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for relation in relations:
+        if not isinstance(relation, Mapping) or relation.get("surface_gap_m") is None:
+            continue
+        values = relation.get("objects")
+        if not isinstance(values, list):
+            values = [relation.get("source"), relation.get("target")]
+        pair = [str(value) for value in values if value]
+        if len(pair) < 2:
+            continue
+        result.append(
+            {
+                "source": pair[0],
+                "target": pair[1],
+                "surface_gap_m": float(relation["surface_gap_m"]),
+            }
+        )
     return result
 
 
@@ -1004,6 +1065,24 @@ def _validate_asset_request(
     for field in ("provider_hint", "source_uri_hint"):
         if acquisition.get(field) is not None and not isinstance(acquisition.get(field), str):
             _issue(issues, f"{path}/acquisition/{field}", "invalid_type", "must be null or a string")
+    if "texture_prompt" in acquisition:
+        texture_prompt = acquisition.get("texture_prompt")
+        if not isinstance(texture_prompt, str):
+            _issue(issues, f"{path}/acquisition/texture_prompt", "invalid_type", "must be a string when present")
+        elif len(texture_prompt) > 600:
+            _issue(
+                issues,
+                f"{path}/acquisition/texture_prompt",
+                "texture_prompt_too_long",
+                "must contain at most 600 characters",
+            )
+        if route != "model_generation":
+            _issue(
+                issues,
+                f"{path}/acquisition/texture_prompt",
+                "texture_prompt_route_mismatch",
+                "is supported only for model_generation acquisition",
+            )
     fallback = _string_list(acquisition.get("fallback_order"), f"{path}/acquisition/fallback_order", issues)
     invalid_fallback = [value for value in fallback if value not in ACQUISITION_ROUTES or value == "default"]
     if invalid_fallback:
@@ -1047,6 +1126,49 @@ def _validate_asset_request(
             _issue(issues, reference_path, "contradictory_image_use", "similarity_search usage conflicts with allow_similarity_search=false")
 
 
+def _validate_procedural_primitive_size(
+    geometry: Mapping[str, Any],
+    requests: list[dict[str, Any]],
+    object_path: str,
+    issues: list[ValidationIssue],
+) -> None:
+    if not any(
+        isinstance(request.get("acquisition"), Mapping)
+        and request["acquisition"].get("route") == "procedural_generation"
+        for request in requests
+    ):
+        return
+    size = geometry.get("approx_size_m")
+    if not _is_finite_vec3(size) or any(float(value) <= 0.0 for value in size):
+        return
+    shape = str(geometry.get("shape_hint") or "").strip().casefold()
+    if shape in {"sphere", "ball"} and not all(
+        math.isclose(float(size[0]), float(size[index]), rel_tol=1e-9, abs_tol=1e-12)
+        for index in (1, 2)
+    ):
+        _issue(
+            issues,
+            f"{object_path}/geometry/approx_size_m",
+            "procedural_sphere_size_mismatch",
+            "procedural spheres require equal x/y/z diameters",
+        )
+    if shape in {"cylinder", "rod", "pole", "column", "disc", "disk"} and not math.isclose(
+        float(size[0]),
+        float(size[1]),
+        rel_tol=1e-9,
+        abs_tol=1e-12,
+    ):
+        _issue(
+            issues,
+            f"{object_path}/geometry/approx_size_m",
+            "procedural_cylinder_local_axis_size_mismatch",
+            (
+                "procedural cylinders use local Z as their axis: x/y must be equal diameters, z is length; "
+                "use initial_state.rotation_deg to orient the axis in world space"
+            ),
+        )
+
+
 def _validate_route_policy(
     route: str,
     policy: Mapping[str, Any],
@@ -1086,6 +1208,26 @@ def _validate_references(
         for reference in references:
             if reference not in known_objects:
                 _issue(issues, f"{path}/{index}", "unknown_object_reference", f"unknown object id: {reference}")
+
+
+def _validate_relation_surface_gaps(relations: Any, issues: list[ValidationIssue]) -> None:
+    if not isinstance(relations, list):
+        return
+    collision_types = {"collision", "cascade_collision", "impacts", "hits", "contact_order"}
+    for index, relation in enumerate(relations):
+        if not isinstance(relation, Mapping) or relation.get("surface_gap_m") is None:
+            continue
+        path = f"/relations/{index}/surface_gap_m"
+        gap = relation.get("surface_gap_m")
+        if isinstance(gap, bool) or not isinstance(gap, (int, float)) or not math.isfinite(float(gap)) or float(gap) < 0.0:
+            _issue(issues, path, "invalid_surface_gap", "must be a finite nonnegative number")
+        if _canonical_relation_type(relation.get("type")) not in collision_types:
+            _issue(
+                issues,
+                path,
+                "surface_gap_requires_collision_relation",
+                "is supported only on a collision/impacts propagation relation",
+            )
 
 
 def _validate_support_footprints(
@@ -1166,6 +1308,62 @@ def _validate_event_payloads(events: Any, issues: list[ValidationIssue]) -> None
         for field in ("linear_velocity_m_s", "angular_velocity_rad_s", "angular_velocity_deg_s"):
             if event.get(field) is not None:
                 _finite_vec3(event.get(field), f"{path}/{field}", issues)
+
+
+def _validate_release_impact_directions(
+    objects: Iterable[Any],
+    relations: Any,
+    events: Any,
+    issues: list[ValidationIssue],
+) -> None:
+    if not isinstance(relations, list) or not isinstance(events, list):
+        return
+    positions = {
+        str(obj.get("id")): initial.get("position_m")
+        for obj in objects
+        if isinstance(obj, Mapping)
+        and obj.get("id")
+        and isinstance((initial := obj.get("initial_state")), Mapping)
+        and _is_finite_vec3(initial.get("position_m"))
+    }
+    impact_targets: dict[str, list[str]] = {}
+    for relation in relations:
+        if (
+            not isinstance(relation, Mapping)
+            or _canonical_relation_type(relation.get("type")) not in {"impacts", "hits"}
+        ):
+            continue
+        source = str(relation.get("source") or "")
+        target = str(relation.get("target") or "")
+        if source and target:
+            impact_targets.setdefault(source, []).append(target)
+    for index, event in enumerate(events):
+        if not isinstance(event, Mapping):
+            continue
+        event_type = str(event.get("type") or "").casefold().replace("-", "_").replace(" ", "_")
+        if event_type not in {"release", "delayed_release", "staged_release"}:
+            continue
+        source = str(event.get("object") or "")
+        targets = list(dict.fromkeys(impact_targets.get(source, [])))
+        velocity = event.get("linear_velocity_m_s")
+        if len(targets) != 1 or not _is_finite_vec3(velocity):
+            continue
+        source_position = positions.get(source)
+        target_position = positions.get(targets[0])
+        if not _is_finite_vec3(source_position) or not _is_finite_vec3(target_position):
+            continue
+        direction = [float(target_position[axis]) - float(source_position[axis]) for axis in range(3)]
+        speed_squared = sum(float(value) ** 2 for value in velocity)
+        distance_squared = sum(value * value for value in direction)
+        if speed_squared <= 1e-18 or distance_squared <= 1e-18:
+            continue
+        if sum(float(velocity[axis]) * direction[axis] for axis in range(3)) <= 0.0:
+            _issue(
+                issues,
+                f"/events/{index}/linear_velocity_m_s",
+                "release_velocity_points_away_from_impact_target",
+                f"release velocity for {source} must point toward its impacts target {targets[0]}",
+            )
 
 
 def _mapping(

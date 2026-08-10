@@ -73,10 +73,10 @@ class PhysicsVerifier:
                     write_json(run_dir / "verifier.json", {"reference_ready": False, "harness_verifier": report})
                 return report
         output_dir = resolve_output_dir(run_dir)
-        trajectory_path = output_dir / "trajectory.json"
+        trajectory_path = run_dir / "trajectory.json"
+        if not trajectory_path.exists():
+            trajectory_path = output_dir / "trajectory.json"
         trajectory = read_json(trajectory_path) if trajectory_path.exists() else []
-        if not trajectory and (run_dir / "trajectory.json").exists():
-            trajectory = read_json(run_dir / "trajectory.json")
         report = self.verify(case_spec, trajectory, output_dir=output_dir)
         if write:
             write_json(run_dir / "harness_verifier.json", report)

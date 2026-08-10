@@ -184,82 +184,68 @@ class ParticleCacheVerifierTests(unittest.TestCase):
         self.assertEqual(report["status"], "fail")
         self.assertIn("final_surface_too_fragmented", report["failure_codes"])
 
-    def test_asset_bound_container_transfer_requires_source_to_receiver_occupancy(self) -> None:
+    def test_declared_measurements_and_assertions_pass(self) -> None:
         cache = particle_cache()
-        cache["environment"] = {
-            "type": "asset_bound_container_transfer",
-            "workspace_bounds_m": {"min_m": [-1.0, -1.0, -0.1], "max_m": [1.0, 1.0, 2.0]},
-            "penetration_tolerance_m": 0.01,
-            "minimum_initial_source_fraction": 0.9,
-            "minimum_final_receiver_fraction": 0.9,
-            "minimum_source_fraction_decrease": 0.85,
-            "maximum_final_spill_fraction": 0.08,
-        }
-        cache["frames"][0]["transfer_state"] = {
-            "source_fraction": 0.95,
-            "receiver_fraction": 0.0,
-            "outside_both_fraction": 0.05,
-        }
-        cache["frames"][1]["transfer_state"] = {
-            "source_fraction": 0.0,
-            "receiver_fraction": 0.94,
-            "outside_both_fraction": 0.06,
-        }
+        cache["environment"] = declared_environment([
+            assertion("initial_level", "level", "initial", ">=", 0.9),
+            assertion("final_level", "level", "final", "<=", 0.1),
+            assertion("level_change", "level", "initial_minus_final", ">=", 0.8),
+            assertion("minimum_width", "width", "max", ">=", 0.25),
+        ])
+        cache["frames"][0]["measurements"] = {"level": 1.0, "width": 0.05}
+        cache["frames"][1]["measurements"] = {"level": 0.05, "width": 0.28}
 
         report = verify_particle_cache(cache)
 
         self.assertEqual(report["status"], "pass", report)
-        self.assertEqual(report["checks"]["transfer_event_frame"], 1)
-        self.assertAlmostEqual(report["checks"]["final_receiver_fraction"], 0.94)
+        self.assertTrue(report["checks"]["declared_measurements_checked"])
+        self.assertAlmostEqual(report["checks"]["measurement_reductions"]["level_change"], 0.95)
 
-    def test_asset_bound_container_transfer_rejects_spill(self) -> None:
+    def test_generic_assertion_failure_has_no_scenario_specific_code(self) -> None:
         cache = particle_cache()
-        cache["environment"] = {
-            "type": "asset_bound_container_transfer",
-            "workspace_bounds_m": {"min_m": [-1.0, -1.0, -0.1], "max_m": [1.0, 1.0, 2.0]},
-            "penetration_tolerance_m": 0.01,
-            "minimum_initial_source_fraction": 0.9,
-            "minimum_final_receiver_fraction": 0.9,
-            "minimum_source_fraction_decrease": 0.85,
-            "maximum_final_spill_fraction": 0.08,
-        }
-        cache["frames"][0]["transfer_state"] = {"source_fraction": 0.95, "receiver_fraction": 0.0, "outside_both_fraction": 0.05}
-        cache["frames"][1]["transfer_state"] = {"source_fraction": 0.0, "receiver_fraction": 0.7, "outside_both_fraction": 0.3}
+        cache["environment"] = declared_environment([
+            assertion("required_width", "width", "final", ">=", 0.2),
+        ])
+        cache["frames"][0]["measurements"] = {"level": 1.0, "width": 0.05}
+        cache["frames"][1]["measurements"] = {"level": 0.0, "width": 0.08}
 
         report = verify_particle_cache(cache)
 
         self.assertEqual(report["status"], "fail")
-        self.assertIn("container_transfer_receiver_fraction_too_low", report["failure_codes"])
-        self.assertIn("container_transfer_spill_too_high", report["failure_codes"])
+        self.assertEqual(report["failure_codes"], ["solver_assertion_failed"])
+        self.assertEqual(report["checks"]["assertion_results"][0]["id"], "required_width")
 
-    def test_asset_bound_container_transfer_rejects_blob_like_ejection(self) -> None:
+    def test_missing_declared_measurement_fails(self) -> None:
         cache = particle_cache()
-        cache["environment"] = {
-            "type": "asset_bound_container_transfer",
-            "workspace_bounds_m": {"min_m": [-1.0, -1.0, -0.1], "max_m": [1.0, 1.0, 2.0]},
-            "penetration_tolerance_m": 0.01,
-            "minimum_source_evacuation_duration_s": 0.5,
-            "maximum_source_fraction_drop_per_frame": 0.2,
-        }
-        template = cache["frames"][0]
-        cache["frames"] = []
-        for frame, source in enumerate((1.0, 0.98, 0.62, 0.25, 0.0)):
-            cache["frames"].append({
-                **template,
-                "frame": frame,
-                "time_s": frame * 0.1,
-                "transfer_state": {
-                    "source_fraction": source,
-                    "receiver_fraction": 0.0 if source else 1.0,
-                    "outside_both_fraction": 1.0 - source if source else 0.0,
-                },
-            })
+        cache["environment"] = declared_environment([
+            assertion("required_width", "width", "final", ">=", 0.2),
+        ])
+        cache["frames"][0]["measurements"] = {"level": 1.0}
+        cache["frames"][1]["measurements"] = {"level": 0.0}
 
         report = verify_particle_cache(cache)
 
-        self.assertEqual(report["status"], "fail")
-        self.assertIn("container_transfer_source_evacuation_too_abrupt", report["failure_codes"])
-        self.assertIn("container_transfer_single_frame_discharge_too_large", report["failure_codes"])
+        self.assertIn("declared_measurement_missing", report["failure_codes"])
+        self.assertIn("solver_assertion_failed", report["failure_codes"])
+
+def assertion(assertion_id: str, measurement_id: str, reduction: str, operator: str, value: float) -> dict:
+    return {
+        "id": assertion_id,
+        "measurement_id": measurement_id,
+        "reduction": reduction,
+        "operator": operator,
+        "value": value,
+    }
+
+
+def declared_environment(assertions: list[dict]) -> dict:
+    return {
+        "type": "rigid_sph_scene",
+        "workspace_bounds_m": {"min_m": [-1.0, -1.0, -0.1], "max_m": [1.0, 1.0, 2.0]},
+        "penetration_tolerance_m": 0.01,
+        "measurements": [{"id": "level"}, {"id": "width"}],
+        "assertions": assertions,
+    }
 
 
 def particle_cache() -> dict:

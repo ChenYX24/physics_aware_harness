@@ -173,3 +173,41 @@ git diff --check
 - 内层源码当前是 dirty worktree，包含本轮已完成但尚未提交的通用修复和用户已有改动。不要 reset、checkout 或覆盖无关变更；先阅读 `git diff` 的相关文件。
 - 已存在并应保留的修复包括：Poly Haven identity/exclusion gate、具体类别与 generic container 的单向 alias 展开、provider cache version、外部 FBX bounds 容差、V2 relation `impact` 规范化、支撑/真实 bounds 布局、横向/反向链条对齐、ordered contact verifier 和验证失败 CLI 状态。
 - 最近一次相关聚焦回归为 132 项通过；系统 `/usr/bin/python3` 为 3.9，部分测试使用的新 `pathlib` 参数仅在 conda base Python 3.13 正常，因此以 conda base 为准。
+
+## 2026-08-10 Meshy 后续修复计划
+
+### 已确认的产品决定
+
+- 暂不新增跨 LLM 输出归一化的“付费任务身份”，也不按图片哈希和 API payload 合并不同 Provider request。现有 request digest/checkpoint 身份继续保留。
+- Multi-Image API 的 `texture_prompt` 作为可选字段，由规划 LLM 根据用户的材质、颜色或风格意图决定是否填写；它只指导纹理，不得被描述成几何生成 prompt。
+- 当用户要求保留照片中的原始纹理/颜色且没有额外风格要求时，LLM 应省略 `texture_prompt`。若填写，必须原样进入 Provider request、Meshy POST payload 和脱敏 receipt，并校验官方 600 字符上限。
+- 不根据 prompt 中的 `meshy` 等精确字符串注入 `texture_prompt`，也不为椅子或当前 case 添加专用规则。
+
+### 当前失败状态
+
+- 完整 prompt 每次重新规划时，LLM 会改变对象 ID、description、shape、reference usage 等非 Meshy API 字段，从而得到不同的 Provider request digest。连续运行已创建多个任务，不能继续用“重跑完整 prompt”代替恢复。
+- 已知 checkpoint：`f69d2f7c...` 对应任务 `019fe6ba-b8cf-7cc4-9949-2ba4422f0c41`，本地最后进度 99%；`58d9376e...` 对应任务 `019fe6c8-5313-7fd6-8828-68c09f4db925`，本地最后进度 22%。
+- `19beaeed...` 在 POST 等待响应时超时，没有 task ID/checkpoint；服务端是否已创建任务未知。该状态不得自动重复 POST。
+- Expansion 还会为仅明确 `procedural_generation` route 的对象生成 `allowed_providers=[]`，而当前校验器要求非空 Provider 列表，导致规划在 Meshy 前失败。
+
+### 必做修复
+
+1. 增加基于已保存 Provider request、provider input manifest 和 checkpoint 的直接恢复入口；恢复不得重新调用规划 LLM，也不得重新 POST 已有 task ID，成功后继续下载、导入、Catalog、Resolve 和 UE 主链。
+2. 对已有 task ID 的 GET 轮询，以及任务成功后的模型/贴图下载，增加小规模、有上限的超时、SSL EOF、429 和 5xx 重试；保留同一 task ID，不创建替代任务。不得形成复杂通用网络框架。
+3. POST 前原子记录 submission-attempt 状态；若 POST 超时且未取得 task ID，将该 request 标为 `provider_submission_state_unknown`。同一 request 后续必须 fail closed，除非用户显式处置，禁止自动再次 POST。
+4. 允许来源约束只限制 route 而不限制 Provider：`allowed_providers` 为空/省略表示“未声明 Provider 限制”，不是矛盾；`allowed_routes`、required、no-proxy 和 fallback 仍必须严格贯穿。只有用户明确限定 Provider 时才要求非空 Provider 集合。
+5. 为 CaseSpec/Provider contract 增加最小的可选 `texture_prompt` 贯穿，加入长度、类型、receipt 脱敏和 API payload 测试；不得把它用于改变几何、对象身份或物理参数。
+
+### 聚焦验收
+
+- 直接恢复 `f69d2f7c...` 时只出现 GET/下载，不出现 POST，也不调用规划 LLM。
+- GET/下载经历可重试 SSL EOF 后仍使用原 task ID；超过上限结构化失败并保留 checkpoint。
+- POST 未知状态再次恢复时拒绝重提，不增加 Meshy 消耗。
+- route-only procedural 约束可通过 Expansion 校验并由已注册 Provider 正常解析；显式 Provider 约束仍不可被扩大。
+- `texture_prompt` 缺省时不出现在 Meshy payload；LLM 明确填写时逐字进入 payload/receipt，超过 600 字符在网络前失败。
+
+### 本阶段非目标
+
+- 不实现跨不同 request digest 的付费任务合并或全局去重。
+- 不自动猜测 POST 超时对应的远端任务，也不通过重复 POST 探测。
+- 不把自由文本 description、role 或 shape 自动拼接成 `texture_prompt`。

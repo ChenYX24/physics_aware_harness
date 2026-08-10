@@ -924,6 +924,7 @@ def standardize_runner_outputs(run_dir: Path, output_dir: Path, case: CaseSpec, 
     }
     write_json(run_dir / "run_readiness.json", run_readiness)
     write_json(output_dir / "run_readiness.json", run_readiness)
+    verifier_report = PhysicsVerifier().verify_run_dir(run_dir, write=True)
     write_json(
         run_dir / "harness_artifact.json",
         {

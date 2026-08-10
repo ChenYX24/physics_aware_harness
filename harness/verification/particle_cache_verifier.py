@@ -67,7 +67,7 @@ def verify_particle_cache(cache: dict[str, Any], *, root: str | Path | None = No
     rigid_checks = verify_rigid_fluid_response(frames, environment, failures)
     flow_checks = verify_initial_flow_response(frames, environment, failures)
     surface_coherence = verify_final_surface_coherence(frames, environment, failures)
-    transfer_checks = verify_container_transfer(frames, environment, failures)
+    declared_checks = verify_declared_measurements(frames, environment, failures)
     return {
         "schema_version": "harness_particle_cache_report_v1",
         "status": "pass" if not failures else "fail",
@@ -90,73 +90,87 @@ def verify_particle_cache(cache: dict[str, Any], *, root: str | Path | None = No
             **rigid_checks,
             **flow_checks,
             **surface_coherence,
-            **transfer_checks,
+            **declared_checks,
         },
     }
 
 
-def verify_container_transfer(
+def verify_declared_measurements(
     frames: list[dict[str, Any]], environment: dict[str, Any], failures: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    if environment.get("type") != "asset_bound_container_transfer" or not frames:
+    if environment.get("type") != "rigid_sph_scene" or not frames:
         return {}
-    initial = frames[0].get("transfer_state") if isinstance(frames[0].get("transfer_state"), dict) else {}
-    final = frames[-1].get("transfer_state") if isinstance(frames[-1].get("transfer_state"), dict) else {}
-    required_keys = {"source_fraction", "receiver_fraction", "outside_both_fraction"}
-    if not required_keys.issubset(initial) or not required_keys.issubset(final):
-        failures.append(failure("container_transfer_state_missing", int(frames[-1].get("frame") or 0), None))
-        return {"container_transfer_checked": True}
-    initial_source = float(initial["source_fraction"])
-    final_source = float(final["source_fraction"])
-    final_receiver = float(final["receiver_fraction"])
-    final_spill = float(final["outside_both_fraction"])
-    source_decrease = initial_source - final_source
-    minimum_initial = float(environment.get("minimum_initial_source_fraction") or 0.0)
-    minimum_receiver = float(environment.get("minimum_final_receiver_fraction") or 0.0)
-    minimum_decrease = float(environment.get("minimum_source_fraction_decrease") or 0.0)
-    maximum_spill = float(environment.get("maximum_final_spill_fraction") or 1.0)
-    minimum_evacuation_duration = float(environment.get("minimum_source_evacuation_duration_s") or 0.0)
-    maximum_drop_per_frame = float(environment.get("maximum_source_fraction_drop_per_frame") or 0.0)
-    if initial_source < minimum_initial:
-        failures.append(failure("initial_fluid_not_inside_source_container", 0, initial_source))
-    if final_receiver < minimum_receiver:
-        failures.append(failure("container_transfer_receiver_fraction_too_low", int(frames[-1].get("frame") or 0), final_receiver))
-    if source_decrease < minimum_decrease:
-        failures.append(failure("container_transfer_source_did_not_empty", int(frames[-1].get("frame") or 0), source_decrease))
-    if final_spill > maximum_spill:
-        failures.append(failure("container_transfer_spill_too_high", int(frames[-1].get("frame") or 0), final_spill))
-    source_series = [float((frame.get("transfer_state") or {}).get("source_fraction") or 0.0) for frame in frames]
-    first_discharge = next((index for index, value in enumerate(source_series) if value < initial_source - 0.01), None)
-    empty = next((index for index, value in enumerate(source_series) if value <= 0.01), None)
-    evacuation_duration = None
-    if first_discharge is not None and empty is not None and empty >= first_discharge:
-        evacuation_duration = float(frames[empty].get("time_s") or 0.0) - float(frames[first_discharge].get("time_s") or 0.0)
-        if minimum_evacuation_duration > 0.0 and evacuation_duration < minimum_evacuation_duration:
-            failures.append(failure("container_transfer_source_evacuation_too_abrupt", int(frames[empty].get("frame") or 0), evacuation_duration))
-    maximum_drop = max((before - after for before, after in zip(source_series, source_series[1:], strict=False)), default=0.0)
-    if maximum_drop_per_frame > 0.0 and maximum_drop > maximum_drop_per_frame:
-        failures.append(failure("container_transfer_single_frame_discharge_too_large", 0, maximum_drop))
-    transfer_frame = next(
-        (
-            int(frame.get("frame") or 0)
-            for frame in frames[1:]
-            if float(((frame.get("transfer_state") or {}).get("receiver_fraction") or 0.0)) >= 0.05
-        ),
-        None,
-    )
-    if transfer_frame is None:
-        failures.append(failure("container_transfer_event_not_observed", int(frames[-1].get("frame") or 0), None))
+    declarations = environment.get("measurements") if isinstance(environment.get("measurements"), list) else []
+    assertions = environment.get("assertions") if isinstance(environment.get("assertions"), list) else []
+    series: dict[str, list[float]] = {}
+    for declaration in declarations:
+        measurement_id = str(declaration.get("id") or "") if isinstance(declaration, dict) else ""
+        values: list[float] = []
+        for frame in frames:
+            measurements = frame.get("measurements") if isinstance(frame.get("measurements"), dict) else {}
+            value = measurements.get(measurement_id)
+            if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                failures.append(failure("declared_measurement_missing", int(frame.get("frame") or 0), measurement_id))
+                values = []
+                break
+            values.append(float(value))
+        if values:
+            series[measurement_id] = values
+    reductions: dict[str, float | None] = {}
+    assertion_results: list[dict[str, Any]] = []
+    for assertion in assertions:
+        if not isinstance(assertion, dict):
+            continue
+        assertion_id = str(assertion.get("id") or "")
+        measurement_id = str(assertion.get("measurement_id") or "")
+        values = series.get(measurement_id)
+        measured = reduce_measurement(values, assertion, frames) if values else None
+        reductions[assertion_id] = measured
+        expected = float(assertion.get("value") or 0.0)
+        operator = str(assertion.get("operator") or "")
+        passed = measured is not None and ((measured >= expected) if operator == ">=" else (measured <= expected))
+        result = {
+            "id": assertion_id,
+            "measurement_id": measurement_id,
+            "reduction": str(assertion.get("reduction") or ""),
+            "operator": operator,
+            "expected": expected,
+            "measured": measured,
+            "passed": passed,
+        }
+        assertion_results.append(result)
+        if not passed:
+            failures.append(failure("solver_assertion_failed", int(frames[-1].get("frame") or 0), result))
     return {
-        "container_transfer_checked": True,
-        "initial_source_fraction": initial_source,
-        "final_source_fraction": final_source,
-        "source_fraction_decrease": source_decrease,
-        "final_receiver_fraction": final_receiver,
-        "final_spill_fraction": final_spill,
-        "transfer_event_frame": transfer_frame,
-        "source_evacuation_duration_s": evacuation_duration,
-        "maximum_source_fraction_drop_per_frame": maximum_drop,
+        "declared_measurements_checked": True,
+        "measurement_reductions": reductions,
+        "assertion_results": assertion_results,
     }
+
+
+def reduce_measurement(values: list[float], assertion: dict[str, Any], frames: list[dict[str, Any]]) -> float | None:
+    reduction = str(assertion.get("reduction") or "")
+    if reduction == "initial":
+        return values[0]
+    if reduction == "final":
+        return values[-1]
+    if reduction == "max":
+        return max(values)
+    if reduction == "min":
+        return min(values)
+    if reduction == "initial_minus_final":
+        return values[0] - values[-1]
+    if reduction == "max_frame_decrease":
+        return max((before - after for before, after in zip(values, values[1:], strict=False)), default=0.0)
+    if reduction == "threshold_crossing_duration":
+        start_delta = float(assertion.get("start_delta") or 0.0)
+        end_value = float(assertion.get("end_value") or 0.0)
+        start = next((index for index, value in enumerate(values) if value <= values[0] - start_delta), None)
+        end = next((index for index, value in enumerate(values) if value <= end_value), None)
+        if start is None or end is None or end < start:
+            return None
+        return float(frames[end].get("time_s") or 0.0) - float(frames[start].get("time_s") or 0.0)
+    return None
 
 
 def verify_final_surface_coherence(
@@ -345,7 +359,7 @@ def negative_gravity(cache: dict[str, Any]) -> bool:
 
 
 def outside_basin(rows: list[Any], environment: dict[str, Any]) -> bool:
-    if environment.get("type") == "asset_bound_container_transfer":
+    if environment.get("type") == "rigid_sph_scene":
         bounds = environment.get("workspace_bounds_m") if isinstance(environment.get("workspace_bounds_m"), dict) else {}
         minimum = bounds.get("min_m") if isinstance(bounds.get("min_m"), list) else []
         maximum = bounds.get("max_m") if isinstance(bounds.get("max_m"), list) else []
@@ -379,7 +393,7 @@ def particle_bounds(rows: list[Any]) -> dict[str, list[float]]:
 
 
 def surface_bounds_outside_basin(bounds: dict[str, Any], environment: dict[str, Any]) -> bool:
-    if environment.get("type") == "asset_bound_container_transfer":
+    if environment.get("type") == "rigid_sph_scene":
         workspace = environment.get("workspace_bounds_m") if isinstance(environment.get("workspace_bounds_m"), dict) else {}
         allowed_minimum = workspace.get("min_m") if isinstance(workspace.get("min_m"), list) else []
         allowed_maximum = workspace.get("max_m") if isinstance(workspace.get("max_m"), list) else []

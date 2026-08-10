@@ -5,14 +5,7 @@
   "prompt": "A real stemmed wine glass starts upright with settled water, then tilts past its pour angle above a real shallow teacup. Water has zero scripted velocity, leaves under gravity, falls through the air, splashes into the teacup, and settles before the video ends.",
   "expected_physics": {
     "gravity_m_s2": 9.81,
-    "coordinate_system": "z_up",
-    "phenomenon": "asset_bound_container_transfer",
-    "minimum_initial_source_fraction": 0.9,
-    "minimum_final_receiver_fraction": 0.9,
-    "minimum_source_fraction_decrease": 0.85,
-    "maximum_final_spill_fraction": 0.1,
-    "minimum_source_evacuation_duration_s": 0.5,
-    "maximum_source_fraction_drop_per_frame": 0.2
+    "coordinate_system": "z_up"
   },
   "physical_parameters": {
     "gravity_m_s2": [0.0, 0.0, -9.81],
@@ -26,35 +19,21 @@
     {
       "id": "water",
       "role": "fluid",
-      "initial_condition": {
-        "type": "bounded_volume",
-        "shape": "cylinder",
-        "frame": "source_container_local",
-        "local_position_m": [0.0, 0.0, 0.1825],
-        "radius_m": 0.022,
-        "height_m": 0.065,
-        "euler_deg": [0.0, 0.0, 0.0],
-        "velocity_field": {
-          "type": "uniform",
-          "velocity_m_s": [0.0, 0.0, 0.0]
+      "solver": {
+        "material_model": "sph_liquid",
+        "initial_volume": {
+          "shape": "cylinder",
+          "frame": {"type": "body_local", "body_id": "wine_glass"},
+          "position_m": [0.0, 0.0, 0.1825],
+          "radius_m": 0.022,
+          "height_m": 0.065,
+          "euler_xyz_deg": [0.0, 0.0, 0.0]
         }
       }
     },
     {
-      "id": "source_wine_glass",
-      "role": "source_container",
-      "initial_position_m": [-0.25, 0.0, 0.0],
-      "solver_rotation_xyz_deg": [0.0, 0.0, 0.0],
-      "ue_rotation_pyr_deg": [0.0, 0.0, 0.0],
-      "kinematic_motion": {
-        "type": "tilt",
-        "start_time_s": 0.25,
-        "duration_s": 2.4,
-        "pivot_local_m": [0.052, 0.0, 0.225],
-        "expected_stream_landing_xy_m": [-0.15, 0.0],
-        "solver_end_rotation_xyz_deg": [0.0, 98.0, 0.0],
-        "ue_end_rotation_pyr_deg": [-98.0, 0.0, 0.0]
-      },
+      "id": "wine_glass",
+      "role": "rigid_body",
       "asset": {
         "ue_path": "/Game/Props/Dining/SM_Glass04.SM_Glass04",
         "material_path": "/Game/Props/Dining/Materials/M_Glass.M_Glass",
@@ -63,26 +42,35 @@
         "catalog_source": "mounted AgenticDataPlatform UE asset catalog",
         "bbox_m": [0.1103677177, 0.1120703125, 0.2445579529]
       },
-      "collision": {
-        "type": "axisymmetric_profile",
-        "fit_method": "catalog_bbox_plus_visual_inner_profile_v1",
-        "asset_geometry_match": true,
-        "inner_profile": [
-          {"z_m": 0.115, "radius_m": 0.012},
-          {"z_m": 0.145, "radius_m": 0.035},
-          {"z_m": 0.185, "radius_m": 0.05},
-          {"z_m": 0.225, "radius_m": 0.052}
-        ],
-        "wall_thickness_m": 0.006,
-        "panel_count": 24
+      "solver": {
+        "mobility": "kinematic",
+        "transform": {"position_m": [-0.25, 0.0, 0.0], "euler_xyz_deg": [0.0, 0.0, 0.0], "ue_rotation_pyr_deg": [0.0, 0.0, 0.0]},
+        "motion": {
+          "type": "pivot_rotation",
+          "start_time_s": 0.25,
+          "duration_s": 2.4,
+          "pivot_local_m": [0.052, 0.0, 0.225],
+          "solver_end_rotation_xyz_deg": [0.0, 98.0, 0.0],
+          "ue_end_rotation_pyr_deg": [-98.0, 0.0, 0.0]
+        },
+        "collision": {
+          "type": "axisymmetric_profile",
+          "fit_method": "catalog_bbox_plus_visual_inner_profile_v1",
+          "asset_geometry_match": true,
+          "inner_profile": [
+            {"z_m": 0.115, "radius_m": 0.012},
+            {"z_m": 0.145, "radius_m": 0.035},
+            {"z_m": 0.185, "radius_m": 0.05},
+            {"z_m": 0.225, "radius_m": 0.052}
+          ],
+          "wall_thickness_m": 0.006,
+          "panel_count": 24
+        }
       }
     },
     {
-      "id": "receiver_teacup",
-      "role": "receiver_container",
-      "initial_position_m": [-0.15, 0.0, 0.0],
-      "solver_rotation_xyz_deg": [0.0, 0.0, 0.0],
-      "ue_rotation_pyr_deg": [0.0, 0.0, 0.0],
+      "id": "teacup",
+      "role": "rigid_body",
       "asset": {
         "ue_path": "/Game/Props/Dining/SM_TeaCup.SM_TeaCup",
         "material_path": "/Game/Props/Dining/Materials/M_Dining.M_Dining",
@@ -91,35 +79,55 @@
         "catalog_source": "mounted AgenticDataPlatform UE asset catalog",
         "bbox_m": [0.16397, 0.13833, 0.07661]
       },
-      "collision": {
-        "type": "axisymmetric_profile",
-        "fit_method": "catalog_bbox_plus_visual_inner_profile_v1",
-        "asset_geometry_match": true,
-        "inner_profile": [
-          {"z_m": 0.018, "radius_m": 0.025},
-          {"z_m": 0.035, "radius_m": 0.045},
-          {"z_m": 0.068, "radius_m": 0.064}
-        ],
-        "wall_thickness_m": 0.005,
-        "panel_count": 24
+      "solver": {
+        "mobility": "static",
+        "transform": {"position_m": [-0.15, 0.0, 0.0], "euler_xyz_deg": [0.0, 0.0, 0.0], "ue_rotation_pyr_deg": [0.0, 0.0, 0.0]},
+        "collision": {
+          "type": "axisymmetric_profile",
+          "fit_method": "catalog_bbox_plus_visual_inner_profile_v1",
+          "asset_geometry_match": true,
+          "inner_profile": [
+            {"z_m": 0.018, "radius_m": 0.025},
+            {"z_m": 0.035, "radius_m": 0.045},
+            {"z_m": 0.068, "radius_m": 0.064}
+          ],
+          "wall_thickness_m": 0.005,
+          "panel_count": 24
+        }
+      }
+    },
+    {
+      "id": "tabletop",
+      "role": "rigid_body",
+      "asset": {
+        "ue_path": "/Game/Generated/Provider/generated_local_box_mesh_v1_aac66ea29e36eb5083c5b979.generated_local_box_mesh_v1_aac66ea29e36eb5083c5b979",
+        "material_path": "",
+        "sha256": "ccf1312609851524915ccd9bf65c73d0fac663746a60fbcb934a3219659fa841",
+        "proxy": false,
+        "catalog_source": "local procedural asset provider",
+        "bbox_m": [0.06, 0.18, 0.42]
+      },
+      "solver": {
+        "mobility": "static",
+        "transform": {"position_m": [-0.1, 0.0, -0.025], "euler_xyz_deg": [0.0, 0.0, 0.0], "ue_rotation_pyr_deg": [0.0, 0.0, 0.0], "scale": [12.0, 2.2222222222, 0.119047619]},
+        "collision": {"type": "plane", "position_m": [0.0, 0.0, 0.0], "normal": [0.0, 0.0, 1.0], "asset_geometry_match": true}
       }
     }
   ],
   "active_objects": ["water"],
-  "passive_objects": ["source_wine_glass", "receiver_teacup"],
+  "passive_objects": ["wine_glass", "teacup", "tabletop"],
   "required_assets": [
     "/Game/Props/Dining/SM_Glass04.SM_Glass04",
     "/Game/Props/Dining/SM_TeaCup.SM_TeaCup",
-    "/Game/Maps/UrbanDowntown/Meshes/PatioFurniture_Table_A.PatioFurniture_Table_A",
+    "/Game/Generated/Provider/generated_local_box_mesh_v1_aac66ea29e36eb5083c5b979.generated_local_box_mesh_v1_aac66ea29e36eb5083c5b979",
     "reconstructed water surface"
   ],
   "required_signals": [
     "particle_positions",
     "particle_velocities",
     "stable_particle_ids",
-    "source_occupancy_fraction",
-    "receiver_occupancy_fraction",
-    "spill_fraction",
+    "declared_measurements",
+    "solver_assertion_results",
     "surface_mesh_sequence",
     "solver_timebase",
     "rgb",
@@ -142,21 +150,27 @@
       "iso_surface_threshold": 0.65
     }
   },
+  "solver_scene": {
+    "type": "rigid_sph",
+    "measurements": [
+      {"id": "glass_occupancy", "type": "body_interior_fraction", "body_id": "wine_glass"},
+      {"id": "cup_occupancy", "type": "body_interior_fraction", "body_id": "teacup"},
+      {"id": "outside_vessels", "type": "outside_body_interiors_fraction", "body_ids": ["wine_glass", "teacup"]}
+    ],
+    "assertions": [
+      {"id": "initially_in_glass", "measurement_id": "glass_occupancy", "reduction": "initial", "operator": ">=", "value": 0.9},
+      {"id": "leaves_glass", "measurement_id": "glass_occupancy", "reduction": "initial_minus_final", "operator": ">=", "value": 0.85},
+      {"id": "ends_in_cup", "measurement_id": "cup_occupancy", "reduction": "final", "operator": ">=", "value": 0.9},
+      {"id": "limited_outside_fraction", "measurement_id": "outside_vessels", "reduction": "final", "operator": "<=", "value": 0.1},
+      {"id": "cup_entry_observed", "measurement_id": "cup_occupancy", "reduction": "max", "operator": ">=", "value": 0.05},
+      {"id": "bounded_frame_discharge", "measurement_id": "glass_occupancy", "reduction": "max_frame_decrease", "operator": "<=", "value": 0.2},
+      {"id": "non_instantaneous_discharge", "measurement_id": "glass_occupancy", "reduction": "threshold_crossing_duration", "operator": ">=", "value": 0.5, "start_delta": 0.01, "end_value": 0.01}
+    ]
+  },
   "scene": {
     "map_preference": "/Game/Maps/MarketEnvironment/Maps/Day.Day",
     "event_window_s": 1.25,
-    "post_event_tail_s": 1.25,
-    "support_surface": {
-      "id": "cafe_table",
-      "asset": {
-        "ue_path": "/Game/Maps/UrbanDowntown/Meshes/PatioFurniture_Table_A.PatioFurniture_Table_A",
-        "proxy": false,
-        "bbox_m": [0.9606585693, 0.9553964233, 0.9418984985]
-      },
-      "position_m": [-0.24, 0.0, 0.0],
-      "scale": [1.0, 1.0, 1.0],
-      "solver_floor_to_surface_m": 0.9418984985
-    }
+    "post_event_tail_s": 1.25
   },
-  "notes": "Asset-bound transfer vertical slice. SM_Glass04 and SM_TeaCup are materialized UE render assets with recorded hashes. Their open interiors are represented in Genesis by piecewise axisymmetric profiles: every profile segment uses 24 wall panels and one shared bottom closes the interior, because default convex collision would seal each rim. The teacup replaces the narrow tumbler after a solver-only landing probe showed the physical stream sweeping beyond a 10 cm opening. Water settles for 0.5 s in the upright source before capture; only the source vessel follows a declared rim-pivot tilt, while every fluid particle remains solver-owned with no scripted launch velocity."
+  "notes": "This case uses the same declarative rigid_sph contract as every other coupled scene: rigid bodies, collision geometry, motion, one fluid volume, measurements, and assertions. No transfer-specific solver or verifier is selected."
 }

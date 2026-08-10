@@ -241,6 +241,8 @@ class AssetProviderOrchestrator:
             "required_license_tier": required_license_tier,
             "generation_spec": generation_spec,
         }
+        if "texture_prompt" in intent.acquisition:
+            identity["texture_prompt"] = intent.acquisition.get("texture_prompt")
         digest = stable_digest(identity)
         return ProviderRequest.from_dict(
             {
@@ -349,6 +351,72 @@ class AssetProviderOrchestrator:
         if workspace_failure is not None:
             return None, workspace_failure
         request_dir = self.workspace / "providers" / adapter.provider_id / request["request_digest"]
+        legacy_empty_submission = (
+            adapter.provider_id == "meshy_model_generation_v1"
+            and request_dir.is_dir()
+            and not any(request_dir.iterdir())
+        )
+        request_path = request_dir / "provider_request.json"
+        if request_path.is_file():
+            try:
+                saved_request = json.loads(request_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                error = RemoteProviderError(
+                    "provider_request_invalid",
+                    f"saved Provider request cannot be read: {exc}",
+                    status="blocked",
+                )
+                receipt = self._remote_failure_receipt(
+                    request=request,
+                    adapter=adapter,
+                    request_dir=request_dir,
+                    error=error,
+                )
+                return None, (
+                    provider_failure(
+                        request,
+                        status=error.status,
+                        code=error.code,
+                        message=error.message,
+                        receipt_ids=[receipt["receipt_id"]],
+                    ),
+                    receipt,
+                )
+            if saved_request != request:
+                error = RemoteProviderError(
+                    "provider_request_mismatch",
+                    "saved Provider request differs from the compiled request with the same digest",
+                    status="blocked",
+                )
+                receipt = self._remote_failure_receipt(
+                    request=request,
+                    adapter=adapter,
+                    request_dir=request_dir,
+                    error=error,
+                )
+                return None, (
+                    provider_failure(
+                        request,
+                        status=error.status,
+                        code=error.code,
+                        message=error.message,
+                        receipt_ids=[receipt["receipt_id"]],
+                    ),
+                    receipt,
+                )
+        else:
+            write_json(request_path, request)
+        if legacy_empty_submission:
+            write_json(
+                request_dir / "submission_attempt.json",
+                {
+                    "schema_version": "harness_meshy_submission_attempt_v1",
+                    "provider_id": adapter.provider_id,
+                    "request_identity": request["request_digest"],
+                    "state": "unknown",
+                    "failure_code": "legacy_post_result_unknown",
+                },
+            )
         try:
             acquisition = adapter.acquire(request, destination=request_dir, workspace=self.workspace)
         except RemoteProviderError as exc:
@@ -949,6 +1017,18 @@ class AssetProviderOrchestrator:
             audit_path = request_dir / "failure_audits" / f"{stable_digest(audit_payload)}.json"
             write_json(audit_path, audit_payload)
             outputs.append(self._receipt_file(audit_path, role="provider_task_checkpoint", file_format="json"))
+        submission_attempt = request_dir / "submission_attempt.json"
+        if submission_attempt.is_file():
+            outputs.append(
+                self._receipt_file(
+                    submission_attempt,
+                    role="provider_submission_attempt",
+                    file_format="json",
+                )
+            )
+        request_path = request_dir / "provider_request.json"
+        if request_path.is_file():
+            outputs.append(self._receipt_file(request_path, role="provider_request", file_format="json"))
         inputs = [
             {"input_id": str(row["input_id"]), "sha256": str(row["sha256"])}
             for row in request.get("reference_inputs") or []
@@ -964,6 +1044,12 @@ class AssetProviderOrchestrator:
                 "outputs": [{"path": row["path"], "sha256": row["sha256"]} for row in outputs],
             }
         )
+        recipe_parameters = {
+            "provider_hint": request.get("provider_hint"),
+            "source_uri_hint": request.get("source_uri_hint"),
+        }
+        if "texture_prompt" in request:
+            recipe_parameters["texture_prompt"] = request.get("texture_prompt")
         receipt = {
             "schema_version": PROVIDER_RECEIPT_SCHEMA,
             "receipt_id": f"provider-receipt.{receipt_digest}",
@@ -974,10 +1060,7 @@ class AssetProviderOrchestrator:
             "request_digest": request["request_digest"],
             "recipe_id": task_id or request["request_digest"],
             "recipe_version": adapter.provider_version,
-            "recipe_parameters": {
-                "provider_hint": request.get("provider_hint"),
-                "source_uri_hint": request.get("source_uri_hint"),
-            },
+            "recipe_parameters": recipe_parameters,
             "generator_source_version": adapter.provider_version,
             "input_identities": inputs,
             "output_files": outputs,
@@ -1156,6 +1239,15 @@ class AssetProviderOrchestrator:
             )
             for row in acquisition.files
         ]
+        request_path = (
+            self.workspace
+            / "providers"
+            / acquisition.provider_id
+            / str(request["request_digest"])
+            / "provider_request.json"
+        )
+        if request_path.is_file():
+            outputs.append(self._receipt_file(request_path, role="provider_request", file_format="json"))
         for row in importer_result.get("files") or []:
             outputs.append(
                 self._receipt_file(

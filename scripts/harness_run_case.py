@@ -21,6 +21,9 @@ from harness.core.workspace import WORKSPACE_ENV, case_output_root, workspace_pa
 from harness.planning.prompt_to_case import prompt_to_case
 from harness.planning.case_generation import build_case_request, generate_case_spec_v2
 from harness.assets.providers.input_manifest import ProviderInputError, build_provider_input_manifest
+from harness.assets.providers.contracts import ProviderRequest
+from harness.assets.providers.orchestrator import AssetProviderOrchestrator
+from harness.assets.providers.remote import MeshyModelGenerationAdapter, PolyHavenExternalSiteAdapter
 from harness.planning.runtime_compiler import compile_runtime_case
 from harness.runtime.fallback_backend import FallbackBackend
 from harness.runtime.genesis_sph_backend import GenesisSPHBackend
@@ -35,7 +38,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("case_spec", nargs="?", help="Path to cases/.../*.json")
     parser.add_argument("--case", dest="case_spec_flag", help="Path to cases/.../*.json")
     parser.add_argument("--prompt", help="Compile a natural-language prompt into a CaseSpec and run it.")
-    parser.add_argument("--image", action="append", default=[], help="Reference image for CaseSpec V2 generation; may be repeated.")
+    parser.add_argument(
+        "--image",
+        action="append",
+        default=[],
+        help="Register a reference image for CaseSpec V2; pixels stay local unless a destination upload is authorized.",
+    )
     parser.add_argument(
         "--case-spec-version",
         choices=["v1", "v2"],
@@ -45,12 +53,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--allow-image-upload",
         action="store_true",
-        help="Explicitly authorize uploading --image inputs to the configured planning LLM.",
+        help="Explicitly authorize uploading --image pixels to the configured planning LLM; metadata is always supplied.",
     )
     parser.add_argument(
         "--allow-meshy-upload",
         action="store_true",
         help="Separately authorize uploading resolved --image inputs to Meshy; does not follow --allow-image-upload.",
+    )
+    parser.add_argument(
+        "--provider-input-manifest",
+        help="Load a previously saved Provider input manifest for a CaseSpec V2 file run.",
+    )
+    parser.add_argument(
+        "--resume-meshy-request",
+        help="Resume one exact saved Meshy Provider request without planning or another POST; requires --case and --provider-input-manifest.",
     )
     parser.add_argument("--case-id", default="generated_case", help="Case id used with --prompt.")
     parser.add_argument("--backend", choices=["auto", "fallback", "genesis_fem", "genesis_sph", "taichi_cloth", "ue"])
@@ -87,6 +103,10 @@ def main() -> int:
     has_generation_input = bool(args.prompt or args.image)
     if bool(case_path) == has_generation_input:
         raise SystemExit("provide exactly one of --case/case_spec or --prompt/--image")
+    if args.provider_input_manifest and has_generation_input:
+        raise SystemExit("--provider-input-manifest is only valid with a saved CaseSpec file")
+    if args.resume_meshy_request and (has_generation_input or not args.provider_input_manifest):
+        raise SystemExit("--resume-meshy-request requires a saved CaseSpec file and --provider-input-manifest")
     output_root = case_output_root(args.case_route) if args.case_route else workspace_path(args.output_root, default_relative="runs/harness_cases")
     profile = execution_profile(args.profile) if args.profile else None
     if bool(args.width) != bool(args.height):
@@ -131,6 +151,15 @@ def main() -> int:
             source_case = generation.case_spec
     else:
         source_case = load_case_spec_document(case_path)
+        if args.provider_input_manifest:
+            manifest_path = Path(args.provider_input_manifest)
+            try:
+                loaded_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise SystemExit(f"cannot read Provider input manifest: {exc}") from exc
+            if not isinstance(loaded_manifest, dict):
+                raise SystemExit("Provider input manifest root must be an object")
+            provider_input_manifest = loaded_manifest
     is_v2 = isinstance(source_case, CaseSpecV2)
     if profile:
         requested_views = list(profile.views)
@@ -141,12 +170,31 @@ def main() -> int:
     render_mode = profile.render_mode if profile else args.mode
     if not is_v2 and requested_backend is None:
         requested_backend = "fallback"
+    provider_orchestrator = None
+    if args.resume_meshy_request:
+        if not isinstance(source_case, CaseSpecV2):
+            raise SystemExit("--resume-meshy-request requires a CaseSpec V2 file")
+        resume_path = Path(args.resume_meshy_request)
+        try:
+            resume_payload = json.loads(resume_path.read_text(encoding="utf-8"))
+            resume_request = ProviderRequest.from_dict(resume_payload).to_dict()
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            raise SystemExit(f"cannot read saved Meshy Provider request: {exc}") from exc
+        if resume_request.get("route") != "model_generation":
+            raise SystemExit("saved Provider request is not a model_generation request")
+        provider_orchestrator = AssetProviderOrchestrator(
+            remote_providers={
+                "model_generation": MeshyModelGenerationAdapter(resume_request=resume_request),
+                "external_site": PolyHavenExternalSiteAdapter(),
+            }
+        )
     compilation = compile_runtime_case(
         source_case,
         requested_backend=requested_backend,
         requested_views=requested_views,
         render_passes=render_passes,
         camera_strategy=args.camera_strategy,
+        provider_orchestrator=provider_orchestrator,
         provider_input_manifest=provider_input_manifest,
     )
     case = compilation.runtime_case
@@ -249,7 +297,16 @@ def main() -> int:
                 wall_seconds=time.perf_counter() - started,
                 status="fail",
             )
-        videos = ArtifactManager(exc.run_dir).publish_videos(workspace_path(args.video_root, default_relative="review/probes"), case_id=case.case_id, backend=selected_backend)
+        real_ue_invoked = bool(exc.report.get("whether_real_ue_invoked"))
+        videos = (
+            ArtifactManager(exc.run_dir).publish_videos(
+                workspace_path(args.video_root, default_relative="review/probes"),
+                case_id=case.case_id,
+                backend=selected_backend,
+            )
+            if real_ue_invoked
+            else []
+        )
         print(
             json.dumps(
                 {
@@ -261,7 +318,7 @@ def main() -> int:
                     "status": "failed_unavailable",
                     "failure_type": exc.failure_type,
                     "failure_category": exc.report.get("failure_category"),
-                    "real_ue_invoked": bool(exc.report.get("whether_real_ue_invoked")),
+                    "real_ue_invoked": real_ue_invoked,
                     "reason": str(exc),
                     "run_control": str(exc.run_dir / "run_control.html"),
                     "videos": [str(path) for path in videos],

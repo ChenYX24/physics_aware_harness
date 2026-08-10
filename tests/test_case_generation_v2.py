@@ -129,8 +129,11 @@ class CaseGenerationV2Tests(unittest.TestCase):
             ["preserve_authored", "fit_uniform_to_approx_size"],
         )
         self.assertIn("preferences", contract["field_shapes"]["asset_request"])
+        self.assertIn("color_rgb", contract["field_shapes"]["object"])
+        self.assertIn("fixed_material_color", contract["field_shapes"]["object"])
         self.assertIn("allow_similarity_search", contract["field_shapes"]["reference_input"])
         self.assertIn("source", contract["field_shapes"]["binary_relation"])
+        self.assertIn("surface_gap_m", contract["field_shapes"]["binary_relation"])
         self.assertIn("thresholds", contract["field_shapes"]["verification_requirements"])
         expansion_contract = client.calls[0]["payload"]["expansion_contract"]
         self.assertEqual(expansion_contract["field_types"]["object_analysis"], "array")
@@ -142,6 +145,7 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertIn("FIELD-BY-FIELD INSTRUCTIONS", expansion_prompt)
         self.assertIn("exactly one Asset Resolve", expansion_prompt)
         case_prompt = client.calls[1]["system_prompt"]
+        self.assertIn("do not leave the color only in role or descriptive text", case_prompt)
         self.assertIn("Default to\n   local_preview", case_prompt)
         self.assertIn("source restriction for one named object applies only to that object's acquisition", case_prompt)
         self.assertIn("CASESPEC V2 GENERATOR", case_prompt)
@@ -154,6 +158,11 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertIn("A cylinder's authored/analytic axis is local Z", case_prompt)
         self.assertIn("competing classes as must_not.category exclusions", case_prompt)
         self.assertIn("Use supported_by, not plain contact", case_prompt)
+        self.assertIn("sequential_contact_propagation for a simple directed chain", case_prompt)
+        self.assertIn("set physics.enable_gravity=false only when the user explicitly requests", case_prompt)
+        self.assertIn("write that nonnegative value as surface_gap_m", case_prompt)
+        self.assertIn("passes close to each body's center of mass", case_prompt)
+        self.assertIn("Do not raise box, cylinder, container", case_prompt)
         structure_example = client.calls[1]["payload"]["case_spec_contract"]["valid_structure_example_do_not_copy_values"]
         self.assertEqual(case_spec_v2_from_dict(structure_example).case_id, "example")
         self.assertEqual(result.case_spec.case_id, "generated_v2")
@@ -228,6 +237,49 @@ class CaseGenerationV2Tests(unittest.TestCase):
             client.calls[-1]["payload"]["repair_constraints"]["asset_source_constraints"][0]["scope"]["object_ids"],
             ["cue_ball"],
         )
+
+    def test_route_only_source_constraint_does_not_require_a_provider_list(self) -> None:
+        generated = case_spec_v2_fixture()
+        generated["objects"][0]["asset"] = {
+            "description": "a locally generated sphere",
+            "resource_kind": "mesh_3d",
+            "acquisition": {
+                "route": "procedural_generation",
+                "requirement": "required",
+                "origin": "user_explicit",
+                "provider_hint": "sphere_mesh_v1",
+                "reference_inputs": [],
+                "fallback_order": [],
+            },
+        }
+        expansion = source_constraint_expansion()
+        expansion["asset_source_constraints"] = [
+            {
+                "scope": {"object_ids": ["cue_ball"]},
+                "allowed_routes": ["procedural_generation"],
+                "allowed_providers": [],
+                "requirement": "required",
+                "fallback_order": [],
+                "allow_proxy": False,
+            }
+        ]
+        client = FakeJSONClient([expansion, generated])
+
+        result = generate_case_spec_v2(
+            build_case_request(case_id="route_only_constraint", text="Generate the ball procedurally."),
+            client=client,
+        )
+
+        audited = result.case_spec.data["provenance"]["case_generation"]["asset_source_constraints"]
+        self.assertEqual(audited[0]["allowed_providers"], [])
+        self.assertEqual(result.repair_count, 0)
+
+        del expansion["asset_source_constraints"][0]["allowed_providers"]
+        omitted = generate_case_spec_v2(
+            build_case_request(case_id="route_only_constraint_omitted", text="Generate the ball procedurally."),
+            client=FakeJSONClient([expansion, generated]),
+        )
+        self.assertEqual(omitted.repair_count, 0)
 
     def test_common_mapping_shaped_analysis_is_canonicalized_without_losing_keys(self) -> None:
         expansion = expansion_fixture()
@@ -316,19 +368,93 @@ class CaseGenerationV2Tests(unittest.TestCase):
             {item["path"] for item in errors},
         )
 
-    def test_image_upload_requires_explicit_authorization(self) -> None:
+    def test_procedural_cylinder_world_axis_dimensions_enter_bounded_repair(self) -> None:
+        invalid = case_spec_v2_fixture()
+        obj = invalid["objects"][0]
+        obj["geometry"] = {"shape_hint": "cylinder", "approx_size_m": [0.2, 0.6, 0.2]}
+        obj["initial_state"]["rotation_deg"] = [0.0, 0.0, 90.0]
+        obj["asset"] = {
+            "description": "a local procedural cylinder",
+            "resource_kind": "mesh_3d",
+            "must": {"geometry_type": "cylinder", "source_kind": "procedural_generation"},
+            "acquisition": {
+                "route": "procedural_generation",
+                "requirement": "required",
+                "origin": "user_explicit",
+                "provider_hint": "deterministic_local",
+                "reference_inputs": [],
+                "fallback_order": [],
+            },
+        }
+        repaired = deepcopy(invalid)
+        repaired["objects"][0]["geometry"]["approx_size_m"] = [0.2, 0.2, 0.6]
+        request = build_case_request(case_id="cylinder_axis_repair", text="Place a cylinder along world Y.")
+        client = FakeJSONClient([expansion_fixture(), invalid, repaired])
+
+        result = generate_case_spec_v2(request, client=client)
+
+        self.assertEqual(result.repair_count, 1)
+        self.assertEqual(result.case_spec.data["objects"][0]["geometry"]["approx_size_m"], [0.2, 0.2, 0.6])
+        errors = client.calls[-1]["payload"]["validation_errors"]["issues"]
+        self.assertIn(
+            "procedural_cylinder_local_axis_size_mismatch",
+            {item["code"] for item in errors},
+        )
+        self.assertIn("local Z", client.calls[-1]["system_prompt"])
+
+    def test_release_velocity_away_from_impacts_target_enters_bounded_repair(self) -> None:
+        invalid = case_spec_v2_fixture()
+        invalid["objects"][0]["initial_state"]["linear_velocity_m_s"] = [0.0, 0.0, 0.0]
+        invalid["relations"] = [{"type": "impacts", "source": "cue_ball", "target": "target_ball"}]
+        invalid["events"] = [{
+            "type": "release",
+            "object": "cue_ball",
+            "time_s": 0.4,
+            "linear_velocity_m_s": [-2.0, 0.0, 0.0],
+        }]
+        repaired = deepcopy(invalid)
+        repaired["events"][0]["linear_velocity_m_s"] = [2.0, 0.0, 0.0]
+        request = build_case_request(case_id="release_direction_repair", text="Launch the ball into the target.")
+        client = FakeJSONClient([expansion_fixture(), invalid, repaired])
+
+        result = generate_case_spec_v2(request, client=client)
+
+        self.assertEqual(result.repair_count, 1)
+        self.assertEqual(result.case_spec.data["events"][0]["linear_velocity_m_s"], [2.0, 0.0, 0.0])
+        errors = client.calls[-1]["payload"]["validation_errors"]["issues"]
+        self.assertIn(
+            "release_velocity_points_away_from_impact_target",
+            {item["code"] for item in errors},
+        )
+
+    def test_image_registration_and_planning_upload_authorization_are_separate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             image = Path(temporary) / "reference.png"
             image.write_bytes(b"\x89PNG\r\n\x1a\nfixture")
-            with self.assertRaisesRegex(ValueError, "allow-image-upload"):
-                build_case_request(case_id="image_case", image_paths=[image])
-            request = build_case_request(
+            local_request = build_case_request(case_id="image_case", image_paths=[image])
+            upload_request = build_case_request(
                 case_id="image_case",
                 image_paths=[image],
                 allow_image_upload=True,
             )
-        self.assertEqual(request["inputs"][0]["input_id"], "request_image_0")
-        self.assertTrue(request["inputs"][0]["external_upload_authorized"])
+        self.assertEqual(local_request["inputs"][0]["input_id"], "request_image_0")
+        self.assertFalse(local_request["inputs"][0]["external_upload_authorized"])
+        self.assertTrue(upload_request["inputs"][0]["external_upload_authorized"])
+
+    def test_reference_image_metadata_reaches_expansion_without_pixel_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            image = Path(temporary) / "reference.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\nfixture")
+            request = build_case_request(case_id="metadata_only_image", image_paths=[image])
+            client = FakeJSONClient([expansion_fixture(), case_spec_v2_fixture()])
+
+            generate_case_spec_v2(request, client=client)
+
+        self.assertEqual(client.calls[0]["images"], [])
+        model_inputs = client.calls[0]["payload"]["request"]["inputs"]
+        self.assertEqual(model_inputs[0]["input_id"], "request_image_0")
+        self.assertEqual(model_inputs[0]["kind"], "image")
+        self.assertIn("sha256", model_inputs[0])
 
     def test_reference_image_is_seen_by_expansion_and_bound_by_id_in_case_spec(self) -> None:
         generated = case_spec_v2_fixture()

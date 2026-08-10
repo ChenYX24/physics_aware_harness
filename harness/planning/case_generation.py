@@ -192,8 +192,6 @@ def build_case_request(
     paths = [Path(value).expanduser().resolve() for value in image_paths or []]
     if not normalized_text and not paths:
         raise ValueError("CaseSpec V2 generation requires text, at least one image, or both")
-    if paths and not allow_image_upload:
-        raise ValueError("Uploading reference images to an LLM requires --allow-image-upload")
     images: list[dict[str, Any]] = []
     for index, path in enumerate(paths):
         if not path.is_file():
@@ -209,7 +207,7 @@ def build_case_request(
                 "mime_type": mime_type,
                 "sha256": _sha256_file(path),
                 "byte_size": path.stat().st_size,
-                "external_upload_authorized": True,
+                "external_upload_authorized": bool(allow_image_upload),
             }
         )
     backend = str(requested_backend or "").strip()
@@ -235,7 +233,11 @@ def generate_case_spec_v2(
     destination = Path(artifact_dir) if artifact_dir is not None else None
     if destination is not None:
         write_json(destination / "request.json", validated_request)
-    images = [dict(item) for item in validated_request.get("inputs") or [] if item.get("kind") == "image"]
+    images = [
+        dict(item)
+        for item in validated_request.get("inputs") or []
+        if item.get("kind") == "image" and item.get("external_upload_authorized") is True
+    ]
     expansion_response = client.complete_json(
         system_prompt=_expansion_system_prompt(),
         user_payload={
@@ -433,8 +435,8 @@ def _validate_asset_source_constraints(expansion: Mapping[str, Any]) -> None:
         invalid_routes = [route for route in allowed_routes if route not in ACQUISITION_ROUTES]
         if invalid_routes:
             raise ValueError(f"{path}.allowed_routes contains invalid routes: {', '.join(invalid_routes)}")
-        allowed_providers = _nonempty_unique_strings(
-            constraint.get("allowed_providers"),
+        allowed_providers = _unique_strings(
+            constraint.get("allowed_providers", []),
             f"{path}.allowed_providers",
         )
         fallback_order = _unique_strings(constraint.get("fallback_order"), f"{path}.fallback_order")
@@ -444,7 +446,7 @@ def _validate_asset_source_constraints(expansion: Mapping[str, Any]) -> None:
             for provider in fallback_order
             if _canonical_provider_id(provider) not in canonical_allowed_providers
         ]
-        if unknown_fallbacks:
+        if allowed_providers and unknown_fallbacks:
             raise ValueError(f"{path}.fallback_order contains providers outside allowed_providers: {', '.join(unknown_fallbacks)}")
         if constraint.get("requirement") not in {"preferred", "required"}:
             raise ValueError(f"{path}.requirement must be preferred or required")
@@ -546,7 +548,7 @@ def _asset_source_constraint_issues(
                 )
             provider_hint = str(acquisition.get("provider_hint") or "").strip()
             provider = _canonical_provider_id(provider_hint or _default_provider_for_route(route))
-            if not provider or provider not in allowed_providers:
+            if allowed_providers and (not provider or provider not in allowed_providers):
                 issues.append(
                     ValidationIssue(
                         path=f"{acquisition_path}/provider_hint",
@@ -763,9 +765,10 @@ FIELD-BY-FIELD INSTRUCTIONS
    box, sphere, or z-axis cylinder; plates/walls are thin boxes and rods/poles/columns/discs are cylinders.
 7. asset_source_constraints: an array of auditable hard source constraints extracted only from explicit
    user requirements. Each entry scopes exact object_analysis suggested_id values, lists every allowed
-   acquisition route and every allowed structured Provider ID, preserves Provider fallback order, records
+   acquisition route and, only when the user names Providers, every allowed structured Provider ID; preserves Provider fallback order, records
    requirement as preferred or required, and records allow_proxy. Different object groups may use different
-   constraints. Do not infer a required route, Provider permission, or no-proxy rule from a mere preference.
+   constraints. An omitted or empty allowed_providers means the user constrained the route but did not
+   constrain the Provider. Do not infer a required route, Provider permission, or no-proxy rule from a mere preference.
 8. expected_behavior_analysis: an object describing observable preconditions, event ordering, causal
    response, and postconditions without claiming that the run passed.
 9. observation_analysis: an object describing useful camera roles, modalities (RGB/depth/segmentation),
@@ -814,7 +817,7 @@ def _expansion_contract() -> dict[str, Any]:
         "asset_source_constraint_shape": {
             "scope": {"object_ids": ["exact object_analysis suggested_id values"]},
             "allowed_routes": ["one or more acquisition_route values"],
-            "allowed_providers": ["one or more structured Provider IDs"],
+            "allowed_providers": ["zero or more structured Provider IDs; empty means no Provider restriction"],
             "requirement": "preferred or required",
             "fallback_order": ["zero or more allowed Provider IDs in priority order"],
             "allow_proxy": "boolean",
@@ -836,7 +839,9 @@ FIELD-BY-FIELD INSTRUCTIONS
 1. identity: set case_id, a concise title, and source_request. The caller will enforce the original
    case_id and source text.
 2. capabilities: this must be an object. primary must be one registered executable capability;
-   required must be an array containing that same primary and no unrelated capability.
+   required must be an array containing that same primary and no unrelated capability. Use
+   sequential_contact_propagation for a simple directed chain of three or more dynamic bodies; use
+   rigid_body_contact_causality for a single pair or a branching contact graph.
 3. scene: describe environment_intent, z_up coordinates, positive duration_s, and optional positive
    bounds_hint_m. Do not put UE map packages or runtime paths here.
 4. timebase: use positive integer physics_hz and observation_fps with physics_hz exactly divisible by
@@ -869,10 +874,13 @@ FIELD-BY-FIELD INSTRUCTIONS
    (the -X end is high), while negative pitch makes local -X downhill; place the high-end support and
    released body on the corresponding high end. A cylinder's authored/analytic axis is local Z: leave
    rotation zero for a world-Z axis, use an absolute 90-degree roll for a world-Y axis, and an absolute
-   90-degree pitch for a world-X axis. Place initially resting objects with a small positive clearance (about
-   0.002-0.005 m) above the supporting surface. Use low restitution (normally <=0.1) unless a bounce is
-   requested, and set physics.use_ccd=true for small or fast-moving collision bodies. Do not put use_ccd
-   inside behavior.
+   90-degree pitch for a world-X axis. An object declared supported_by and initially at rest must begin in
+   resolved surface contact at frame zero, not above the support with a gravity-settling gap. When the user
+   explicitly requests an object's color, store normalized RGB in the object's top-level color_rgb and set
+   top-level fixed_material_color=true; do not leave the color only in role or descriptive text. Use low restitution (normally <=0.1) unless a bounce is
+   requested, and set physics.use_ccd=true for small or fast-moving collision bodies. Dynamic bodies use
+   gravity by default; set physics.enable_gravity=false only when the user explicitly requests a gravity-free
+   body. Do not put use_ccd inside behavior.
 8. object.asset: description and optional semantic_text are natural-language search/generation intent;
    resource_kind must use its enum. must contains hard filters that every candidate must satisfy;
    must_not contains hard exclusions; preferences contains soft ranking preferences and can never override
@@ -901,6 +909,10 @@ FIELD-BY-FIELD INSTRUCTIONS
 9. acquisition.reference_inputs: every entry is an object with input_id copied exactly from
    request.inputs, usage as an array of registered usage enums, and allow_similarity_search as a boolean.
    Do not copy local paths, hashes, image bytes, captions, or invented IDs into this object.
+   acquisition.texture_prompt is optional, applies only to model_generation texturing, and is limited to
+   600 characters. Fill it only from an explicit material, color, or style intent. When the user wants to
+   preserve the source photos' original texture/colors without a new style, omit texture_prompt. Never use
+   it as a geometry prompt or synthesize it from description, role, or shape.
 10. relations and events: use canonical reference-bearing objects. A binary relation is
     {"type": string, "source": exact_id, "target": exact_id}; a group relation may use
     {"type": string, "objects": [exact_ids]}; an object event is
@@ -924,7 +936,14 @@ FIELD-BY-FIELD INSTRUCTIONS
     tabletop chain with initially resting passive targets, keep those targets at their supported poses with
     zero initial velocity and delay the striker release by about 0.5-1.0 s so Chaos can establish resting
     contact first. Unless the user explicitly requests a high-speed impact, choose the lowest useful tabletop
-    striker speed (normally about 0.8-1.5 m/s) rather than an unnecessarily fast launch.
+    striker speed (normally about 0.8-1.5 m/s) rather than an unnecessarily fast launch. If the user explicitly
+    specifies an adjacent-pair surface clearance, write that nonnegative value as surface_gap_m on the matching
+    collision/impacts relation; never infer surface_gap_m from approximate positions. Unless spin, off-center
+    impact, or bounce is explicitly requested, choose compatible supported-body dimensions so the intended
+    horizontal contact line passes close to each body's center of mass. Do not raise box, cylinder, container,
+    or obstacle restitution merely to force propagation; use low friction, reachable spacing, and adequate
+    striker speed instead. When a release event's object is the source of one direct impacts relation, its
+    linear velocity must point from the source's initial position toward that impacts target.
 11. expected_behavior: describe causal and observable outcomes without claiming success.
 12. observation_requirements: cameras use registered camera roles and exact target object IDs; modalities
     use registered values; signals name evidence required by the capability and assertions. Do not emit
@@ -967,7 +986,13 @@ relation, event, camera, and assertion reference exactly matches an objects[].id
 registered type. asset_source_constraints in repair_constraints are hard and must be restored at the exact
 object asset acquisition paths named by validation_errors. For support_footprint_too_small, enlarge or reposition the named support so it contains
 the subject's full horizontal bounds; for ramp_has_no_incline_rotation, remember rotation_deg is
-[pitch,yaw,roll] and use pitch (or roll) rather than yaw as the incline. Do not redesign the scene, add a Provider, add UE paths, relax a required route, invent
+[pitch,yaw,roll] and use pitch (or roll) rather than yaw as the incline. For
+procedural_cylinder_local_axis_size_mismatch, store equal diameters in size_m x/y and the authored cylinder
+length in z, then use rotation_deg to orient local Z in world space. For procedural_sphere_size_mismatch,
+use equal x/y/z diameters. For invalid_surface_gap, use a finite nonnegative surface_gap_m only on its named
+collision/impacts relation. For release_velocity_points_away_from_impact_target, preserve the release speed and
+change only its direction so it points from the named source position toward the named impacts target. Do not
+redesign the scene, add a Provider, add UE paths, relax a required route, invent
 evidence, or perform free-form regeneration.
 
 Return exactly one valid JSON object. No Markdown, comments, trailing commas, single quotes, placeholders,
@@ -1017,7 +1042,9 @@ def _case_spec_contract() -> dict[str, Any]:
             },
             "object": {
                 "id": "stable identifier string",
-                "role": "semantic role string",
+                "role": "machine-readable physics role; for rigid_body_gravity_collision use falling_body for each dynamic falling object or stack_block for a stack member",
+                "color_rgb": "optional [red, green, blue], each component between 0 and 1",
+                "fixed_material_color": "optional boolean; true when an explicit color_rgb must be rendered",
                 "geometry": {
                     "shape_hint": "string",
                     "approx_size_m": ["positive x", "positive y", "positive z"],
@@ -1044,6 +1071,7 @@ def _case_spec_contract() -> dict[str, Any]:
                 "source_uri_hint": "string or null",
                 "reference_inputs": [],
                 "fallback_order": [],
+                "texture_prompt": "optional texture-only guidance string of at most 600 characters",
             },
             "asset_request": {
                 "description": "natural-language asset intent string",
@@ -1071,7 +1099,12 @@ def _case_spec_contract() -> dict[str, Any]:
                 "usage": ["one or more reference_usage enum values"],
                 "allow_similarity_search": "boolean; false for generation/style/geometry-only conditions",
             },
-            "binary_relation": {"type": "string", "source": "exact object.id", "target": "exact object.id"},
+            "binary_relation": {
+                "type": "string",
+                "source": "exact object.id",
+                "target": "exact object.id",
+                "surface_gap_m": "optional finite nonnegative number; only when explicitly requested",
+            },
             "group_relation": {"type": "string", "objects": ["exact object.id"]},
             "object_event": {"type": "string", "object": "exact object.id"},
             "verification_assertion": {
@@ -1116,6 +1149,7 @@ def _case_spec_contract() -> dict[str, Any]:
             "capabilities must be an object and capabilities.required must contain exactly capabilities.primary",
             "every object behavior must be an object and every physics.body_type must use the body_type enum",
             "every relation, event, camera, and assertion object reference must exactly equal one declared object.id; never use a phrase",
+            "an explicitly requested collision surface clearance belongs in relation.surface_gap_m and must survive projection",
             "every verification assertion requires a type from verification_assertion and an objects array of exact IDs",
             "must and must_not are hard filters; preferences is soft ranking and cannot weaken a hard filter",
             "thresholds and time_window are passed to the verifier unchanged; use only names defined by the selected capability contract",

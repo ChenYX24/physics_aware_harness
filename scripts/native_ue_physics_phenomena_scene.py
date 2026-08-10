@@ -3499,6 +3499,11 @@ def configure_runtime_physics(actor, obj: dict, role: str, controls: dict | None
     return detail
 
 
+def released_body_gravity_enabled(properties: dict, controls: dict | None = None) -> bool:
+    """Default released dynamic bodies to gravity unless explicitly disabled."""
+    return bool_control(properties.get("enable_gravity"), bool((controls or {}).get("gravity_enabled", True)))
+
+
 def is_skeletal_component(component) -> bool:
     if not component:
         return False
@@ -5310,6 +5315,21 @@ def set_actor_color(actor, color: unreal.LinearColor):
                     pass
 
 
+def apply_explicit_runtime_visual_appearance(obj: dict, actor, materials: dict) -> bool:
+    params = obj.get("params") if isinstance(obj.get("params"), dict) else {}
+    if not any(key in params for key in ("color", "color_rgb", "tint")):
+        return False
+    if obj.get("behavior") == "llm_static_body":
+        material = materials.get("runtime_lane") or materials.get("runtime_floor") or materials.get("runtime_prop")
+        fallback = unreal.LinearColor(0.32, 0.44, 0.48, 1.0)
+    else:
+        material = materials.get("runtime_air_sphere") or materials.get("runtime_prop")
+        fallback = unreal.LinearColor(0.58, 0.52, 0.43, 1.0)
+    set_actor_material(actor, material)
+    set_actor_color(actor, runtime_object_color(obj, fallback))
+    return True
+
+
 def spawn_runtime_stage_helpers(editor, runtime_scene: dict, scene_origin: unreal.Vector, materials: dict) -> list[dict]:
     cube = load_asset("/Engine/BasicShapes/Cube.Cube")
     floor_mat = materials.get("runtime_floor")
@@ -6139,6 +6159,7 @@ def setup_scene(runtime_scene: dict | None = None):
                     except Exception:
                         pass
                     component.set_simulate_physics(False)
+                explicit_visual_appearance = apply_explicit_runtime_visual_appearance(obj, visual, materials)
                 collision_component = actor_runtime_component(physics_actor)
                 if collision_component:
                     collision_component.set_visibility(False, True)
@@ -6150,6 +6171,7 @@ def setup_scene(runtime_scene: dict | None = None):
                         entry["collision_mesh"] = entry.get("mesh")
                         entry["visual_mesh"] = visual_path
                         entry["visual_collision_enabled"] = bool(visual.get_actor_enable_collision())
+                        entry["explicit_visual_appearance"] = explicit_visual_appearance
                         break
             except Exception as exc:
                 write_progress_marker("runtime_visual_fallback", f"{obj.get('id')}:{exc}")
@@ -7543,6 +7565,7 @@ def apply_delayed_release_projectiles(
     release_state = actors.setdefault("delayed_release_state", {})
     time_s = float(frame.get("time") or 0.0)
     ground_offsets = actors.get("runtime_ground_offsets") or {}
+    physics_controls = runtime_physics_controls(runtime_scene)
     for obj in projectiles:
         actor_id = obj.get("id")
         actor = actors.get(actor_id)
@@ -7782,7 +7805,7 @@ def apply_delayed_release_projectiles(
             status.setdefault("errors", []).append(f"delayed_release_collision:{actor_id}:{exc}")
         try:
             component.set_simulate_physics(True)
-            component.set_enable_gravity(bool(properties.get("enable_gravity", True)))
+            component.set_enable_gravity(released_body_gravity_enabled(properties, physics_controls))
             component.wake_all_rigid_bodies()
         except Exception as exc:
             status.setdefault("errors", []).append(f"delayed_release_enable:{actor_id}:{exc}")

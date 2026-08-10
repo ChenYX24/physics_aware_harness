@@ -154,12 +154,12 @@ class UEAssetImporterLauncherTests(unittest.TestCase):
             self.assertEqual(outcome, "result")
             self.assertLess(time.monotonic() - started, 5.0)
 
-    def test_prepare_remote_obj_fits_declared_bounds_and_centers_pivot(self) -> None:
+    def test_prepare_meshy_obj_converts_y_up_and_uniformly_fits_declared_size(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "remote.obj"
             source.write_text(
-                "v 10 20 30\nv 12 20 30\nv 10 24 30\nv 10 20 38\nf 1 2 3\n",
+                "v 10 20 30\nv 12 20 30\nv 10 28 30\nv 10 20 34\nvn 0 1 0\nf 1//1 2//1 3//1\n",
                 encoding="utf-8",
             )
             request = {
@@ -167,7 +167,8 @@ class UEAssetImporterLauncherTests(unittest.TestCase):
                 "request_digest": "b" * 64,
                 "asset_id": "generated.meshy.fixture",
                 "source_kind": "model_generation",
-                "expected_size_m": [0.2, 0.4, 0.8],
+                "provider_id": "meshy_model_generation_v1",
+                "expected_size_m": [0.3, 0.4, 0.8],
                 "source_files": [{"local_path": str(source), "materialized": True}],
             }
             request_path = root / "request.json"
@@ -181,8 +182,19 @@ class UEAssetImporterLauncherTests(unittest.TestCase):
             ]
             extents = [max(row[axis] for row in vertices) - min(row[axis] for row in vertices) for axis in range(3)]
             centers = [(max(row[axis] for row in vertices) + min(row[axis] for row in vertices)) / 2 for axis in range(3)]
-            self.assertEqual(extents, [20.0, 40.0, 80.0])
+            self.assertAlmostEqual(extents[1] / extents[0], 2.0)
+            self.assertAlmostEqual(extents[2] / extents[0], 4.0)
+            self.assertAlmostEqual(math.sqrt(sum(value * value for value in extents)), math.sqrt(30.0**2 + 40.0**2 + 80.0**2))
             self.assertEqual(centers, [0.0, 0.0, 0.0])
+            ue_request = json.loads(ue_request_path.read_text(encoding="utf-8"))
+            for actual, expected in zip(ue_request["expected_size_m"], [value / 100.0 for value in extents]):
+                self.assertAlmostEqual(actual, expected)
+            normal = next(
+                [float(value) for value in line.split()[1:]]
+                for line in normalized.read_text(encoding="utf-8").splitlines()
+                if line.startswith("vn ")
+            )
+            self.assertEqual(normal, [0.0, 0.0, 1.0])
             for path in temporary_paths:
                 path.unlink(missing_ok=True)
 

@@ -10,7 +10,7 @@ from typing import Any
 from harness.core.artifact_schema import read_json, runtime_summary, write_json
 from harness.core.case_spec import CaseSpec
 from harness.core.workspace import workspace_root
-from harness.runtime.fluid_container_geometry import compile_container_transfer
+from harness.runtime.rigid_sph_scene import compile_rigid_sph_scene
 from harness.verification.physics_verifier import PhysicsVerifier
 
 
@@ -93,9 +93,9 @@ def genesis_parameters(case_spec: dict[str, Any]) -> dict[str, Any]:
     expected = case_spec.get("expected_physics") if isinstance(case_spec.get("expected_physics"), dict) else {}
     physical = case_spec.get("physical_parameters") if isinstance(case_spec.get("physical_parameters"), dict) else {}
     objects = [item for item in case_spec.get("objects") or [] if isinstance(item, dict)]
-    roles = {str(item.get("role") or "") for item in objects}
-    if {"source_container", "receiver_container"}.issubset(roles):
-        return compile_container_transfer(case_spec)
+    solver_scene = case_spec.get("solver_scene") if isinstance(case_spec.get("solver_scene"), dict) else {}
+    if solver_scene.get("type") == "rigid_sph":
+        return compile_rigid_sph_scene(case_spec)
     liquid = next((item for item in objects if str(item.get("role") or "") in {"fluid", "fluid_volume"}), {})
     basin = next((item for item in objects if str(item.get("role") or "") in {"rigid_container", "basin"}), {})
     coordinate_system = str(expected.get("coordinate_system") or "z_up")
@@ -185,10 +185,10 @@ def genesis_command(executable: Path, run_dir: Path, options: Any, parameters: d
         "maximum_final_surface_area_to_volume_ratio_1_m": 0.0,
         "maximum_final_surface_volume_relative_error": 0.0,
     }
-    if settings.get("solver_mode") == "container_transfer":
+    if settings.get("execution_contract") == "rigid_sph_scene":
         return [
             str(executable),
-            str(ROOT / "scripts" / "harness_genesis_container_transfer.py"),
+            str(ROOT / "scripts" / "harness_genesis_rigid_sph.py"),
             "--case",
             str(run_dir / "case_spec.json"),
             "--output-dir",
@@ -405,8 +405,8 @@ def write_genesis_artifacts(case: CaseSpec, run_dir: Path) -> dict[str, Any]:
         "verifier": "harness_verifier.json",
         "backend_report": "genesis_sph_backend_report.json",
     }
-    if (run_dir / "container_transfer_compilation.json").is_file():
-        artifacts["container_transfer_compilation"] = "container_transfer_compilation.json"
+    if (run_dir / "rigid_sph_scene.json").is_file():
+        artifacts["rigid_sph_scene"] = "rigid_sph_scene.json"
     write_json(
         run_dir / "harness_artifact.json",
         {

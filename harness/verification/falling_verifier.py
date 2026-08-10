@@ -11,7 +11,11 @@ def verify_falling(case_spec: dict[str, Any], trajectory: list[dict[str, Any]]) 
     evidence: list[dict[str, Any]] = []
     if not trajectory:
         return "F1_missing_trajectory", failure("trajectory", 0, 0, "frame_count", 0), evidence
-    falling = [str(obj.get("id")) for obj in case_spec.get("objects", []) if str(obj.get("role") or "") in {"falling_body", "stack_block"}]
+    falling = [
+        str(obj.get("id"))
+        for obj in case_spec.get("objects", [])
+        if str(obj.get("verification_role") or obj.get("role") or "") in {"falling_body", "stack_block"}
+    ]
     if not falling:
         return "F7_runtime_artifact_incomplete", failure("case_spec", 0, 0, "falling_body_count", 0), evidence
     contacts = [contact for frame in trajectory for contact in frame.get("contacts") or [] if isinstance(contact, dict)]

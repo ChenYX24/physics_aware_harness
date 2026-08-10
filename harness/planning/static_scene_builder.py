@@ -127,7 +127,9 @@ def align_v2_explicit_supports(case_spec: dict[str, Any], nodes: list[dict[str, 
         return []
     by_id = {str(node.get("object_id")): node for node in nodes}
     adjustments: list[dict[str, Any]] = []
-    clearance_m = 0.003
+    # An explicit support relation describes a body already resting at frame
+    # zero.  Adding an air gap here creates an unintended gravity-drop event.
+    clearance_m = 0.0
     for object_id, support_id in support_map.items():
         node = by_id.get(str(object_id))
         support = by_id.get(str(support_id))
@@ -272,6 +274,56 @@ def separate_v2_dynamic_overlaps(
                 right_position = object_position(right)
                 left_extents = conservative_world_extents(left)
                 right_extents = conservative_world_extents(right)
+                sphere_radii = sphere_pair_radii(left, right)
+                if sphere_radii is not None:
+                    overlap_distance = sum(sphere_radii) - 1e-4
+                    if math.dist(left_position, right_position) >= overlap_distance:
+                        continue
+                    horizontal_delta = [
+                        right_position[axis] - left_position[axis]
+                        for axis in range(2)
+                    ]
+                    horizontal_distance = math.hypot(*horizontal_delta)
+                    required_center_distance = sum(sphere_radii) + clearance_m
+                    vertical_distance = abs(right_position[2] - left_position[2])
+                    if horizontal_distance <= 1e-6 or vertical_distance >= required_center_distance:
+                        continue
+                    required_horizontal_distance = math.sqrt(
+                        required_center_distance * required_center_distance
+                        - vertical_distance * vertical_distance
+                    )
+                    shift = required_horizontal_distance - horizontal_distance
+                    maximum_safe_shift = max(0.25, required_center_distance * 0.75)
+                    if shift <= 1e-6 or shift > maximum_safe_shift:
+                        continue
+                    original_position = list(right_position)
+                    delta_position = [
+                        shift * horizontal_delta[axis] / horizontal_distance
+                        for axis in range(2)
+                    ]
+                    for axis in range(2):
+                        right_position[axis] = round(right_position[axis] + delta_position[axis], 6)
+                    right.setdefault("transform", {})["position_m"] = right_position
+                    adjustments.append(
+                        {
+                            "object_id": right_id,
+                            "relative_to_object_id": left_id,
+                            "type": "dynamic_overlap_bounds_separation",
+                            "axis": "xy_radial",
+                            "delta_position_m": [
+                                round(delta_position[0], 6),
+                                round(delta_position[1], 6),
+                                0.0,
+                            ],
+                            "clearance_m": clearance_m,
+                            "original_position_m": [round(value, 6) for value in original_position],
+                            "position_m": list(right_position),
+                            "bounds_source": "resolved_effective_asset_bounds",
+                            "overlap_test": "sphere_center_distance",
+                        }
+                    )
+                    changed = True
+                    continue
                 axis_distances = [abs(left_position[axis] - right_position[axis]) for axis in range(3)]
                 overlap_thresholds = [
                     max(left_extents[axis] + right_extents[axis] - 1e-4, 0.001)
@@ -360,6 +412,18 @@ def align_v2_ordered_dynamic_chain(
         ordered_ids.append(next_id)
     if len(ordered_ids) != len(edges) + 1 or set(ordered_ids) != {value for edge in edges for value in edge}:
         return []
+    expected = case_spec.get("expected_physics") if isinstance(case_spec.get("expected_physics"), dict) else {}
+    explicit_gaps = {
+        (str(row.get("source") or ""), str(row.get("target") or "")): float(row["surface_gap_m"])
+        for row in expected.get("collision_surface_gaps_m") or []
+        if isinstance(row, dict)
+        and row.get("source")
+        and row.get("target")
+        and isinstance(row.get("surface_gap_m"), (int, float))
+        and not isinstance(row.get("surface_gap_m"), bool)
+        and math.isfinite(float(row["surface_gap_m"]))
+        and float(row["surface_gap_m"]) >= 0.0
+    }
     adjustments: list[dict[str, Any]] = []
     root_position = object_position(by_id[ordered_ids[0]])
     first_position = object_position(by_id[ordered_ids[1]])
@@ -378,14 +442,17 @@ def align_v2_ordered_dynamic_chain(
         target_position = object_position(target)
         source_extent = conservative_world_extents(source)[axis]
         target_extent = conservative_world_extents(target)[axis]
-        required_distance = source_extent + target_extent + clearance_m
+        explicit_gap = explicit_gaps.get((source_id, target_id))
+        target_gap = explicit_gap if explicit_gap is not None else clearance_m
+        required_distance = source_extent + target_extent + target_gap
         primary_delta = sign * (target_position[axis] - source_position[axis])
         transverse_delta = abs(target_position[transverse_axis] - source_position[transverse_axis])
         surface_gap = primary_delta - source_extent - target_extent
         reversed_edge = primary_delta <= 1e-6
         transverse_edge = primary_delta < transverse_delta
         excessive_gap = surface_gap > clearance_m + 1e-6
-        if not (reversed_edge or transverse_edge or excessive_gap):
+        explicit_gap_mismatch = explicit_gap is not None and abs(surface_gap - explicit_gap) > 1e-6
+        if not (reversed_edge or transverse_edge or (excessive_gap and explicit_gap is None) or explicit_gap_mismatch):
             continue
         original_position = list(target_position)
         target_position[axis] = round(source_position[axis] + sign * required_distance, 6)
@@ -396,7 +463,9 @@ def align_v2_ordered_dynamic_chain(
                 "object_id": target_id,
                 "relative_to_object_id": source_id,
                 "type": (
-                    "ordered_chain_bounds_tightening"
+                    "ordered_chain_explicit_gap_alignment"
+                    if explicit_gap is not None
+                    else "ordered_chain_bounds_tightening"
                     if excessive_gap and not reversed_edge and not transverse_edge
                     else "ordered_chain_direction_alignment"
                 ),
@@ -404,7 +473,8 @@ def align_v2_ordered_dynamic_chain(
                 "original_position_m": [round(value, 6) for value in original_position],
                 "position_m": list(target_position),
                 "surface_gap_before_m": round(surface_gap, 6),
-                "clearance_m": clearance_m,
+                "clearance_m": target_gap,
+                "explicit_surface_gap": explicit_gap is not None,
                 "bounds_source": "resolved_effective_asset_bounds",
             }
         )
@@ -699,13 +769,24 @@ def find_overlap_pairs(
                 for axis in range(3)
             ]
             axis_distances = [abs(left_pos[axis] - right_pos[axis]) for axis in range(3)]
-            if all(axis_distances[axis] < axis_thresholds[axis] for axis in range(3)):
+            sphere_radii = sphere_pair_radii(left, right)
+            overlaps = (
+                distance < sum(sphere_radii) - 1e-4
+                if sphere_radii is not None
+                else all(axis_distances[axis] < axis_thresholds[axis] for axis in range(3))
+            )
+            if overlaps:
                 pairs.append(
                     {
                         "object_ids": [left["object_id"], right["object_id"]],
                         "distance_m": round(distance, 6),
                         "axis_distances_m": [round(value, 6) for value in axis_distances],
                         "axis_thresholds_m": [round(value, 6) for value in axis_thresholds],
+                        "overlap_test": (
+                            "sphere_center_distance"
+                            if sphere_radii is not None
+                            else "axis_aligned_bounds"
+                        ),
                     }
                 )
     return pairs
@@ -730,6 +811,21 @@ def nodes_overlap_conservative(left: dict[str, Any], right: dict[str, Any]) -> b
         < left_extents[axis] + right_extents[axis] - 1e-4
         for axis in range(3)
     )
+
+
+def sphere_pair_radii(left: dict[str, Any], right: dict[str, Any]) -> tuple[float, float] | None:
+    radii: list[float] = []
+    for node in (left, right):
+        physics = node.get("physics") if isinstance(node.get("physics"), dict) else {}
+        shape = str(node.get("shape") or "").casefold()
+        collider = str(physics.get("collider") or "").casefold()
+        if "sphere" not in shape and collider != "sphere":
+            return None
+        radius = max(object_extents(node))
+        if radius <= 0.0:
+            return None
+        radii.append(radius)
+    return radii[0], radii[1]
 
 
 def conservative_world_extents(node: dict[str, Any]) -> list[float]:
