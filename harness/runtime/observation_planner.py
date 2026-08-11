@@ -20,14 +20,14 @@ def compile_observation_plan(
     scene_layout: Mapping[str, Any],
     verification_plan: Mapping[str, Any],
     *,
-    source_case_spec: CaseSpecV2 | None = None,
+    source_case_spec: CaseSpecV2,
     requested_views: list[str] | None = None,
     render_passes: list[str] | None = None,
     camera_strategy: str = "bounds_auto_v1",
 ) -> dict[str, Any]:
     requirements = (
         source_case_spec.data.get("observation_requirements")
-        if source_case_spec and isinstance(source_case_spec.data.get("observation_requirements"), dict)
+        if isinstance(source_case_spec.data.get("observation_requirements"), dict)
         else {}
     )
     camera_intents = [
@@ -47,8 +47,7 @@ def compile_observation_plan(
     else:
         camera_roles = []
         precedence = "camera_planner_default"
-    if source_case_spec is not None:
-        camera_roles = list(dict.fromkeys([*camera_roles, *verifier_roles]))
+    camera_roles = list(dict.fromkeys([*camera_roles, *verifier_roles]))
     camera_plan = camera_plan_from_case_spec(
         dict(runtime_case_spec),
         requested_views=camera_roles or None,
@@ -59,7 +58,7 @@ def compile_observation_plan(
     modalities = _normalize_modalities([*requested_modalities, *(evidence.get("modalities") or [])])
     case_signals = [str(value) for value in requirements.get("signals") or runtime_case_spec.get("required_signals") or []]
     signals = list(dict.fromkeys([*case_signals, *(str(value) for value in evidence.get("signals") or [])]))
-    timebase = source_case_spec.data.get("timebase") if source_case_spec else runtime_case_spec.get("timebase") or {}
+    timebase = source_case_spec.data.get("timebase") or {}
     physics_hz = int(timebase.get("physics_hz") or 120)
     observation_fps = int(timebase.get("observation_fps") or 24)
     sampling = copy.deepcopy(requirements.get("sampling") or {})
@@ -73,7 +72,7 @@ def compile_observation_plan(
     return {
         "schema_version": "harness_observation_plan_v1",
         "case_id": runtime_case_spec.get("case_id"),
-        "source_case_schema_version": source_case_spec.data.get("schema_version") if source_case_spec else "harness_case_spec_v1",
+        "source_case_schema_version": source_case_spec.data.get("schema_version"),
         "camera_intents": camera_intents,
         "camera_precedence": precedence,
         "cameras": copy.deepcopy(camera_plan_data["views"]),

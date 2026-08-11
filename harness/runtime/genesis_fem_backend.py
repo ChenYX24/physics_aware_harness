@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 
 from harness.core.artifact_schema import read_json, write_json
-from harness.core.case_spec import CaseSpec
+from harness.core.runtime_case import RuntimeCase
 from harness.core.physics_contract import infer_scene_domain
 from harness.runtime.genesis_sph_backend import genesis_python
 
@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 class GenesisFEMBackend:
     name = "genesis_fem"
 
-    def run_case(self, case: CaseSpec, output_root: str | Path, **_: object) -> Path:
+    def run_case(self, case: RuntimeCase, output_root: str | Path, **_: object) -> Path:
         if infer_scene_domain(case.data) != "deformable":
             raise ValueError("genesis_fem requires a deformable-domain scene contract")
         run_dir = Path(output_root) / f"{case.case_id}_{self.name}"

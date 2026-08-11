@@ -30,16 +30,16 @@ ASSERTION_EVIDENCE = {
 def compile_verification_plan(
     runtime_case_spec: Mapping[str, Any],
     *,
-    source_case_spec: CaseSpecV2 | None = None,
+    source_case_spec: CaseSpecV2,
 ) -> dict[str, Any]:
     domain = infer_scene_domain(runtime_case_spec)
     execution_capability = execution_capability_id(runtime_case_spec)
     requirements = (
         source_case_spec.data.get("verification_requirements")
-        if source_case_spec and isinstance(source_case_spec.data.get("verification_requirements"), dict)
+        if isinstance(source_case_spec.data.get("verification_requirements"), dict)
         else {}
     )
-    source_assertions = requirements.get("assertions") if source_case_spec else runtime_case_spec.get("verification_assertions")
+    source_assertions = requirements.get("assertions")
     assertions = [copy.deepcopy(item) for item in source_assertions or [] if isinstance(item, dict)]
     if domain == "rigid_body" and not assertions:
         assertions = [{"id": "trajectory_integrity", "type": "trajectory_integrity"}]

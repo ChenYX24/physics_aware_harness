@@ -166,6 +166,7 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertIn("Never classify the\n   request as a named physical process", case_prompt)
         self.assertIn("Never invent a\n   placeholder mesh asset for solver-generated output", case_prompt)
         self.assertIn("set physics.enable_gravity=false only when the user explicitly requests", case_prompt)
+        self.assertIn("must not add the unsupported rigid_body solver capability", case_prompt)
         self.assertIn("write that nonnegative value as surface_gap_m", case_prompt)
         self.assertIn("passes close to each body's center of mass", case_prompt)
         self.assertIn("Do not raise box, cylinder, container", case_prompt)
@@ -176,6 +177,20 @@ class CaseGenerationV2Tests(unittest.TestCase):
         ]
         container = rigid_sph_example["objects"][0]
         liquid = rigid_sph_example["objects"][2]
+        self.assertEqual(rigid_sph_example["solver_scene"]["initialization"]["state"], "settled")
+        self.assertEqual(
+            rigid_sph_example["backend_constraints"],
+            {
+                "required_solver_capabilities": [
+                    "particle_dynamics",
+                    "particle_cache",
+                    "surface_mesh_cache",
+                ],
+                "allowed_solvers": ["genesis_sph"],
+                "render_backend": "ue",
+                "allow_multi_backend": True,
+            },
+        )
         self.assertEqual(container["role"], "rigid_body")
         self.assertEqual(container["visual_representation"], {"source": "asset"})
         self.assertEqual(liquid["visual_representation"], {"source": "solver_generated"})
@@ -346,8 +361,28 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertEqual(result.repair_count, 1)
         self.assertEqual(len(client.calls), 3)
         self.assertEqual(client.calls[-1]["purpose"], "case_spec_validation_repair")
+        self.assertIn("never\nadd a solver, renderer, or fallback", client.calls[-1]["system_prompt"])
         errors = client.calls[-1]["payload"]["validation_errors"]["issues"]
         self.assertIn("/timebase", {item["path"] for item in errors})
+
+    def test_requested_backend_is_explicit_in_bounded_repair_constraints(self) -> None:
+        invalid = case_spec_v2_fixture()
+        invalid["timebase"]["observation_fps"] = 25
+        repaired = deepcopy(invalid)
+        repaired["timebase"]["observation_fps"] = 24
+        request = build_case_request(
+            case_id="repaired_for_ue",
+            text="Drop a rigid body in UE.",
+            requested_backend="ue",
+        )
+        client = FakeJSONClient([expansion_fixture(), invalid, repaired])
+
+        generate_case_spec_v2(request, client=client)
+
+        self.assertEqual(
+            client.calls[-1]["payload"]["repair_constraints"]["requested_backend"],
+            "ue",
+        )
 
     def test_explicit_requested_backend_is_authoritative_for_generated_case(self) -> None:
         generated = case_spec_v2_fixture()

@@ -34,6 +34,20 @@ class RigidSPHSceneTests(unittest.TestCase):
         self.assertNotIn("solver_mode", transfer)
         self.assertNotIn("solver_mode", coffee)
 
+    def test_declared_settled_initialization_is_compiled(self) -> None:
+        case = copy.deepcopy(load_case_spec(COFFEE_CASE).data)
+        case["solver_scene"]["initialization"] = {
+            "state": "settled",
+            "pre_roll_s": 0.25,
+            "capture_after_pre_roll": True,
+        }
+
+        compiled = compile_rigid_sph_scene(case)
+
+        self.assertEqual(compiled["initialization"]["state"], "settled")
+        self.assertEqual(compiled["initialization"]["pre_roll_s"], 0.25)
+        self.assertTrue(compiled["initialization"]["capture_after_pre_roll"])
+
     def test_runtime_layers_do_not_dispatch_on_scenario_names(self) -> None:
         paths = [
             ROOT / "harness/runtime/genesis_sph_backend.py",

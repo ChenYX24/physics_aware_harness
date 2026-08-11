@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from harness.core.case_spec import load_case_spec
+from harness.core.runtime_case import load_runtime_case
 from harness.core.workspace import workspace_path
 from harness.runtime.rigid_sph_scene import (
     compile_rigid_sph_scene,
@@ -46,7 +46,12 @@ def simulate_rigid_sph_scene(case_spec: dict[str, Any]) -> dict[str, Any]:
     duration_s = float(options.get("duration_s") or 2.0)
     particle_size = float(options.get("particle_size_m") or 0.006)
     steps_per_frame = int(options.get("steps_per_frame") or 145)
-    pre_roll_s = float(options.get("pre_roll_s") or 0.0)
+    initialization = compiled.get("initialization") if isinstance(compiled.get("initialization"), dict) else {}
+    pre_roll_s = (
+        float(initialization.get("pre_roll_s") or 0.0)
+        if initialization.get("declared") is True
+        else float(options.get("pre_roll_s") or 0.0)
+    )
     solver_dt = 1.0 / (fps * steps_per_frame)
     gravity = physical.get("gravity_m_s2") or [0.0, 0.0, -9.81]
     reconstruction_options = options.get("surface_reconstruction") if isinstance(options.get("surface_reconstruction"), dict) else {}
@@ -460,7 +465,7 @@ def main() -> int:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--skip-publish", action="store_true")
     args = parser.parse_args()
-    case = load_case_spec(args.case)
+    case = load_runtime_case(args.case)
     output_dir = workspace_path(args.output_dir, default_relative="runs/fluid/rigid_sph")
     compiled = compile_rigid_sph_scene(case.data)
     (output_dir / "rigid_sph_scene.json").parent.mkdir(parents=True, exist_ok=True)

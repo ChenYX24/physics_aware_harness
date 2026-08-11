@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from harness.core.case_spec import CaseSpec
-from harness.planning.runtime_compiler import RuntimeCompilation, compile_runtime_case
+from harness.core.runtime_case import RuntimeCase
+from harness.planning.runtime_compiler import RuntimeCompilation
 from harness.runtime.artifact_collector import write_runtime_artifacts
 from harness.runtime.observation_planner import camera_ids_from_observation_plan, render_passes_from_observation_plan
 
@@ -14,7 +14,7 @@ class FallbackBackend:
 
     def run_case(
         self,
-        case: CaseSpec,
+        case: RuntimeCase,
         output_root: str | Path,
         *,
         requested_views: list[str] | None = None,
@@ -23,13 +23,8 @@ class FallbackBackend:
         compilation: RuntimeCompilation | None = None,
     ) -> Path:
         run_dir = Path(output_root) / f"{case.case_id}_fallback"
-        compilation = compilation or compile_runtime_case(
-            case,
-            requested_backend="fallback",
-            requested_views=requested_views,
-            render_passes=render_passes,
-            camera_strategy=camera_strategy,
-        )
+        if compilation is None:
+            raise ValueError("FallbackBackend requires the V2 RuntimeCompilation produced by Runtime Compiler")
         compilation.write(run_dir)
         observation_plan = compilation.artifacts["observation_plan"]
         return write_runtime_artifacts(

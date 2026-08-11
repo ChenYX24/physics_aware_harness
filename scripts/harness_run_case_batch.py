@@ -104,6 +104,7 @@ def run_one_case(
         height=height,
         camera_strategy=camera_strategy,
         profile=profile.name if profile else "custom",
+        source_case_filename="case_spec.json",
     )
     write_run_control_page(
         run_dir,

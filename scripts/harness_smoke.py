@@ -55,6 +55,7 @@ def main() -> int:
             width=1920,
             height=1080,
             camera_strategy="bounds_auto_v1",
+            source_case_filename="case_spec.json",
         )
         write_run_control_page(
             run_dir,

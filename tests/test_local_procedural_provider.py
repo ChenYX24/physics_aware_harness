@@ -18,8 +18,7 @@ from harness.assets.providers.contracts import BACKEND_IMPORT_REQUEST_SCHEMA, Ba
 from harness.assets.providers.local_procedural_mesh import generate_box_obj, generate_procedural_obj
 from harness.assets.providers.orchestrator import AssetProviderOrchestrator
 from harness.assets.sqlite_catalog import initialize_catalog
-from harness.core.case_spec import load_case_spec
-from harness.core.case_spec_v2 import CaseSpecV2ValidationError, case_spec_v2_from_dict, project_case_spec_v2_to_v1
+from harness.core.case_spec_v2 import CaseSpecV2ValidationError, case_spec_v2_from_dict, compile_case_spec_v2_runtime
 from harness.planning.runtime_compiler import compile_runtime_case
 from harness.runtime.ue_backend import UEBackend, UEBackendUnavailable
 from tests.case_spec_v2_fixture import case_spec_v2_fixture
@@ -600,7 +599,7 @@ class LocalProceduralProviderTests(unittest.TestCase):
             ),
         ).compiled_asset_intents
         result = resolve_asset_intents(
-            project_case_spec_v2_to_v1(case).data,
+            compile_case_spec_v2_runtime(case).data,
             registry=self.registry,
             compiled_intents=list(compiled),
             provider_results={
@@ -711,20 +710,6 @@ class LocalProceduralProviderTests(unittest.TestCase):
                 self.assertEqual(result["status"], "blocked")
                 self.assertEqual(result["failure"]["code"], "unsupported_provider_hint")
                 self.assertEqual(compilation.report["asset_resolve_invocation_count"], 1)
-
-    def test_v1_does_not_invoke_provider_or_add_provider_artifacts(self) -> None:
-        case = load_case_spec(ROOT / "cases" / "billiards" / "low_speed_single_contact.json")
-        orchestrator = self.orchestrator()
-        with patch.object(orchestrator, "fulfill", wraps=orchestrator.fulfill) as fulfill:
-            compilation = compile_runtime_case(
-                case,
-                requested_backend="fallback",
-                registry=AssetRegistry(ROOT / "assets" / "asset_registry.example.json"),
-                provider_orchestrator=orchestrator,
-            )
-        self.assertEqual(fulfill.call_count, 0)
-        self.assertNotIn("asset_provider_batch", compilation.artifacts)
-        self.assertEqual(compilation.report["asset_resolve_invocation_count"], 1)
 
     def test_registration_marks_vector_index_stale_without_rebuild(self) -> None:
         with closing(sqlite3.connect(self.catalog_path)) as connection:

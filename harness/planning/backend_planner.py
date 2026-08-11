@@ -29,7 +29,7 @@ class BackendPlanningError(ValueError):
 def plan_backend(
     runtime_case_spec: Mapping[str, Any],
     *,
-    source_case_spec: CaseSpecV2 | None = None,
+    source_case_spec: CaseSpecV2,
     requested_backend: str | None = None,
 ) -> dict[str, Any]:
     source_capability_id = canonical_capability_id(str(runtime_case_spec.get("capability_id") or ""))
@@ -37,7 +37,7 @@ def plan_backend(
     scene_domain = infer_scene_domain(runtime_case_spec)
     constraints = (
         source_case_spec.data.get("backend_constraints")
-        if source_case_spec and isinstance(source_case_spec.data.get("backend_constraints"), dict)
+        if isinstance(source_case_spec.data.get("backend_constraints"), dict)
         else {}
     )
     requested = normalize_backend(requested_backend) if requested_backend else None
@@ -109,7 +109,7 @@ def plan_backend(
         "required_case_capabilities": [
             canonical_capability_id(str(value))
             for value in ((source_case_spec.data.get("capabilities") or {}).get("required") or [])
-        ] if source_case_spec else [capability_id],
+        ],
         "selected_backend": selected,
         "solver_backend": selected,
         "render_backend": render_backend,

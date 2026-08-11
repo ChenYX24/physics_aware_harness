@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 from harness.core.artifact_schema import read_json, write_json
-from harness.core.case_spec import CaseSpec
+from harness.core.runtime_case import RuntimeCase
 from harness.core.physics_contract import infer_scene_domain
 from harness.core.workspace import workspace_root
 
@@ -18,7 +18,7 @@ class TaichiClothBackend:
 
     def run_case(
         self,
-        case: CaseSpec,
+        case: RuntimeCase,
         output_root: str | Path,
         **_: object,
     ) -> Path:

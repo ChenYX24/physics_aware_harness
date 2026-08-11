@@ -7,7 +7,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from harness.core.case_spec import CaseSpec
+from harness.core.case_spec_v2 import CaseSpecV2
+from harness.core.runtime_case import RuntimeCase
 from harness.core.artifact_schema import read_json, write_json
 from harness.core.artifact_manager import ArtifactManager
 from harness.assets.asset_resolver import requested_map_reference
@@ -33,7 +34,7 @@ class UEBackend:
 
     def run_case(
         self,
-        case: CaseSpec,
+        case: RuntimeCase,
         output_root: str | Path,
         *,
         requested_views: list[str] | None = None,
@@ -46,13 +47,8 @@ class UEBackend:
         run_dir = Path(output_root) / run_id
         output_dir = run_dir / "ue_output"
         output_dir.mkdir(parents=True, exist_ok=True)
-        compilation = compilation or compile_runtime_case(
-            case,
-            requested_backend="ue",
-            requested_views=requested_views,
-            render_passes=render_passes,
-            camera_strategy=camera_strategy,
-        )
+        if compilation is None:
+            raise ValueError("UEBackend requires the V2 RuntimeCompilation produced by Runtime Compiler")
         compilation.write(run_dir)
         observation_plan = compilation.artifacts["observation_plan"]
         planned_views = camera_ids_from_observation_plan(observation_plan)
@@ -151,7 +147,7 @@ class UEBackend:
 def write_failed_ue_artifacts(
     run_dir: Path,
     output_dir: Path,
-    case: CaseSpec,
+    case: RuntimeCase,
     run_id: str,
     report: dict[str, Any],
     camera_plan: Any,
@@ -402,7 +398,7 @@ def empty_preflight(case_id: str) -> dict[str, Any]:
 
 
 def prepare_runtime_actor_contract(
-    case: CaseSpec,
+    case: CaseSpecV2,
     run_dir: Path,
     *,
     requested_views: list[str],
@@ -565,7 +561,7 @@ def initialized_workspace_project() -> str:
 
 
 def build_backend_report(
-    case: CaseSpec,
+    case: RuntimeCase,
     run_id: str,
     preflight: dict[str, Any],
     *,
@@ -610,7 +606,7 @@ def build_backend_report(
 
 
 def invoke_real_ue_runner(
-    case: CaseSpec,
+    case: RuntimeCase,
     run_dir: Path,
     output_dir: Path,
     scene_spec: dict[str, Any],
@@ -809,7 +805,7 @@ def evaluate_ue_physics_readiness(run_dir: str | Path) -> tuple[bool, dict[str, 
     return provenance_ready and not failures, provenance
 
 
-def standardize_runner_outputs(run_dir: Path, output_dir: Path, case: CaseSpec, run_id: str, report: dict[str, Any], *, camera_plan: Any, render_passes: list[str], requested_view_count: int) -> None:
+def standardize_runner_outputs(run_dir: Path, output_dir: Path, case: RuntimeCase, run_id: str, report: dict[str, Any], *, camera_plan: Any, render_passes: list[str], requested_view_count: int) -> None:
     for name in ("trajectory.json", "contact_events.json", "fracture_events.json", "camera_trajectory.json", "render_manifest.json"):
         source = run_dir / name
         if not source.exists():

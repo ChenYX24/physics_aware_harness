@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -10,8 +11,8 @@ from harness.assets.asset_registry import AssetRegistry
 from harness.assets.asset_resolver import resolve_asset_intents
 from harness.assets.providers.orchestrator import AssetProviderOrchestrator
 from harness.core.artifact_schema import write_json
-from harness.core.case_spec import CaseSpec
-from harness.core.case_spec_v2 import CaseSpecV2, project_case_spec_v2_to_v1
+from harness.core.case_spec_v2 import CaseSpecV2, compile_case_spec_v2_runtime
+from harness.core.runtime_case import RuntimeCase
 from harness.planning.backend_planner import plan_backend
 from harness.planning.static_scene_builder import build_static_scene_layout
 from harness.planning.verification_compiler import compile_verification_plan
@@ -44,20 +45,10 @@ COMPILATION_STAGE_ORDER = [
     "observation_planner",
     "runtime_binding_and_stage_compiler",
 ]
-V1_COMPILATION_STAGE_ORDER = [
-    "backend_planner",
-    "asset_intent_compiler_and_resolver",
-    "scene_layout_compiler",
-    "verification_compiler",
-    "observation_planner",
-    "runtime_binding_and_stage_compiler",
-]
-
-
 @dataclass(frozen=True)
 class RuntimeCompilation:
     source_case_spec: dict[str, Any]
-    runtime_case: CaseSpec
+    runtime_case: RuntimeCase
     backend_selection: dict[str, Any]
     compiled_asset_intents: tuple[CompiledAssetIntent, ...]
     artifacts: dict[str, dict[str, Any]]
@@ -80,9 +71,8 @@ class RuntimeCompilation:
         destination = Path(run_dir)
         destination.mkdir(parents=True, exist_ok=True)
         write_json(destination / "case_spec.json", self.runtime_case.data)
-        write_json(destination / "runtime_case_spec_v1.json", self.runtime_case.data)
-        if self.source_case_spec.get("schema_version") == "harness_case_spec_v2":
-            write_json(destination / "case_spec_v2.json", self.source_case_spec)
+        write_json(destination / "runtime_case.json", self.runtime_case.data)
+        write_json(destination / "case_spec_v2.json", self.source_case_spec)
         for key, filename in ARTIFACT_FILENAMES.items():
             if key in self.artifacts:
                 write_json(destination / filename, self.artifacts[key])
@@ -93,7 +83,7 @@ class RuntimeCompilation:
 
 
 def compile_runtime_case(
-    case_spec: CaseSpec | CaseSpecV2,
+    case_spec: CaseSpecV2,
     *,
     requested_backend: str | None = None,
     requested_views: list[str] | None = None,
@@ -103,47 +93,40 @@ def compile_runtime_case(
     provider_orchestrator: AssetProviderOrchestrator | None = None,
     provider_input_manifest: Mapping[str, Any] | None = None,
 ) -> RuntimeCompilation:
-    source_v2 = case_spec if isinstance(case_spec, CaseSpecV2) else None
-    runtime_case = project_case_spec_v2_to_v1(source_v2) if source_v2 else case_spec
-    source_data = copy.deepcopy(source_v2.data if source_v2 else runtime_case.data)
+    if not isinstance(case_spec, CaseSpecV2):
+        raise TypeError("Runtime Compiler accepts only a validated CaseSpec V2")
+    runtime_case = compile_case_spec_v2_runtime(case_spec)
+    source_data = copy.deepcopy(case_spec.data)
     registry = registry or AssetRegistry()
 
     backend_selection = plan_backend(
         runtime_case.data,
-        source_case_spec=source_v2,
+        source_case_spec=case_spec,
         requested_backend=requested_backend,
     )
     target_asset_backend = str(backend_selection.get("target_asset_backend") or backend_selection["render_backend"])
     compiled_intents = tuple(
         compile_v2_asset_intents(
-            source_v2,
+            case_spec,
             runtime_case.data,
             target_backend=target_asset_backend,
         )
-        if source_v2
-        else []
     )
-    provider_orchestration = (
-        (provider_orchestrator or AssetProviderOrchestrator()).fulfill(
-            case_id=runtime_case.case_id,
-            source_case_spec=source_v2.data,
-            compiled_intents=compiled_intents,
-            target_backend=target_asset_backend,
-            registry=registry,
-            input_manifest=provider_input_manifest,
-        )
-        if source_v2
-        else None
+    provider_orchestration = (provider_orchestrator or AssetProviderOrchestrator()).fulfill(
+        case_id=runtime_case.case_id,
+        source_case_spec=case_spec.data,
+        compiled_intents=compiled_intents,
+        target_backend=target_asset_backend,
+        registry=registry,
+        input_manifest=provider_input_manifest,
     )
     asset_resolution = resolve_asset_intents(
         runtime_case.data,
         registry=registry,
-        compiled_intents=list(compiled_intents) if source_v2 else None,
-        provider_results=provider_orchestration.results if provider_orchestration else None,
+        compiled_intents=list(compiled_intents),
+        provider_results=provider_orchestration.results,
         target_backend=target_asset_backend,
-        allow_local_preview=(source_v2.data.get("asset_policy") or {}).get("required_license_tier") == "local_preview"
-        if source_v2
-        else None,
+        allow_local_preview=(case_spec.data.get("asset_policy") or {}).get("required_license_tier") == "local_preview",
     )
     solver_contract_error = bind_resolved_solver_assets(runtime_case.data, asset_resolution)
     scene_layout = build_static_scene_layout(
@@ -153,12 +136,12 @@ def compile_runtime_case(
         camera_strategy=camera_strategy,
         camera_plan={},
     )
-    verification_plan = compile_verification_plan(runtime_case.data, source_case_spec=source_v2)
+    verification_plan = compile_verification_plan(runtime_case.data, source_case_spec=case_spec)
     observation_plan = compile_observation_plan(
         runtime_case.data,
         scene_layout,
         verification_plan,
-        source_case_spec=source_v2,
+        source_case_spec=case_spec,
         requested_views=requested_views,
         render_passes=render_passes,
         camera_strategy=camera_strategy,
@@ -178,11 +161,11 @@ def compile_runtime_case(
         backend_selection,
         verification_plan,
         observation_plan,
-        provider_enabled=source_v2 is not None,
+        provider_enabled=True,
         provider_input_manifest_enabled=provider_input_manifest is not None,
     )
     errors = _compilation_errors(
-        source_v2,
+        case_spec,
         asset_resolution,
         static_scene_report,
         actor_report,
@@ -201,18 +184,17 @@ def compile_runtime_case(
         "runtime_actor_placement_report": actor_report,
         "runtime_plan": runtime_plan,
     }
-    if provider_orchestration is not None:
-        artifacts["asset_provider_batch"] = provider_orchestration.batch
+    artifacts["asset_provider_batch"] = provider_orchestration.batch
     if provider_input_manifest is not None:
         artifacts["provider_input_manifest"] = copy.deepcopy(dict(provider_input_manifest))
     report = {
         "schema_version": "harness_runtime_compilation_report_v1",
         "case_id": runtime_case.case_id,
         "source_schema_version": source_data.get("schema_version"),
-        "runtime_projection_schema_version": runtime_case.data.get("schema_version"),
+        "runtime_contract_schema_version": runtime_case.data.get("schema_version"),
         "status": "fail" if errors else "pass",
-        "stage_order": list(COMPILATION_STAGE_ORDER if source_v2 else V1_COMPILATION_STAGE_ORDER),
-        "completed_stages": list(COMPILATION_STAGE_ORDER if source_v2 else V1_COMPILATION_STAGE_ORDER),
+        "stage_order": list(COMPILATION_STAGE_ORDER),
+        "completed_stages": list(COMPILATION_STAGE_ORDER),
         "asset_resolve_invocation_count": 1,
         "backend_selection": copy.deepcopy(backend_selection),
         "artifact_schemas": {
@@ -229,7 +211,7 @@ def compile_runtime_case(
         compiled_asset_intents=compiled_intents,
         artifacts=artifacts,
         report=report,
-        provider_receipts=provider_orchestration.receipts if provider_orchestration else (),
+        provider_receipts=provider_orchestration.receipts,
     )
 
 
@@ -318,6 +300,8 @@ def bind_resolved_solver_assets(
             "catalog_source": str(selected.get("source_kind") or selected.get("source_uri") or "catalog"),
             "bbox_m": copy.deepcopy(bbox_m),
         }
+    register_model_generated_solver_frames(case_spec, selected_by_object)
+    align_model_generated_supported_bodies(case_spec, selected_by_object)
     try:
         from harness.runtime.rigid_sph_scene import compile_rigid_sph_scene
 
@@ -331,8 +315,135 @@ def bind_resolved_solver_assets(
     return None
 
 
+def register_model_generated_solver_frames(
+    case_spec: dict[str, Any],
+    selected_by_object: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """Register estimated solver-local geometry to resolved visual bounds."""
+    objects = [obj for obj in case_spec.get("objects") or [] if isinstance(obj, dict)]
+    by_id = {str(obj.get("id") or ""): obj for obj in objects}
+    for object_id, obj in by_id.items():
+        if obj.get("role") != "rigid_body":
+            continue
+        selected = selected_by_object.get(object_id)
+        if not isinstance(selected, Mapping) or str(selected.get("source_kind") or "") != "model_generation":
+            continue
+        solver = obj.get("solver") if isinstance(obj.get("solver"), dict) else {}
+        collision = solver.get("collision") if isinstance(solver.get("collision"), dict) else {}
+        if collision.get("type") != "axisymmetric_profile" or isinstance(collision.get("geometry_registration"), dict):
+            continue
+        profile = collision.get("inner_profile")
+        bbox_m = selected.get("bbox_size_m") or selected.get("effective_size_m") or selected.get("authored_size_m")
+        if not isinstance(profile, list) or len(profile) < 2 or not _positive_vec3_values(bbox_m):
+            continue
+        points = [point for point in profile if isinstance(point, dict)]
+        if len(points) != len(profile):
+            continue
+        z_values = [float(point.get("z_m")) for point in points]
+        radii = [float(point.get("radius_m")) for point in points]
+        thickness = float(collision.get("wall_thickness_m") or 0.0)
+        if not all(math.isfinite(value) for value in [*z_values, *radii, thickness]) or min(radii) <= 0.0 or thickness <= 0.0:
+            continue
+        center_z = (min(z_values) + max(z_values)) / 2.0
+        visual_minor_radius = min(float(bbox_m[0]), float(bbox_m[1])) / 2.0
+        radial_scale = min(1.0, max(0.0, visual_minor_radius - thickness) / max(radii))
+        if radial_scale <= 0.0:
+            continue
+        for point in points:
+            point["z_m"] = float(point["z_m"]) - center_z
+            point["radius_m"] = float(point["radius_m"]) * radial_scale
+        motion = solver.get("motion") if isinstance(solver.get("motion"), dict) else None
+        if motion is not None and _finite_vec3_values(motion.get("pivot_local_m")):
+            pivot = [float(value) for value in motion["pivot_local_m"]]
+            motion["pivot_local_m"] = [pivot[0] * radial_scale, pivot[1] * radial_scale, pivot[2] - center_z]
+        for candidate in objects:
+            candidate_solver = candidate.get("solver") if isinstance(candidate.get("solver"), dict) else {}
+            initial = candidate_solver.get("initial_volume") if isinstance(candidate_solver.get("initial_volume"), dict) else {}
+            frame = initial.get("frame") if isinstance(initial.get("frame"), dict) else {}
+            if frame.get("type") != "body_local" or str(frame.get("body_id") or "") != object_id:
+                continue
+            if _finite_vec3_values(initial.get("position_m")):
+                position = [float(value) for value in initial["position_m"]]
+                initial["position_m"] = [position[0] * radial_scale, position[1] * radial_scale, position[2] - center_z]
+            if isinstance(initial.get("radius_m"), (int, float)) and not isinstance(initial.get("radius_m"), bool):
+                initial["radius_m"] = float(initial["radius_m"]) * radial_scale
+        registration = {
+            "status": "verified",
+            "method": "resolved_visual_bounds_axisymmetric_registration_v1",
+            "asset_sha256": str(selected.get("sha256") or ""),
+            "visual_bounds_size_m": [float(value) for value in bbox_m],
+            "solver_local_translation_m": [0.0, 0.0, -center_z],
+            "solver_local_radial_scale": radial_scale,
+        }
+        collision["geometry_registration"] = registration
+        collision["fit_method"] = registration["method"]
+        asset = obj.get("asset") if isinstance(obj.get("asset"), dict) else {}
+        asset["geometry_registration"] = copy.deepcopy(registration)
+
+
+def align_model_generated_supported_bodies(
+    case_spec: dict[str, Any],
+    selected_by_object: Mapping[str, Mapping[str, Any]],
+) -> None:
+    expected = case_spec.get("expected_physics") if isinstance(case_spec.get("expected_physics"), dict) else {}
+    support_map = expected.get("support") if isinstance(expected.get("support"), dict) else {}
+    objects = [obj for obj in case_spec.get("objects") or [] if isinstance(obj, dict)]
+    by_id = {str(obj.get("id") or ""): obj for obj in objects}
+    for object_id, support_id in support_map.items():
+        obj = by_id.get(str(object_id))
+        support = by_id.get(str(support_id))
+        selected = selected_by_object.get(str(object_id))
+        if obj is None or support is None or not isinstance(selected, Mapping):
+            continue
+        if str(selected.get("source_kind") or "") != "model_generation":
+            continue
+        bbox_m = selected.get("bbox_size_m") or selected.get("effective_size_m") or selected.get("authored_size_m")
+        if not _positive_vec3_values(bbox_m):
+            continue
+        support_solver = support.get("solver") if isinstance(support.get("solver"), dict) else {}
+        support_collision = support_solver.get("collision") if isinstance(support_solver.get("collision"), dict) else {}
+        if support_collision.get("type") != "plane" or not _finite_vec3_values(support_collision.get("normal")):
+            continue
+        normal = [float(value) for value in support_collision["normal"]]
+        if abs(normal[0]) > 1e-6 or abs(normal[1]) > 1e-6 or normal[2] <= 0.0:
+            continue
+        support_top_z = float((support_collision.get("position_m") or [0.0, 0.0, 0.0])[2])
+        solver = obj.get("solver") if isinstance(obj.get("solver"), dict) else {}
+        transform = solver.get("transform") if isinstance(solver.get("transform"), dict) else {}
+        if not _finite_vec3_values(transform.get("position_m")):
+            continue
+        position = [float(value) for value in transform["position_m"]]
+        original_z = position[2]
+        position[2] = support_top_z + float(bbox_m[2]) / 2.0
+        transform["position_m"] = position
+        if _finite_vec3_values(obj.get("initial_position_m")):
+            initial_position = [float(value) for value in obj["initial_position_m"]]
+            initial_position[2] = position[2]
+            obj["initial_position_m"] = initial_position
+        registration = {
+            "status": "verified",
+            "method": "resolved_visual_bounds_supported_by_plane_v1",
+            "support_id": str(support_id),
+            "original_center_z_m": original_z,
+            "registered_center_z_m": position[2],
+        }
+        asset = obj.get("asset") if isinstance(obj.get("asset"), dict) else {}
+        asset["support_registration"] = registration
+
+
+def _finite_vec3_values(value: Any) -> bool:
+    return isinstance(value, list) and len(value) == 3 and all(
+        isinstance(item, (int, float)) and not isinstance(item, bool) and math.isfinite(float(item))
+        for item in value
+    )
+
+
+def _positive_vec3_values(value: Any) -> bool:
+    return _finite_vec3_values(value) and all(float(item) > 0.0 for item in value)
+
+
 def _compilation_errors(
-    source_v2: CaseSpecV2 | None,
+    source_v2: CaseSpecV2,
     asset_resolution: Mapping[str, Any],
     static_scene_report: Mapping[str, Any],
     actor_report: Mapping[str, Any],
@@ -343,46 +454,45 @@ def _compilation_errors(
     errors: list[dict[str, Any]] = []
     if solver_contract_error is not None:
         errors.append(dict(solver_contract_error))
-    if source_v2:
-        policy = source_v2.data.get("asset_policy") if isinstance(source_v2.data.get("asset_policy"), dict) else {}
-        for row in asset_resolution.get("assets") or []:
-            if not isinstance(row, Mapping):
-                continue
-            acquisition = row.get("acquisition") if isinstance(row.get("acquisition"), Mapping) else {}
-            requested = acquisition.get("requested") if isinstance(acquisition.get("requested"), Mapping) else {}
-            requirement = str(requested.get("requirement") or "preferred")
-            route = str(requested.get("route") or "default")
-            required_resolved = acquisition.get("status") in {
-                "resolved_provider" if route in {"external_site", "procedural_generation", "model_generation"} else "resolved_local_catalog"
-            }
-            if requirement == "required" and not required_resolved:
-                provider_result = acquisition.get("provider_result") if isinstance(acquisition.get("provider_result"), Mapping) else {}
-                provider_failure = provider_result.get("failure") if isinstance(provider_result.get("failure"), Mapping) else {}
-                if provider_failure.get("code"):
-                    failure_code = str(provider_failure["code"])
-                elif provider_result.get("status") == "fulfilled":
-                    failure_code = "provider_asset_unresolved"
-                elif route in {"external_site", "procedural_generation", "model_generation"}:
-                    failure_code = "provider_required"
-                else:
-                    failure_code = "required_asset_route_unresolved"
-                errors.append(
-                    {
-                        "stage": "asset_resolution",
-                        "code": failure_code,
-                        "object_id": (row.get("intent") or {}).get("object_id"),
-                        "message": str(row.get("fallback_reason") or "required acquisition route did not resolve"),
-                    }
-                )
-            if not row.get("selected_asset") and not policy.get("allow_analytic_proxy", True):
-                errors.append(
-                    {
-                        "stage": "asset_resolution",
-                        "code": "analytic_proxy_disallowed",
-                        "object_id": (row.get("intent") or {}).get("object_id"),
-                        "message": "no selected asset and CaseSpec V2 disallows analytic proxy fallback",
-                    }
-                )
+    policy = source_v2.data.get("asset_policy") if isinstance(source_v2.data.get("asset_policy"), dict) else {}
+    for row in asset_resolution.get("assets") or []:
+        if not isinstance(row, Mapping):
+            continue
+        acquisition = row.get("acquisition") if isinstance(row.get("acquisition"), Mapping) else {}
+        requested = acquisition.get("requested") if isinstance(acquisition.get("requested"), Mapping) else {}
+        requirement = str(requested.get("requirement") or "preferred")
+        route = str(requested.get("route") or "default")
+        required_resolved = acquisition.get("status") in {
+            "resolved_provider" if route in {"external_site", "procedural_generation", "model_generation"} else "resolved_local_catalog"
+        }
+        if requirement == "required" and not required_resolved:
+            provider_result = acquisition.get("provider_result") if isinstance(acquisition.get("provider_result"), Mapping) else {}
+            provider_failure = provider_result.get("failure") if isinstance(provider_result.get("failure"), Mapping) else {}
+            if provider_failure.get("code"):
+                failure_code = str(provider_failure["code"])
+            elif provider_result.get("status") == "fulfilled":
+                failure_code = "provider_asset_unresolved"
+            elif route in {"external_site", "procedural_generation", "model_generation"}:
+                failure_code = "provider_required"
+            else:
+                failure_code = "required_asset_route_unresolved"
+            errors.append(
+                {
+                    "stage": "asset_resolution",
+                    "code": failure_code,
+                    "object_id": (row.get("intent") or {}).get("object_id"),
+                    "message": str(row.get("fallback_reason") or "required acquisition route did not resolve"),
+                }
+            )
+        if not row.get("selected_asset") and not policy.get("allow_analytic_proxy", True):
+            errors.append(
+                {
+                    "stage": "asset_resolution",
+                    "code": "analytic_proxy_disallowed",
+                    "object_id": (row.get("intent") or {}).get("object_id"),
+                    "message": "no selected asset and CaseSpec V2 disallows analytic proxy fallback",
+                }
+            )
     scene_map = asset_resolution.get("scene_map") if isinstance(asset_resolution.get("scene_map"), Mapping) else None
     if scene_map is not None and not scene_map.get("selected_asset"):
         errors.append(

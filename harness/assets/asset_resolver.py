@@ -8,9 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from harness.assets.asset_intent_compiler import CompiledAssetIntent, local_catalog_allowed, provider_route_required
-from harness.assets.asset_intent import intent_from_object
 from harness.assets.asset_registry import AssetRegistry, candidate_matches_search_intent
-from harness.assets.search_intent import SearchIntent, analytic_search_intent_from_asset_intent, search_intent_from_asset_intent
+from harness.assets.search_intent import SearchIntent
 from harness.assets.sqlite_catalog import effective_license_tier, reference_license_authorized
 
 
@@ -19,7 +18,7 @@ def resolve_asset_intents(
     *,
     top_k: int = 5,
     registry: AssetRegistry | None = None,
-    compiled_intents: list[CompiledAssetIntent] | None = None,
+    compiled_intents: list[CompiledAssetIntent],
     provider_results: dict[tuple[str, str], dict[str, Any]] | None = None,
     target_backend: str = "unreal",
     allow_local_preview: bool | None = None,
@@ -28,27 +27,22 @@ def resolve_asset_intents(
     if allow_local_preview is None:
         allow_local_preview = os.environ.get("SIM_HARNESS_ALLOW_LOCAL_PREVIEW_ASSETS", "").casefold() in {"1", "true", "yes"}
     objects = [obj for obj in case_spec.get("objects", []) if isinstance(obj, dict)]
-    compiled_by_id = {item.object_id: item for item in compiled_intents or []}
-    intents = [
-        compiled_by_id[str(obj.get("id") or "")].legacy_intent
-        if str(obj.get("id") or "") in compiled_by_id
-        else intent_from_object(obj)
-        for obj in objects
+    objects_by_id = {str(obj.get("id") or ""): obj for obj in objects if obj.get("id")}
+    missing_object_ids = [item.object_id for item in compiled_intents if item.object_id not in objects_by_id]
+    if missing_object_ids:
+        raise ValueError(f"compiled asset intents reference missing runtime objects: {missing_object_ids}")
+    work_items = [
+        (objects_by_id[item.object_id], item.legacy_intent, item)
+        for item in compiled_intents
     ]
+    intents = [intent for _, intent, _ in work_items]
     rows = []
-    for obj, intent in zip(objects, intents):
-        compiled = compiled_by_id.get(str(obj.get("id") or ""))
-        acquisition = compiled.acquisition if compiled else None
+    for obj, intent, compiled in work_items:
+        acquisition = compiled.acquisition
         provider_pending = bool(acquisition and provider_route_required(acquisition))
-        provider_result = provider_results.get((compiled.object_id, compiled.slot)) if compiled and provider_results else None
+        provider_result = provider_results.get((compiled.object_id, compiled.slot)) if provider_results else None
         explicit_proxy = bool(obj.get("force_analytic_proxy") or obj.get("asset_policy") == "analytic_proxy")
-        search_intent = (
-            compiled.search_intent
-            if compiled
-            else analytic_search_intent_from_asset_intent(intent, obj, backend=target_backend)
-            if explicit_proxy
-            else search_intent_from_asset_intent(intent, backend=target_backend)
-        )
+        search_intent = compiled.search_intent
         provider_fulfilled = bool(provider_result and provider_result.get("status") == "fulfilled")
         provider_failed = bool(provider_result and provider_result.get("status") in {"blocked", "failed"})
         explicit_local_fallback = bool(
@@ -59,9 +53,9 @@ def resolve_asset_intents(
             or acquisition is None
             or (not provider_pending and local_catalog_allowed(
                 acquisition,
-                allow_local=compiled.allow_local if compiled else True,
+                allow_local=compiled.allow_local,
             ))
-            or (provider_failed and explicit_local_fallback and bool(compiled and compiled.allow_local))
+            or (provider_failed and explicit_local_fallback and compiled.allow_local)
         )
         if provider_fulfilled:
             ranked = [
@@ -159,7 +153,7 @@ def resolve_asset_intents(
             row["intent"] = {
                 **row["intent"],
                 "compiled_search_intent": search_intent.to_dict(),
-                "slot": compiled.slot if compiled else "primary",
+                "slot": compiled.slot,
             }
         rows.append(row)
     scene_map = resolve_scene_map(
@@ -195,17 +189,16 @@ def resolve_asset_intents(
         },
         "assets": rows,
     }
-    if compiled_intents is not None:
-        result["asset_intent_compiler"] = {
-            "schema_version": "harness_compiled_asset_intents_v1",
-            "target_backend": target_backend,
-            "intent_count": len(compiled_intents),
-            "provider_required_count": sum(
-                1
-                for row in rows
-                if (row.get("acquisition") or {}).get("status") == "provider_required"
-            ),
-        }
+    result["asset_intent_compiler"] = {
+        "schema_version": "harness_compiled_asset_intents_v1",
+        "target_backend": target_backend,
+        "intent_count": len(compiled_intents),
+        "provider_required_count": sum(
+            1
+            for row in rows
+            if (row.get("acquisition") or {}).get("status") == "provider_required"
+        ),
+    }
     if scene_map:
         result["scene_map"] = scene_map
     return result

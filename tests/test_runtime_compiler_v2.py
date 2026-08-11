@@ -15,7 +15,7 @@ from harness.assets.asset_intent_compiler import compile_v2_asset_intents
 from harness.assets.asset_resolver import resolve_asset_intents
 from harness.assets.sqlite_catalog import initialize_catalog
 from harness.core.artifact_schema import read_json
-from harness.core.case_spec_v2 import CaseSpecV2, case_spec_v2_from_dict, project_case_spec_v2_to_v1
+from harness.core.case_spec_v2 import CaseSpecV2, case_spec_v2_from_dict, compile_case_spec_v2_runtime
 from harness.planning.backend_planner import BackendPlanningError, plan_backend
 from harness.planning.runtime_compiler import bind_resolved_solver_assets, compile_runtime_case
 from harness.runtime.fallback_backend import FallbackBackend
@@ -28,6 +28,126 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RuntimeCompilerV2Tests(unittest.TestCase):
+    def test_model_generated_solver_frame_registers_to_resolved_visual_bounds(self) -> None:
+        case = {
+            "solver_scene": {
+                "type": "rigid_sph",
+                "measurements": [{"id": "span", "type": "axis_span", "axes": ["x"]}],
+                "assertions": [
+                    {"id": "span", "measurement_id": "span", "reduction": "final", "operator": ">=", "value": 0.01}
+                ],
+            },
+            "expected_physics": {"support": {"mug": "table"}},
+            "workspace_bounds_m": {"min_m": [-1.0, -1.0, -0.1], "max_m": [1.0, 1.0, 1.0]},
+            "objects": [
+                {
+                    "id": "mug",
+                    "role": "rigid_body",
+                    "initial_position_m": [0.0, 0.0, 0.0],
+                    "solver": {
+                        "mobility": "kinematic",
+                        "transform": {
+                            "position_m": [0.0, 0.0, 0.0],
+                            "euler_xyz_deg": [0.0, 0.0, 0.0],
+                            "ue_rotation_pyr_deg": [0.0, 0.0, 0.0],
+                        },
+                        "collision": {
+                            "type": "axisymmetric_profile",
+                            "asset_geometry_match": True,
+                            "fit_method": "estimated_from_request_dimensions",
+                            "inner_profile": [{"z_m": 0.0, "radius_m": 0.045}, {"z_m": 0.09, "radius_m": 0.05}],
+                            "wall_thickness_m": 0.005,
+                            "panel_count": 16,
+                        },
+                        "motion": {
+                            "type": "pivot_rotation",
+                            "start_time_s": 0.3,
+                            "duration_s": 1.5,
+                            "pivot_local_m": [-0.05, 0.0, 0.09],
+                            "solver_end_rotation_xyz_deg": [0.0, 110.0, 0.0],
+                            "ue_end_rotation_pyr_deg": [-110.0, 0.0, 0.0],
+                        },
+                    },
+                },
+                {
+                    "id": "table",
+                    "role": "rigid_body",
+                    "solver": {
+                        "mobility": "static",
+                        "transform": {
+                            "position_m": [0.0, 0.0, -0.025],
+                            "euler_xyz_deg": [0.0, 0.0, 0.0],
+                            "ue_rotation_pyr_deg": [0.0, 0.0, 0.0],
+                        },
+                        "collision": {
+                            "type": "plane",
+                            "position_m": [0.0, 0.0, 0.0],
+                            "normal": [0.0, 0.0, 1.0],
+                            "asset_geometry_match": True,
+                        },
+                    },
+                },
+                {
+                    "id": "water",
+                    "role": "fluid",
+                    "solver": {
+                        "material_model": "sph_liquid",
+                        "initial_volume": {
+                            "shape": "cylinder",
+                            "frame": {"type": "body_local", "body_id": "mug"},
+                            "position_m": [0.0, 0.0, 0.04],
+                            "euler_xyz_deg": [0.0, 0.0, 0.0],
+                            "radius_m": 0.04,
+                            "height_m": 0.06,
+                        },
+                    },
+                },
+            ],
+        }
+        resolution = {
+            "assets": [
+                {
+                    "intent": {"object_id": "mug"},
+                    "selected_asset": {
+                        "ue_path": "/Game/Generated/Mug.Mug",
+                        "sha256": "a" * 64,
+                        "bbox_size_m": [0.13157, 0.098743, 0.106715],
+                        "source_kind": "model_generation",
+                        "proxy": False,
+                    },
+                },
+                {
+                    "intent": {"object_id": "table"},
+                    "selected_asset": {
+                        "ue_path": "/Game/Generated/Table.Table",
+                        "sha256": "b" * 64,
+                        "bbox_size_m": [0.8, 0.8, 0.05],
+                        "source_kind": "procedural_generation",
+                        "proxy": False,
+                    },
+                },
+            ]
+        }
+
+        error = bind_resolved_solver_assets(case, resolution)
+
+        self.assertIsNone(error)
+        mug = case["objects"][0]
+        water = case["objects"][2]
+        profile = mug["solver"]["collision"]["inner_profile"]
+        radial_scale = (0.098743 / 2.0 - 0.005) / 0.05
+        self.assertEqual([point["z_m"] for point in profile], [-0.045, 0.045])
+        self.assertAlmostEqual(profile[-1]["radius_m"], 0.05 * radial_scale)
+        self.assertAlmostEqual(mug["solver"]["motion"]["pivot_local_m"][0], -0.05 * radial_scale)
+        self.assertAlmostEqual(mug["solver"]["motion"]["pivot_local_m"][2], 0.045)
+        self.assertAlmostEqual(water["solver"]["initial_volume"]["radius_m"], 0.04 * radial_scale)
+        self.assertAlmostEqual(water["solver"]["initial_volume"]["position_m"][2], -0.005)
+        self.assertAlmostEqual(mug["solver"]["transform"]["position_m"][2], 0.106715 / 2.0)
+        self.assertEqual(mug["initial_position_m"], mug["solver"]["transform"]["position_m"])
+        registration = mug["solver"]["collision"]["geometry_registration"]
+        self.assertEqual(registration["status"], "verified")
+        self.assertEqual(registration["asset_sha256"], "a" * 64)
+
     def test_asset_intents_only_include_asset_visual_representations(self) -> None:
         data = case_spec_v2_fixture()
         data["objects"][0]["visual_representation"] = {"source": "solver_generated"}
@@ -40,19 +160,46 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
             "acquisition": {"route": "default", "requirement": "preferred", "origin": "system_default"},
         }
         source = case_spec_v2_from_dict(data)
-        runtime = project_case_spec_v2_to_v1(source)
+        runtime = compile_case_spec_v2_runtime(source)
 
         intents = compile_v2_asset_intents(source, runtime.data, target_backend="unreal")
 
         self.assertEqual([intent.object_id for intent in intents], ["floor"])
+        resolution = resolve_asset_intents(
+            runtime.data,
+            registry=self.registry(),
+            compiled_intents=intents,
+            provider_results={},
+            target_backend="unreal",
+            allow_local_preview=True,
+        )
+        self.assertEqual(
+            [row["intent"]["object_id"] for row in resolution["assets"]],
+            ["floor"],
+        )
 
     def test_rigid_sph_solver_targets_ue_replay_asset_bindings(self) -> None:
+        source = CaseSpecV2(
+            {
+                "backend_constraints": {
+                    "allowed_solvers": ["genesis_sph"],
+                    "required_solver_capabilities": ["particle_dynamics", "surface_mesh_cache"],
+                    "render_backend": "ue",
+                    "allow_multi_backend": True,
+                },
+                "capabilities": {
+                    "primary": "fluid_particle_dynamics",
+                    "required": ["fluid_particle_dynamics"],
+                },
+            }
+        )
         plan = plan_backend(
             {
                 "capability_id": "fluid_particle_dynamics",
                 "solver_scene": {"type": "rigid_sph"},
                 "objects": [{"id": "water", "role": "fluid"}],
             },
+            source_case_spec=source,
             requested_backend="genesis_sph",
         )
 
@@ -233,7 +380,7 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
             compilation.write(temporary)
             for name in (
                 "case_spec_v2.json",
-                "runtime_case_spec_v1.json",
+                "runtime_case.json",
                 "asset_resolution.json",
                 "scene_layout.json",
                 "verification_plan.json",
@@ -288,7 +435,7 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
             {"type": "release", "object": "cue_ball", "time": 0.35},
             {"type": "release", "object": "target_ball", "time_s": 0.0},
         ]
-        projected = project_case_spec_v2_to_v1(case_spec_v2_from_dict(data)).data
+        projected = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data)).data
         by_id = {obj["id"]: obj for obj in projected["objects"]}
         self.assertEqual(by_id["cue_ball"]["release_time_s"], 0.35)
         self.assertEqual(by_id["cue_ball"]["hold_position_m"], by_id["cue_ball"]["initial_position_m"])
@@ -309,7 +456,7 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
         case = case_spec_v2_from_dict(data)
 
         standalone = plan_backend(
-            project_case_spec_v2_to_v1(case).data,
+            compile_case_spec_v2_runtime(case).data,
             source_case_spec=case,
             requested_backend="genesis_fem",
         )
@@ -320,7 +467,7 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
         data["backend_constraints"]["render_backend"] = "ue"
         staged_case = case_spec_v2_from_dict(data)
         staged = plan_backend(
-            project_case_spec_v2_to_v1(staged_case).data,
+            compile_case_spec_v2_runtime(staged_case).data,
             source_case_spec=staged_case,
             requested_backend="genesis_fem",
         )

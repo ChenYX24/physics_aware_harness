@@ -12,8 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from harness.core.case_spec import load_case_spec_document
-from harness.core.case_spec_v2 import CaseSpecV2
+from harness.core.case_spec_v2 import load_case_spec_v2
 from harness.core.artifact_schema import write_json
 from harness.core.artifact_manager import ArtifactManager
 from harness.core.case_library import build_run_control_execution, write_run_control_page
@@ -45,9 +44,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--case-spec-version",
-        choices=["v1", "v2"],
+        choices=["v2"],
         default="v2",
-        help="Prompt compilation version. File inputs dispatch from schema_version; prompt input remains V1 by default.",
+        help="Prompt compilation version; the active harness accepts CaseSpec V2 only.",
     )
     parser.add_argument(
         "--allow-image-upload",
@@ -79,7 +78,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--views",
         default=None,
-        help="Comma-separated camera ids. V2 defaults to CaseSpec observation intent; V1 keeps front_static when omitted.",
+        help="Comma-separated camera ids; defaults to the CaseSpec V2 observation intent.",
     )
     parser.add_argument("--render-passes", default=None)
     parser.add_argument("--width", type=int, help="Custom UE capture width; requires --height.")
@@ -128,31 +127,26 @@ def main() -> int:
     generation = None
     provider_input_manifest = None
     if has_generation_input:
-        if args.case_spec_version == "v1":
-            raise SystemExit(
-                "natural-language V1 template classification has been removed; use --case-spec-version v2 or provide a saved V1 CaseSpec"
+        request = build_case_request(
+            case_id=args.case_id,
+            text=args.prompt,
+            image_paths=args.image,
+            allow_image_upload=args.allow_image_upload,
+            requested_backend=requested_backend,
+        )
+        try:
+            provider_input_manifest = build_provider_input_manifest(
+                request.get("inputs") or [],
+                workspace=workspace_root(),
+                meshy_upload_authorized=args.allow_meshy_upload,
             )
-        else:
-            request = build_case_request(
-                case_id=args.case_id,
-                text=args.prompt,
-                image_paths=args.image,
-                allow_image_upload=args.allow_image_upload,
-                requested_backend=requested_backend,
-            )
-            try:
-                provider_input_manifest = build_provider_input_manifest(
-                    request.get("inputs") or [],
-                    workspace=workspace_root(),
-                    meshy_upload_authorized=args.allow_meshy_upload,
-                )
-            except ProviderInputError as exc:
-                raise SystemExit(f"{exc.code}: {exc.message}") from exc
-            planning_dir = Path(output_root) / "_planning" / args.case_id
-            generation = generate_case_spec_v2(request, artifact_dir=planning_dir)
-            source_case = generation.case_spec
+        except ProviderInputError as exc:
+            raise SystemExit(f"{exc.code}: {exc.message}") from exc
+        planning_dir = Path(output_root) / "_planning" / args.case_id
+        generation = generate_case_spec_v2(request, artifact_dir=planning_dir)
+        source_case = generation.case_spec
     else:
-        source_case = load_case_spec_document(case_path)
+        source_case = load_case_spec_v2(case_path)
         if args.provider_input_manifest:
             manifest_path = Path(args.provider_input_manifest)
             try:
@@ -162,20 +156,15 @@ def main() -> int:
             if not isinstance(loaded_manifest, dict):
                 raise SystemExit("Provider input manifest root must be an object")
             provider_input_manifest = loaded_manifest
-    is_v2 = isinstance(source_case, CaseSpecV2)
     if profile:
         requested_views = list(profile.views)
         render_passes = list(profile.render_passes)
     else:
-        requested_views = parse_csv(args.views) if args.views else None if is_v2 else ["front_static"]
-        render_passes = parse_csv(args.render_passes) if args.render_passes else None if is_v2 else ["rgb"]
+        requested_views = parse_csv(args.views) if args.views else None
+        render_passes = parse_csv(args.render_passes) if args.render_passes else None
     render_mode = profile.render_mode if profile else args.mode
-    if not is_v2 and requested_backend is None:
-        requested_backend = "fallback"
     provider_orchestrator = None
     if args.resume_meshy_request:
-        if not isinstance(source_case, CaseSpecV2):
-            raise SystemExit("--resume-meshy-request requires a CaseSpec V2 file")
         resume_path = Path(args.resume_meshy_request)
         try:
             resume_payload = json.loads(resume_path.read_text(encoding="utf-8"))
@@ -236,6 +225,7 @@ def main() -> int:
         profile=profile.name if profile else "custom",
         case_route=args.case_route,
         lighting_preset=os.environ.get("SIM_STUDIO_UE_LIGHTING_PRESET"),
+        source_case_filename="case_spec_v2.json",
     )
     write_run_control_page(
         run_dir,

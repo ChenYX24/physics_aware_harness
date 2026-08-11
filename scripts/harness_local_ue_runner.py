@@ -488,15 +488,13 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
         ):
             if case_object.get(key) is not None:
                 params[key] = case_object[key]
-        v2_projection = case_spec.get("v2_projection") if isinstance(case_spec.get("v2_projection"), dict) else {}
         expected_physics = case_spec.get("expected_physics") if isinstance(case_spec.get("expected_physics"), dict) else {}
         support_map = expected_physics.get("support") if isinstance(expected_physics.get("support"), dict) else {}
         if (
-            v2_projection.get("source_schema_version") == "harness_case_spec_v2"
-            and object_id in support_map
+            object_id in support_map
             and float(params.get("release_time_s") or 0.0) > 0.0
         ):
-            # Actor Placement may snap a V2 staged body to resolved support
+            # Actor Placement may snap a staged body to resolved support
             # geometry after provider acquisition.  Holding/releasing must use
             # that compiled transform, not the pre-resolution semantic guess.
             compiled_position = list(transform.get("position_m") or [0.0, 0.0, 0.0])

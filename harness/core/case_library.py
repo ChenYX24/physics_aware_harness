@@ -13,7 +13,7 @@ from typing import Any, Iterable
 
 from harness.core.artifact_manager import ArtifactManager, file_sha256, is_mp4, safe_filename
 from harness.core.artifact_schema import read_json, write_json
-from harness.core.case_spec import validate_case_spec
+from harness.core.runtime_case import validate_runtime_case
 from harness.core.workspace import WorkspaceError, workspace_root
 
 
@@ -35,6 +35,13 @@ class CaseLibraryError(ValueError):
     pass
 
 
+def _validate_variant_case(case_spec: dict[str, Any]) -> None:
+    """Keep the historical variant editor isolated from the V2 runtime path."""
+    from harness.core.case_spec import validate_case_spec
+
+    validate_case_spec(case_spec)
+
+
 def create_variant_plan(
     base_case: str | Path,
     *,
@@ -47,7 +54,7 @@ def create_variant_plan(
     base = read_json(base_path)
     if not isinstance(base, dict):
         raise CaseLibraryError(f"base case must be a JSON object: {base_path}")
-    validate_case_spec(base)
+    _validate_variant_case(base)
     normalized_axes = _normalize_axes(axes)
     baseline = {axis["id"]: axis["baseline"] for axis in normalized_axes}
     selected = [{"id": "baseline", "levels": baseline}]
@@ -111,7 +118,7 @@ def materialize_variant(
         "levels": variant["levels"],
         "computed_pointers": list(computed_edits),
     }
-    validate_case_spec(payload)
+    _validate_variant_case(payload)
     write_json(Path(output_path), payload)
     return payload
 
@@ -128,7 +135,7 @@ def write_case_editor(
     plan_path = Path(plan_path).expanduser().resolve(strict=True)
     plan = _load_variant_plan(plan_path)
     base_case = read_json(_plan_base_case(plan, plan_path))
-    validate_case_spec(base_case)
+    _validate_variant_case(base_case)
     output = (
         Path(output_path).expanduser().resolve(strict=False)
         if output_path
@@ -153,7 +160,7 @@ def write_run_control_page(
     status: str,
 ) -> Path:
     """Write the machine-readable and standalone per-run reproduction contract."""
-    validate_case_spec(case_spec)
+    validate_runtime_case(case_spec)
     if status not in {"prepared", "completed", "failed"}:
         raise CaseLibraryError(f"invalid run control status: {status}")
     if not reproduce_command.strip():
@@ -204,6 +211,7 @@ def build_run_control_execution(
     profile: str = "custom",
     case_route: str | None = None,
     lighting_preset: str | None = None,
+    source_case_filename: str,
 ) -> tuple[dict[str, Any], str]:
     run_dir = Path(run_dir).expanduser().resolve(strict=False)
     reproduction_root = run_dir / "reproductions"
@@ -226,7 +234,7 @@ def build_run_control_execution(
     command = [
         sys.executable,
         execution["runner"],
-        str(run_dir / "case_spec.json"),
+        str(run_dir / source_case_filename),
         "--backend",
         backend,
         "--output-root",

@@ -6,41 +6,41 @@ from pathlib import Path
 
 from harness.planning.backend_planner import plan_backend
 from harness.planning.verification_compiler import compile_verification_plan
+from harness.core.case_spec_v2 import case_spec_v2_from_dict, compile_case_spec_v2_runtime
 from harness.runtime.fallback_backend import trajectory_for_case
 from harness.verification.physics_verifier import PhysicsVerifier
 from scripts.harness_local_ue_runner import native_case_type
+from tests.case_spec_v2_fixture import case_spec_v2_fixture
+
+
+def rigid_case(label: str):
+    data = case_spec_v2_fixture()
+    data["identity"]["title"] = label
+    data["identity"]["source_request"] = label
+    return case_spec_v2_from_dict(data)
 
 
 def rigid_scene(label: str) -> dict:
-    return {
-        "schema_version": "harness_case_spec_v1",
-        "case_id": "same_scene",
-        "capability_id": label,
-        "scene": {"duration_s": 1.0},
-        "objects": [
-            {
-                "id": "body",
-                "body_type": "dynamic",
-                "initial_position_m": [0.0, 0.0, 1.0],
-                "initial_velocity_m_s": [0.0, 0.0, 0.0],
-            },
-            {"id": "support", "body_type": "static", "role": "support"},
-        ],
-        "verification_assertions": [{"type": "trajectory_integrity"}],
-    }
+    return compile_case_spec_v2_runtime(rigid_case(label)).data
 
 
 class NoProcessDispatchTests(unittest.TestCase):
-    def test_legacy_process_label_does_not_change_backend_plan(self) -> None:
-        plans = [plan_backend(rigid_scene(label), requested_backend="fallback") for label in ("falling", "domino", "projectile")]
+    def test_narrative_label_does_not_change_backend_plan(self) -> None:
+        plans = [
+            plan_backend(rigid_scene(label), source_case_spec=rigid_case(label), requested_backend="fallback")
+            for label in ("falling", "domino", "projectile")
+        ]
         self.assertEqual({item["scene_domain"] for item in plans}, {"rigid_body"})
         self.assertEqual({item["selected_backend"] for item in plans}, {"fallback"})
         self.assertEqual({item["capability_id"] for item in plans}, {"rigid_body_dynamics"})
 
-    def test_legacy_process_label_does_not_select_a_verifier(self) -> None:
-        plans = [compile_verification_plan(rigid_scene(label)) for label in ("falling", "domino", "projectile")]
+    def test_narrative_label_does_not_select_a_verifier(self) -> None:
+        plans = [
+            compile_verification_plan(rigid_scene(label), source_case_spec=rigid_case(label))
+            for label in ("falling", "domino", "projectile")
+        ]
         self.assertEqual({item["verifiers"][0]["id"] for item in plans}, {"trajectory_assertion_verifier"})
-        self.assertEqual({tuple(str(value) for value in item["assertions"]) for item in plans}, {("{'type': 'trajectory_integrity'}",)})
+        self.assertEqual(len({tuple(str(value) for value in item["assertions"]) for item in plans}), 1)
 
     def test_fallback_and_verification_ignore_process_label(self) -> None:
         left = rigid_scene("falling")

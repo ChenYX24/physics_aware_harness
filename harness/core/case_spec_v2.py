@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from harness.core.capability import CapabilityStore, canonical_capability_id
-from harness.core.case_spec import CaseSpec, validate_case_spec
 from harness.core.physics_contract import allowed_backends_for_scene
+from harness.core.runtime_case import RUNTIME_CASE_SCHEMA_VERSION, RuntimeCase
 
 
 CASE_SPEC_V2_SCHEMA_VERSION = "harness_case_spec_v2"
@@ -231,6 +231,13 @@ def normalize_case_spec_v2(data: Mapping[str, Any]) -> dict[str, Any]:
     ):
         normalized.setdefault(key, copy.deepcopy(default))
     normalized.setdefault("notes", "")
+    solver_scene = normalized.get("solver_scene")
+    if isinstance(solver_scene, dict) and solver_scene.get("type") == "rigid_sph":
+        initialization = solver_scene.setdefault("initialization", {})
+        if isinstance(initialization, dict):
+            initialization.setdefault("state", "settled")
+            initialization.setdefault("pre_roll_s", 0.25)
+            initialization.setdefault("capture_after_pre_roll", True)
     for obj in normalized.get("objects") or []:
         if not isinstance(obj, dict):
             continue
@@ -617,7 +624,7 @@ def collect_case_spec_v2_issues(
     return issues
 
 
-def project_case_spec_v2_to_v1(case_spec: CaseSpecV2) -> CaseSpec:
+def compile_case_spec_v2_runtime(case_spec: CaseSpecV2) -> RuntimeCase:
     data = case_spec.data
     allow_analytic_proxy = bool((data.get("asset_policy") or {}).get("allow_analytic_proxy"))
     capability_id = case_spec.capability_id
@@ -666,8 +673,8 @@ def project_case_spec_v2_to_v1(case_spec: CaseSpecV2) -> CaseSpec:
     variant = data.get("variant") or {}
     projected_timebase = copy.deepcopy(data.get("timebase") or {})
     projected_timebase["render_fps"] = int(projected_timebase.get("observation_fps") or 24)
-    projection = {
-        "schema_version": "harness_case_spec_v1",
+    runtime_contract = {
+        "schema_version": RUNTIME_CASE_SCHEMA_VERSION,
         "case_id": case_spec.case_id,
         "capability_id": capability_id,
         "prompt": str((data.get("identity") or {}).get("source_request") or (data.get("identity") or {}).get("title") or ""),
@@ -706,19 +713,18 @@ def project_case_spec_v2_to_v1(case_spec: CaseSpecV2) -> CaseSpec:
         "verifier_expectation": {"status": "pass" if variant.get("should_pass", True) else "fail"},
         "should_pass": bool(variant.get("should_pass", True)),
         "notes": str(data.get("notes") or ""),
-        "v2_projection": {
+        "source_contract": {
             "source_schema_version": CASE_SPEC_V2_SCHEMA_VERSION,
-            "projection_version": "harness_case_spec_v2_to_v1_projection_v1",
+            "compiler_version": "case_spec_v2_runtime_compiler_v1",
             "source_digest": stable_case_spec_digest(data),
             "source_provenance": copy.deepcopy(data.get("provenance") or {}),
         },
     }
     if isinstance(data.get("solver_scene"), Mapping):
-        projection["solver_scene"] = copy.deepcopy(dict(data["solver_scene"]))
+        runtime_contract["solver_scene"] = copy.deepcopy(dict(data["solver_scene"]))
     if isinstance(data.get("workspace_bounds_m"), Mapping):
-        projection["workspace_bounds_m"] = copy.deepcopy(dict(data["workspace_bounds_m"]))
-    validate_case_spec(projection)
-    return CaseSpec(projection)
+        runtime_contract["workspace_bounds_m"] = copy.deepcopy(dict(data["workspace_bounds_m"]))
+    return RuntimeCase(runtime_contract)
 
 
 def asset_requests(asset: Any) -> list[dict[str, Any]]:
@@ -837,7 +843,7 @@ def _infer_active_passive(objects: list[dict[str, Any]]) -> tuple[list[str], lis
 
 
 def _project_release_events(events: Iterable[Any], objects: list[dict[str, Any]]) -> None:
-    """Carry V2 delayed-release semantics into the legacy UE runtime contract."""
+    """Compile delayed-release semantics into the canonical runtime contract."""
     by_id = {str(obj.get("id") or ""): obj for obj in objects}
     for event in events:
         if not isinstance(event, Mapping):
@@ -1374,6 +1380,45 @@ def _validate_rigid_sph_declarations(
     objects: Iterable[Any],
     issues: list[ValidationIssue],
 ) -> None:
+    initialization = _mapping(scene.get("initialization"), "/solver_scene/initialization", issues)
+    initialization_state = str(initialization.get("state") or "")
+    if initialization_state not in {"as_authored", "settled"}:
+        _issue(
+            issues,
+            "/solver_scene/initialization/state",
+            "invalid_solver_initialization_state",
+            "must be as_authored or settled",
+        )
+    pre_roll_s = _finite_number(
+        initialization.get("pre_roll_s"),
+        "/solver_scene/initialization/pre_roll_s",
+        issues,
+    )
+    if pre_roll_s is not None and pre_roll_s < 0.0:
+        _issue(
+            issues,
+            "/solver_scene/initialization/pre_roll_s",
+            "invalid_solver_initialization_time",
+            "must be non-negative",
+        )
+    if not isinstance(initialization.get("capture_after_pre_roll"), bool):
+        _issue(
+            issues,
+            "/solver_scene/initialization/capture_after_pre_roll",
+            "invalid_type",
+            "must be boolean",
+        )
+    if initialization_state == "settled" and (
+        pre_roll_s is None
+        or pre_roll_s <= 0.0
+        or initialization.get("capture_after_pre_roll") is not True
+    ):
+        _issue(
+            issues,
+            "/solver_scene/initialization",
+            "invalid_settled_initialization",
+            "settled requires positive pre_roll_s and capture_after_pre_roll=true",
+        )
     entries = [(index, obj) for index, obj in enumerate(objects) if isinstance(obj, Mapping)]
     fluids = [(index, obj) for index, obj in entries if str(obj.get("role") or "") in {"fluid", "fluid_volume"}]
     rigid_candidates = [(index, obj) for index, obj in entries if (index, obj) not in fluids]

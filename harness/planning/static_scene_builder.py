@@ -36,9 +36,6 @@ def build_static_scene_layout(
     placement_adjustments = align_v2_explicit_supports(case_spec, nodes)
     expected_physics = case_spec.get("expected_physics") or {}
     collision_edges = normalize_edges(expected_physics.get("collision_graph") or expected_physics.get("contact_order") or [])
-    projection = case_spec.get("v2_projection") if isinstance(case_spec.get("v2_projection"), dict) else {}
-    if not collision_edges and projection.get("source_schema_version") != "harness_case_spec_v2":
-        collision_edges = infer_collision_edges(nodes)
     chain_adjustments = align_v2_ordered_dynamic_chain(case_spec, nodes, collision_edges)
     placement_adjustments.extend(chain_adjustments)
     if chain_adjustments:
@@ -75,7 +72,7 @@ def build_static_scene_layout(
             frozenset((str(relation["object_id"]), str(relation["container_id"])))
             for relation in containment_relations
         },
-        include_static_obstacles=projection.get("source_schema_version") == "harness_case_spec_v2",
+        include_static_obstacles=True,
     )
     return {
         "schema_version": SCENE_LAYOUT_SCHEMA_VERSION,
@@ -156,11 +153,10 @@ def infer_support_relations(case_spec: dict[str, Any], nodes: list[dict[str, Any
 
 
 def align_v2_explicit_supports(case_spec: dict[str, Any], nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Snap explicitly supported V2 bodies to resolved support geometry."""
-    projection = case_spec.get("v2_projection") if isinstance(case_spec.get("v2_projection"), dict) else {}
+    """Snap explicitly supported bodies to resolved support geometry."""
     expected = case_spec.get("expected_physics") if isinstance(case_spec.get("expected_physics"), dict) else {}
     support_map = expected.get("support") if isinstance(expected.get("support"), dict) else {}
-    if projection.get("source_schema_version") != "harness_case_spec_v2" or not support_map:
+    if not support_map:
         return []
     by_id = {str(node.get("object_id")): node for node in nodes}
     adjustments: list[dict[str, Any]] = []
@@ -274,14 +270,11 @@ def separate_v2_dynamic_overlaps(
     *,
     clearance_m: float = 0.005,
 ) -> list[dict[str, Any]]:
-    """Apply the smallest inferable horizontal separation to V2 dynamic chains.
+    """Apply the smallest inferable horizontal separation to declared dynamic chains.
 
     The LLM-provided order and direction remain authoritative.  Exact co-location,
     deep disagreement, static geometry, and unrelated bodies remain hard failures.
     """
-    projection = case_spec.get("v2_projection") if isinstance(case_spec.get("v2_projection"), dict) else {}
-    if projection.get("source_schema_version") != "harness_case_spec_v2":
-        return []
     expected = case_spec.get("expected_physics") if isinstance(case_spec.get("expected_physics"), dict) else {}
     support_map = expected.get("support") if isinstance(expected.get("support"), dict) else {}
     edge_pairs = {
@@ -412,9 +405,6 @@ def align_v2_ordered_dynamic_chain(
     clearance_m: float = 0.005,
 ) -> list[dict[str, Any]]:
     """Align and tighten downstream edges in one simple sequential chain."""
-    projection = case_spec.get("v2_projection") if isinstance(case_spec.get("v2_projection"), dict) else {}
-    if projection.get("source_schema_version") != "harness_case_spec_v2":
-        return []
     by_id = {str(node.get("object_id") or ""): node for node in nodes}
     edges = [
         (str(edge[0]), str(edge[1]))
@@ -528,9 +518,6 @@ def separate_v2_chain_from_static_obstacles(
     all of its downstream collision targets move by the same amount.  This
     preserves the authored chain while accounting for resolved asset bounds.
     """
-    projection = case_spec.get("v2_projection") if isinstance(case_spec.get("v2_projection"), dict) else {}
-    if projection.get("source_schema_version") != "harness_case_spec_v2":
-        return []
     expected = case_spec.get("expected_physics") if isinstance(case_spec.get("expected_physics"), dict) else {}
     by_id = {str(node.get("object_id") or ""): node for node in nodes}
     directed_edges = [
@@ -928,11 +915,6 @@ def normalize_edges(raw_edges: Any) -> list[list[str]]:
             if left and right:
                 edges.append([str(left), str(right)])
     return edges
-
-
-def infer_collision_edges(nodes: list[dict[str, Any]]) -> list[list[str]]:
-    ids = [str(node["object_id"]) for node in nodes if node.get("physics_critical")]
-    return [[ids[index], ids[index + 1]] for index in range(len(ids) - 1)]
 
 
 def summarize_asset_resolution(asset_resolution: dict[str, Any] | None) -> dict[str, Any]:

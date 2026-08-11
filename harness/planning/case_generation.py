@@ -291,6 +291,9 @@ def generate_case_spec_v2(
                     "maximum_repairs": 1,
                     "preserve_user_intent": True,
                     "do_not_change_valid_fields_unless_required_by_an_error": True,
+                    "requested_backend": str(
+                        (validated_request.get("execution_constraints") or {}).get("requested_backend") or ""
+                    ) or None,
                     "asset_source_constraints": copy.deepcopy(expansion.get("asset_source_constraints") or []),
                 },
                 "case_spec_contract": _case_spec_contract(),
@@ -861,11 +864,16 @@ FIELD-BY-FIELD INSTRUCTIONS
 4. timebase: use positive integer physics_hz and observation_fps with physics_hz exactly divisible by
    observation_fps; deterministic_seed must be an integer.
 5. backend_constraints: required_solver_capabilities must use only registered solver_capability enum
-   tokens such as rigid_body and contact_events, never natural-language phrases. If request.execution_constraints has a
-   requested_backend, use it in allowed_solvers and do not substitute another solver. A declared rigid_sph
-   scene solved by genesis_sph uses render_backend=ue and allow_multi_backend=true because UE replays the
-   solver's generic surface/state cache with resolved visual assets. Otherwise use the requested backend as
-   render_backend. Use allow_multi_backend only for an intentional separate solver/render plan.
+   tokens provided by the selected solver in case_spec_contract.backend_solver_capability_matrix, never
+   natural-language phrases. If request.execution_constraints has a requested_backend, use exactly that
+   backend in allowed_solvers and do not add or substitute another solver or fallback. Renderer capabilities
+   never satisfy required_solver_capabilities. A declared rigid_sph scene solved by genesis_sph uses exactly
+   particle_dynamics, particle_cache, and surface_mesh_cache as required_solver_capabilities, plus
+   render_backend=ue and allow_multi_backend=true because UE only replays the solver's generic surface/state
+   cache with resolved visual assets. The rigid_body role on a static or kinematic rigid_sph participant is
+   a scene-role requirement and must not add the unsupported rigid_body solver capability to genesis_sph.
+   Otherwise use the requested backend as render_backend. Use allow_multi_backend only for an intentional
+   separate solver/render plan.
 6. asset_policy: use booleans for allow_local, allow_external, allow_generation, and
    allow_analytic_proxy. Set allow_generation=true for procedural_generation or model_generation.
    required_license_tier is local_preview or reference and must reflect the user's request. Default to
@@ -898,7 +906,10 @@ FIELD-BY-FIELD INSTRUCTIONS
    body. Do not put use_ccd inside behavior.
 8. solver_scene and object.solver: use these only when the selected backend needs explicit generic
    solver primitives beyond rigid-body fields. For a coupled particle/rigid scene, set
-   solver_scene.type="rigid_sph" and declare only measurements and numeric assertions there. A liquid
+   solver_scene.type="rigid_sph" and declare initialization, measurements, and numeric assertions there.
+   initialization is {state:settled|as_authored,pre_roll_s,capture_after_pre_roll}. Use settled with a
+   positive pre-roll and capture_after_pre_roll=true when the requested frame zero is an already resting
+   or equilibrated state; use as_authored only when the initial transient itself must be observed. A liquid
    participant uses role="fluid" and solver.material_model="sph_liquid" plus solver.initial_volume with a geometric shape,
    dimensions, pose, and a frame. Use frame={"type":"body_local","body_id":exact_id} when the initial
    volume is contained by a moving rigid body; use a world frame otherwise. Every coupled rigid participant
@@ -1031,6 +1042,12 @@ relation, event, camera, and assertion reference exactly matches an objects[].id
 registered type. asset_source_constraints in repair_constraints are hard and must be restored at the exact
 object asset acquisition paths named by validation_errors. For support_footprint_too_small, enlarge or reposition the named support so it contains
 the subject's full horizontal bounds. For
+solver_capability_mismatch, keep repair_constraints.requested_backend as the only allowed solver and never
+add a solver, renderer, or fallback to allowed_solvers. Replace unsupported requirements using the selected
+solver's row in case_spec_contract.backend_solver_capability_matrix. In particular, a genesis_sph rigid_sph
+scene requires exactly particle_dynamics, particle_cache, and surface_mesh_cache; its rigid_body object roles
+describe static or kinematic collision participants and do not require the unsupported rigid_body solver
+capability. UE remains render_backend only. For
 rigid_sph_role_required or missing rigid_sph solver fields, never turn a visual-only duplicate into a
 second rigid body. Merge the visual asset request and simplified solver collision onto one logical object,
 keep the asset-source-constrained object ID, remove the redundant visual/collision duplicate, and remap
@@ -1115,6 +1132,7 @@ def _case_spec_contract() -> dict[str, Any]:
             },
             "solver_scene": {
                 "type": "rigid_sph when explicit rigid/particle coupling is required",
+                "initialization": "{state:settled|as_authored,pre_roll_s:nonnegative,capture_after_pre_roll:boolean}",
                 "measurements": {
                     "allowed_types": [
                         "body_interior_fraction",
@@ -1260,6 +1278,7 @@ def _case_spec_contract() -> dict[str, Any]:
             "solver_scene and object.solver may declare generic primitives only and must survive deterministic projection unchanged",
             "asset resolution applies only to objects with visual_representation.source=asset; solver_generated and none must omit object.asset",
             "one logical rigid_sph body owns both its visual asset request and simplified solver collision; never split them into visual/collision object IDs",
+            "a genesis_sph rigid_sph scene requires particle_dynamics, particle_cache, and surface_mesh_cache; rigid_body is an object role, not a genesis_sph solver capability",
         ],
         "valid_structure_example_do_not_copy_values": _valid_case_spec_structure_example(),
         "valid_rigid_sph_shape_example_do_not_copy_values": _valid_rigid_sph_shape_example(),
@@ -1358,6 +1377,16 @@ def _valid_case_spec_structure_example() -> dict[str, Any]:
 def _valid_rigid_sph_shape_example() -> dict[str, Any]:
     """Show the exact coupled shape without duplicating a complete CaseSpec."""
     return {
+        "backend_constraints": {
+            "required_solver_capabilities": [
+                "particle_dynamics",
+                "particle_cache",
+                "surface_mesh_cache",
+            ],
+            "allowed_solvers": ["genesis_sph"],
+            "render_backend": "ue",
+            "allow_multi_backend": True,
+        },
         "workspace_bounds_m": {"min_m": [-1.0, -1.0, -0.1], "max_m": [1.0, 1.0, 1.0]},
         "objects": [
             {
@@ -1473,6 +1502,7 @@ def _valid_rigid_sph_shape_example() -> dict[str, Any]:
         ],
         "solver_scene": {
             "type": "rigid_sph",
+            "initialization": {"state": "settled", "pre_roll_s": 0.25, "capture_after_pre_roll": True},
             "measurements": [
                 {"id": "inside", "type": "body_interior_fraction", "body_id": "container"},
                 {

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from harness.core.artifact_schema import read_json, runtime_summary, write_json
-from harness.core.case_spec import CaseSpec
+from harness.core.runtime_case import RuntimeCase
 from harness.core.physics_contract import infer_scene_domain
 from harness.core.workspace import workspace_root
 from harness.runtime.rigid_sph_scene import compile_rigid_sph_scene
@@ -26,7 +26,7 @@ class GenesisSPHBackend:
 
     def run_case(
         self,
-        case: CaseSpec,
+        case: RuntimeCase,
         output_root: str | Path,
         *,
         requested_views: list[str] | None = None,
@@ -395,7 +395,7 @@ def fluid_velocity_field_parameters(value: Any) -> dict[str, Any]:
     raise ValueError(f"unsupported fluid initial velocity field: {field_type}")
 
 
-def write_genesis_artifacts(case: CaseSpec, run_dir: Path) -> dict[str, Any]:
+def write_genesis_artifacts(case: RuntimeCase, run_dir: Path) -> dict[str, Any]:
     output_dir = run_dir / "genesis_sph_output"
     output_dir.mkdir(exist_ok=True)
     cache_path = run_dir / "particle_cache.json"

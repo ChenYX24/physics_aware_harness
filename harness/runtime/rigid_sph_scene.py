@@ -31,6 +31,7 @@ def compile_rigid_sph_scene(case_spec: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("workspace bounds must have min < max on every axis")
     measurements = compile_measurements(scene.get("measurements"), body_by_id)
     assertions = compile_assertions(scene.get("assertions"), {item["id"] for item in measurements})
+    initialization = compile_initialization(scene.get("initialization"))
     return {
         "schema_version": "harness_rigid_sph_scene_v1",
         "execution_contract": "rigid_sph_scene",
@@ -38,7 +39,30 @@ def compile_rigid_sph_scene(case_spec: dict[str, Any]) -> dict[str, Any]:
         "fluid": fluid,
         "measurements": measurements,
         "assertions": assertions,
+        "initialization": initialization,
         "workspace_bounds_m": {"min_m": minimum, "max_m": maximum},
+    }
+
+
+def compile_initialization(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {"state": "as_authored", "pre_roll_s": 0.0, "capture_after_pre_roll": False, "declared": False}
+    if not isinstance(value, dict):
+        raise ValueError("solver_scene.initialization must be an object")
+    state = str(value.get("state") or "")
+    if state not in {"as_authored", "settled"}:
+        raise ValueError("solver_scene.initialization.state must be as_authored or settled")
+    pre_roll_s = finite(value.get("pre_roll_s"), "solver initialization pre_roll_s")
+    capture_after_pre_roll = value.get("capture_after_pre_roll")
+    if pre_roll_s < 0.0 or not isinstance(capture_after_pre_roll, bool):
+        raise ValueError("solver initialization requires non-negative pre_roll_s and boolean capture_after_pre_roll")
+    if state == "settled" and (pre_roll_s <= 0.0 or capture_after_pre_roll is not True):
+        raise ValueError("settled initialization requires positive pre_roll_s and capture_after_pre_roll=true")
+    return {
+        "state": state,
+        "pre_roll_s": pre_roll_s,
+        "capture_after_pre_roll": capture_after_pre_roll,
+        "declared": True,
     }
 
 
@@ -89,6 +113,8 @@ def compile_rigid_body(body: dict[str, Any]) -> dict[str, Any]:
             "proxy": False,
             "catalog_source": str(asset.get("catalog_source") or ""),
             "bbox_m": vec3(asset.get("bbox_m"), "rigid_body asset bbox_m"),
+            "geometry_registration": dict(asset.get("geometry_registration") or {}),
+            "support_registration": dict(asset.get("support_registration") or {}),
         },
         "transform": transform,
         "motion": compiled_motion,
@@ -148,6 +174,7 @@ def compile_collision(collision: dict[str, Any], transform: dict[str, Any]) -> d
         "wall_thickness_m": thickness,
         "panel_count": panel_count,
         "parts": parts,
+        "geometry_registration": dict(collision.get("geometry_registration") or {}),
     }
 
 
