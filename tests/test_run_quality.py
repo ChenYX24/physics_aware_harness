@@ -408,7 +408,7 @@ class RunQualityTests(unittest.TestCase):
             codes = {item["code"] for item in report["hard_gate"]["failures"]}
             self.assertNotIn("F_SEGMENTATION_PALETTE_CLOSURE", codes)
 
-    def test_complete_rack_spreads_require_every_passive_contact_and_motion(self) -> None:
+    def test_named_spread_metadata_does_not_enable_hidden_quality_gate(self) -> None:
         for expected_spread in ("full_rack_break", "angled_rack_break"):
             with self.subTest(expected_spread=expected_spread), tempfile.TemporaryDirectory() as tmp:
                 run_dir = self.make_run(Path(tmp))
@@ -428,12 +428,9 @@ class RunQualityTests(unittest.TestCase):
                     report = evaluate_run(run_dir, write=False)
 
                 codes = {item["code"] for item in report["hard_gate"]["failures"]}
-                self.assertIn("F_FULL_RACK_CONTACT_INCOMPLETE", codes)
-                self.assertIn("F_FULL_RACK_MOTION_INCOMPLETE", codes)
-                self.assertEqual(
-                    report["contacts"]["complete_passive_propagation"]["expected_spread"],
-                    expected_spread,
-                )
+                self.assertNotIn("F_FULL_RACK_CONTACT_INCOMPLETE", codes)
+                self.assertNotIn("F_FULL_RACK_MOTION_INCOMPLETE", codes)
+                self.assertNotIn("complete_passive_propagation", report["contacts"])
 
     def test_precomputed_replay_cannot_pass_initial_state_live_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -6,9 +6,9 @@
     "source_request": "Five upright dominoes tip in order after the first domino starts from a small unstable angle. Only the initial state is prescribed; Unreal Engine Chaos solves every later transform and contact."
   },
   "capabilities": {
-    "primary": "sequential_contact_propagation",
+    "primary": "rigid_body_dynamics",
     "required": [
-      "sequential_contact_propagation"
+      "rigid_body_dynamics"
     ]
   },
   "scene": {
@@ -471,13 +471,12 @@
   "verification_requirements": {
     "assertions": [
       {
-        "type": "ordered_contact_propagation",
-        "objects": [
-          "domino_0",
-          "domino_1",
-          "domino_2",
-          "domino_3",
-          "domino_4"
+        "type": "event_sequence",
+        "pairs": [
+          ["domino_0", "domino_1"],
+          ["domino_1", "domino_2"],
+          ["domino_2", "domino_3"],
+          ["domino_3", "domino_4"]
         ]
       }
     ],

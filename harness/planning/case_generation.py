@@ -391,7 +391,7 @@ def _request_for_model(request: Mapping[str, Any]) -> dict[str, Any]:
 
 def _normalize_expansion(payload: Mapping[str, Any]) -> dict[str, Any]:
     raw = payload.get("expansion") if isinstance(payload.get("expansion"), Mapping) else payload
-    expansion = dict(raw)
+    expansion = copy.deepcopy(dict(raw))
     expansion["schema_version"] = EXPANSION_SCHEMA_VERSION
     for field in EXPANSION_FIELDS:
         if field not in expansion:
@@ -407,6 +407,12 @@ def _normalize_expansion(payload: Mapping[str, Any]) -> dict[str, Any]:
     for field in EXPANSION_OBJECT_FIELDS:
         if not isinstance(expansion.get(field), dict):
             raise ValueError(f"expansion.{field} must be an object")
+    for constraint in expansion.get("asset_source_constraints") or []:
+        if isinstance(constraint, dict) and constraint.get("requirement") == "required":
+            # Required sources are exclusive. The raw model response remains
+            # persisted for audit; the normalized planning contract enforces
+            # the stricter no-fallback meaning used by CaseSpec generation.
+            constraint["fallback_order"] = []
     _validate_asset_source_constraints(expansion)
     return expansion
 
@@ -657,8 +663,13 @@ def _apply_request_identity(case_spec: Mapping[str, Any], request: Mapping[str, 
     if requested_backend:
         backend = dict(result.get("backend_constraints")) if isinstance(result.get("backend_constraints"), Mapping) else {}
         backend["allowed_solvers"] = [requested_backend]
-        backend["render_backend"] = requested_backend
-        backend["allow_multi_backend"] = False
+        solver_scene = result.get("solver_scene") if isinstance(result.get("solver_scene"), Mapping) else {}
+        if requested_backend == "genesis_sph" and solver_scene.get("type") == "rigid_sph":
+            backend["render_backend"] = "ue"
+            backend["allow_multi_backend"] = True
+        else:
+            backend["render_backend"] = requested_backend
+            backend["allow_multi_backend"] = False
         result["backend_constraints"] = backend
     return result
 
@@ -752,9 +763,11 @@ FIELD-BY-FIELD INSTRUCTIONS
    capability from planning_contract.executable_primary_capabilities. Do not invent capability IDs.
 3. scene_analysis: an object describing the semantic environment, scale, coordinate assumptions,
    approximate duration, and necessary support objects. Keep it engine-neutral.
-4. object_analysis: an array with one object per distinct simulated or rendered object. For each, propose
+4. object_analysis: an array with one object per distinct logical physical object. For each, propose
    a stable machine-friendly suggested_id, semantic role, geometry and dimensions, body behavior,
-   material/physics needs, initial-state intent, and whether it requires an asset.
+   material/physics needs, initial-state intent, and whether it requires an asset. Never split one
+   physical object into separate visual-mesh and collision-proxy object IDs. Its visual asset and
+   simplified collision geometry belong to the same logical object; describe both needs on that item.
 5. event_and_relation_analysis: an array of temporal events and relations among proposed objects, such
    as falling, contact, collision order, support, attachment, fracture, or settling. Refer to proposed
    object IDs consistently.
@@ -766,7 +779,8 @@ FIELD-BY-FIELD INSTRUCTIONS
 7. asset_source_constraints: an array of auditable hard source constraints extracted only from explicit
    user requirements. Each entry scopes exact object_analysis suggested_id values, lists every allowed
    acquisition route and, only when the user names Providers, every allowed structured Provider ID; preserves Provider fallback order, records
-   requirement as preferred or required, and records allow_proxy. Different object groups may use different
+   requirement as preferred or required, and records allow_proxy. A required constraint always has an
+   empty fallback_order; the selected Provider belongs in allowed_providers, not fallback_order. Different object groups may use different
    constraints. An omitted or empty allowed_providers means the user constrained the route but did not
    constrain the Provider. Do not infer a required route, Provider permission, or no-proxy rule from a mere preference.
 8. expected_behavior_analysis: an object describing observable preconditions, event ordering, causal
@@ -838,19 +852,20 @@ the structural example. Use the example only for structure; derive all values fr
 FIELD-BY-FIELD INSTRUCTIONS
 1. identity: set case_id, a concise title, and source_request. The caller will enforce the original
    case_id and source text.
-2. capabilities: this must be an object. primary must be one registered executable capability;
-   required must be an array containing that same primary and no unrelated capability. Use
-   sequential_contact_propagation for a simple directed chain of three or more dynamic bodies; use
-   rigid_body_contact_causality for a single pair or a branching contact graph.
+2. capabilities: this must be an object. Choose only the state/coupling domain:
+   rigid_body_dynamics, fluid_particle_dynamics, or deformable_body_dynamics. Never classify the
+   request as a named physical process such as falling, bouncing, sequential collision, pouring,
+   fracture, or pendulum motion. required contains that same primary and no unrelated capability.
 3. scene: describe environment_intent, z_up coordinates, positive duration_s, and optional positive
    bounds_hint_m. Do not put UE map packages or runtime paths here.
 4. timebase: use positive integer physics_hz and observation_fps with physics_hz exactly divisible by
    observation_fps; deterministic_seed must be an integer.
 5. backend_constraints: required_solver_capabilities must use only registered solver_capability enum
    tokens such as rigid_body and contact_events, never natural-language phrases. If request.execution_constraints has a
-   requested_backend, use it in allowed_solvers and render_backend and do not substitute another backend.
-   Otherwise choose only registered compatible backends. Use allow_multi_backend only for an intentional
-   separate solver/render plan.
+   requested_backend, use it in allowed_solvers and do not substitute another solver. A declared rigid_sph
+   scene solved by genesis_sph uses render_backend=ue and allow_multi_backend=true because UE replays the
+   solver's generic surface/state cache with resolved visual assets. Otherwise use the requested backend as
+   render_backend. Use allow_multi_backend only for an intentional separate solver/render plan.
 6. asset_policy: use booleans for allow_local, allow_external, allow_generation, and
    allow_analytic_proxy. Set allow_generation=true for procedural_generation or model_generation.
    required_license_tier is local_preview or reference and must reflect the user's request. Default to
@@ -881,7 +896,37 @@ FIELD-BY-FIELD INSTRUCTIONS
    requested, and set physics.use_ccd=true for small or fast-moving collision bodies. Dynamic bodies use
    gravity by default; set physics.enable_gravity=false only when the user explicitly requests a gravity-free
    body. Do not put use_ccd inside behavior.
-8. object.asset: description and optional semantic_text are natural-language search/generation intent;
+8. solver_scene and object.solver: use these only when the selected backend needs explicit generic
+   solver primitives beyond rigid-body fields. For a coupled particle/rigid scene, set
+   solver_scene.type="rigid_sph" and declare only measurements and numeric assertions there. A liquid
+   participant uses role="fluid" and solver.material_model="sph_liquid" plus solver.initial_volume with a geometric shape,
+   dimensions, pose, and a frame. Use frame={"type":"body_local","body_id":exact_id} when the initial
+   volume is contained by a moving rigid body; use a world frame otherwise. Every coupled rigid participant
+   uses role="rigid_body" and declares
+   solver.mobility, solver.transform, and solver.collision. Supported generic collision primitives are
+   exactly plane and axisymmetric_profile; do not emit composite or primitives arrays. A plane contains
+   position_m, normal, and asset_geometry_match=true. An axisymmetric_profile contains an inner_profile
+   array of positive-radius {z_m,radius_m} points, wall_thickness_m, panel_count,
+   asset_geometry_match=true, and a non-empty fit_method naming the evidence used to align that profile
+   to the render asset. Do not claim asset_geometry_match without such evidence. A body-local cylindrical
+   fluid volume must clear the profile wall, bottom, and rim by at least 0.003 m; never make its radius
+   exactly equal to the container's inner radius. solver.transform uses position_m, euler_xyz_deg,
+   ue_rotation_pyr_deg, and
+   optional scale. Kinematic pivot_rotation uses start_time_s, duration_s, pivot_local_m,
+   solver_end_rotation_xyz_deg, and ue_end_rotation_pyr_deg; do not invent angle/axis/pivot objects.
+   Convert every solver XYZ rotation [x,y,z] to UE pitch/yaw/roll as [-y,-z,x], including motion endpoints.
+   pivot_local_m is the actual local pivot point: if the request names a rim or profile edge, use that
+   edge's radial coordinate and z coordinate rather than the profile center [0,0,z].
+   Keep solver transforms consistent with
+   object.initial_state. Also provide workspace_bounds_m={"min_m":[x,y,z],"max_m":[x,y,z]} enclosing
+   every declared body, initial volume, and expected motion. Do not name a physical phenomenon, select a prepared process, or put rendering
+   behavior in these declarations. If the request does not require such coupling, omit both fields.
+   Every object also declares visual_representation.source as exactly asset, solver_generated, or none.
+   Use asset when Asset Resolve must supply a visual resource. Use solver_generated when the selected solver
+   produces the renderable geometry or field consumed by a later render stage; omit object.asset in that case.
+   Use none only for an intentionally invisible logical/helper object, and omit object.asset. Never invent a
+   placeholder mesh asset for solver-generated output.
+9. object.asset: description and optional semantic_text are natural-language search/generation intent;
    resource_kind must use its enum. must contains hard filters that every candidate must satisfy;
    must_not contains hard exclusions; preferences contains soft ranking preferences and can never override
    must/must_not. taxonomy contains string hierarchy labels such as domain, category, subcategory, and
@@ -906,14 +951,14 @@ FIELD-BY-FIELD INSTRUCTIONS
    Expansion asset_source_constraints are hard: for every scoped exact object ID, choose only an allowed
    route and allowed Provider, preserve required and user_explicit, and do not add an unauthorized fallback.
    A global allow_analytic_proxy=true for unrelated objects never weakens a scoped required no-proxy route.
-9. acquisition.reference_inputs: every entry is an object with input_id copied exactly from
+10. acquisition.reference_inputs: every entry is an object with input_id copied exactly from
    request.inputs, usage as an array of registered usage enums, and allow_similarity_search as a boolean.
    Do not copy local paths, hashes, image bytes, captions, or invented IDs into this object.
    acquisition.texture_prompt is optional, applies only to model_generation texturing, and is limited to
    600 characters. Fill it only from an explicit material, color, or style intent. When the user wants to
    preserve the source photos' original texture/colors without a new style, omit texture_prompt. Never use
    it as a geometry prompt or synthesize it from description, role, or shape.
-10. relations and events: use canonical reference-bearing objects. A binary relation is
+11. relations and events: use canonical reference-bearing objects. A binary relation is
     {"type": string, "source": exact_id, "target": exact_id}; a group relation may use
     {"type": string, "objects": [exact_ids]}; an object event is
     {"type": string, "object": exact_id}. Additional semantic parameters may be objects or scalars, but
@@ -944,16 +989,16 @@ FIELD-BY-FIELD INSTRUCTIONS
     or obstacle restitution merely to force propagation; use low friction, reachable spacing, and adequate
     striker speed instead. When a release event's object is the source of one direct impacts relation, its
     linear velocity must point from the source's initial position toward that impacts target.
-11. expected_behavior: describe causal and observable outcomes without claiming success.
-12. observation_requirements: cameras use registered camera roles and exact target object IDs; modalities
+12. expected_behavior: describe causal and observable outcomes without claiming success.
+13. observation_requirements: cameras use registered camera roles and exact target object IDs; modalities
     use registered values; signals name evidence required by the capability and assertions. Do not emit
     exact camera coordinates.
-13. verification_requirements: each assertion is an object with a registered type and exact object IDs.
+14. verification_requirements: each assertion is an object with a registered type and exact object IDs.
     Choose assertions that test the primary physical invariant. thresholds and time_window are global
     verifier configuration objects passed unchanged to the selected verifier. Use {} unless the selected
     capability contract or an explicit user requirement supplies a named numeric tolerance/window; do not
     invent threshold names, measured values, or pass/fail evidence.
-14. variant: should_pass is boolean. provenance is an object. notes is a string.
+15. variant: should_pass is boolean. provenance is an object. notes is a string.
 
 REFERENCE INTEGRITY
 First declare every object in objects. Then reuse those exact IDs in relations, events, camera targets,
@@ -985,8 +1030,13 @@ asset-policy booleans authorize declared routes; behavior is an object; body_typ
 relation, event, camera, and assertion reference exactly matches an objects[].id; every assertion has a
 registered type. asset_source_constraints in repair_constraints are hard and must be restored at the exact
 object asset acquisition paths named by validation_errors. For support_footprint_too_small, enlarge or reposition the named support so it contains
-the subject's full horizontal bounds; for ramp_has_no_incline_rotation, remember rotation_deg is
-[pitch,yaw,roll] and use pitch (or roll) rather than yaw as the incline. For
+the subject's full horizontal bounds. For
+rigid_sph_role_required or missing rigid_sph solver fields, never turn a visual-only duplicate into a
+second rigid body. Merge the visual asset request and simplified solver collision onto one logical object,
+keep the asset-source-constrained object ID, remove the redundant visual/collision duplicate, and remap
+references to that retained ID. Every non-fluid rigid_sph object has role=rigid_body and its own solver;
+the fluid has role=fluid. A required acquisition always has acquisition.fallback_order=[]; Provider IDs such
+as meshy belong only in provider_hint and must never be copied into the route fallback_order. For
 procedural_cylinder_local_axis_size_mismatch, store equal diameters in size_m x/y and the authored cylinder
 length in z, then use rotation_deg to orient local Z in world space. For procedural_sphere_size_mismatch,
 use equal x/y/z diameters. For invalid_surface_gap, use a finite nonnegative surface_gap_m only on its named
@@ -1001,10 +1051,7 @@ or prose outside JSON.
 
 
 def _executable_primary_capabilities() -> list[str]:
-    # Local import avoids making the schema layer depend on verifier modules.
-    from harness.planning.verification_compiler import VERIFIER_BY_CAPABILITY
-
-    return sorted(VERIFIER_BY_CAPABILITY)
+    return ["deformable_body_dynamics", "fluid_particle_dynamics", "rigid_body_dynamics"]
 
 
 def _case_spec_contract() -> dict[str, Any]:
@@ -1026,9 +1073,10 @@ def _case_spec_contract() -> dict[str, Any]:
             "variant",
             "provenance",
         ],
+        "optional_top_level_fields": ["solver_scene", "workspace_bounds_m", "notes"],
         "object_shape": {
-            "required": ["id", "role"],
-            "semantic_sections": ["asset", "geometry", "physics", "initial_state", "behavior"],
+            "required": ["id", "role", "visual_representation"],
+            "semantic_sections": ["visual_representation", "asset", "geometry", "physics", "initial_state", "behavior", "solver"],
             "asset_cardinality": "zero_or_one_direct_request",
         },
         "field_shapes": {
@@ -1042,7 +1090,8 @@ def _case_spec_contract() -> dict[str, Any]:
             },
             "object": {
                 "id": "stable identifier string",
-                "role": "machine-readable physics role; for rigid_body_gravity_collision use falling_body for each dynamic falling object or stack_block for a stack member",
+                "role": "semantic object role only; execution behavior comes from physics, initial_state, relations, events, and constraints",
+                "visual_representation": {"source": "asset, solver_generated, or none"},
                 "color_rgb": "optional [red, green, blue], each component between 0 and 1",
                 "fixed_material_color": "optional boolean; true when an explicit color_rgb must be rendered",
                 "geometry": {
@@ -1062,6 +1111,53 @@ def _case_spec_contract() -> dict[str, Any]:
                     "linear_velocity_m_s": ["x", "y", "z"],
                 },
                 "behavior": "object, never a string",
+                "solver": "optional object of generic backend solver primitives; never a named physical-process mode",
+            },
+            "solver_scene": {
+                "type": "rigid_sph when explicit rigid/particle coupling is required",
+                "measurements": {
+                    "allowed_types": [
+                        "body_interior_fraction",
+                        "outside_body_interiors_fraction",
+                        "plane_proximity_fraction",
+                        "axis_span",
+                    ],
+                    "shape": "non-empty array; each item has id, type, and only the fields required by that type",
+                },
+                "assertions": {
+                    "shape": "non-empty array of {id, measurement_id, reduction, operator, value}",
+                    "reductions": [
+                        "initial",
+                        "final",
+                        "max",
+                        "min",
+                        "initial_minus_final",
+                        "max_frame_decrease",
+                        "threshold_crossing_duration",
+                    ],
+                    "operators": [">=", "<="],
+                },
+            },
+            "rigid_sph_rigid_object_solver": {
+                "role": "exactly rigid_body",
+                "mobility": "static or kinematic",
+                "transform": {
+                    "position_m": ["x", "y", "z"],
+                    "euler_xyz_deg": ["x", "y", "z"],
+                    "ue_rotation_pyr_deg": ["pitch", "yaw", "roll"],
+                    "scale": "optional positive xyz",
+                },
+                "collision": "exactly one plane or axisymmetric_profile object; axisymmetric_profile requires non-empty fit_method; composite/primitives are invalid",
+                "motion": "optional {type:pivot_rotation,start_time_s,duration_s,pivot_local_m,solver_end_rotation_xyz_deg,ue_end_rotation_pyr_deg}",
+            },
+            "rigid_sph_fluid_object_solver": {
+                "role": "fluid",
+                "material_model": "sph_liquid",
+                "initial_volume": "{shape:cylinder,frame:{type:world|body_local,body_id?:exact_id},position_m,radius_m,height_m,euler_xyz_deg?}",
+            },
+            "workspace_bounds_m": {
+                "min_m": ["finite x", "finite y", "finite z"],
+                "max_m": ["finite x greater than min x", "finite y greater than min y", "finite z greater than min z"],
             },
             "asset_acquisition": {
                 "route": "one acquisition_route enum",
@@ -1145,20 +1241,28 @@ def _case_spec_contract() -> dict[str, Any]:
             "verification_assertion": sorted(VERIFICATION_ASSERTION_TYPES),
             "local_procedural_recipe": ["box_mesh_v1", "sphere_mesh_v1", "cylinder_mesh_v1"],
         },
+        "backend_solver_capability_matrix": {
+            backend: sorted(capabilities)
+            for backend, capabilities in sorted(BACKEND_SOLVER_CAPABILITIES.items())
+        },
         "hard_rules": [
             "capabilities must be an object and capabilities.required must contain exactly capabilities.primary",
             "every object behavior must be an object and every physics.body_type must use the body_type enum",
             "every relation, event, camera, and assertion object reference must exactly equal one declared object.id; never use a phrase",
             "an explicitly requested collision surface clearance belongs in relation.surface_gap_m and must survive projection",
-            "every verification assertion requires a type from verification_assertion and an objects array of exact IDs",
+            "verification assertions use only generic state/event operators; object references must be exact declared IDs",
             "must and must_not are hard filters; preferences is soft ranking and cannot weaken a hard filter",
-            "thresholds and time_window are passed to the verifier unchanged; use only names defined by the selected capability contract",
+            "put numeric comparison values and operators directly on the generic assertion that consumes them",
             "required acquisition is legal only when origin=user_explicit and route is specific",
             "LLM inferred acquisition must use requirement=preferred",
             "reference input_id must come from request.inputs",
             "do not emit UE paths, runtime stages, exact camera poses, or verifier implementations",
+            "solver_scene and object.solver may declare generic primitives only and must survive deterministic projection unchanged",
+            "asset resolution applies only to objects with visual_representation.source=asset; solver_generated and none must omit object.asset",
+            "one logical rigid_sph body owns both its visual asset request and simplified solver collision; never split them into visual/collision object IDs",
         ],
         "valid_structure_example_do_not_copy_values": _valid_case_spec_structure_example(),
+        "valid_rigid_sph_shape_example_do_not_copy_values": _valid_rigid_sph_shape_example(),
     }
 
 
@@ -1167,8 +1271,8 @@ def _valid_case_spec_structure_example() -> dict[str, Any]:
         "schema_version": CASE_SPEC_V2_SCHEMA_VERSION,
         "identity": {"case_id": "example", "title": "Example", "source_request": "Example request"},
         "capabilities": {
-            "primary": "rigid_body_gravity_collision",
-            "required": ["rigid_body_gravity_collision"],
+            "primary": "rigid_body_dynamics",
+            "required": ["rigid_body_dynamics"],
         },
         "scene": {
             "environment_intent": "minimal floor",
@@ -1193,10 +1297,11 @@ def _valid_case_spec_structure_example() -> dict[str, Any]:
         "objects": [
             {
                 "id": "generated_box",
-                "role": "falling_body",
+                "role": "dynamic_box",
                 "geometry": {"shape_hint": "box", "approx_size_m": [0.4, 0.6, 0.8]},
                 "physics": {
                     "body_type": "dynamic",
+                    "enable_gravity": True,
                     "mass_kg": 1.0,
                     "collision_required": True,
                     "material": {"dynamic_friction": 0.5, "restitution": 0.2},
@@ -1231,7 +1336,7 @@ def _valid_case_spec_structure_example() -> dict[str, Any]:
             },
         ],
         "relations": [{"type": "collision", "source": "generated_box", "target": "floor"}],
-        "events": [{"type": "gravity_drop", "object": "generated_box"}],
+        "events": [],
         "expected_behavior": {"contact_required": True},
         "observation_requirements": {
             "cameras": [{"role": "front_static", "target_objects": ["generated_box", "floor"]}],
@@ -1240,11 +1345,159 @@ def _valid_case_spec_structure_example() -> dict[str, Any]:
         },
         "verification_requirements": {
             "assertions": [
-                {"type": "gravity_then_support_contact", "objects": ["generated_box", "floor"]}
+                {"id": "box_contacts_floor", "type": "event_exists", "event": "contact", "objects": ["generated_box", "floor"]}
             ],
             "thresholds": {},
         },
         "variant": {"should_pass": True},
         "provenance": {},
         "notes": "Structure example only.",
+    }
+
+
+def _valid_rigid_sph_shape_example() -> dict[str, Any]:
+    """Show the exact coupled shape without duplicating a complete CaseSpec."""
+    return {
+        "workspace_bounds_m": {"min_m": [-1.0, -1.0, -0.1], "max_m": [1.0, 1.0, 1.0]},
+        "objects": [
+            {
+                "id": "container",
+                "role": "rigid_body",
+                "visual_representation": {"source": "asset"},
+                "asset": {
+                    "description": "visual mesh for this same physical container",
+                    "resource_kind": "mesh_3d",
+                    "must": {},
+                    "must_not": {},
+                    "preferences": {},
+                    "taxonomy": {},
+                    "relaxation_policy": {
+                        "allow_parent_category": False,
+                        "allow_format_conversion": True,
+                    },
+                    "acquisition": {
+                        "route": "model_generation",
+                        "requirement": "required",
+                        "origin": "user_explicit",
+                        "provider_hint": "named_provider",
+                        "source_uri_hint": None,
+                        "reference_inputs": [],
+                        "fallback_order": [],
+                    },
+                },
+                "solver": {
+                    "mobility": "kinematic",
+                    "transform": {
+                        "position_m": [0.0, 0.0, 0.1],
+                        "euler_xyz_deg": [0.0, 0.0, 0.0],
+                        "ue_rotation_pyr_deg": [0.0, 0.0, 0.0],
+                    },
+                    "collision": {
+                        "type": "axisymmetric_profile",
+                        "asset_geometry_match": True,
+                        "fit_method": "declared_asset_dimensions_and_profile_landmarks_v1",
+                        "inner_profile": [
+                            {"z_m": -0.04, "radius_m": 0.03},
+                            {"z_m": 0.04, "radius_m": 0.04},
+                        ],
+                        "wall_thickness_m": 0.005,
+                        "panel_count": 16,
+                    },
+                    "motion": {
+                        "type": "pivot_rotation",
+                        "start_time_s": 0.3,
+                        "duration_s": 1.0,
+                        "pivot_local_m": [0.04, 0.0, 0.04],
+                        "solver_end_rotation_xyz_deg": [0.0, 90.0, 0.0],
+                        "ue_end_rotation_pyr_deg": [-90.0, 0.0, 0.0],
+                    },
+                },
+            },
+            {
+                "id": "surface",
+                "role": "rigid_body",
+                "visual_representation": {"source": "asset"},
+                "geometry": {"shape_hint": "box", "approx_size_m": [0.8, 0.8, 0.05]},
+                "asset": {
+                    "description": "procedural support surface",
+                    "resource_kind": "mesh_3d",
+                    "must": {"geometry_type": "box", "source_kind": "procedural_generation"},
+                    "must_not": {},
+                    "preferences": {},
+                    "taxonomy": {},
+                    "relaxation_policy": {
+                        "allow_parent_category": False,
+                        "allow_format_conversion": False,
+                    },
+                    "acquisition": {
+                        "route": "procedural_generation",
+                        "requirement": "preferred",
+                        "origin": "llm_inferred",
+                        "provider_hint": "box_mesh_v1",
+                        "source_uri_hint": None,
+                        "reference_inputs": [],
+                        "fallback_order": [],
+                    },
+                },
+                "solver": {
+                    "mobility": "static",
+                    "transform": {
+                        "position_m": [0.0, 0.0, -0.025],
+                        "euler_xyz_deg": [0.0, 0.0, 0.0],
+                        "ue_rotation_pyr_deg": [0.0, 0.0, 0.0],
+                    },
+                    "collision": {
+                        "type": "plane",
+                        "position_m": [0.0, 0.0, 0.0],
+                        "normal": [0.0, 0.0, 1.0],
+                        "asset_geometry_match": True,
+                    },
+                },
+            },
+            {
+                "id": "liquid",
+                "role": "fluid",
+                "visual_representation": {"source": "solver_generated"},
+                "solver": {
+                    "material_model": "sph_liquid",
+                    "initial_volume": {
+                        "shape": "cylinder",
+                        "frame": {"type": "body_local", "body_id": "container"},
+                        "position_m": [0.0, 0.0, 0.0],
+                        "euler_xyz_deg": [0.0, 0.0, 0.0],
+                        "radius_m": 0.025,
+                        "height_m": 0.06,
+                    },
+                },
+            },
+        ],
+        "solver_scene": {
+            "type": "rigid_sph",
+            "measurements": [
+                {"id": "inside", "type": "body_interior_fraction", "body_id": "container"},
+                {
+                    "id": "near_surface",
+                    "type": "plane_proximity_fraction",
+                    "body_id": "surface",
+                    "distance_m": 0.01,
+                },
+                {"id": "span", "type": "axis_span", "axes": ["x", "y"]},
+            ],
+            "assertions": [
+                {
+                    "id": "starts_inside",
+                    "measurement_id": "inside",
+                    "reduction": "initial",
+                    "operator": ">=",
+                    "value": 0.8,
+                },
+                {
+                    "id": "reaches_surface",
+                    "measurement_id": "near_surface",
+                    "reduction": "final",
+                    "operator": ">=",
+                    "value": 0.3,
+                },
+            ],
+        },
     }

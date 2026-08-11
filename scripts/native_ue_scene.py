@@ -1017,12 +1017,8 @@ def validate_runtime_scene(runtime_scene: dict, trajectory: list[dict]) -> dict:
             "diagnostic": "runtime scene contains dynamic objects",
         },
         "asset_policy": {
-            "passed": all(
-                not str(obj.get("ue5_path") or "").startswith(("/Engine/", "/Game/StarterContent"))
-                or obj.get("behavior") in {"character_carry_object", "character_throw_projectile", "landing_surface", "room_floor", "room_wall"}
-                for obj in (runtime_scene.get("dynamic_objects") or []) + (runtime_scene.get("static_objects") or [])
-            ),
-            "diagnostic": "semantic actors use provided assets; controlled rigid bodies may use analytic UE meshes",
+            "passed": all(bool(obj.get("ue5_path")) for obj in (runtime_scene.get("dynamic_objects") or []) + (runtime_scene.get("static_objects") or [])),
+            "diagnostic": "every declared object resolves to an explicit runtime asset or analytic collider mesh",
         },
     }
     case_type = runtime_scene.get("case_type")
@@ -4686,6 +4682,55 @@ def normalize_runtime_actor(actor, obj: dict) -> tuple[unreal.Vector, unreal.Vec
     return origin, extent
 
 
+def align_runtime_actor_to_pose_anchor(
+    actor,
+    obj: dict,
+    desired_position: unreal.Vector,
+    registrations: dict | None = None,
+) -> tuple[unreal.Vector, unreal.Vector]:
+    """Register an imported mesh's bounds center to the declared body pose."""
+    params = obj.get("params") if isinstance(obj.get("params"), dict) else {}
+    if params.get("pose_anchor") != "bounds_center":
+        return actor_bounds(actor)
+    before_origin, extent = actor_bounds(actor)
+    before_location = actor.get_actor_location()
+    correction = desired_position - before_origin
+    actor.set_actor_location(before_location + correction, False, False)
+    after_origin, after_extent = actor_bounds(actor)
+    residual = math.sqrt(
+        (after_origin.x - desired_position.x) ** 2
+        + (after_origin.y - desired_position.y) ** 2
+        + (after_origin.z - desired_position.z) ** 2
+    )
+    if residual > 0.1:
+        raise RuntimeError(
+            f"runtime pose registration failed for {obj.get('id')}: "
+            f"bounds-center residual {residual:.6f} cm"
+        )
+    if registrations is not None:
+        object_id = str(obj.get("id") or "")
+        current = registrations.get(object_id) if isinstance(registrations.get(object_id), dict) else {}
+        correction_length = math.sqrt(correction.x ** 2 + correction.y ** 2 + correction.z ** 2)
+        registrations[object_id] = {
+            "anchor": "bounds_center",
+            "desired_position_cm": [desired_position.x, desired_position.y, desired_position.z],
+            "bounds_center_before_cm": [before_origin.x, before_origin.y, before_origin.z],
+            "bounds_center_after_cm": [after_origin.x, after_origin.y, after_origin.z],
+            "actor_location_before_cm": [before_location.x, before_location.y, before_location.z],
+            "actor_location_after_cm": [
+                actor.get_actor_location().x,
+                actor.get_actor_location().y,
+                actor.get_actor_location().z,
+            ],
+            "translation_correction_cm": [correction.x, correction.y, correction.z],
+            "translation_correction_magnitude_cm": correction_length,
+            "residual_cm": residual,
+            "application_count": int(current.get("application_count") or 0) + 1,
+            "max_residual_cm": max(float(current.get("max_residual_cm") or 0.0), residual),
+        }
+    return after_origin, after_extent
+
+
 def runtime_base_rotation(obj: dict) -> list[float]:
     params = obj.get("params") or {}
     raw = params.get("base_rotation_degrees")
@@ -4944,21 +4989,6 @@ def runtime_camera_pose(runtime_scene: dict, runtime_actors: dict, selected_map:
             location = origin + unreal.Vector(float(position[0]) * 100.0, float(position[1]) * 100.0, float(position[2]) * 100.0)
             target = origin + unreal.Vector(float(target_offset[0]) * 100.0, float(target_offset[1]) * 100.0, float(target_offset[2]) * 100.0)
             return location, target, unreal.Vector(max(extent.x, 420.0), max(extent.y, 320.0), max(extent.z, 220.0))
-    if case_type == "llm_object_graph":
-        object_text = " ".join(
-            str(obj.get(key, ""))
-            for obj in (runtime_scene.get("dynamic_objects") or []) + (runtime_scene.get("static_objects") or [])
-            for key in ("id", "semantic_role", "semantic_purpose", "asset_key", "asset_name", "behavior")
-        ).lower()
-        tabletop_like = any(term in object_text for term in ("cue", "target_ball", "billiard", "table", "tabletop", "桌", "台球"))
-        if tabletop_like:
-            dynamic_ids = [str(obj.get("id")) for obj in runtime_scene.get("dynamic_objects") or [] if obj.get("id")]
-            focus_actors = [runtime_actors[obj_id] for obj_id in dynamic_ids if obj_id in runtime_actors]
-            focus_target, focus_extent = combined_actor_bounds(focus_actors or list(runtime_actors.values()))
-            focus_target = focus_target + unreal.Vector(18.0, 0.0, max(10.0, min(max_axis(focus_extent) * 0.08, 28.0)))
-            focus_extent = unreal.Vector(max(focus_extent.x, 125.0), max(focus_extent.y, 90.0), max(focus_extent.z, 60.0))
-            location = focus_target + unreal.Vector(-185.0, -215.0, 155.0)
-            return location, focus_target, focus_extent
     if case_type in {"third_person_box_throw", "character_throw_to_slope_roll", "character_carry_drop"} and "runner_character" in runtime_actors:
         runner_target, runner_extent = combined_actor_bounds([runtime_actors["runner_character"]])
         target = runner_target + unreal.Vector(35.0, 0.0, max(86.0, runner_extent.z * 1.15))
@@ -5429,6 +5459,10 @@ def spawn_runtime_stage_helpers(editor, runtime_scene: dict, scene_origin: unrea
 
 def setup_scene(runtime_scene: dict | None = None):
     write_progress_marker("setup_scene_start", f"runtime_scene={bool(runtime_scene)}")
+    if runtime_scene and runtime_scene.get("case_type") != "llm_object_graph":
+        raise RuntimeError(
+            "named physical-process scene modes are disabled; compile objects, constraints, forces and assertions into llm_object_graph"
+        )
     selected_map = open_selected_map()
     write_progress_marker("setup_scene_open_selected_map", selected_map.get("name"))
     if selected_map.get("path") and not selected_map.get("opened"):
@@ -5444,8 +5478,7 @@ def setup_scene(runtime_scene: dict | None = None):
         if selected_map.get("name") == "StudioRuntimeBlank" or actor.get_actor_label().startswith("native_phenomena_demo_"):
             editor.destroy_actor(actor)
     write_progress_marker("setup_scene_destroy_old_demo_actors")
-    domino_runtime_adjustments = stabilize_domino_runtime_scene(runtime_scene)
-    write_progress_marker("setup_scene_domino_adjustments")
+    runtime_adjustments = []
 
     world = unreal.EditorLevelLibrary.get_editor_world()
     removed_map_actors = remove_conflicting_map_actors(editor, selected_map)
@@ -5647,7 +5680,7 @@ def setup_scene(runtime_scene: dict | None = None):
         "simulate_physics_enabled": bool(physics_controls.get("simulate_physics", False)),
         "driver": str(physics_controls.get("simulation_driver") or "scripted_trajectory_replay_with_collision_shapes"),
         "controls": physics_controls,
-        "runtime_scene_adjustments": domino_runtime_adjustments,
+        "runtime_scene_adjustments": runtime_adjustments,
         "config_source": "ADP DefaultEngine.ini collision channels and physical surfaces mirrored into local_ue_render",
         "actors": [],
     }
@@ -6103,6 +6136,7 @@ def setup_scene(runtime_scene: dict | None = None):
         runtime_actors = {}
         runtime_visual_actors = {}
         runtime_actor_bounds = {}
+        runtime_pose_registrations = {}
         runtime_initial_transforms = {}
         support_surfaces = []
 
@@ -6303,6 +6337,17 @@ def setup_scene(runtime_scene: dict | None = None):
             )
             runtime_actors[obj["id"]] = actor
             origin, extent = normalize_runtime_actor(actor, obj)
+            desired_position = ue_vec_from_meters(
+                obj.get("initial_position_m", [0.0, 0.0, 0.0]),
+                z_offset_cm=0.0,
+                origin=scene_origin,
+            )
+            origin, extent = align_runtime_actor_to_pose_anchor(
+                actor,
+                obj,
+                desired_position,
+                runtime_pose_registrations,
+            )
             origin, extent = maybe_fit_support_to_dynamic_plan(obj, actor, origin, extent)
             if is_runtime_support_surface(obj):
                 origin, extent = align_runtime_support_top(obj, actor, origin, extent)
@@ -6348,6 +6393,13 @@ def setup_scene(runtime_scene: dict | None = None):
                 origin, extent = actor_bounds(actor)
                 runtime_actor_bounds[obj["id"]] = {"origin": [origin.x, origin.y, origin.z], "extent": [extent.x, extent.y, extent.z]}
             origin, extent = maybe_align_dynamic_to_support(obj, actor, origin, extent)
+            desired_position = actor.get_actor_location()
+            origin, extent = align_runtime_actor_to_pose_anchor(
+                actor,
+                obj,
+                desired_position,
+                runtime_pose_registrations,
+            )
             runtime_actor_bounds[obj["id"]] = {"origin": [origin.x, origin.y, origin.z], "extent": [extent.x, extent.y, extent.z]}
             # Capture the planned pose before Chaos is enabled. Scene setup and
             # viewport warmup can otherwise advance a free body before frame 0.
@@ -6428,6 +6480,7 @@ def setup_scene(runtime_scene: dict | None = None):
             "asset_indexes": find_asset_indexes(ASSET_ROOT),
             "spawned_assets": spawned_assets,
             "runtime_actor_bounds": runtime_actor_bounds,
+            "runtime_pose_registrations": runtime_pose_registrations,
             "runtime_ground_offsets": runtime_ground_offsets,
             "runtime_initial_transforms": runtime_initial_transforms,
             "chaos_runtime": chaos_runtime,
@@ -7427,11 +7480,22 @@ def apply_trajectory_frame(actors: dict, dynamic_ids: list[str], frame: dict, sc
             apply_gasp_locomotion_frame(actors, obj_by_id.get(oid) or {}, frame)
             continue
         sweep_movement = params.get("sweep_movement") is True
-        actors[oid].set_actor_location(ue_vec_from_meters(frame_obj["position"], z_offset_cm=z_offset_cm, origin=scene_origin), sweep_movement, False)
+        desired_position = ue_vec_from_meters(
+            frame_obj["position"],
+            z_offset_cm=z_offset_cm,
+            origin=scene_origin,
+        )
+        actors[oid].set_actor_location(desired_position, sweep_movement, False)
         if runtime_scene:
             rot = frame_obj.get("rotation_degrees") or [0.0, 0.0, 0.0]
             combined_rot = runtime_combined_rotation(obj_by_id.get(oid, {}), rot)
             actors[oid].set_actor_rotation(runtime_rotator(combined_rot), False)
+            align_runtime_actor_to_pose_anchor(
+                actors[oid],
+                obj_by_id.get(oid, {}),
+                desired_position,
+                actors.get("runtime_pose_registrations"),
+            )
     update_elastic_tether_visual(actors, frame, scene_origin, runtime_scene)
 
 
@@ -9210,6 +9274,7 @@ def start_highres_viewport_capture(
         "visible_map_actors": actors.get("visible_map_actors", {}),
         "spawned_assets": actors.get("spawned_assets", []),
         "runtime_actor_bounds": actors.get("runtime_actor_bounds", {}),
+        "runtime_pose_registrations": actors.get("runtime_pose_registrations", {}),
         "runtime_ground_offsets": actors.get("runtime_ground_offsets", {}),
         "runtime_initial_transforms": actors.get("runtime_initial_transforms", {}),
         "chaos_runtime": actors.get("chaos_runtime", {}),
@@ -9705,14 +9770,15 @@ def main():
     frames_dir.mkdir(exist_ok=True)
     write_progress_marker("main_start", str(OUTPUT_DIR))
     runtime_scene = STUDIO_RUNTIME_SCENE if STUDIO_RUNTIME_SCENE and not STUDIO_RUNTIME_SCENE.get("load_error") else None
-    if runtime_scene:
-        scene_spec = runtime_scene
-        trajectory = simulate_runtime_scene(runtime_scene)
-        validation = validate_runtime_scene(runtime_scene, trajectory)
-    else:
-        scene_spec = build_scene_spec(DURATION, FPS)
-        trajectory = simulate(scene_spec)
-        validation = validate(scene_spec, trajectory)
+    if not runtime_scene:
+        raise RuntimeError("a compiled llm_object_graph runtime scene is required")
+    if runtime_scene.get("case_type") != "llm_object_graph":
+        raise RuntimeError(
+            "named physical-process scene modes are disabled; compile objects, constraints, forces and assertions into llm_object_graph"
+        )
+    scene_spec = runtime_scene
+    trajectory = simulate_runtime_scene(runtime_scene)
+    validation = validate_runtime_scene(runtime_scene, trajectory)
     (OUTPUT_DIR / "scene_spec.json").write_text(json.dumps(scene_spec, indent=2), encoding="utf-8")
     (OUTPUT_DIR / "trajectory.json").write_text(json.dumps(trajectory, indent=2), encoding="utf-8")
     (OUTPUT_DIR / "validation.json").write_text(json.dumps(validation, indent=2), encoding="utf-8")
@@ -9936,6 +10002,7 @@ def main():
         "visible_map_actors": actors.get("visible_map_actors", {}),
         "spawned_assets": actors.get("spawned_assets", []),
         "runtime_actor_bounds": actors.get("runtime_actor_bounds", {}),
+        "runtime_pose_registrations": actors.get("runtime_pose_registrations", {}),
         "runtime_ground_offsets": actors.get("runtime_ground_offsets", {}),
         "runtime_initial_transforms": actors.get("runtime_initial_transforms", {}),
         "chaos_runtime": actors.get("chaos_runtime", {}),

@@ -19,7 +19,9 @@ def compile_rigid_sph_scene(case_spec: dict[str, Any]) -> dict[str, Any]:
     fluids = [item for item in objects if item.get("role") in {"fluid", "fluid_volume"}]
     if len(fluids) != 1:
         raise ValueError("rigid_sph scene currently requires exactly one fluid")
-    fluid = compile_fluid(fluids[0], body_by_id)
+    options = case_spec.get("backend_options") if isinstance(case_spec.get("backend_options"), dict) else {}
+    particle_size_m = positive(options.get("particle_size_m", 0.006), "backend_options.particle_size_m")
+    fluid = compile_fluid(fluids[0], body_by_id, particle_radius_m=particle_size_m / 2.0)
     workspace = case_spec.get("workspace_bounds_m")
     if not isinstance(workspace, dict):
         raise ValueError("rigid_sph scene requires workspace_bounds_m")
@@ -59,10 +61,17 @@ def compile_rigid_body(body: dict[str, Any]) -> dict[str, Any]:
     if mobility not in {"static", "kinematic"}:
         raise ValueError("rigid_body solver.mobility must be static or kinematic")
     transform_raw = solver.get("transform") if isinstance(solver.get("transform"), dict) else {}
+    solver_rotation = vec3(transform_raw.get("euler_xyz_deg"), "rigid_body transform.euler_xyz_deg")
+    declared_ue_rotation = vec3(
+        transform_raw.get("ue_rotation_pyr_deg"),
+        "rigid_body transform.ue_rotation_pyr_deg",
+    )
+    ue_rotation = ue_rotation_pyr_from_solver_xyz(solver_rotation)
+    require_matching_ue_rotation(declared_ue_rotation, ue_rotation, "rigid_body transform")
     transform = {
         "position_m": vec3(transform_raw.get("position_m"), "rigid_body transform.position_m"),
-        "euler_xyz_deg": vec3(transform_raw.get("euler_xyz_deg"), "rigid_body transform.euler_xyz_deg"),
-        "ue_rotation_pyr_deg": vec3(transform_raw.get("ue_rotation_pyr_deg"), "rigid_body transform.ue_rotation_pyr_deg"),
+        "euler_xyz_deg": solver_rotation,
+        "ue_rotation_pyr_deg": ue_rotation,
         "scale": vec3(transform_raw.get("scale", [1.0, 1.0, 1.0]), "rigid_body transform.scale"),
     }
     if any(value <= 0.0 for value in transform["scale"]):
@@ -105,6 +114,9 @@ def compile_collision(collision: dict[str, Any], transform: dict[str, Any]) -> d
         raise ValueError(f"unsupported rigid_sph collision type: {collision_type}")
     if collision.get("asset_geometry_match") is not True:
         raise ValueError("axisymmetric_profile must be explicitly fitted to the render asset")
+    fit_method = str(collision.get("fit_method") or "").strip()
+    if not fit_method:
+        raise ValueError("axisymmetric_profile requires a non-empty fit_method identifying its geometry evidence")
     panel_count = int(collision.get("panel_count") or 0)
     if panel_count < 12:
         raise ValueError("axisymmetric_profile requires at least 12 wall panels")
@@ -127,7 +139,7 @@ def compile_collision(collision: dict[str, Any], transform: dict[str, Any]) -> d
     return {
         "type": "axisymmetric_profile",
         "asset_geometry_match": True,
-        "fit_method": str(collision.get("fit_method") or ""),
+        "fit_method": fit_method,
         "inner_bottom_radius_m": bottom_radius,
         "inner_rim_radius_m": rim_radius,
         "inner_bottom_z_m": bottom_z,
@@ -144,15 +156,19 @@ def compile_motion(value: Any, transform: dict[str, Any], mobility: str) -> dict
         return None
     if mobility != "kinematic" or not isinstance(value, dict) or value.get("type") != "pivot_rotation":
         raise ValueError("rigid_body motion must be pivot_rotation on a kinematic body")
+    solver_end_rotation = vec3(value.get("solver_end_rotation_xyz_deg"), "motion solver end rotation")
+    declared_ue_end_rotation = vec3(value.get("ue_end_rotation_pyr_deg"), "motion UE end rotation")
+    ue_end_rotation = ue_rotation_pyr_from_solver_xyz(solver_end_rotation)
+    require_matching_ue_rotation(declared_ue_end_rotation, ue_end_rotation, "motion end rotation")
     motion = {
         "type": "pivot_rotation",
         "start_time_s": finite(value.get("start_time_s"), "motion start_time_s"),
         "duration_s": positive(value.get("duration_s"), "motion duration_s"),
         "pivot_local_m": vec3(value.get("pivot_local_m"), "motion pivot_local_m"),
         "solver_start_rotation_xyz_deg": list(transform["euler_xyz_deg"]),
-        "solver_end_rotation_xyz_deg": vec3(value.get("solver_end_rotation_xyz_deg"), "motion solver end rotation"),
+        "solver_end_rotation_xyz_deg": solver_end_rotation,
         "ue_start_rotation_pyr_deg": list(transform["ue_rotation_pyr_deg"]),
-        "ue_end_rotation_pyr_deg": vec3(value.get("ue_end_rotation_pyr_deg"), "motion UE end rotation"),
+        "ue_end_rotation_pyr_deg": ue_end_rotation,
     }
     motion["pivot_world_m"] = add(
         transform["position_m"],
@@ -161,38 +177,109 @@ def compile_motion(value: Any, transform: dict[str, Any], mobility: str) -> dict
     return motion
 
 
-def compile_fluid(fluid: dict[str, Any], bodies: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def compile_fluid(
+    fluid: dict[str, Any],
+    bodies: dict[str, dict[str, Any]],
+    *,
+    particle_radius_m: float,
+) -> dict[str, Any]:
     solver = fluid.get("solver") if isinstance(fluid.get("solver"), dict) else {}
     initial = solver.get("initial_volume") if isinstance(solver.get("initial_volume"), dict) else {}
     if solver.get("material_model") != "sph_liquid" or initial.get("shape") != "cylinder":
         raise ValueError("rigid_sph currently supports sph_liquid with a cylindrical initial_volume")
     frame = initial.get("frame") if isinstance(initial.get("frame"), dict) else {}
     frame_type = str(frame.get("type") or "")
-    rotation = rotation_matrix_xyz(vec3(initial.get("euler_xyz_deg", [0.0, 0.0, 0.0]), "fluid initial euler"))
+    local_position = vec3(initial.get("position_m"), "fluid initial position")
+    local_rotation = rotation_matrix_xyz(
+        vec3(initial.get("euler_xyz_deg", [0.0, 0.0, 0.0]), "fluid initial euler")
+    )
+    rotation = local_rotation
+    radius_m = positive(initial.get("radius_m"), "fluid radius_m")
+    height_m = positive(initial.get("height_m"), "fluid height_m")
     if frame_type == "body_local":
         body_id = str(frame.get("body_id") or "")
         if body_id not in bodies:
             raise ValueError(f"fluid initial frame references unknown rigid_body: {body_id}")
         body = bodies[body_id]
         body_rotation = rotation_matrix_xyz(body["transform"]["euler_xyz_deg"])
-        world_position = add(body["transform"]["position_m"], matrix_vector(body_rotation, vec3(initial.get("position_m"), "fluid local position")))
+        world_position = add(body["transform"]["position_m"], matrix_vector(body_rotation, local_position))
         rotation = matrix_multiply(body_rotation, rotation)
+        if body["collision"]["type"] == "axisymmetric_profile":
+            require_initial_cylinder_clearance(
+                local_position,
+                local_rotation,
+                radius_m,
+                height_m,
+                body["collision"]["inner_profile"],
+                particle_radius_m,
+            )
     elif frame_type == "world":
         body_id = None
-        world_position = vec3(initial.get("position_m"), "fluid world position")
+        world_position = local_position
     else:
         raise ValueError("fluid initial_volume.frame.type must be body_local or world")
     return {
         "id": str(fluid.get("id") or "fluid"),
         "material_model": "sph_liquid",
         "shape": "cylinder",
-        "radius_m": positive(initial.get("radius_m"), "fluid radius_m"),
-        "height_m": positive(initial.get("height_m"), "fluid height_m"),
+        "radius_m": radius_m,
+        "height_m": height_m,
         "frame": {"type": frame_type, "body_id": body_id},
         "world_position_m": world_position,
         "world_quaternion_wxyz": quaternion_from_matrix(rotation),
         "initial_velocity_m_s": [0.0, 0.0, 0.0],
     }
+
+
+def ue_rotation_pyr_from_solver_xyz(euler_xyz_deg: list[float]) -> list[float]:
+    """Map Genesis RH XYZ Euler components to UE Rotator pitch/yaw/roll."""
+    x_deg, y_deg, z_deg = [float(value) for value in euler_xyz_deg]
+    return [-y_deg, -z_deg, x_deg]
+
+
+def require_matching_ue_rotation(declared: list[float], expected: list[float], label: str) -> None:
+    if any(abs(angle_delta_deg(actual, target)) > 1e-6 for actual, target in zip(declared, expected, strict=True)):
+        raise ValueError(f"{label} UE rotation must equal [-solver_y, -solver_z, solver_x]")
+
+
+def angle_delta_deg(left: float, right: float) -> float:
+    return (float(left) - float(right) + 180.0) % 360.0 - 180.0
+
+
+def require_initial_cylinder_clearance(
+    center_local_m: list[float],
+    rotation: list[list[float]],
+    radius_m: float,
+    height_m: float,
+    profile: list[dict[str, float]],
+    clearance_m: float,
+) -> None:
+    axis = matrix_vector(rotation, [0.0, 0.0, 1.0])
+    radial_axis = math.hypot(axis[0], axis[1])
+    half_height = height_m / 2.0
+    radial_extent = math.hypot(center_local_m[0], center_local_m[1]) + radius_m + half_height * radial_axis
+    vertical_extent = half_height * abs(axis[2]) + radius_m * radial_axis
+    minimum_z = center_local_m[2] - vertical_extent
+    maximum_z = center_local_m[2] + vertical_extent
+    bottom_z = float(profile[0]["z_m"])
+    rim_z = float(profile[-1]["z_m"])
+    if minimum_z < bottom_z + clearance_m or maximum_z > rim_z - clearance_m:
+        raise ValueError("body-local fluid cylinder must clear the container bottom and rim by at least one particle radius")
+    candidate_z = [minimum_z, maximum_z]
+    candidate_z.extend(float(point["z_m"]) for point in profile if minimum_z < float(point["z_m"]) < maximum_z)
+    minimum_radius = min(profile_radius_at(profile, z_m) for z_m in candidate_z)
+    if radial_extent > minimum_radius - clearance_m:
+        raise ValueError("body-local fluid cylinder must clear the container wall by at least one particle radius")
+
+
+def profile_radius_at(profile: list[dict[str, float]], z_m: float) -> float:
+    for lower, upper in zip(profile, profile[1:]):
+        lower_z = float(lower["z_m"])
+        upper_z = float(upper["z_m"])
+        if lower_z <= z_m <= upper_z:
+            fraction = (z_m - lower_z) / (upper_z - lower_z)
+            return float(lower["radius_m"]) + fraction * (float(upper["radius_m"]) - float(lower["radius_m"]))
+    raise ValueError("fluid cylinder vertical bounds lie outside the container profile")
 
 
 def compile_measurements(value: Any, bodies: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:

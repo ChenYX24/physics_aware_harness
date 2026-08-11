@@ -12,13 +12,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from harness.core.case_spec import CaseSpec, load_case_spec_document, validate_case_spec
+from harness.core.case_spec import load_case_spec_document
 from harness.core.case_spec_v2 import CaseSpecV2
 from harness.core.artifact_schema import write_json
 from harness.core.artifact_manager import ArtifactManager
 from harness.core.case_library import build_run_control_execution, write_run_control_page
 from harness.core.workspace import WORKSPACE_ENV, case_output_root, workspace_path, workspace_root
-from harness.planning.prompt_to_case import prompt_to_case
 from harness.planning.case_generation import build_case_request, generate_case_spec_v2
 from harness.assets.providers.input_manifest import ProviderInputError, build_provider_input_manifest
 from harness.assets.providers.contracts import ProviderRequest
@@ -26,7 +25,7 @@ from harness.assets.providers.orchestrator import AssetProviderOrchestrator
 from harness.assets.providers.remote import MeshyModelGenerationAdapter, PolyHavenExternalSiteAdapter
 from harness.planning.runtime_compiler import compile_runtime_case
 from harness.runtime.fallback_backend import FallbackBackend
-from harness.runtime.genesis_sph_backend import GenesisSPHBackend
+from harness.runtime.genesis_sph_backend import GenesisSPHBackend, run_ue_surface_replay
 from harness.runtime.genesis_fem_backend import GenesisFEMBackend
 from harness.runtime.taichi_cloth_backend import TaichiClothBackend
 from harness.runtime.execution_profile import EXECUTION_PROFILES, execution_profile, verified_run_status, write_execution_reports
@@ -47,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--case-spec-version",
         choices=["v1", "v2"],
-        default="v1",
+        default="v2",
         help="Prompt compilation version. File inputs dispatch from schema_version; prompt input remains V1 by default.",
     )
     parser.add_argument(
@@ -75,7 +74,6 @@ def parse_args() -> argparse.Namespace:
     outputs.add_argument("--case-route", help="Canonical physics/scenario/vNNN_description route under workspace/cases.")
     parser.add_argument(
         "--video-root",
-        default="review/probes",
         help="Unvalidated one-off previews; defaults to review/probes. Use harness_iterate_case.py to publish a hard-gate winner to review/inbox.",
     )
     parser.add_argument(
@@ -98,7 +96,6 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    os.environ.setdefault(WORKSPACE_ENV, str(workspace_root()))
     case_path = args.case_spec_flag or args.case_spec
     has_generation_input = bool(args.prompt or args.image)
     if bool(case_path) == has_generation_input:
@@ -108,6 +105,13 @@ def main() -> int:
     if args.resume_meshy_request and (has_generation_input or not args.provider_input_manifest):
         raise SystemExit("--resume-meshy-request requires a saved CaseSpec file and --provider-input-manifest")
     output_root = case_output_root(args.case_route) if args.case_route else workspace_path(args.output_root, default_relative="runs/harness_cases")
+    video_root = (
+        workspace_path(args.video_root, default_relative="review/probes")
+        if args.video_root
+        else output_root / "review" / "probes"
+        if args.output_root and Path(args.output_root).expanduser().is_absolute() and WORKSPACE_ENV not in os.environ
+        else workspace_path(None, default_relative="review/probes")
+    )
     profile = execution_profile(args.profile) if args.profile else None
     if bool(args.width) != bool(args.height):
         raise SystemExit("--width and --height must be provided together")
@@ -125,11 +129,9 @@ def main() -> int:
     provider_input_manifest = None
     if has_generation_input:
         if args.case_spec_version == "v1":
-            if args.image:
-                raise SystemExit("--image requires --case-spec-version v2")
-            generated = prompt_to_case(args.prompt, case_id=args.case_id)
-            validate_case_spec(generated)
-            source_case: CaseSpec | CaseSpecV2 = CaseSpec(generated)
+            raise SystemExit(
+                "natural-language V1 template classification has been removed; use --case-spec-version v2 or provide a saved V1 CaseSpec"
+            )
         else:
             request = build_case_request(
                 case_id=args.case_id,
@@ -282,6 +284,19 @@ def main() -> int:
         if selected_backend == "ue":
             run_kwargs["complete_sensor_contract"] = profile.complete_sensor_contract if profile else False
         run_dir = backend.run_case(case, output_root, **run_kwargs)
+        backend_selection = compilation.backend_selection
+        if (
+            backend_selection.get("solver_backend") == "genesis_sph"
+            and backend_selection.get("render_backend") == "ue"
+        ):
+            replay_profile = profile.name if profile else "smoke"
+            run_ue_surface_replay(
+                run_dir,
+                profile=replay_profile,
+                requested_views=requested_views,
+                width=width,
+                height=height,
+            )
     except UEBackendUnavailable as exc:
         write_run_control_page(
             exc.run_dir,
@@ -300,7 +315,7 @@ def main() -> int:
         real_ue_invoked = bool(exc.report.get("whether_real_ue_invoked"))
         videos = (
             ArtifactManager(exc.run_dir).publish_videos(
-                workspace_path(args.video_root, default_relative="review/probes"),
+                video_root,
                 case_id=case.case_id,
                 backend=selected_backend,
             )
@@ -357,8 +372,14 @@ def main() -> int:
         reproduce_command=reproduce_command,
         status="completed" if verification_status == "pass" else "failed",
     )
-    videos = ArtifactManager(run_dir).publish_videos(workspace_path(args.video_root, default_relative="review/probes"), case_id=case.case_id, backend=selected_backend)
-    print(json.dumps({"schema_version": "harness_run_case_result_v1", "run_dir": str(run_dir), "case_id": case.case_id, "backend": selected_backend, "status": result_status, "verification_status": verification_status, "profile": profile.name if profile else "custom", "run_control": str(run_dir / "run_control.html"), "videos": [str(path) for path in videos]}, indent=2, ensure_ascii=False))
+    render_manifest_path = Path(run_dir) / "render_manifest.json"
+    render_manifest = json.loads(render_manifest_path.read_text(encoding="utf-8")) if render_manifest_path.is_file() else {}
+    videos = (
+        []
+        if render_manifest.get("render_kind") == "solver_surface_preview" and render_manifest.get("ue_render_real") is False
+        else ArtifactManager(run_dir).publish_videos(video_root, case_id=case.case_id, backend=selected_backend)
+    )
+    print(json.dumps({"schema_version": "harness_run_case_result_v1", "run_dir": str(run_dir), "case_id": case.case_id, "backend": selected_backend, "render_backend": compilation.backend_selection.get("render_backend"), "status": result_status, "verification_status": verification_status, "profile": profile.name if profile else "custom", "run_control": str(Path(run_dir) / "run_control.html"), "videos": [str(path) for path in videos]}, indent=2, ensure_ascii=False))
     return 0 if verification_status == "pass" else 2
 
 

@@ -12,6 +12,21 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class FluidBatchVerifierTests(unittest.TestCase):
+    def test_rigid_replay_camera_bounds_come_from_declared_workspace(self) -> None:
+        from scripts.harness_render_fluid_ue import replay_scene_bounds
+
+        bounds = replay_scene_bounds(
+            {"workspace_bounds_m": {"min_m": [-0.8, -0.4, -0.1], "max_m": [0.6, 0.4, 0.9]}},
+            render_z_offset_m=-0.05,
+        )
+
+        for actual, expected in zip(bounds["center"], [-0.1, 0.0, 0.35], strict=True):
+            self.assertAlmostEqual(actual, expected)
+        for actual, expected in zip(bounds["extent"], [0.7, 0.4, 0.5], strict=True):
+            self.assertAlmostEqual(actual, expected)
+        with self.assertRaisesRegex(ValueError, "workspace_bounds_m"):
+            replay_scene_bounds({}, render_z_offset_m=0.0)
+
     def test_fluid_capability_preserves_unified_solver_to_ue_contract(self) -> None:
         capability = json.loads((ROOT / "capabilities" / "fluid_particle_dynamics.json").read_text(encoding="utf-8"))
 
@@ -74,7 +89,7 @@ class FluidBatchVerifierTests(unittest.TestCase):
         from scripts.harness_render_fluid_ue import fluid_visual_parameters
 
         renderer = (ROOT / "scripts" / "harness_render_fluid_ue.py").read_text(encoding="utf-8")
-        native = (ROOT / "scripts" / "native_ue_physics_phenomena_scene.py").read_text(encoding="utf-8")
+        native = (ROOT / "scripts" / "native_ue_scene.py").read_text(encoding="utf-8")
 
         self.assertEqual(fluid_visual_parameters({"case_id": "water", "objects": []})["color_rgb"], [0.03, 0.30, 0.78])
         self.assertIn('"generated_material_name": fluid_visual["generated_material_name"]', renderer)
@@ -173,6 +188,7 @@ class FluidBatchVerifierTests(unittest.TestCase):
         from scripts.harness_render_fluid_ue import (
             rigid_body_asset_resolution_entries,
             rigid_body_runtime_objects,
+            runtime_pose_registration_report,
         )
 
         bodies = [
@@ -201,6 +217,8 @@ class FluidBatchVerifierTests(unittest.TestCase):
         self.assertEqual(dynamic[0]["ue5_path"], bodies[0]["asset"]["ue_path"])
         self.assertEqual(static[0]["ue5_path"], bodies[1]["asset"]["ue_path"])
         self.assertEqual(dynamic[0]["params"]["base_rotation_degrees"], [0.0, 0.0, 0.0])
+        self.assertEqual(dynamic[0]["params"]["pose_anchor"], "bounds_center")
+        self.assertEqual(static[0]["params"]["pose_anchor"], "bounds_center")
         self.assertEqual(static[0]["scale"], [2.0, 1.0, 0.5])
         self.assertEqual(static[0]["initial_position_m"], [0.02, 0.0, 0.0])
         self.assertTrue(dynamic[0]["params"]["asset_geometry_match"])
@@ -210,6 +228,21 @@ class FluidBatchVerifierTests(unittest.TestCase):
         del bodies[0]["transform"]["ue_rotation_pyr_deg"]
         with self.assertRaisesRegex(ValueError, "missing an explicit UE transform"):
             rigid_body_runtime_objects(cache, render_z_offset_m=0.0)
+
+        registration = runtime_pose_registration_report(
+            {
+                "runtime_pose_registrations": {
+                    "moving_body": {"anchor": "bounds_center", "max_residual_cm": 0.001},
+                    "static_body": {"anchor": "bounds_center", "max_residual_cm": 0.0},
+                }
+            },
+            ["moving_body", "static_body"],
+        )
+        self.assertEqual(registration["status"], "pass")
+
+        missing_registration = runtime_pose_registration_report({}, ["moving_body"])
+        self.assertEqual(missing_registration["status"], "fail")
+        self.assertEqual(missing_registration["failures"][0]["code"], "pose_registration_missing")
 
 
 def particle_cache() -> dict:

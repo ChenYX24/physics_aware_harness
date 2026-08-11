@@ -11,12 +11,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from harness.assets.asset_registry import AssetRegistry
+from harness.assets.asset_intent_compiler import compile_v2_asset_intents
 from harness.assets.asset_resolver import resolve_asset_intents
 from harness.assets.sqlite_catalog import initialize_catalog
 from harness.core.artifact_schema import read_json
-from harness.core.case_spec_v2 import case_spec_v2_from_dict, project_case_spec_v2_to_v1
+from harness.core.case_spec_v2 import CaseSpecV2, case_spec_v2_from_dict, project_case_spec_v2_to_v1
 from harness.planning.backend_planner import BackendPlanningError, plan_backend
-from harness.planning.runtime_compiler import compile_runtime_case
+from harness.planning.runtime_compiler import bind_resolved_solver_assets, compile_runtime_case
 from harness.runtime.fallback_backend import FallbackBackend
 from harness.runtime.ue_backend import UEBackend, UEBackendUnavailable, empty_preflight
 from harness.verification.runtime_actor_placement_verifier import verify_runtime_actor_placement
@@ -27,6 +28,135 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RuntimeCompilerV2Tests(unittest.TestCase):
+    def test_asset_intents_only_include_asset_visual_representations(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["visual_representation"] = {"source": "solver_generated"}
+        data["objects"][0]["solver"] = {"output": "renderable_geometry"}
+        data["objects"][1]["visual_representation"] = {"source": "none"}
+        data["objects"][2]["visual_representation"] = {"source": "asset"}
+        data["objects"][2]["asset"] = {
+            "description": "visible floor asset",
+            "resource_kind": "mesh_3d",
+            "acquisition": {"route": "default", "requirement": "preferred", "origin": "system_default"},
+        }
+        source = case_spec_v2_from_dict(data)
+        runtime = project_case_spec_v2_to_v1(source)
+
+        intents = compile_v2_asset_intents(source, runtime.data, target_backend="unreal")
+
+        self.assertEqual([intent.object_id for intent in intents], ["floor"])
+
+    def test_rigid_sph_solver_targets_ue_replay_asset_bindings(self) -> None:
+        plan = plan_backend(
+            {
+                "capability_id": "fluid_particle_dynamics",
+                "solver_scene": {"type": "rigid_sph"},
+                "objects": [{"id": "water", "role": "fluid"}],
+            },
+            requested_backend="genesis_sph",
+        )
+
+        self.assertEqual(plan["selected_backend"], "genesis_sph")
+        self.assertEqual(plan["render_backend"], "ue")
+        self.assertTrue(plan["execution_supported"])
+        self.assertEqual(plan["target_asset_backend"], "unreal")
+
+    def test_registered_genesis_to_ue_stage_pair_is_executable(self) -> None:
+        source = CaseSpecV2(
+            {
+                "backend_constraints": {
+                    "allowed_solvers": ["genesis_sph"],
+                    "required_solver_capabilities": ["particle_dynamics", "surface_mesh_cache"],
+                    "render_backend": "ue",
+                    "allow_multi_backend": True,
+                },
+                "capabilities": {
+                    "primary": "fluid_particle_dynamics",
+                    "required": ["fluid_particle_dynamics"],
+                },
+            }
+        )
+        plan = plan_backend(
+            {
+                "capability_id": "fluid_particle_dynamics",
+                "solver_scene": {"type": "rigid_sph"},
+                "objects": [{"id": "water", "role": "fluid"}],
+            },
+            source_case_spec=source,
+            requested_backend="genesis_sph",
+        )
+
+        self.assertTrue(plan["multi_backend"])
+        self.assertTrue(plan["execution_supported"])
+        self.assertIsNone(plan["execution_blocker"])
+        self.assertEqual([stage["id"] for stage in plan["stages"]], ["solve", "render"])
+
+    def test_resolved_catalog_asset_is_bound_before_solver_contract_validation(self) -> None:
+        case = {
+            "solver_scene": {
+                "type": "rigid_sph",
+                "measurements": [{"id": "span", "type": "axis_span", "axes": ["x"]}],
+                "assertions": [
+                    {"id": "span", "measurement_id": "span", "reduction": "final", "operator": ">=", "value": 0.01}
+                ],
+            },
+            "workspace_bounds_m": {"min_m": [-1.0, -1.0, -0.1], "max_m": [1.0, 1.0, 1.0]},
+            "objects": [
+                {
+                    "id": "water",
+                    "role": "fluid",
+                    "solver": {
+                        "material_model": "sph_liquid",
+                        "initial_volume": {
+                            "shape": "cylinder",
+                            "frame": {"type": "world"},
+                            "position_m": [0.0, 0.0, 0.1],
+                            "radius_m": 0.03,
+                            "height_m": 0.06,
+                        },
+                    },
+                },
+                {
+                    "id": "table",
+                    "role": "rigid_body",
+                    "solver": {
+                        "mobility": "static",
+                        "transform": {
+                            "position_m": [0.0, 0.0, -0.025],
+                            "euler_xyz_deg": [0.0, 0.0, 0.0],
+                            "ue_rotation_pyr_deg": [0.0, 0.0, 0.0],
+                        },
+                        "collision": {
+                            "type": "plane",
+                            "position_m": [0.0, 0.0, 0.0],
+                            "normal": [0.0, 0.0, 1.0],
+                            "asset_geometry_match": True,
+                        },
+                    },
+                },
+            ],
+        }
+        resolution = {
+            "assets": [
+                {
+                    "intent": {"object_id": "table"},
+                    "selected_asset": {
+                        "ue_path": "/Game/Generated/Table.Table",
+                        "sha256": "a" * 64,
+                        "bbox_size_m": [1.0, 1.0, 0.05],
+                        "source_kind": "procedural_generation",
+                        "proxy": False,
+                    },
+                }
+            ]
+        }
+
+        error = bind_resolved_solver_assets(case, resolution)
+
+        self.assertIsNone(error)
+        self.assertEqual(case["objects"][1]["asset"]["ue_path"], "/Game/Generated/Table.Table")
+        self.assertFalse(case["objects"][1]["asset"]["proxy"])
+
     def registry(self) -> AssetRegistry:
         return AssetRegistry(ROOT / "assets" / "asset_registry.example.json")
 
@@ -86,7 +216,7 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
         self.assertEqual(compilation.artifacts["runtime_plan"]["backend_selection"]["selected_backend"], "fallback")
         self.assertEqual(
             compilation.artifacts["runtime_plan"]["backend_selection"]["required_case_capabilities"],
-            ["rigid_body_contact_causality"],
+            ["rigid_body_dynamics"],
         )
         self.assertTrue(
             {"rigid_body", "contact_events"}.issubset(
@@ -170,14 +300,16 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
     def test_non_ue_solver_remains_single_backend_unless_renderer_is_explicit(self) -> None:
         data = case_spec_v2_fixture()
         data["capabilities"] = {
-            "primary": "soft_body_deformation",
-            "required": ["soft_body_deformation"],
+            "primary": "deformable_body_dynamics",
+            "required": ["deformable_body_dynamics"],
         }
+        data["objects"][0]["role"] = "deformable mesh"
+        data["objects"][0]["physics"]["material_model"] = "fem"
         data["backend_constraints"]["required_solver_capabilities"] = ["soft_body", "mesh_cache"]
         case = case_spec_v2_from_dict(data)
 
         standalone = plan_backend(
-            {"capability_id": "soft_body_deformation"},
+            project_case_spec_v2_to_v1(case).data,
             source_case_spec=case,
             requested_backend="genesis_fem",
         )
@@ -188,7 +320,7 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
         data["backend_constraints"]["render_backend"] = "ue"
         staged_case = case_spec_v2_from_dict(data)
         staged = plan_backend(
-            {"capability_id": "soft_body_deformation"},
+            project_case_spec_v2_to_v1(staged_case).data,
             source_case_spec=staged_case,
             requested_backend="genesis_fem",
         )
@@ -368,12 +500,14 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
                 capture_output=True,
                 check=False,
             )
-            self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+            self.assertEqual(completed.returncode, 2, completed.stderr or completed.stdout)
             run_dir = output_root / "v2_ball_contact_fallback"
             self.assertTrue((run_dir / "case_spec_v2.json").is_file())
             self.assertTrue((run_dir / "observation_plan.json").is_file())
             self.assertTrue((run_dir / "verification_plan.json").is_file())
             self.assertTrue((run_dir / "runtime_plan.json").is_file())
+            report = json.loads((run_dir / "harness_verifier.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "fail")
 
 
 if __name__ == "__main__":

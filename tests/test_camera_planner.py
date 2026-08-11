@@ -49,7 +49,7 @@ class CameraPlannerTests(unittest.TestCase):
         self.assertEqual(len(plan.views), 4)
         self.assertEqual(plan.scene_bounds.center, (1.0, 1.0, 0.5))
 
-    def test_billiards_uses_a_tighter_reference_framing(self) -> None:
+    def test_task_label_does_not_change_bounds_framing(self) -> None:
         case = {
             "task_type": "billiards_collision",
             "objects": [
@@ -60,7 +60,7 @@ class CameraPlannerTests(unittest.TestCase):
 
         plan = camera_plan_from_case_spec(case, requested_views=["front_static", "side_static"])
 
-        self.assertEqual(plan.views[0].fov, 52.0)
+        self.assertEqual(plan.views[0].fov, 60.0)
         self.assertGreater(plan.views[1].location[2], 0.8)
 
     def test_case_can_override_one_camera_without_changing_other_views(self) -> None:

@@ -69,6 +69,24 @@ def _import_one(request: dict[str, Any]) -> dict[str, Any]:
             raise RuntimeError(f"imported object is not a StaticMesh: {object_path}")
         if int(asset.get_num_sections(0)) <= 0:
             raise RuntimeError(f"imported StaticMesh has no LOD0 render sections: {object_path}")
+        initial_size_cm = _asset_size_cm(asset)
+        effective_import_uniform_scale = import_uniform_scale
+        corrected_scale = _corrected_fbx_import_scale(
+            source,
+            initial_size_cm,
+            request.get("expected_size_m"),
+            current_scale=import_uniform_scale,
+            source_kind=source_kind,
+        )
+        if corrected_scale is not None:
+            effective_import_uniform_scale = corrected_scale
+            options.static_mesh_import_data.import_uniform_scale = corrected_scale
+            unreal.AssetToolsHelpers.get_asset_tools().import_asset_tasks([task])
+            asset = unreal.load_asset(object_path)
+            if not asset or asset.get_class().get_name() != "StaticMesh":
+                raise RuntimeError(f"corrected FBX import is not a StaticMesh: {object_path}")
+            if int(asset.get_num_sections(0)) <= 0:
+                raise RuntimeError(f"corrected FBX import has no LOD0 render sections: {object_path}")
         actual_size_cm = _validate_dimensions(
             asset,
             request.get("expected_size_m"),
@@ -128,7 +146,10 @@ def _import_one(request: dict[str, Any]) -> dict[str, Any]:
                 "obj_meter_to_ue_centimeter_scale": 100.0,
                 "normalized_source_unit": "centimeter",
                 "source_format": source.suffix.lstrip(".").casefold(),
-                "import_uniform_scale": import_uniform_scale,
+                "import_uniform_scale": effective_import_uniform_scale,
+                "requested_import_uniform_scale": import_uniform_scale,
+                "effective_import_uniform_scale": effective_import_uniform_scale,
+                "scale_correction_applied": corrected_scale is not None,
                 "materials_imported": remote_asset,
                 "textures_imported": remote_asset,
             },
@@ -227,13 +248,43 @@ def _dimensions_match_source(
     return all(matches)
 
 
-def _validate_dimensions(asset: Any, expected_size_m: Any, *, source_kind: str = "") -> list[float]:
+def _asset_size_cm(asset: Any) -> list[float]:
     bounds = asset.get_bounding_box()
-    actual_size_cm = [
+    return [
         float(bounds.max.x - bounds.min.x),
         float(bounds.max.y - bounds.min.y),
         float(bounds.max.z - bounds.min.z),
     ]
+
+
+def _corrected_fbx_import_scale(
+    source: Path,
+    actual_size_cm: list[float],
+    expected_size_m: Any,
+    *,
+    current_scale: float,
+    source_kind: str,
+) -> float | None:
+    """Return one uniform FBX refit when the declared dimensions disagree."""
+    if source.suffix.casefold() != ".fbx" or expected_size_m is None:
+        return None
+    if not isinstance(expected_size_m, list) or len(expected_size_m) != 3:
+        raise RuntimeError("backend import request expected_size_m must contain three values when provided")
+    expected_size_cm = [float(value) * 100.0 for value in expected_size_m]
+    if _dimensions_match_source(actual_size_cm, expected_size_cm, source_kind=source_kind):
+        return None
+    if any(not math.isfinite(value) or value <= 0.0 for value in [*actual_size_cm, *expected_size_cm]):
+        raise RuntimeError("FBX scale correction requires finite positive bounds")
+    actual_diagonal = math.sqrt(sum(value * value for value in actual_size_cm))
+    expected_diagonal = math.sqrt(sum(value * value for value in expected_size_cm))
+    corrected = float(current_scale) * expected_diagonal / actual_diagonal
+    if not math.isfinite(corrected) or corrected <= 0.0:
+        raise RuntimeError("FBX scale correction produced an invalid import scale")
+    return corrected
+
+
+def _validate_dimensions(asset: Any, expected_size_m: Any, *, source_kind: str = "") -> list[float]:
+    actual_size_cm = _asset_size_cm(asset)
     if expected_size_m is None:
         if any(value <= 0 for value in actual_size_cm):
             raise RuntimeError(f"imported StaticMesh has degenerate bounds: {actual_size_cm}")

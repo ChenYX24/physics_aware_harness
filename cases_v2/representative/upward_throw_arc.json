@@ -6,9 +6,9 @@
     "source_request": "A rigid ball is thrown upward and forward. It rises to an apex, descends under gravity, and lands on the ground."
   },
   "capabilities": {
-    "primary": "projectile_gravity_motion",
+    "primary": "rigid_body_dynamics",
     "required": [
-      "projectile_gravity_motion"
+      "rigid_body_dynamics"
     ]
   },
   "scene": {
@@ -163,7 +163,8 @@
   "verification_requirements": {
     "assertions": [
       {
-        "type": "ballistic_gravity_impact",
+        "type": "event_exists",
+        "event": "contact",
         "objects": [
           "projectile",
           "ground"

@@ -28,12 +28,14 @@ class AssetRegistry:
         embedding_provider: EmbeddingProvider | None = None,
         retrieval_config_path: str | Path | None = None,
     ) -> None:
-        explicit = (
-            path
-            or os.environ.get("SIM_HARNESS_ASSET_CATALOG")
-        )
+        explicit = path or os.environ.get("SIM_HARNESS_ASSET_CATALOG")
         workspace_catalog = default_catalog_path()
-        configured = explicit or (workspace_catalog if workspace_catalog.is_file() else ROOT / "assets" / "asset_physics_index.json")
+        legacy_registry = os.environ.get("SIM_STUDIO_ASSET_REGISTRY")
+        configured = explicit or (
+            workspace_catalog
+            if workspace_catalog.is_file()
+            else legacy_registry or ROOT / "assets" / "asset_physics_index.json"
+        )
         self.path = Path(configured)
         self._sqlite = (
             SQLiteCatalog(

@@ -145,6 +145,7 @@ def compile_runtime_case(
         if source_v2
         else None,
     )
+    solver_contract_error = bind_resolved_solver_assets(runtime_case.data, asset_resolution)
     scene_layout = build_static_scene_layout(
         runtime_case.data,
         asset_resolution=asset_resolution,
@@ -187,6 +188,7 @@ def compile_runtime_case(
         actor_report,
         verification_plan,
         backend_selection,
+        solver_contract_error,
     )
     artifacts = {
         "asset_resolution": asset_resolution,
@@ -277,6 +279,58 @@ def _compile_runtime_plan(
     return plan
 
 
+def bind_resolved_solver_assets(
+    case_spec: dict[str, Any],
+    asset_resolution: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Bind Catalog-selected assets before validating explicit solver geometry."""
+    solver_scene = case_spec.get("solver_scene") if isinstance(case_spec.get("solver_scene"), dict) else None
+    if solver_scene is None:
+        return None
+    selected_by_object = {}
+    for row in asset_resolution.get("assets") or []:
+        if not isinstance(row, Mapping):
+            continue
+        intent = row.get("intent") if isinstance(row.get("intent"), Mapping) else {}
+        selected = row.get("selected_asset") if isinstance(row.get("selected_asset"), Mapping) else None
+        object_id = str(intent.get("object_id") or "")
+        if object_id and selected is not None:
+            selected_by_object[object_id] = selected
+    for obj in case_spec.get("objects") or []:
+        if not isinstance(obj, dict) or obj.get("role") != "rigid_body":
+            continue
+        selected = selected_by_object.get(str(obj.get("id") or ""))
+        if selected is None:
+            continue
+        unreal_binding = (
+            (selected.get("backend_bindings") or {}).get("unreal")
+            if isinstance(selected.get("backend_bindings"), Mapping)
+            else {}
+        )
+        unreal_binding = unreal_binding if isinstance(unreal_binding, Mapping) else {}
+        ue_path = str(selected.get("ue_path") or unreal_binding.get("object_path") or "")
+        bbox_m = selected.get("bbox_size_m") or selected.get("effective_size_m") or selected.get("authored_size_m")
+        obj["asset"] = {
+            "ue_path": ue_path,
+            "material_path": str(selected.get("material_path") or ""),
+            "sha256": str(selected.get("sha256") or ""),
+            "proxy": bool(selected.get("proxy", False)),
+            "catalog_source": str(selected.get("source_kind") or selected.get("source_uri") or "catalog"),
+            "bbox_m": copy.deepcopy(bbox_m),
+        }
+    try:
+        from harness.runtime.rigid_sph_scene import compile_rigid_sph_scene
+
+        compile_rigid_sph_scene(case_spec)
+    except (TypeError, ValueError) as exc:
+        return {
+            "stage": "solver_contract",
+            "code": "F3_invalid_solver_contract",
+            "message": str(exc),
+        }
+    return None
+
+
 def _compilation_errors(
     source_v2: CaseSpecV2 | None,
     asset_resolution: Mapping[str, Any],
@@ -284,8 +338,11 @@ def _compilation_errors(
     actor_report: Mapping[str, Any],
     verification_plan: Mapping[str, Any],
     backend_selection: Mapping[str, Any],
+    solver_contract_error: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     errors: list[dict[str, Any]] = []
+    if solver_contract_error is not None:
+        errors.append(dict(solver_contract_error))
     if source_v2:
         policy = source_v2.data.get("asset_policy") if isinstance(source_v2.data.get("asset_policy"), dict) else {}
         for row in asset_resolution.get("assets") or []:

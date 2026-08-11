@@ -33,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     outputs = parser.add_mutually_exclusive_group()
     outputs.add_argument("--output-root", help="Absolute path, or a path relative to the local harness workspace.")
     outputs.add_argument("--case-route", help="Canonical physics/scenario/vNNN_description route under workspace/cases.")
-    parser.add_argument("--video-root", default="review/probes", help="Batch previews default to review/probes; publish only a validated selection to review/inbox.")
+    parser.add_argument("--video-root", help="Batch previews default to review/probes; publish only a validated selection to review/inbox.")
     parser.add_argument("--timestamp", default="")
     parser.add_argument("--views", default="front_static")
     parser.add_argument("--render-passes", default="rgb")
@@ -150,8 +150,13 @@ def run_one_case(
         run_error = str(exc)
         render_sync = {}
 
-    expected_negative_caught = (not case.should_pass) and status == "fail" and failure_category == "verifier_failure"
-    expectation_met = (case.should_pass and status == "pass") or expected_negative_caught
+    has_explicit_assertions = bool(case.data.get("verification_assertions"))
+    expected_negative_caught = has_explicit_assertions and (not case.should_pass) and status == "fail" and failure_category == "verifier_failure"
+    expectation_met = (
+        (case.should_pass and status == "pass") or expected_negative_caught
+        if has_explicit_assertions
+        else status == "pass"
+    )
     published_videos = ArtifactManager(run_dir).publish_videos(video_root, case_id=case.case_id, backend=backend_name)
     video_exists = bool(published_videos) or (run_dir / "video.mp4").exists()
     video_missing_expected = failure_category == "preflight_failure" and not video_exists
@@ -171,6 +176,7 @@ def run_one_case(
         "case_path": str(case_path),
         "capability_id": case.capability_id,
         "should_pass": case.should_pass,
+        "explicit_assertion_contract": has_explicit_assertions,
         "status": status,
         "failure_type": failure_type,
         "failure_category": failure_category,
@@ -244,7 +250,13 @@ def main() -> int:
         case_dir = ROOT / case_dir
     timestamp = args.timestamp or time.strftime("%Y%m%dT%H%M%S")
     output_root = case_output_root(args.case_route) if args.case_route else workspace_path(args.output_root, default_relative="runs/harness_cases") / f"{case_dir.name}_{args.backend}_{timestamp}"
-    video_root = workspace_path(args.video_root, default_relative="review/probes")
+    video_root = (
+        workspace_path(args.video_root, default_relative="review/probes")
+        if args.video_root
+        else output_root / "review" / "probes"
+        if args.output_root and Path(args.output_root).expanduser().is_absolute()
+        else workspace_path(None, default_relative="review/probes")
+    )
     output_root.mkdir(parents=True, exist_ok=True)
 
     case_paths = [path for path in sorted(case_dir.glob("*.json")) if path.name != "manifest.json"]

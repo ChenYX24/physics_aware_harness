@@ -1,0 +1,18 @@
+{
+  "schema_version": "harness_capability_v1",
+  "id": "deformable_body_dynamics",
+  "description": "Execute declarative deformable bodies and fixed-topology state caches without selecting a named deformation process.",
+  "physical_assumptions": [
+    "Deformable geometry, material, constraints and loads are explicit scene data.",
+    "The selected backend owns vertex-state truth."
+  ],
+  "required_signals": ["mesh_cache", "trajectory"],
+  "required_assets": ["declared deformable geometry"],
+  "verifier_rules": ["Mesh-cache integrity and explicitly declared assertions are evaluated."],
+  "failure_taxonomy": ["mesh_cache_invalid", "declared_assertion_failed"],
+  "repair_suggestions": ["Correct the deformable primitives, constraints or solver capability requirements."],
+  "smoke_cases": [],
+  "regression_cases": [],
+  "capability_type": "physics_constraint",
+  "stage_ids": ["runtime_backend_execution", "physics_verifier_truth_gate"]
+}

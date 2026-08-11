@@ -22,7 +22,17 @@ def build_static_scene_layout(
     camera_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     asset_rows = asset_rows_by_object_id(asset_resolution)
-    nodes = [build_object_node(obj, asset_rows.get(str(obj.get("id")))) for obj in case_spec.get("objects", []) if isinstance(obj, dict)]
+    objects = [obj for obj in case_spec.get("objects", []) if isinstance(obj, dict)]
+    objects_by_id = {str(obj.get("id") or ""): obj for obj in objects if obj.get("id")}
+    nodes = [
+        build_object_node(
+            obj,
+            asset_rows.get(str(obj.get("id"))),
+            objects_by_id=objects_by_id,
+        )
+        for obj in objects
+    ]
+    containment_relations = declared_containment_relations(objects)
     placement_adjustments = align_v2_explicit_supports(case_spec, nodes)
     expected_physics = case_spec.get("expected_physics") or {}
     collision_edges = normalize_edges(expected_physics.get("collision_graph") or expected_physics.get("contact_order") or [])
@@ -61,6 +71,10 @@ def build_static_scene_layout(
     overlap_pairs = find_overlap_pairs(
         nodes,
         support_map=effective_support_map,
+        allowed_overlap_pairs={
+            frozenset((str(relation["object_id"]), str(relation["container_id"])))
+            for relation in containment_relations
+        },
         include_static_obstacles=projection.get("source_schema_version") == "harness_case_spec_v2",
     )
     return {
@@ -72,6 +86,7 @@ def build_static_scene_layout(
         "stage_id": "static_scene_layout",
         "object_nodes": nodes,
         "support_relations": support_relations,
+        "containment_relations": containment_relations,
         "placement_adjustments": placement_adjustments,
         "overlap_pairs": overlap_pairs,
         "physics_graph": {
@@ -88,6 +103,28 @@ def build_static_scene_layout(
             "camera_plan_available",
         ],
     }
+
+
+def declared_containment_relations(objects: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    relations: list[dict[str, Any]] = []
+    object_ids = {str(obj.get("id") or "") for obj in objects if obj.get("id")}
+    for obj in objects:
+        solver = obj.get("solver") if isinstance(obj.get("solver"), dict) else {}
+        initial = solver.get("initial_volume") if isinstance(solver.get("initial_volume"), dict) else {}
+        frame = initial.get("frame") if isinstance(initial.get("frame"), dict) else {}
+        object_id = str(obj.get("id") or "")
+        container_id = str(frame.get("body_id") or "")
+        if frame.get("type") != "body_local" or not object_id or container_id not in object_ids:
+            continue
+        relations.append(
+            {
+                "object_id": object_id,
+                "container_id": container_id,
+                "relation": "initially_contained_by",
+                "source": "solver.initial_volume.frame",
+            }
+        )
+    return relations
 
 
 def asset_rows_by_object_id(asset_resolution: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
@@ -376,10 +413,7 @@ def align_v2_ordered_dynamic_chain(
 ) -> list[dict[str, Any]]:
     """Align and tighten downstream edges in one simple sequential chain."""
     projection = case_spec.get("v2_projection") if isinstance(case_spec.get("v2_projection"), dict) else {}
-    if (
-        projection.get("source_schema_version") != "harness_case_spec_v2"
-        or str(case_spec.get("capability_id") or "") != "sequential_contact_propagation"
-    ):
+    if projection.get("source_schema_version") != "harness_case_spec_v2":
         return []
     by_id = {str(node.get("object_id") or ""): node for node in nodes}
     edges = [
@@ -687,9 +721,9 @@ def support_footprint_margins(node: dict[str, Any], support_node: dict[str, Any]
 
 def support_footprint_axes(support_node: dict[str, Any]) -> tuple[list[list[float]], list[float]]:
     support_extents = object_extents(support_node)
-    shape_role = f"{support_node.get('shape', '')} {support_node.get('role', '')}".casefold()
-    if any(token in shape_role for token in ("ramp", "inclined", "slope")):
-        pitch = math.radians(float(((support_node.get("transform") or {}).get("rotation_deg") or [0.0])[0]))
+    rotation = (support_node.get("transform") or {}).get("rotation_deg") or [0.0, 0.0, 0.0]
+    pitch = math.radians(float(rotation[0]))
+    if abs(pitch) > 1e-9:
         return (
             [[math.cos(pitch), 0.0, -math.sin(pitch)], [0.0, 1.0, 0.0]],
             [support_extents[0], support_extents[1]],
@@ -722,12 +756,10 @@ def allows_free_initial_motion(node: dict[str, Any]) -> bool:
 
 
 def inclined_surface_gap(node: dict[str, Any], support_node: dict[str, Any]) -> float | None:
-    shape_role = f"{support_node.get('shape', '')} {support_node.get('role', '')}".casefold()
-    if not any(token in shape_role for token in ("ramp", "inclined", "slope")):
+    rotation = (support_node.get("transform") or {}).get("rotation_deg") or [0.0, 0.0, 0.0]
+    pitch = math.radians(float(rotation[0]))
+    if abs(pitch) <= 1e-9:
         return None
-    pitch = math.radians(float(((support_node.get("transform") or {}).get("rotation_deg") or [0.0])[0]))
-    # Match the UE runtime convention used by the registered ramp cases:
-    # positive pitch makes local +X the downhill direction.
     normal = [math.sin(pitch), 0.0, math.cos(pitch)]
     node_position = object_position(node)
     support_position = object_position(support_node)
@@ -741,10 +773,12 @@ def find_overlap_pairs(
     nodes: list[dict[str, Any]],
     *,
     support_map: dict[str, Any] | None = None,
+    allowed_overlap_pairs: set[frozenset[str]] | None = None,
     include_static_obstacles: bool = False,
 ) -> list[dict[str, Any]]:
     pairs: list[dict[str, Any]] = []
     support_map = support_map if isinstance(support_map, dict) else {}
+    allowed_overlap_pairs = allowed_overlap_pairs or set()
     collidable = [
         node
         for node in nodes
@@ -758,6 +792,8 @@ def find_overlap_pairs(
             left_id = str(left.get("object_id") or "")
             right_id = str(right.get("object_id") or "")
             if support_map.get(left_id) == right_id or support_map.get(right_id) == left_id:
+                continue
+            if frozenset((left_id, right_id)) in allowed_overlap_pairs:
                 continue
             left_pos = object_position(left)
             right_pos = object_position(right)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -118,14 +119,19 @@ def main() -> int:
         report_path=run_dir / "logs" / "fluid_surface_import.json",
     )
     duration_s = (frame_count - 1) / fps
+    scene_bounds = (
+        replay_scene_bounds(environment, render_z_offset_m=args.scene_z_offset_m)
+        if rigid_scene_mode
+        else {
+            "center": [-0.24, 0.0, 0.35 + args.scene_z_offset_m],
+            "extent": [0.55, 0.55, 0.7],
+        }
+    )
     case_spec["scene"] = {
         **(case_spec.get("scene") or {}),
         "duration_s": duration_s,
         "map_preference": args.map,
-        "scene_bounds": {
-            "center": [-0.24, 0.0, 0.35 + args.scene_z_offset_m],
-            "extent": [0.55, 0.55, 0.7],
-        },
+        "scene_bounds": scene_bounds,
     }
     case_spec["timebase"] = {
         "physics_hz": fps,
@@ -341,12 +347,13 @@ def main() -> int:
     write_json(run_dir / "case_spec.json", case_spec)
     write_json(run_dir / "camera_plan.json", camera_plan_payload)
     particle_cache_path = Path(args.particle_cache).expanduser().resolve()
-    shutil.copyfile(particle_cache_path, run_dir / "particle_cache.json")
+    copy_file_if_different(particle_cache_path, run_dir / "particle_cache.json")
     source_surface_frames = particle_cache_path.parent / "surface_frames"
     if not source_surface_frames.is_dir():
         raise SystemExit(f"particle cache surface_frames directory is missing: {source_surface_frames}")
-    shutil.copytree(source_surface_frames, run_dir / "surface_frames", dirs_exist_ok=True)
-    shutil.copyfile(args.replay_manifest, run_dir / "fluid_surface_replay.json")
+    if source_surface_frames.resolve() != (run_dir / "surface_frames").resolve():
+        shutil.copytree(source_surface_frames, run_dir / "surface_frames", dirs_exist_ok=True)
+    copy_file_if_different(Path(args.replay_manifest), run_dir / "fluid_surface_replay.json")
     rigid_body_resolution_entries = (
         rigid_body_asset_resolution_entries(declared_rigid_bodies)
         if rigid_scene_mode
@@ -366,42 +373,44 @@ def main() -> int:
             }
         ]
     )
-    write_json(
-        run_dir / "asset_resolution.json",
-        {
-            "schema_version": "asset_resolution_v1",
-            "assets": [
-                {
-                    "object_id": "fluid_surface",
-                    "selected_asset": {
-                        "asset_id": "genesis_splashsurf_static_mesh_sequence",
-                        "ue5_path": asset_paths[0],
-                        "sequence_frame_count": len(asset_paths),
-                        "proxy": True,
-                        "provenance": "particle_cache.json + fluid_surface_replay.json",
-                    },
+    replay_asset_resolution = {
+        "schema_version": "asset_resolution_v1",
+        "assets": [
+            {
+                "object_id": "fluid_surface",
+                "selected_asset": {
+                    "asset_id": "genesis_splashsurf_static_mesh_sequence",
+                    "ue5_path": asset_paths[0],
+                    "sequence_frame_count": len(asset_paths),
+                    "proxy": True,
+                    "provenance": "particle_cache.json + fluid_surface_replay.json",
                 },
-                *rigid_body_resolution_entries,
-                *[
-                    {
-                        "object_id": item["id"],
-                        "selected_asset": {
-                            "asset_id": item["ue5_path"].rsplit(".", 1)[0],
-                            "ue5_path": item["ue5_path"],
-                            "proxy": False,
-                            "provenance": "mounted AgenticDataPlatform UE asset catalog",
-                        },
-                    }
-                    for item in rigid_runtime_objects
-                ],
-            ],
-            "quality_gate": {
-                "reference_assets_ready": False,
-                "local_preview_count": (len(declared_rigid_bodies) if rigid_scene_mode else 1) + len(rigid_runtime_objects),
-                "geometry_match": asset_geometry_match,
-                "reason": "real UE scene assets with a derived fluid surface; particle cache remains state truth",
             },
+            *rigid_body_resolution_entries,
+            *[
+                {
+                    "object_id": item["id"],
+                    "selected_asset": {
+                        "asset_id": item["ue5_path"].rsplit(".", 1)[0],
+                        "ue5_path": item["ue5_path"],
+                        "proxy": False,
+                        "provenance": "mounted AgenticDataPlatform UE asset catalog",
+                    },
+                }
+                for item in rigid_runtime_objects
+            ],
+        ],
+        "quality_gate": {
+            "reference_assets_ready": False,
+            "local_preview_count": (len(declared_rigid_bodies) if rigid_scene_mode else 1) + len(rigid_runtime_objects),
+            "geometry_match": asset_geometry_match,
+            "reason": "real UE scene assets with a derived fluid surface; particle cache remains state truth",
         },
+    }
+    asset_resolution_path = run_dir / "asset_resolution.json"
+    write_json(
+        run_dir / "ue_replay_asset_resolution.json" if asset_resolution_path.is_file() else asset_resolution_path,
+        replay_asset_resolution,
     )
 
     command = [
@@ -413,7 +422,7 @@ def main() -> int:
         "-NoScreenMessages",
         "-stdout",
         "-FullStdOutLogOutput",
-        f"-ExecutePythonScript={ROOT / 'scripts' / 'native_ue_physics_phenomena_scene.py'}",
+        f"-ExecutePythonScript={ROOT / 'scripts' / 'native_ue_scene.py'}",
     ]
     env = os.environ.copy()
     env.update(
@@ -491,6 +500,18 @@ def main() -> int:
         case_spec=case_spec,
         scene_spec=studio_scene,
     )
+    native_summary = read_json(native_output / "summary.json")
+    pose_registration = runtime_pose_registration_report(
+        native_summary,
+        [str(body.get("id") or "") for body in declared_rigid_bodies],
+    ) if rigid_scene_mode else {
+        "schema_version": "harness_runtime_pose_registration_report_v1",
+        "status": "not_required",
+        "required_object_ids": [],
+        "objects": {},
+        "failures": [],
+    }
+    write_json(run_dir / "runtime_pose_registration_report.json", pose_registration)
     write_render_contract_artifacts(
         run_dir,
         backend="ue",
@@ -519,6 +540,7 @@ def main() -> int:
         and render_sync.get("status") == "pass"
         and rgb_observability.get("status") == "pass"
         and asset_geometry_match
+        and pose_registration.get("status") in {"pass", "not_required"}
     )
     write_json(
         run_dir / "run_readiness.json",
@@ -539,6 +561,7 @@ def main() -> int:
             "state_truth": "particle_cache.json",
             "render_representation": "fluid_surface_replay.json",
             "asset_geometry_match": asset_geometry_match,
+            "runtime_pose_registration_ready": pose_registration.get("status") in {"pass", "not_required"},
         },
     )
     inputs_dir = run_dir / "inputs"
@@ -567,6 +590,7 @@ def main() -> int:
             "render_sync_status": render_sync.get("status"),
             "rgb_observability_status": rgb_observability.get("status"),
             "quality_gate_status": quality.get("status"),
+            "runtime_pose_registration_status": pose_registration.get("status"),
             "state_truth": "particle_cache.json",
             "surface_replay": "fluid_surface_replay.json",
             "solver_execution_count": 0,
@@ -715,6 +739,34 @@ def offset_z(position: list[float], amount: float) -> list[float]:
     return [float(position[0]), float(position[1]), float(position[2]) + amount]
 
 
+def copy_file_if_different(source: Path, destination: Path) -> None:
+    source = source.expanduser().resolve()
+    destination = destination.expanduser().resolve()
+    if source == destination:
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
+
+
+def replay_scene_bounds(environment: dict, *, render_z_offset_m: float) -> dict:
+    bounds = environment.get("workspace_bounds_m") if isinstance(environment.get("workspace_bounds_m"), dict) else {}
+    lower = bounds.get("min_m") if isinstance(bounds.get("min_m"), list) else []
+    upper = bounds.get("max_m") if isinstance(bounds.get("max_m"), list) else []
+    if len(lower) == 3 and len(upper) == 3:
+        lower_values = [float(value) for value in lower]
+        upper_values = [float(value) for value in upper]
+        if all(math.isfinite(value) for value in lower_values + upper_values) and all(
+            high > low for low, high in zip(lower_values, upper_values, strict=True)
+        ):
+            center = [(low + high) / 2.0 for low, high in zip(lower_values, upper_values, strict=True)]
+            center[2] += render_z_offset_m
+            return {
+                "center": center,
+                "extent": [(high - low) / 2.0 for low, high in zip(lower_values, upper_values, strict=True)],
+            }
+    raise ValueError("rigid surface replay requires finite workspace_bounds_m with positive extents")
+
+
 def fluid_visual_parameters(case_spec: dict) -> dict:
     fluid = next(
         (
@@ -733,6 +785,47 @@ def fluid_visual_parameters(case_spec: dict) -> dict:
         "color_rgb": [float(value) for value in color],
         "roughness": float(visual.get("roughness", 0.12)),
         "emissive": float(visual.get("emissive", 0.18)),
+    }
+
+
+def runtime_pose_registration_report(
+    native_summary: dict,
+    required_object_ids: list[str],
+    *,
+    tolerance_cm: float = 0.1,
+) -> dict:
+    registrations = (
+        native_summary.get("runtime_pose_registrations")
+        if isinstance(native_summary.get("runtime_pose_registrations"), dict)
+        else {}
+    )
+    failures = []
+    objects = {}
+    for object_id in required_object_ids:
+        registration = registrations.get(object_id)
+        if not isinstance(registration, dict):
+            failures.append({"object_id": object_id, "code": "pose_registration_missing"})
+            continue
+        residual = float(registration.get("max_residual_cm", registration.get("residual_cm", float("inf"))))
+        objects[object_id] = registration
+        if registration.get("anchor") != "bounds_center":
+            failures.append({"object_id": object_id, "code": "pose_anchor_invalid"})
+        if not math.isfinite(residual) or residual > tolerance_cm:
+            failures.append(
+                {
+                    "object_id": object_id,
+                    "code": "pose_registration_residual_exceeded",
+                    "residual_cm": residual,
+                }
+            )
+    return {
+        "schema_version": "harness_runtime_pose_registration_report_v1",
+        "status": "fail" if failures else "pass",
+        "anchor": "bounds_center",
+        "tolerance_cm": tolerance_cm,
+        "required_object_ids": required_object_ids,
+        "objects": objects,
+        "failures": failures,
     }
 
 
@@ -782,6 +875,11 @@ def rigid_body_runtime_objects(cache: dict, *, render_z_offset_m: float) -> tupl
                     else list(transform["ue_rotation_pyr_deg"])
                 ),
                 "preserve_authored_scale": True,
+                # Solver rigid-body poses are expressed at the collision/body
+                # center. Imported meshes may retain an arbitrary FBX authoring
+                # pivot, so the UE replay must register their visible bounds to
+                # that backend-neutral pose anchor.
+                "pose_anchor": "bounds_center",
                 "preserve_material": True,
                 "visual_material_path": str(asset.get("material_path") or ""),
                 "segmentation_identity": str(body.get("id") or "rigid_body"),

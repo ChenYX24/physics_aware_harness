@@ -342,7 +342,8 @@ class HarnessCliTests(unittest.TestCase):
         self.assertEqual(default.returncode, 0, default.stderr)
         payload = json.loads(default.stdout)
         default_ids = {item["id"] for item in payload["capabilities"]}
-        self.assertIn("rigid_body_contact_causality", default_ids)
+        self.assertIn("rigid_body_dynamics", default_ids)
+        self.assertNotIn("rigid_body_contact_causality", default_ids)
         self.assertNotIn("billiard_causality_compiler", default_ids)
         taxonomy = payload["capability_taxonomy"]
         self.assertIn("prompt_case_capability_planning", taxonomy["pipeline_stage_capabilities"])
@@ -350,7 +351,7 @@ class HarnessCliTests(unittest.TestCase):
         self.assertIn("blueprint_function_invocation", taxonomy["runtime_bridge_capabilities"])
         self.assertIn("physics_parameter_semantics", taxonomy["physical_property_constraint_capabilities"])
         self.assertIn("physics_verifier_truth_gate", taxonomy["verification_capabilities"])
-        self.assertIn("rigid_body_contact_causality", taxonomy["physics_behavior_capabilities"])
+        self.assertIn("rigid_body_dynamics", taxonomy["physics_behavior_capabilities"])
         self.assertEqual(taxonomy["pipeline_execution_order"][0], "prompt_case_capability_planning")
         self.assertLess(
             taxonomy["pipeline_execution_order"].index("runtime_actor_placement_compilation"),
@@ -367,6 +368,7 @@ class HarnessCliTests(unittest.TestCase):
         )
         self.assertEqual(with_deprecated.returncode, 0, with_deprecated.stderr)
         deprecated_ids = {item["id"] for item in json.loads(with_deprecated.stdout)["capabilities"]}
+        self.assertIn("rigid_body_contact_causality", deprecated_ids)
         self.assertNotIn("billiard_causality_compiler", deprecated_ids)
 
     def test_harness_smoke_outputs_summary(self) -> None:
@@ -393,8 +395,8 @@ class HarnessCliTests(unittest.TestCase):
                 [
                     sys.executable,
                     str(ROOT / "scripts" / "harness_generate_cases.py"),
-                    "--suite",
-                    "billiards",
+                    "--case",
+                    "cases/falling/falling_block_on_floor.json",
                     "--count",
                     "4",
                     "--seed",
@@ -409,23 +411,13 @@ class HarnessCliTests(unittest.TestCase):
             )
             self.assertEqual(generated.returncode, 0, generated.stderr)
             manifest = json.loads((case_dir / "manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(manifest["schema_version"], "harness_generated_case_manifest_v1")
+            self.assertEqual(manifest["schema_version"], "harness_generated_case_manifest_v2")
             self.assertEqual(manifest["num_cases"], 4)
             self.assertEqual(len(manifest["cases"]), 4)
             generated_case_path = next(path for path in case_dir.glob("*.json") if path.name != "manifest.json")
             generated_case = json.loads(generated_case_path.read_text(encoding="utf-8"))
-            for key in (
-                "task_type",
-                "scene",
-                "initial_state",
-                "physical_parameters",
-                "expected_event",
-                "negative_or_boundary",
-                "asset_requirements",
-                "allowed_proxy_policy",
-                "verification_rules",
-            ):
-                self.assertIn(key, generated_case)
+            self.assertEqual(generated_case["generation"]["mode"], "declarative_case_replication")
+            self.assertEqual(generated_case["objects"], json.loads((ROOT / "cases/falling/falling_block_on_floor.json").read_text())["objects"])
             batch = subprocess.run(
                 [
                     sys.executable,
@@ -577,9 +569,9 @@ class HarnessCliTests(unittest.TestCase):
             fake_runner = root / "fake_runner.py"
             write_fake_ue_runner(fake_runner)
             env = ue_env_without_config()
-            env.pop("SIM_HARNESS_WORKSPACE", None)
             env.update(
                 {
+                    "SIM_HARNESS_WORKSPACE": str(workspace),
                     "HOME": str(root),
                     "SIM_STUDIO_UE_EXECUTABLE": str(executable),
                     "SIM_STUDIO_UE_MAP": "/Game/Maps/HarnessSmoke",
@@ -812,9 +804,9 @@ class HarnessCliTests(unittest.TestCase):
             self.assertEqual(received["ue_project"], str(Path(env["SIM_STUDIO_UE_PROJECT"]).resolve()))
             self.assertEqual(received["ue_executable"], str(Path(env["SIM_STUDIO_UE_EXECUTABLE"]).resolve()))
             self.assertTrue(readiness["visual_ready"])
-            self.assertTrue(readiness["physics_ready"])
+            self.assertFalse(readiness["physics_ready"])
             self.assertTrue(readiness["map_ready"])
-            self.assertTrue(readiness["ue_render_real"])
+            self.assertFalse(readiness["ue_render_real"])
             self.assertEqual(readiness["depth_source"], "ue")
             self.assertTrue(readiness["multi_view_sync_ok"])
             self.assertTrue(readiness["render_pass_valid"])
@@ -904,13 +896,28 @@ class HarnessCliTests(unittest.TestCase):
     def test_cli_returns_failure_when_physics_verifier_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            case_data = json.loads((ROOT / "cases/falling/falling_block_on_floor.json").read_text(encoding="utf-8"))
+            case_data["case_id"] = "declared_assertion_failure"
+            case_data["verification_assertions"] = [
+                {
+                    "id": "impossible_height",
+                    "type": "state_value",
+                    "object_id": "falling_block",
+                    "field": "position_m.z",
+                    "reduction": "final",
+                    "operator": ">",
+                    "value": 100.0,
+                }
+            ]
+            case_path = root / "case.json"
+            case_path.write_text(json.dumps(case_data), encoding="utf-8")
             env = os.environ.copy()
             env["SIM_HARNESS_WORKSPACE"] = str(root / "workspace")
             result = subprocess.run(
                 [
                     sys.executable,
                     str(ROOT / "scripts" / "harness_run_case.py"),
-                    "cases/falling/negative_floating_block.json",
+                    str(case_path),
                     "--backend",
                     "fallback",
                     "--out",

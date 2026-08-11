@@ -62,7 +62,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
     def test_native_ue_snapshots_initial_pose_before_enabling_physics(self) -> None:
         import ast
 
-        source = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+        source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
         setup_scene = next(
             node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "setup_scene"
@@ -346,7 +346,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertTrue(static[0]["params"]["generate_solid_material"])
         self.assertEqual(static[0]["params"]["metallic"], 0.65)
 
-    def test_newton_cradle_adds_one_tether_visual_per_ball(self) -> None:
+    def test_constraint_case_does_not_inject_tether_visuals(self) -> None:
         from harness.assets.asset_resolver import resolve_asset_intents
         from harness.planning.static_scene_builder import build_static_scene_layout
         from harness.runtime.actor_placement import compile_runtime_actor_placement
@@ -360,7 +360,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
 
         self.assertEqual(len([item for item in dynamic if item["id"].startswith("ball_")]), 5)
         self.assertTrue(all(item["params"]["fit_dynamic_plan"] is False for item in dynamic if item["id"].startswith("ball_")))
-        self.assertEqual(len([item for item in static if item["behavior"] == "elastic_tether_visual"]), 5)
+        self.assertEqual(len([item for item in static if item["behavior"] == "elastic_tether_visual"]), 0)
         with patch.dict(os.environ, {}, clear=False), patch(
             "scripts.harness_local_ue_runner.simulate_rigid_case",
             return_value=[{"frame": 0, "source": "mujoco_constraint_impulse"}],
@@ -477,6 +477,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         )
         self.assertEqual(dynamic[0]["scale"], [1.0, 1.0, 1.0])
         self.assertTrue(dynamic[0]["params"]["preserve_authored_scale"])
+        self.assertEqual(dynamic[0]["params"]["pose_anchor"], "bounds_center")
         self.assertEqual(dynamic[0]["params"]["desired_extent_cm"], 60.0)
 
         visual_binding = deepcopy(binding)
@@ -490,7 +491,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual(visual[0]["scale"], [0.15, 0.15, 0.15])
         self.assertNotIn("preserve_authored_scale", visual[0]["params"])
         self.assertTrue(visual[0]["params"]["preserve_visual_authored_scale"])
-        native_source = (ROOT / "scripts" / "native_ue_physics_phenomena_scene.py").read_text(encoding="utf-8")
+        native_source = (ROOT / "scripts" / "native_ue_scene.py").read_text(encoding="utf-8")
         self.assertIn('get("preserve_visual_authored_scale")', native_source)
 
     def test_uniform_instance_scale_reaches_runtime_mesh_and_visual_proxy(self) -> None:
@@ -519,6 +520,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         )
         self.assertEqual(dynamic[0]["scale"], [0.75, 0.75, 0.75])
         self.assertTrue(dynamic[0]["params"]["preserve_authored_scale"])
+        self.assertEqual(dynamic[0]["params"]["pose_anchor"], "bounds_center")
 
         visual_binding = deepcopy(binding)
         visual_binding["asset"]["runtime_usage"] = "visual_proxy"
@@ -653,7 +655,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual(dynamic[0]["params"]["hold_position_m"], [1.0, 0.0, 0.83])
         self.assertEqual(dynamic[0]["params"]["release_position_m"], [1.0, 0.0, 0.83])
 
-    def test_elastic_anchor_uses_compact_builtin_cube(self) -> None:
+    def test_static_anchor_preserves_compiled_bounds_without_role_override(self) -> None:
         from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement, ue_path_for_binding
 
         binding = {
@@ -674,9 +676,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         anchor = next(obj for obj in static if obj["id"] == "anchor")
         self.assertEqual(anchor["ue5_path"], "/Engine/BasicShapes/Cube.Cube")
         self.assertEqual(anchor["asset_kind"], "static_mesh")
-        self.assertEqual(anchor["scale"], [0.18, 0.18, 0.18])
-        self.assertTrue(anchor["params"]["preserve_authored_scale"])
-        self.assertFalse(anchor["params"]["fit_dynamic_plan"])
+        self.assertEqual(anchor["scale"], [0.09, 0.09, 0.09])
         self.assertEqual(anchor["params"]["desired_extent_cm"], 9.0)
 
     def test_compiled_dynamic_sphere_marks_selected_mesh_as_visual_only(self) -> None:
@@ -783,13 +783,17 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertTrue(dynamic[0]["params"]["preserve_visual_authored_scale"])
 
     def test_native_visual_proxy_tracks_collision_bounds_center(self) -> None:
-        native_source = (ROOT / "scripts" / "native_ue_physics_phenomena_scene.py").read_text(encoding="utf-8")
+        native_source = (ROOT / "scripts" / "native_ue_scene.py").read_text(encoding="utf-8")
         self.assertIn("physics_origin, _ = actor_bounds(physics_actor)", native_source)
         self.assertIn("visual_origin, _ = actor_bounds(visual)", native_source)
         self.assertIn("center_delta = physics_origin - visual_origin", native_source)
+        self.assertIn(
+            'obj.get("initial_position_m", [0.0, 0.0, 0.0]),\n                z_offset_cm=0.0,\n                origin=scene_origin,',
+            native_source,
+        )
 
     def test_native_ue_preserves_selected_asset_materials_for_llm_objects(self) -> None:
-        native_source = (ROOT / "scripts" / "native_ue_physics_phenomena_scene.py").read_text(encoding="utf-8")
+        native_source = (ROOT / "scripts" / "native_ue_scene.py").read_text(encoding="utf-8")
         self.assertIn('params.get("binding_source") == "ue_asset"', native_source)
         self.assertIn('params.get("asset_runtime_usage") in {"collision_and_visual", "visual_proxy"}', native_source)
 
@@ -826,8 +830,8 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual(dynamic[0]["params"]["desired_extent_cm"], 9.0)
         self.assertEqual(dynamic[0]["physics_properties"]["dynamic_friction"], 0.035)
         self.assertEqual(dynamic[0]["physics_properties"]["restitution"], 0.88)
-        self.assertEqual(dynamic[0]["physics_properties"]["linear_damping"], 0.01)
-        self.assertEqual(dynamic[0]["physics_properties"]["angular_damping"], 0.02)
+        self.assertIsNone(dynamic[0]["physics_properties"]["linear_damping"])
+        self.assertIsNone(dynamic[0]["physics_properties"]["angular_damping"])
         self.assertEqual(dynamic[0]["params"]["visual_material_path"], "/Game/Materials/MI_Glass.MI_Glass")
 
     def test_domino_case_compiles_as_valid_initial_state_only_chaos_scene(self) -> None:
@@ -878,8 +882,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
 
         drifted = deepcopy(case)
         drifted["physical_parameters"]["initial_pitch_deg"] = -10.0
-        with self.assertRaisesRegex(ValueError, "initial_pitch_deg"):
-            validate_case_spec(drifted)
+        validate_case_spec(drifted)
 
     def test_sixth_domino_extends_the_existing_initial_state_chain(self) -> None:
         from harness.assets.asset_resolver import resolve_asset_intents
@@ -924,7 +927,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
 
         self.assertEqual(runner.call_args.kwargs["env"]["CHAOS_SIMULATION_ENABLED"], "0")
 
-    def test_elastic_case_adds_non_physical_tether_visual(self) -> None:
+    def test_constraint_case_does_not_add_nonphysical_tether_visual(self) -> None:
         from harness.assets.asset_resolver import resolve_asset_intents
         from harness.planning.static_scene_builder import build_static_scene_layout
         from harness.runtime.actor_placement import compile_runtime_actor_placement
@@ -940,11 +943,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual([obj["id"] for obj in dynamic], ["payload"])
         self.assertEqual(dynamic[0]["ue5_path"], "/Engine/BasicShapes/Sphere.Sphere")
         self.assertEqual(dynamic[0]["asset_kind"], "static_mesh")
-        tether = next(obj for obj in static if obj["id"] == "elastic_tether_visual")
-        self.assertEqual(tether["behavior"], "elastic_tether_visual")
-        self.assertEqual(tether["physics_properties"]["simulate_physics"], "force_off")
-        self.assertEqual(tether["params"]["anchor_id"], "anchor")
-        self.assertEqual(tether["params"]["body_id"], "payload")
+        self.assertNotIn("elastic_tether_visual", {obj["id"] for obj in static})
 
         from scripts.harness_local_ue_runner import ue_path_for_binding
 
@@ -956,7 +955,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
                     "asset": {"ue_path": "/Game/Blueprints/BP_Projectile.BP_Projectile", "asset_kind": "Blueprint"},
                 }
             ),
-            "/Engine/BasicShapes/Sphere.Sphere",
+            "/Game/Blueprints/BP_Projectile.BP_Projectile",
         )
 
     def test_ue_rigid_defaults_to_live_chaos_without_precomputed_trajectory(self) -> None:

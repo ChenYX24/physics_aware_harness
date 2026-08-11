@@ -4,17 +4,21 @@ import math
 import os
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 from harness.core.artifact_schema import read_json, runtime_summary, write_json
 from harness.core.case_spec import CaseSpec
+from harness.core.physics_contract import infer_scene_domain
 from harness.core.workspace import workspace_root
 from harness.runtime.rigid_sph_scene import compile_rigid_sph_scene
+from harness.runtime.fluid_surface_adapter import file_sha256, prepare_ue_surface_replay
 from harness.verification.physics_verifier import PhysicsVerifier
 
 
 ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_UE_MAP = "/Engine/Maps/Templates/Template_Default.Template_Default"
 
 
 class GenesisSPHBackend:
@@ -29,8 +33,8 @@ class GenesisSPHBackend:
         render_passes: list[str] | None = None,
         camera_strategy: str = "bounds_auto_v1",
     ) -> Path:
-        if case.capability_id != "fluid_particle_dynamics":
-            raise ValueError(f"genesis_sph only supports fluid_particle_dynamics, got {case.capability_id}")
+        if infer_scene_domain(case.data) != "particle":
+            raise ValueError("genesis_sph requires a particle-domain scene contract")
         run_dir = Path(output_root) / f"{case.case_id}_{self.name}"
         run_dir.mkdir(parents=True, exist_ok=True)
         write_json(run_dir / "case_spec.json", case.data)
@@ -79,6 +83,93 @@ class GenesisSPHBackend:
         if verifier["status"] != "pass":
             raise RuntimeError(f"Genesis SPH artifacts failed verification; see {run_dir / 'harness_verifier.json'}")
         return run_dir
+
+
+def run_ue_surface_replay(
+    run_dir: str | Path,
+    *,
+    profile: str,
+    requested_views: list[str] | None = None,
+    width: int | None = None,
+    height: int | None = None,
+) -> dict[str, Any]:
+    """Render one completed Genesis particle/surface cache with resolved UE assets."""
+    run_dir = Path(run_dir).resolve()
+    particle_cache = run_dir / "particle_cache.json"
+    case_spec = run_dir / "case_spec.json"
+    if not particle_cache.is_file() or not case_spec.is_file():
+        raise RuntimeError("Genesis-to-UE replay requires particle_cache.json and case_spec.json")
+
+    ue_project = os.environ.get("SIM_STUDIO_UE_PROJECT", "").strip()
+    if not ue_project:
+        candidate = workspace_root() / "ue" / "SimulatorWorkspace.uproject"
+        ue_project = str(candidate) if candidate.is_file() else ""
+    if not ue_project or not Path(ue_project).is_file():
+        raise RuntimeError("Genesis-to-UE replay requires SIM_STUDIO_UE_PROJECT or the initialized workspace UE project")
+
+    configured_executable = os.environ.get("SIM_STUDIO_UE_EXECUTABLE", "").strip()
+    if not configured_executable:
+        raise RuntimeError("Genesis-to-UE replay requires SIM_STUDIO_UE_EXECUTABLE")
+    ue_executable = Path(configured_executable).expanduser()
+    if not ue_executable.is_file():
+        raise RuntimeError(f"SIM_STUDIO_UE_EXECUTABLE does not exist: {ue_executable}")
+
+    replay_input = run_dir / "ue_replay_input"
+    cache_digest = file_sha256(particle_cache)
+    replay = prepare_ue_surface_replay(
+        particle_cache,
+        replay_input,
+        ue_asset_root=f"/Game/HarnessGenerated/Fluid/Cache_{cache_digest[:16]}",
+    )
+    replay_manifest = replay_input / "fluid_surface_replay.json"
+    solver_preview = run_dir / "video.mp4"
+    render_manifest_path = run_dir / "render_manifest.json"
+    render_manifest = read_json(render_manifest_path) if render_manifest_path.is_file() else {}
+    if solver_preview.is_file() and render_manifest.get("render_kind") == "solver_surface_preview":
+        solver_preview.replace(run_dir / "solver_preview.mp4")
+
+    command = [
+        sys.executable,
+        str(ROOT / "scripts" / "harness_render_fluid_ue.py"),
+        str(replay_manifest),
+        "--particle-cache",
+        str(particle_cache),
+        "--case",
+        str(case_spec),
+        "--run-dir",
+        str(run_dir),
+        "--ue-project",
+        ue_project,
+        "--ue-executable",
+        str(ue_executable),
+        "--map",
+        os.environ.get("SIM_STUDIO_UE_MAP") or DEFAULT_UE_MAP,
+        "--profile",
+        profile,
+    ]
+    if requested_views:
+        command.extend(("--views", ",".join(requested_views)))
+    if width is not None and height is not None:
+        command.extend(("--width", str(width), "--height", str(height)))
+    result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
+    report = {
+        "schema_version": "harness_staged_render_report_v1",
+        "solver_backend": "genesis_sph",
+        "render_backend": "ue",
+        "status": "completed" if result.returncode == 0 else "failed",
+        "command": command,
+        "returncode": result.returncode,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "surface_replay": str(replay_manifest.relative_to(run_dir)),
+        "frame_count": int((replay.get("timebase") or {}).get("frame_count") or 0),
+    }
+    write_json(run_dir / "staged_render_report.json", report)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Genesis-to-UE replay failed with exit code {result.returncode}; see {run_dir / 'staged_render_report.json'}"
+        )
+    return report
 
 
 def genesis_python() -> Path:
@@ -365,7 +456,8 @@ def write_genesis_artifacts(case: CaseSpec, run_dir: Path) -> dict[str, Any]:
         "case_id": case.case_id,
         "reference_ready": False,
         "physics_ready": False,
-        "visual_ready": video_ready,
+        "visual_ready": False,
+        "solver_preview_ready": video_ready,
         "local_preview_ready": False,
         "ue_render_real": False,
         "publication_tier": "rejected",
@@ -385,8 +477,8 @@ def write_genesis_artifacts(case: CaseSpec, run_dir: Path) -> dict[str, Any]:
     readiness = {
         **provisional_readiness,
         "physics_ready": physics_ready,
-        "local_preview_ready": physics_ready and video_ready,
-        "publication_tier": "local_preview" if physics_ready and video_ready else "rejected",
+        "local_preview_ready": False,
+        "publication_tier": "rejected",
         "verifier_status": verifier["status"],
     }
     for directory in (run_dir, output_dir):

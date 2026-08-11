@@ -12,6 +12,7 @@ from harness.runtime.rigid_sph_scene import (
     matrix_vector,
     point_inside_profile,
     rotation_matrix_xyz,
+    ue_rotation_pyr_from_solver_xyz,
 )
 from scripts.harness_genesis_rigid_sph import rigid_body_pose_at_time, set_rigid_body_pose
 
@@ -85,6 +86,32 @@ class RigidSPHSceneTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "explicitly fitted"):
             validate_case_spec(case)
 
+    def test_unified_solver_declarations_compile_to_valid_static_layout(self) -> None:
+        from harness.planning.static_scene_builder import build_static_scene_layout
+        from harness.verification.static_scene_verifier import verify_static_scene_layout
+
+        case = load_case_spec(COFFEE_CASE).data
+        layout = build_static_scene_layout(case)
+        nodes = {node["object_id"]: node for node in layout["object_nodes"]}
+
+        self.assertEqual(layout["overlap_pairs"], [])
+        self.assertEqual(
+            layout["containment_relations"],
+            [
+                {
+                    "object_id": "coffee",
+                    "container_id": "coffee_mug",
+                    "relation": "initially_contained_by",
+                    "source": "solver.initial_volume.frame",
+                }
+            ],
+        )
+        self.assertEqual(nodes["coffee"]["physics"]["state_kind"], "particle")
+        self.assertEqual(nodes["coffee"]["transform"]["position_m"], [-0.22, 0.0, 0.055])
+        self.assertEqual(nodes["coffee_mug"]["transform"]["position_m"], [-0.22, 0.0, 0.05])
+        self.assertEqual(nodes["tabletop"]["bounds"]["extents_m"], [0.4, 0.4, 0.025])
+        self.assertEqual(verify_static_scene_layout(case, layout)["status"], "pass")
+
     def test_kinematic_body_reports_boundary_velocity_to_solver(self) -> None:
         compiled = compile_rigid_sph_scene(load_case_spec(TRANSFER_CASE).data)
         body = next(item for item in compiled["rigid_bodies"] if item["mobility"] == "kinematic")
@@ -117,6 +144,29 @@ class RigidSPHSceneTests(unittest.TestCase):
 
         for actual, expected in zip(pivot_world, body["motion"]["pivot_world_m"], strict=True):
             self.assertAlmostEqual(actual, expected)
+
+    def test_solver_rotation_is_mapped_to_equivalent_ue_rotator(self) -> None:
+        self.assertEqual(ue_rotation_pyr_from_solver_xyz([10.0, 20.0, 30.0]), [-20.0, -30.0, 10.0])
+
+        case = copy.deepcopy(load_case_spec(COFFEE_CASE).data)
+        mug = next(item for item in case["objects"] if item["id"] == "coffee_mug")
+        mug["solver"]["motion"]["ue_end_rotation_pyr_deg"] = [110.0, 0.0, 0.0]
+
+        with self.assertRaisesRegex(ValueError, "UE rotation must equal"):
+            validate_case_spec(case)
+
+    def test_profile_fit_evidence_and_initial_fluid_clearance_are_required(self) -> None:
+        missing_fit = copy.deepcopy(load_case_spec(COFFEE_CASE).data)
+        mug = next(item for item in missing_fit["objects"] if item["id"] == "coffee_mug")
+        mug["solver"]["collision"]["fit_method"] = ""
+        with self.assertRaisesRegex(ValueError, "non-empty fit_method"):
+            validate_case_spec(missing_fit)
+
+        no_clearance = copy.deepcopy(load_case_spec(COFFEE_CASE).data)
+        fluid = next(item for item in no_clearance["objects"] if item["role"] == "fluid")
+        fluid["solver"]["initial_volume"]["radius_m"] = 0.04
+        with self.assertRaisesRegex(ValueError, "clear the container wall"):
+            validate_case_spec(no_clearance)
 
 
 if __name__ == "__main__":

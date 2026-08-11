@@ -20,7 +20,7 @@ class Vector:
 
 
 def load_camera_functions() -> dict:
-    path = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+    path = ROOT / "scripts" / "native_ue_scene.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     wanted = {
         "apply_explicit_runtime_visual_appearance",

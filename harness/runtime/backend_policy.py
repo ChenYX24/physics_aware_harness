@@ -17,21 +17,9 @@ def policy(preferred_backend: str, status: str, coupling_contract: str, *, valid
 
 
 BACKEND_POLICIES: dict[str, dict[str, Any]] = {
-    "rigid_body_gravity_collision": policy("mujoco_rigid", "validated", "rigid_transforms_contacts"),
-    "rigid_body_contact_causality": policy(
-        "ue_chaos_initial_state",
-        "validated",
-        "initial_state_to_rigid_state_cache",
-        validation_backend="mujoco_rigid",
-    ),
-    "constraint_momentum_transfer": policy("mujoco_constraint_adapter", "prototype_validated", "rigid_transforms_contacts_constraints"),
-    "force_field_wind_drift": policy("mujoco_force_adapter", "planned", "rigid_transforms_force_trace"),
-    "magnetic_force_field": policy("mujoco_force_adapter", "prototype_validated", "rigid_transforms_force_trace"),
-    "elastic_energy_launch": policy("mujoco_constraint_adapter", "planned", "rigid_transforms_constraint_trace"),
-    "elastic_constraint_rebound": policy("mujoco_constraint_adapter", "prototype_validated", "rigid_transforms_constraint_trace"),
-    "brittle_impact_fracture": policy("ue_chaos_destruction", "planned", "fragment_transforms_fracture_events"),
+    "rigid_body_dynamics": policy("ue", "validated", "rigid_transforms_contacts_constraints"),
     "fluid_particle_dynamics": policy("genesis_sph", "prototype_validated", "particles_to_surface_cache", validation_backend="sphinxsys"),
-    "soft_body_deformation": policy("taichi_cloth", "prototype_validated", "vertices_to_fixed_topology_mesh_cache"),
+    "deformable_body_dynamics": policy("taichi_cloth", "prototype_validated", "vertices_to_fixed_topology_mesh_cache"),
 }
 
 

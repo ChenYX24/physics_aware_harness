@@ -216,6 +216,48 @@ class UEAssetImporterLauncherTests(unittest.TestCase):
             self.assertEqual(ue_request_path, request_path)
             self.assertEqual(temporary_paths, ())
 
+    def test_fbx_scale_is_uniformly_corrected_once_from_declared_dimensions(self) -> None:
+        source = Path(__file__).resolve().parents[1] / "scripts" / "native_ue_asset_importer.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        functions = [
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in {"_dimensions_match_source", "_corrected_fbx_import_scale"}
+        ]
+        namespace = {"math": math, "Path": Path, "Any": object}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"), namespace)
+        corrected_scale = namespace["_corrected_fbx_import_scale"]
+
+        corrected = corrected_scale(
+            Path("cup.fbx"),
+            [1321.569091796875, 999.9079971313477, 1051.3495593070984],
+            [0.131555, 0.105135, 0.099992],
+            current_scale=37.5,
+            source_kind="user_file",
+        )
+
+        self.assertIsNotNone(corrected)
+        self.assertAlmostEqual(corrected, 0.375, delta=0.02)
+        self.assertIsNone(
+            corrected_scale(
+                Path("cup.fbx"),
+                [13.1555, 10.5135, 9.9992],
+                [0.131555, 0.105135, 0.099992],
+                current_scale=float(corrected),
+                source_kind="user_file",
+            )
+        )
+        self.assertIsNone(
+            corrected_scale(
+                Path("surface.obj"),
+                [1300.0, 1000.0, 1000.0],
+                [0.13, 0.10, 0.10],
+                current_scale=1.0,
+                source_kind="model_generation",
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

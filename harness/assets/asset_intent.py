@@ -4,75 +4,6 @@ from dataclasses import dataclass
 from typing import Any
 
 
-PHYSICS_CRITICAL_ROLES = {
-    "active_striker",
-    "passive_target",
-    "falling_body",
-    "stack_block",
-    "domino",
-    "support",
-    "floor",
-    "ground",
-    "rigid_body",
-    "rolling_subject",
-    "sliding_subject",
-    "sliding_body",
-    "sliding_crate",
-    "ramp_subject",
-    "ramp",
-    "slope_surface",
-    "inclined_plane",
-    "constrained_body",
-    "constraint_anchor",
-    "active_chain_driver",
-    "constrained_chain_body",
-    "projectile",
-    "thrown_body",
-    "launched_body",
-    "elastic_launcher",
-    "spring_launcher",
-    "spring_proxy",
-    "elastic_payload",
-    "elastic_constraint_anchor",
-    "elastic_constrained_body",
-    "elastic_tether_constraint",
-    "bungee_anchor",
-    "bungee_payload",
-    "bouncing_body",
-    "restitution_subject",
-    "bounce_subject",
-    "rolling_body",
-    "friction_subject",
-    "wind_drift_body",
-    "wind_subject",
-    "balloon",
-    "light_body",
-    "force_field",
-    "magnetic_source",
-    "magnet_source",
-    "magnetized_body",
-    "magnetic_body",
-    "magnetic_subject",
-    "spinning_body",
-    "spin_subject",
-    "angular_damping_subject",
-    "active_agent",
-    "agent_controller",
-    "pushing_agent",
-    "throwing_agent",
-    "action_coupled_body",
-    "pushed_body",
-    "rigid_body_payload",
-    "goal_container",
-    "active_impactor",
-    "brittle_fracture_body",
-    "breakable_body",
-    "destructible_body",
-    "fracture_fragment",
-    "fragment_proxy",
-}
-
-
 @dataclass(frozen=True)
 class AssetIntent:
     object_id: str
@@ -124,14 +55,13 @@ def intent_from_object(obj: dict[str, Any]) -> AssetIntent:
 
 def classify_asset_role(role: str) -> str:
     normalized = role.casefold().replace("-", "_").replace(" ", "_")
-    if any(term in normalized for term in ("map", "scene", "level", "environment", "world")):
+    tokens = {token for token in normalized.split("_") if token}
+    if tokens.intersection({"map", "scene", "level", "environment", "world"}):
         return "scene_map"
-    if any(term in normalized for term in ("blueprint", "function_library", "callable", "logic", "interface")):
+    if tokens.intersection({"blueprint", "callable", "logic", "interface"}) or "function_library" in normalized:
         return "blueprint_logic"
-    if any(term in normalized for term in PHYSICS_CRITICAL_ROLES):
-        return "physics_critical"
-    if any(term in normalized for term in ("texture", "material", "decal", "vfx", "visual")):
+    if tokens.intersection({"texture", "material", "decal", "vfx", "visual"}):
         return "visual_only"
-    if any(term in normalized for term in ("skeleton", "skeletal", "animation", "ik")):
+    if tokens.intersection({"skeleton", "skeletal", "animation", "ik"}):
         return "skeletal_animation"
-    return "visual_only"
+    return "physics_critical"

@@ -56,15 +56,22 @@ def first_missing_physics_asset(nodes: list[dict[str, Any]]) -> dict[str, Any] |
             continue
         binding = node.get("asset_binding") or {}
         physics = node.get("physics") or {}
+        if physics.get("state_kind") == "particle":
+            continue
         selected = binding.get("selected_asset_id")
         fallback = binding.get("fallback_reason")
         if not selected and not fallback:
             return {"object_id": node.get("object_id"), "reason": "no selected asset or fallback reason"}
-        for key in ("collider", "mass_kg", "collision_profile"):
+        required = []
+        if physics.get("collision_required") is not False:
+            required.extend(("collider", "collision_profile"))
+        if str(physics.get("body_type") or "").casefold() in {"", "dynamic"}:
+            required.append("mass_kg")
+        for key in required:
             value = physics.get(key)
             if value is None:
                 return {"object_id": node.get("object_id"), "missing_property": key}
-        if physics.get("material") is None and not str(node.get("role", "")).endswith("anchor"):
+        if physics.get("collision_required") is not False and physics.get("material") is None and not str(node.get("role", "")).endswith("anchor"):
             return {"object_id": node.get("object_id"), "missing_property": "material"}
     return None
 

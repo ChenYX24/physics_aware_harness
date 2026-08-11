@@ -23,7 +23,7 @@ class Vector:
 
 class HighresViewportMultiviewTests(unittest.TestCase):
     def test_precomputed_trajectory_uses_named_runtime_rotator_mapping(self) -> None:
-        source = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+        source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
         functions = {
             node.name: node
@@ -54,6 +54,7 @@ class HighresViewportMultiviewTests(unittest.TestCase):
             "ue_vec_from_meters": lambda *_args, **_kwargs: None,
             "runtime_combined_rotation": lambda _obj, values: list(values),
             "runtime_rotator": runtime_rotator,
+            "align_runtime_actor_to_pose_anchor": lambda *_args, **_kwargs: None,
         }
         exec(
             compile(ast.Module(body=[tether_helper, function], type_ignores=[]), str(source), "exec"),
@@ -80,7 +81,7 @@ class HighresViewportMultiviewTests(unittest.TestCase):
         self.assertEqual(actor.rotation, ("named_pyr", -52.0, 0.0, 0.0))
 
     def test_geometry_collection_strain_is_gated_by_measured_incident_energy(self) -> None:
-        source = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+        source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
         function = next(
             node
@@ -267,7 +268,7 @@ class HighresViewportMultiviewTests(unittest.TestCase):
         self.assertIn("panel:native_contact_impact_point_unavailable", status["geometry_collection_fracture"]["errors"])
 
     def test_measured_energy_is_attached_to_authoritative_solver_contact(self) -> None:
-        source = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+        source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
         function = next(
             node
@@ -305,7 +306,7 @@ class HighresViewportMultiviewTests(unittest.TestCase):
         self.assertFalse(contact["external_strain_applied"])
 
     def test_runtime_physics_enables_ccd_for_fast_impactor(self) -> None:
-        source = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+        source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
         function = next(
             node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "configure_runtime_physics"
@@ -346,7 +347,7 @@ class HighresViewportMultiviewTests(unittest.TestCase):
         self.assertTrue(detail["use_ccd"])
 
     def test_instance_mask_material_enables_geometry_collection_usage(self) -> None:
-        source = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+        source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
         function = next(
             node
@@ -372,7 +373,7 @@ class HighresViewportMultiviewTests(unittest.TestCase):
         self.assertEqual(calls, ["set", "compile", "save"])
 
     def test_each_solver_frame_is_captured_once_for_every_requested_view(self) -> None:
-        source = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+        source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
         function = next(
             node

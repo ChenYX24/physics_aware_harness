@@ -76,8 +76,10 @@ def main() -> int:
     replay = read_json(replay_path)
     cache_manifest = read_json(cache_manifest_path)
     case_spec = dict(load_case_spec(case_path).data)
-    if case_spec.get("capability_id") != "soft_body_deformation":
-        raise SystemExit("deformable UE replay requires soft_body_deformation")
+    from harness.core.physics_contract import infer_scene_domain
+
+    if infer_scene_domain(case_spec) != "deformable":
+        raise SystemExit("deformable UE replay requires a deformable-domain scene contract")
     fps = int((replay.get("timebase") or {}).get("fps") or 0)
     frame_count = int((replay.get("timebase") or {}).get("frame_count") or 0)
     if fps <= 0 or frame_count <= 1 or len(replay.get("frames") or []) != frame_count:
@@ -320,7 +322,7 @@ def main() -> int:
         "-NoScreenMessages",
         "-stdout",
         "-FullStdOutLogOutput",
-        f"-ExecutePythonScript={ROOT / 'scripts' / 'native_ue_physics_phenomena_scene.py'}",
+        f"-ExecutePythonScript={ROOT / 'scripts' / 'native_ue_scene.py'}",
     ]
     env = os.environ.copy()
     env.update({

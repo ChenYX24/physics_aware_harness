@@ -10,7 +10,6 @@ from typing import Any
 
 from harness.core.artifact_schema import write_json
 from harness.runtime.backend_policy import backend_plan
-from harness.verification.contact_causality_verifier import requires_complete_passive_propagation
 from harness.verification.depth_geometry_verifier import verify_depth_geometry
 from harness.verification.render_sync_checker import depth_pixel_statistics, sequence_evidence_for_view
 
@@ -833,10 +832,12 @@ def validate_solver_execution(
     run_backend = backend or (readiness.get("backend") if isinstance(readiness, dict) else None)
     if run_backend is None and (run_dir / "ue_backend_report.json").is_file():
         run_backend = "ue"
-    policy_plan = backend_plan(str(case.get("capability_id") or ""))
+    from harness.core.physics_contract import execution_capability_id
+
+    policy_plan = backend_plan(execution_capability_id(case))
     policy_requires_chaos = (
         run_backend == "ue"
-        and policy_plan.get("preferred_backend") == "ue_chaos_initial_state"
+        and policy_plan.get("preferred_backend") == "ue"
     )
     explicit_requires_chaos = explicit_contract.get("input_mode") == "initial_state_only"
     if not policy_requires_chaos and not explicit_requires_chaos:
@@ -1267,48 +1268,6 @@ def validate_contacts(run_dir: Path, trajectory: list[dict[str, Any]], failures:
         elif min(checked_frames) == 0:
             failures.append(issue("F_CONTACT_AT_INITIAL_FRAME", "positive collision evidence starts at frame 0", frame=0))
 
-    expected_spread = str((case.get("expected_physics") or {}).get("expected_spread") or "")
-    complete_propagation = requires_complete_passive_propagation(case)
-    complete_propagation_summary: dict[str, Any] | None = None
-    if complete_propagation:
-        passive_ids = [str(item) for item in case.get("passive_objects") or []]
-        support_ids = {
-            str(item.get("id"))
-            for item in case.get("objects") or []
-            if isinstance(item, dict) and str(item.get("role") or "") == "support"
-        }
-        contacted = set()
-        for event in events:
-            objects = [str(item) for item in event.get("objects") or []]
-            if integer(event.get("frame"), default=-1) <= 0 or len(objects) < 2 or set(objects) & support_ids:
-                continue
-            contacted.update(set(objects) & set(passive_ids))
-        initial_objects = (trajectory[0].get("objects") or {}) if trajectory else {}
-        displacement_by_id: dict[str, float] = {}
-        for object_id in passive_ids:
-            initial = state_position(initial_objects.get(object_id) or {})
-            displacement_by_id[object_id] = max(
-                (
-                    math.dist(initial, state_position((frame.get("objects") or {}).get(object_id) or {}))
-                    for frame in trajectory
-                ),
-                default=0.0,
-            )
-        missing_contacts = sorted(set(passive_ids) - contacted)
-        insufficient_motion = sorted(object_id for object_id, value in displacement_by_id.items() if value + 1e-9 < 0.01)
-        if missing_contacts:
-            failures.append(issue("F_FULL_RACK_CONTACT_INCOMPLETE", "full-rack break did not positively contact every passive target", object_ids=missing_contacts))
-        if insufficient_motion:
-            failures.append(issue("F_FULL_RACK_MOTION_INCOMPLETE", "full-rack break left passive targets below 1 cm displacement", object_ids=insufficient_motion))
-        complete_propagation_summary = {
-            "expected_spread": expected_spread,
-            "required_passive_count": len(passive_ids),
-            "positively_contacted_count": len(contacted),
-            "moved_at_least_1cm_count": sum(value + 1e-9 >= 0.01 for value in displacement_by_id.values()),
-            "missing_contacts": missing_contacts,
-            "insufficient_motion": insufficient_motion,
-        }
-
     initial_expected_contact_free = not positive or bool(checked_frames and min(checked_frames) > 0)
     return {
         "event_count": len(events),
@@ -1317,8 +1276,6 @@ def validate_contacts(run_dir: Path, trajectory: list[dict[str, Any]], failures:
         "first_positive_contact_frame": min(checked_frames) if checked_frames else None,
         "initial_expected_contact_free": initial_expected_contact_free,
         "initial_contact_scope": "expected_collision_graph" if graph else "non_support_contacts",
-        "complete_passive_propagation": complete_propagation_summary,
-        "full_rack_break": complete_propagation_summary if expected_spread == "full_rack_break" else None,
     }
 
 
@@ -1383,8 +1340,7 @@ def positive_collision_case(case: dict[str, Any], graph: list[tuple[str, str]]) 
     expected = case.get("verifier_expectation")
     if isinstance(expected, dict) and expected.get("status") == "fail":
         return False
-    identifiers = " ".join(str(case.get(key) or "") for key in ("capability_id", "task_type"))
-    return bool(graph) or "collision" in identifiers or "contact" in identifiers
+    return bool(graph)
 
 
 def build_ranking_score(

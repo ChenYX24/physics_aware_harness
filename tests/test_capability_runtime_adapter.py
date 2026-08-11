@@ -24,7 +24,7 @@ class CapabilityRuntimeAdapterTests(unittest.TestCase):
             result = verify_capability_run(run_dir)
             report = result["verifier_report"]
             execution = result["execution_trace"]
-            self.assertEqual(result["capability_plan"]["primary_capability_id"], "rigid_body_contact_causality")
+            self.assertEqual(result["capability_plan"]["primary_capability_id"], "rigid_body_dynamics")
             self.assertEqual(execution["render_evidence"]["source_type"], "UE")
             self.assertTrue(report["capability_ready"])
             self.assertTrue(report["reference_video_ready"])
@@ -38,11 +38,11 @@ class CapabilityRuntimeAdapterTests(unittest.TestCase):
             self.assertFalse(report["capability_ready"])
             self.assertEqual(report["primary_failure_type"], "F4_causality_violation")
 
-    def test_adapter_preserves_falling_blocks_capability(self) -> None:
+    def test_adapter_ignores_historical_process_wording(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = write_falling_run(Path(tmp))
             result = CapabilityRuntimeAdapter().verify_run(run_dir)
-            self.assertEqual(result["capability_plan"]["primary_capability_id"], "rigid_body_gravity_collision")
+            self.assertEqual(result["capability_plan"]["primary_capability_id"], "rigid_body_dynamics")
             self.assertTrue(result["verifier_report"]["capability_ready"])
 
 
@@ -61,6 +61,10 @@ def write_billiard_run(root: Path, *, pre_contact_target_velocity: list[float]) 
                     {"id": "target_ball", "dynamic": True, "role": "passive target", "initial_position_m": [0.0, 0.0, 0.0], "initial_velocity_m_s": [0.0, 0.0, 0.0]},
                 ],
             },
+            "verification_assertions": [
+                {"id": "contact", "type": "event_exists", "event": "contact", "objects": ["cue_ball", "target_ball"]},
+                {"id": "initial_target_speed", "type": "state_value", "object_id": "target_ball", "field": "velocity_m_s.x", "reduction": "initial", "operator": "<=", "value": 0.01},
+            ],
         },
     )
     write_json(
@@ -128,6 +132,10 @@ def write_falling_run(root: Path) -> Path:
                     {"id": "floor", "dynamic": False, "role": "support floor", "initial_position_m": [0.0, 0.0, 0.0]},
                 ],
             },
+            "verification_assertions": [
+                {"id": "descent", "type": "state_delta", "object_id": "falling_block", "field": "position_m.z", "operator": "<=", "value": -0.5},
+                {"id": "contact", "type": "event_exists", "event": "contact", "objects": ["falling_block", "floor"]},
+            ],
         },
     )
     write_json(output_dir / "summary.json", {"native_ue": True, "physics_capture": {"trajectory_source": "adp_cpp_runtime_driver"}})

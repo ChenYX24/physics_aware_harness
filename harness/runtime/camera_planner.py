@@ -118,12 +118,11 @@ def plan_cameras_for_scene(
 
 def camera_plan_from_case_spec(case_spec: dict[str, Any], requested_views: list[str] | None = None, camera_strategy: str = "bounds_auto_v1") -> CameraPlan:
     bounds, warnings = bounds_from_case_spec(case_spec)
-    tabletop = str(case_spec.get("task_type") or "").casefold() in {"billiards_collision", "pool_collision"}
     plan = plan_cameras_for_scene(
         bounds,
         requested_views=requested_views,
-        min_distance_multiplier=1.6 if tabletop else 2.2,
-        fov=52.0 if tabletop else 60.0,
+        min_distance_multiplier=2.2,
+        fov=60.0,
     )
     scene = case_spec.get("scene") if isinstance(case_spec.get("scene"), dict) else {}
     overrides = case_spec.get("camera_overrides") or scene.get("camera_overrides")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import unittest
 
 from harness.core.case_spec_v2 import (
@@ -30,7 +31,7 @@ class CaseSpecV2Tests(unittest.TestCase):
         self.assertTrue(projection.data["objects"][0]["collision_required"])
         self.assertEqual(projection.data["objects"][2]["body_type"], "static")
 
-    def test_gravity_projection_canonicalizes_dynamic_role_without_language_matching(self) -> None:
+    def test_historical_gravity_label_does_not_rewrite_object_roles(self) -> None:
         data = case_spec_v2_fixture()
         data["capabilities"] = {
             "primary": "rigid_body_gravity_collision",
@@ -43,7 +44,7 @@ class CaseSpecV2Tests(unittest.TestCase):
         subject = projection["objects"][0]
 
         self.assertEqual(subject["role"], "自由描述的下落物体")
-        self.assertEqual(subject["verification_role"], "falling_body")
+        self.assertNotIn("verification_role", subject)
         self.assertEqual(projection["objects"][2]["role"], "support")
 
     def test_uniform_asset_scale_policy_is_validated_and_projected(self) -> None:
@@ -61,6 +62,175 @@ class CaseSpecV2Tests(unittest.TestCase):
         with self.assertRaises(CaseSpecV2ValidationError) as context:
             case_spec_v2_from_dict(data)
         self.assertIn("invalid_enum", {issue.code for issue in context.exception.issues})
+
+    def test_generic_solver_declarations_survive_v2_projection(self) -> None:
+        data = case_spec_v2_fixture()
+        data["capabilities"] = {
+            "primary": "fluid_particle_dynamics",
+            "required": ["fluid_particle_dynamics"],
+        }
+        data["backend_constraints"] = {
+            "required_solver_capabilities": ["particle_dynamics", "fluid_dynamics", "particle_cache"],
+            "allowed_solvers": ["genesis_sph"],
+            "render_backend": "genesis_sph",
+            "allow_multi_backend": True,
+        }
+        data["workspace_bounds_m"] = {"min_m": [-1.0, -1.0, -0.1], "max_m": [1.0, 1.0, 1.0]}
+        data["solver_scene"] = {
+            "type": "rigid_sph",
+            "measurements": [{"id": "span", "type": "axis_span", "axes": ["x", "y"]}],
+            "assertions": [
+                {
+                    "id": "span_grows",
+                    "measurement_id": "span",
+                    "reduction": "final",
+                    "operator": ">=",
+                    "value": 0.1,
+                }
+            ],
+        }
+        data["objects"][0]["role"] = "fluid"
+        data["objects"][0]["solver"] = {
+            "material_model": "sph_liquid",
+            "initial_volume": {
+                "shape": "cylinder",
+                "frame": {"type": "body_local", "body_id": "target_ball"},
+                "position_m": [0.0, 0.0, 0.0],
+                "radius_m": 0.025,
+                "height_m": 0.06,
+            },
+        }
+        data["objects"][1]["role"] = "rigid_body"
+        data["objects"][1]["solver"] = {
+            "mobility": "kinematic",
+            "transform": {
+                "position_m": [0.0, 0.0, 0.09],
+                "euler_xyz_deg": [0.0, 0.0, 0.0],
+                "ue_rotation_pyr_deg": [0.0, 0.0, 0.0],
+            },
+            "collision": {
+                "type": "axisymmetric_profile",
+                "asset_geometry_match": True,
+                "fit_method": "fixture_profile_fit_v1",
+                "inner_profile": [{"z_m": -0.04, "radius_m": 0.03}, {"z_m": 0.04, "radius_m": 0.04}],
+                "wall_thickness_m": 0.005,
+                "panel_count": 16,
+            },
+            "motion": {
+                "type": "pivot_rotation",
+                "start_time_s": 0.3,
+                "duration_s": 1.0,
+                "pivot_local_m": [0.04, 0.0, 0.04],
+                "solver_end_rotation_xyz_deg": [0.0, 90.0, 0.0],
+                "ue_end_rotation_pyr_deg": [-90.0, 0.0, 0.0],
+            },
+        }
+        data["objects"][2]["role"] = "rigid_body"
+        data["objects"][2]["solver"] = {
+            "mobility": "static",
+            "transform": {
+                "position_m": [0.0, 0.0, -0.025],
+                "euler_xyz_deg": [0.0, 0.0, 0.0],
+                "ue_rotation_pyr_deg": [0.0, 0.0, 0.0],
+            },
+            "collision": {
+                "type": "plane",
+                "position_m": [0.0, 0.0, 0.0],
+                "normal": [0.0, 0.0, 1.0],
+                "asset_geometry_match": True,
+            },
+        }
+
+        projection = project_case_spec_v2_to_v1(case_spec_v2_from_dict(data)).data
+
+        self.assertEqual(projection["solver_scene"], data["solver_scene"])
+        self.assertEqual(projection["workspace_bounds_m"], data["workspace_bounds_m"])
+        self.assertEqual(projection["objects"][1]["solver"], data["objects"][1]["solver"])
+
+        invalid_rotation = deepcopy(data)
+        invalid_rotation["objects"][1]["solver"]["motion"]["ue_end_rotation_pyr_deg"] = [90.0, 0.0, 0.0]
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(invalid_rotation)
+        self.assertIn("rigid_sph_rotation_mapping_mismatch", {issue.code for issue in context.exception.issues})
+
+        missing_fit = deepcopy(data)
+        missing_fit["objects"][1]["solver"]["collision"].pop("fit_method")
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(missing_fit)
+        self.assertIn("missing_collision_fit_evidence", {issue.code for issue in context.exception.issues})
+
+        no_clearance = deepcopy(data)
+        no_clearance["objects"][0]["solver"]["initial_volume"]["radius_m"] = 0.03
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(no_clearance)
+        self.assertIn("insufficient_initial_fluid_clearance", {issue.code for issue in context.exception.issues})
+
+    def test_invalid_rigid_sph_nested_contract_is_rejected_before_projection(self) -> None:
+        data = case_spec_v2_fixture()
+        data["capabilities"] = {
+            "primary": "fluid_particle_dynamics",
+            "required": ["fluid_particle_dynamics"],
+        }
+        data["backend_constraints"] = {
+            "required_solver_capabilities": ["particle_dynamics", "fluid_dynamics", "particle_cache"],
+            "allowed_solvers": ["genesis_sph"],
+            "render_backend": "genesis_sph",
+            "allow_multi_backend": True,
+        }
+        data["workspace_bounds_m"] = {"min_m": [-1.0, -1.0, -0.1], "max_m": [1.0, 1.0, 1.0]}
+        data["solver_scene"] = {
+            "type": "rigid_sph",
+            "measurements": [{"id": "inside", "type": "volume_query"}],
+            "assertions": [
+                {"id": "inside", "measurement_id": "inside", "operator": ">", "value": 0.5}
+            ],
+        }
+        data["objects"][0]["role"] = "coffee mug container"
+        data["objects"][0]["solver"] = {
+            "mobility": "kinematic",
+            "transform": {"position_m": [0.0, 0.0, 0.1], "rotation_deg": [0.0, 0.0, 0.0]},
+            "collision": {"type": "composite", "primitives": []},
+            "motion": {
+                "type": "pivot_rotation",
+                "start_s": 0.3,
+                "duration_s": 1.5,
+                "angle_deg": 110.0,
+            },
+        }
+        data["objects"][1]["role"] = "support surface"
+        data["objects"][1].pop("solver", None)
+        data["objects"][2]["role"] = "fluid"
+        data["objects"][2]["solver"] = {
+            "material_model": "sph_liquid",
+            "initial_volume": {
+                "shape": "cylinder",
+                "frame": "body_local",
+                "body_id": "target_ball",
+                "dimensions_m": {"radius": 0.03, "height": 0.06},
+                "pose": {"position_m": [0.0, 0.0, 0.0]},
+            },
+        }
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        codes = {issue.code for issue in context.exception.issues}
+        self.assertIn("rigid_sph_role_required", codes)
+        self.assertIn("unsupported_rigid_sph_collision", codes)
+        self.assertIn("invalid_rigid_sph_frame", codes)
+        self.assertIn("unsupported_rigid_sph_measurement", codes)
+        self.assertIn("unsupported_rigid_sph_reduction", codes)
+        self.assertIn("unsupported_rigid_sph_operator", codes)
+
+    def test_allowed_solver_must_provide_every_required_solver_capability(self) -> None:
+        data = case_spec_v2_fixture()
+        data["backend_constraints"]["allowed_solvers"] = ["genesis_sph"]
+        data["backend_constraints"]["required_solver_capabilities"] = ["particle_dynamics", "contact_events"]
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        self.assertIn("solver_capability_mismatch", {issue.code for issue in context.exception.issues})
 
     def test_explicit_object_color_is_validated_and_projected(self) -> None:
         data = case_spec_v2_fixture()
@@ -210,15 +380,13 @@ class CaseSpecV2Tests(unittest.TestCase):
             case_spec_v2_from_dict(data)
         self.assertIn("kinetic_energy_mismatch", {issue.code for issue in context.exception.issues})
 
-    def test_box_ramp_must_use_pitch_or_roll_not_yaw_only(self) -> None:
+    def test_semantic_role_does_not_add_a_process_specific_rotation_rule(self) -> None:
         data = case_spec_v2_fixture()
         ramp = data["objects"][2]
         ramp["role"] = "static inclined ramp"
         ramp["geometry"]["shape_hint"] = "box"
         ramp["initial_state"]["rotation_deg"] = [0.0, -12.0, 0.0]
-        with self.assertRaises(CaseSpecV2ValidationError) as context:
-            case_spec_v2_from_dict(data)
-        self.assertIn("ramp_has_no_incline_rotation", {issue.code for issue in context.exception.issues})
+        case_spec_v2_from_dict(data)
 
         ramp["initial_state"]["rotation_deg"] = [-12.0, 0.0, 0.0]
         case_spec_v2_from_dict(data)
@@ -446,7 +614,7 @@ class CaseSpecV2Tests(unittest.TestCase):
         data["backend_constraints"]["allowed_solvers"] = ["taichi_cloth"]
         with self.assertRaises(CaseSpecV2ValidationError) as context:
             case_spec_v2_from_dict(data)
-        self.assertIn("unsupported_capability_backend", {issue.code for issue in context.exception.issues})
+        self.assertIn("unsupported_scene_backend", {issue.code for issue in context.exception.issues})
 
     def test_rigid_primary_cannot_be_routed_to_a_specialized_solver_by_omission(self) -> None:
         data = case_spec_v2_fixture()
@@ -454,7 +622,7 @@ class CaseSpecV2Tests(unittest.TestCase):
         data["backend_constraints"]["allowed_solvers"] = ["genesis_sph"]
         with self.assertRaises(CaseSpecV2ValidationError) as context:
             case_spec_v2_from_dict(data)
-        self.assertIn("unsupported_capability_backend", {issue.code for issue in context.exception.issues})
+        self.assertIn("unsupported_scene_backend", {issue.code for issue in context.exception.issues})
 
     def test_required_solver_capability_must_use_registered_vocabulary(self) -> None:
         data = case_spec_v2_fixture()
@@ -518,6 +686,26 @@ class CaseSpecV2Tests(unittest.TestCase):
         with self.assertRaises(CaseSpecV2ValidationError) as context:
             case_spec_v2_from_dict(data)
         self.assertIn("asset_required", {issue.code for issue in context.exception.issues})
+
+    def test_non_asset_visual_representations_do_not_require_asset_intents(self) -> None:
+        data = case_spec_v2_fixture()
+        data["asset_policy"]["allow_analytic_proxy"] = False
+        data["objects"][0]["visual_representation"] = {"source": "solver_generated"}
+        data["objects"][0]["solver"] = {"output": "renderable_geometry"}
+        data["objects"][1]["visual_representation"] = {"source": "none"}
+        data["objects"][2]["visual_representation"] = {"source": "none"}
+
+        case = case_spec_v2_from_dict(data)
+        projection = project_case_spec_v2_to_v1(case)
+
+        self.assertEqual(projection.data["objects"][0]["visual_representation"]["source"], "solver_generated")
+        self.assertNotIn("force_analytic_proxy", projection.data["objects"][0])
+
+        conflict = deepcopy(data)
+        conflict["objects"][0]["asset"] = {"description": "incorrect placeholder asset"}
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(conflict)
+        self.assertIn("visual_representation_conflict", {issue.code for issue in context.exception.issues})
 
     def test_runtime_vocabulary_is_validated_before_compilation(self) -> None:
         data = case_spec_v2_fixture()

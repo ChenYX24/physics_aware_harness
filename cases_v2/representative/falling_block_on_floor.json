@@ -6,9 +6,9 @@
     "source_request": "A rigid block falls under gravity and contacts the floor."
   },
   "capabilities": {
-    "primary": "rigid_body_gravity_collision",
+    "primary": "rigid_body_dynamics",
     "required": [
-      "rigid_body_gravity_collision"
+      "rigid_body_dynamics"
     ]
   },
   "scene": {
@@ -147,7 +147,8 @@
   "verification_requirements": {
     "assertions": [
       {
-        "type": "gravity_then_support_contact",
+        "type": "event_exists",
+        "event": "contact",
         "objects": [
           "falling_block",
           "floor"

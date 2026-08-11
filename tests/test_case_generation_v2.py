@@ -10,6 +10,7 @@ from typing import Any, Mapping
 from harness.core.case_spec_v2 import CaseSpecV2ValidationError, case_spec_v2_from_dict
 from harness.planning.case_generation import (
     LLMJSONResponse,
+    _apply_request_identity,
     build_case_request,
     generate_case_spec_v2,
 )
@@ -105,7 +106,10 @@ class CaseGenerationV2Tests(unittest.TestCase):
             contract["enums"]["local_procedural_recipe"],
             ["box_mesh_v1", "sphere_mesh_v1", "cylinder_mesh_v1"],
         )
-        self.assertIn("rigid_body_contact_causality", contract["enums"]["primary_capability"])
+        self.assertEqual(
+            set(contract["enums"]["primary_capability"]),
+            {"rigid_body_dynamics", "fluid_particle_dynamics", "deformable_body_dynamics"},
+        )
         self.assertEqual(
             set(contract["enums"]["resource_kind"]),
             {
@@ -144,6 +148,7 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertIn("Unreal Engine (UE)", expansion_prompt)
         self.assertIn("FIELD-BY-FIELD INSTRUCTIONS", expansion_prompt)
         self.assertIn("exactly one Asset Resolve", expansion_prompt)
+        self.assertIn("Never split one\n   physical object", expansion_prompt)
         case_prompt = client.calls[1]["system_prompt"]
         self.assertIn("do not leave the color only in role or descriptive text", case_prompt)
         self.assertIn("Default to\n   local_preview", case_prompt)
@@ -158,13 +163,29 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertIn("A cylinder's authored/analytic axis is local Z", case_prompt)
         self.assertIn("competing classes as must_not.category exclusions", case_prompt)
         self.assertIn("Use supported_by, not plain contact", case_prompt)
-        self.assertIn("sequential_contact_propagation for a simple directed chain", case_prompt)
+        self.assertIn("Never classify the\n   request as a named physical process", case_prompt)
+        self.assertIn("Never invent a\n   placeholder mesh asset for solver-generated output", case_prompt)
         self.assertIn("set physics.enable_gravity=false only when the user explicitly requests", case_prompt)
         self.assertIn("write that nonnegative value as surface_gap_m", case_prompt)
         self.assertIn("passes close to each body's center of mass", case_prompt)
         self.assertIn("Do not raise box, cylinder, container", case_prompt)
         structure_example = client.calls[1]["payload"]["case_spec_contract"]["valid_structure_example_do_not_copy_values"]
         self.assertEqual(case_spec_v2_from_dict(structure_example).case_id, "example")
+        rigid_sph_example = client.calls[1]["payload"]["case_spec_contract"][
+            "valid_rigid_sph_shape_example_do_not_copy_values"
+        ]
+        container = rigid_sph_example["objects"][0]
+        liquid = rigid_sph_example["objects"][2]
+        self.assertEqual(container["role"], "rigid_body")
+        self.assertEqual(container["visual_representation"], {"source": "asset"})
+        self.assertEqual(liquid["visual_representation"], {"source": "solver_generated"})
+        self.assertNotIn("asset", liquid)
+        self.assertIn("asset", container)
+        self.assertEqual(container["solver"]["collision"]["type"], "axisymmetric_profile")
+        self.assertNotIn(
+            "rigid_body",
+            client.calls[1]["payload"]["case_spec_contract"]["backend_solver_capability_matrix"]["genesis_sph"],
+        )
         self.assertEqual(result.case_spec.case_id, "generated_v2")
         self.assertEqual(result.repair_count, 0)
 
@@ -200,6 +221,7 @@ class CaseGenerationV2Tests(unittest.TestCase):
         audited = result.case_spec.data["provenance"]["case_generation"]["asset_source_constraints"]
         self.assertEqual(len(audited), 2)
         self.assertEqual(audited[0]["allowed_providers"], ["poly_haven", "meshy"])
+        self.assertEqual(audited[0]["fallback_order"], [])
 
     def test_required_no_proxy_source_mismatch_enters_existing_bounded_repair(self) -> None:
         invalid = case_spec_v2_fixture()
@@ -237,6 +259,7 @@ class CaseGenerationV2Tests(unittest.TestCase):
             client.calls[-1]["payload"]["repair_constraints"]["asset_source_constraints"][0]["scope"]["object_ids"],
             ["cue_ball"],
         )
+        self.assertIn("Merge the visual asset request", client.calls[-1]["system_prompt"])
 
     def test_route_only_source_constraint_does_not_require_a_provider_list(self) -> None:
         generated = case_spec_v2_fixture()
@@ -351,6 +374,23 @@ class CaseGenerationV2Tests(unittest.TestCase):
             client.calls[0]["payload"]["request"]["execution_constraints"],
             {"requested_backend": "ue"},
         )
+
+    def test_explicit_particle_solver_keeps_separate_real_asset_renderer(self) -> None:
+        result = _apply_request_identity(
+            {
+                "backend_constraints": {},
+                "solver_scene": {"type": "rigid_sph"},
+            },
+            {
+                "case_id": "particle_scene",
+                "text": "generic coupled particle and rigid-body scene",
+                "execution_constraints": {"requested_backend": "genesis_sph"},
+            },
+        )
+
+        self.assertEqual(result["backend_constraints"]["allowed_solvers"], ["genesis_sph"])
+        self.assertEqual(result["backend_constraints"]["render_backend"], "ue")
+        self.assertTrue(result["backend_constraints"]["allow_multi_backend"])
 
     def test_unregistered_natural_language_solver_capability_enters_bounded_repair(self) -> None:
         invalid = case_spec_v2_fixture()

@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def native_function_source(name: str) -> str:
-    path = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+    path = ROOT / "scripts" / "native_ue_scene.py"
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(path))
     node = next(item for item in tree.body if isinstance(item, ast.FunctionDef) and item.name == name)
@@ -34,7 +34,7 @@ class UECaseConfigurationTests(unittest.TestCase):
         self.assertIn("set_material(material_index, material)", source)
 
     def test_native_exr_capture_retries_a_missing_image_write(self) -> None:
-        path = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+        path = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         function = next(
             node for node in tree.body
@@ -199,7 +199,7 @@ class UECaseConfigurationTests(unittest.TestCase):
         self.assertNotIn("advance_", recapture_source)
 
     def test_domino_native_validation_accepts_formal_domino_ids_and_any_rotation_axis(self) -> None:
-        path = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+        path = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         function = next(
             node for node in tree.body
@@ -238,7 +238,7 @@ class UECaseConfigurationTests(unittest.TestCase):
         self.assertFalse(simultaneous["checks"]["domino_order"]["passed"])
 
     def test_formal_domino_case_preserves_the_requested_map(self) -> None:
-        path = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+        path = ROOT / "scripts" / "native_ue_scene.py"
         source = path.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(path))
         assignment = next(

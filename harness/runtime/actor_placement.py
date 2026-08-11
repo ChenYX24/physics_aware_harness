@@ -7,20 +7,6 @@ from harness.core.scene_layout import is_support_role
 
 
 RUNTIME_ACTOR_PLACEMENT_SCHEMA_VERSION = "harness_runtime_actor_placement_v1"
-FIELD_OR_CONTROLLER_ROLES = {
-    "force_field",
-    "magnetic_source",
-    "magnet_source",
-    "constraint_anchor",
-    "elastic_constraint_anchor",
-    "bungee_anchor",
-    "active_agent",
-    "agent_controller",
-    "pushing_agent",
-    "throwing_agent",
-}
-
-
 def compile_runtime_actor_placement(
     case_spec: dict[str, Any],
     scene_layout: dict[str, Any],
@@ -73,10 +59,11 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
     asset_binding = node.get("asset_binding") if isinstance(node.get("asset_binding"), dict) else {}
     physics_critical = bool(node.get("physics_critical"))
     is_support = is_support_role(role)
-    is_field = normalized_role(role) in FIELD_OR_CONTROLLER_ROLES or str(node.get("shape") or "").casefold() in {"fixed_point", "constraint"}
+    is_field = str(node.get("shape") or "").casefold() in {"fixed_point", "constraint"}
+    state_kind = str(physics.get("state_kind") or "rigid").casefold()
     body_type = str(physics.get("body_type") or "").casefold()
     kinematic = bool(body_type in {"static", "kinematic"} if body_type else physics.get("kinematic") or is_support or is_field)
-    simulate_physics = bool(physics_critical and not kinematic and not is_field)
+    simulate_physics = bool(physics_critical and state_kind == "rigid" and not kinematic and not is_field)
     required_asset_unresolved = bool(asset_binding.get("required_asset_unresolved"))
     proxy = bool(
         not required_asset_unresolved
@@ -85,7 +72,7 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
     ue_path = asset_binding.get("selected_asset_ue_path")
     collider = str(physics.get("collider") or node.get("shape") or "box").casefold()
     collision_required = physics.get("collision_required")
-    collision_enabled = bool(physics_critical and not is_field and collision_required is not False)
+    collision_enabled = bool(physics_critical and state_kind == "rigid" and not is_field and collision_required is not False)
     analytic_primitive = (
         "sphere"
         if "sphere" in collider
@@ -158,6 +145,7 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
             "required_asset_unresolved": required_asset_unresolved,
         },
         "physics": {
+            "state_kind": state_kind,
             "body_type": body_type or None,
             "collision_required": collision_required,
             "simulate_physics": simulate_physics,

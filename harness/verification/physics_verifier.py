@@ -4,35 +4,18 @@ from pathlib import Path
 from typing import Any
 
 from harness.core.artifact_schema import read_json, write_json
-from harness.core.capability import canonical_capability_id
+from harness.core.physics_contract import execution_capability_id, infer_scene_domain
 from harness.core.verifier_schema import verifier_report
-from harness.verification.agent_action_verifier import verify_agent_action
-from harness.verification.brittle_fracture_verifier import verify_brittle_fracture
-from harness.verification.bounce_verifier import verify_bounce
-from harness.verification.constraint_verifier import verify_constraint_motion
-from harness.verification.contact_causality_verifier import verify_contact_causality
 from harness.verification.diagnosis import repair_suggestion
-from harness.verification.ordered_contact_verifier import verify_ordered_contact_propagation
-from harness.verification.elastic_constraint_verifier import verify_elastic_constraint
-from harness.verification.elastic_launch_verifier import verify_elastic_launch
-from harness.verification.falling_verifier import verify_falling
-from harness.verification.impulse_chain_verifier import verify_impulse_chain
-from harness.verification.mass_ratio_verifier import verify_mass_ratio
-from harness.verification.magnetic_verifier import verify_magnetic
 from harness.verification.particle_cache_verifier import verify_particle_cache
-from harness.verification.projectile_verifier import verify_projectile
-from harness.verification.ramp_verifier import verify_ramp
-from harness.verification.rolling_verifier import verify_rolling
-from harness.verification.sliding_verifier import verify_sliding
-from harness.verification.spin_verifier import verify_spin
-from harness.verification.wind_verifier import verify_wind
+from harness.verification.trajectory_assertion_verifier import verify_trajectory_assertions
 
 
 class PhysicsVerifier:
     def verify_run_dir(self, run_dir: str | Path, *, write: bool = False) -> dict[str, Any]:
         run_dir = Path(run_dir)
         case_spec = read_json(run_dir / "case_spec.json")
-        if canonical_capability_id(str(case_spec["capability_id"])) == "fluid_particle_dynamics":
+        if infer_scene_domain(case_spec) == "particle":
             report = verify_fluid_run(case_spec, run_dir)
             if write:
                 write_json(run_dir / "harness_verifier.json", report)
@@ -85,45 +68,8 @@ class PhysicsVerifier:
         return report
 
     def verify(self, case_spec: dict[str, Any], trajectory: list[dict[str, Any]], *, output_dir: str | Path | None = None) -> dict[str, Any]:
-        capability_id = canonical_capability_id(str(case_spec["capability_id"]))
-        if capability_id == "rigid_body_contact_causality":
-            failure_type, first_failure, evidence = verify_contact_causality(case_spec, trajectory)
-        elif capability_id == "sequential_contact_propagation":
-            failure_type, first_failure, evidence = verify_ordered_contact_propagation(case_spec, trajectory)
-        elif capability_id == "rigid_body_gravity_collision":
-            failure_type, first_failure, evidence = verify_falling(case_spec, trajectory)
-        elif capability_id == "ramp_sliding_friction":
-            failure_type, first_failure, evidence = verify_ramp(case_spec, trajectory)
-        elif capability_id == "projectile_gravity_motion":
-            failure_type, first_failure, evidence = verify_projectile(case_spec, trajectory)
-        elif capability_id == "bounce_restitution_ball":
-            failure_type, first_failure, evidence = verify_bounce(case_spec, trajectory)
-        elif capability_id == "rolling_friction_ball":
-            failure_type, first_failure, evidence = verify_rolling(case_spec, trajectory)
-        elif capability_id == "sliding_crate_friction":
-            failure_type, first_failure, evidence = verify_sliding(case_spec, trajectory)
-        elif capability_id == "force_field_wind_drift":
-            failure_type, first_failure, evidence = verify_wind(case_spec, trajectory)
-        elif capability_id == "magnetic_force_field":
-            failure_type, first_failure, evidence = verify_magnetic(case_spec, trajectory)
-        elif capability_id == "mass_ratio_momentum_transfer":
-            failure_type, first_failure, evidence = verify_mass_ratio(case_spec, trajectory)
-        elif capability_id == "angular_damping_spin_decay":
-            failure_type, first_failure, evidence = verify_spin(case_spec, trajectory)
-        elif capability_id == "agent_rigidbody_action_coupling":
-            failure_type, first_failure, evidence = verify_agent_action(case_spec, trajectory)
-        elif capability_id == "constraint_distance_pendulum_motion":
-            failure_type, first_failure, evidence = verify_constraint_motion(case_spec, trajectory)
-        elif capability_id == "constraint_momentum_transfer":
-            failure_type, first_failure, evidence = verify_impulse_chain(case_spec, trajectory)
-        elif capability_id == "elastic_energy_launch":
-            failure_type, first_failure, evidence = verify_elastic_launch(case_spec, trajectory)
-        elif capability_id == "elastic_constraint_rebound":
-            failure_type, first_failure, evidence = verify_elastic_constraint(case_spec, trajectory)
-        elif capability_id == "brittle_impact_fracture":
-            failure_type, first_failure, evidence = verify_brittle_fracture(case_spec, trajectory)
-        else:
-            failure_type, first_failure, evidence = "F7_runtime_artifact_incomplete", {"object_id": capability_id, "frame": 0, "time": 0, "metric": "unsupported_capability", "value": capability_id}, []
+        capability_id = execution_capability_id(case_spec)
+        failure_type, first_failure, evidence = verify_trajectory_assertions(case_spec, trajectory)
         return verifier_report(
             case_id=str(case_spec["case_id"]),
             capability_id=capability_id,

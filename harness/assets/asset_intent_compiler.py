@@ -10,7 +10,7 @@ from harness.assets.search_intent import (
     analytic_search_intent_from_asset_intent,
     search_intent_from_asset_intent,
 )
-from harness.core.case_spec_v2 import CaseSpecV2, asset_requests
+from harness.core.case_spec_v2 import CaseSpecV2, asset_requests, visual_representation_source
 
 
 RESOURCE_KIND_TO_ASSET_TYPE = {
@@ -76,6 +76,8 @@ def compile_v2_asset_intents(
     policy = case_spec.data.get("asset_policy") if isinstance(case_spec.data.get("asset_policy"), dict) else {}
     compiled: list[CompiledAssetIntent] = []
     for obj in case_spec.objects:
+        if visual_representation_source(obj) != "asset":
+            continue
         object_id = str(obj.get("id") or "")
         legacy_object = legacy_by_id.get(object_id, {"id": object_id, "role": obj.get("role")})
         legacy_intent = intent_from_object(legacy_object)

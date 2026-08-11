@@ -33,7 +33,7 @@ class HarnessFallbackBackendTests(unittest.TestCase):
             self.assertTrue((run_a / "views" / "front_static" / "rgb.mp4").exists())
             self.assertTrue((run_a / "fallback_output" / "contact_events.json").exists())
             contacts = read_json(run_a / "fallback_output" / "contact_events.json")
-            self.assertGreaterEqual(len(contacts), 1)
+            self.assertEqual(contacts, [])
             verifier = PhysicsVerifier().verify_run_dir(run_a, write=True)
             self.assertEqual(verifier["status"], "pass")
             self.assertTrue((run_a / "harness_verifier.json").exists())

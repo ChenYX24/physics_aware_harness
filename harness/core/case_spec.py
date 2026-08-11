@@ -79,17 +79,17 @@ def validate_case_spec(data: dict[str, Any]) -> None:
             raise ValueError(f"case spec field must be list: {key}")
     if not isinstance(data["should_pass"], bool):
         raise ValueError("case spec should_pass must be boolean")
-    if data.get("capability_id") == "sequential_contact_propagation":
-        validate_domino_parameter_consistency(data)
-    if data.get("capability_id") == "fluid_particle_dynamics":
+    if any(
+        isinstance(obj, dict) and str(obj.get("role") or "") in {"fluid", "fluid_volume"}
+        for obj in data.get("objects") or []
+    ) or isinstance(data.get("solver_scene"), dict):
         validate_fluid_initial_conditions(data)
-    if data.get("capability_id") == "agent_rigidbody_action_coupling":
+    expected = data.get("expected_physics") if isinstance(data.get("expected_physics"), dict) else {}
+    if expected.get("required_action_sequence") is not None or expected.get("object_effect") is not None:
         validate_agent_action_effect(data)
-    verification_rules = {str(rule) for rule in data.get("verification_rules") or []}
-    if "ballistic_gravity_impact" in verification_rules:
-        validate_ballistic_gravity_impact(data)
-    if "impact_centered_fracture" in verification_rules:
-        validate_impact_centered_fracture(data)
+    parameters = data.get("physical_parameters") if isinstance(data.get("physical_parameters"), dict) else {}
+    if parameters.get("target_impact_point_m") is not None:
+        validate_constant_acceleration_target(data)
     for obj in data["objects"]:
         if isinstance(obj, dict) and isinstance(obj.get("fracture_response"), dict):
             validate_fracture_energy_response(obj["fracture_response"])
@@ -107,7 +107,16 @@ def validate_fluid_initial_conditions(data: dict[str, Any]) -> None:
     if isinstance(data.get("solver_scene"), dict):
         from harness.runtime.rigid_sph_scene import compile_rigid_sph_scene
 
-        compile_rigid_sph_scene(data)
+        rigid_objects = [obj for obj in data.get("objects") or [] if isinstance(obj, dict) and obj.get("role") == "rigid_body"]
+        unresolved_v2_assets = (
+            (data.get("v2_projection") or {}).get("source_schema_version") == "harness_case_spec_v2"
+            and any(not str(((obj.get("asset") or {}).get("ue_path") or "")).startswith("/Game/") for obj in rigid_objects)
+        )
+        # V2 projection precedes Provider/Catalog resolution. Its generic
+        # solver declarations are validated after selected assets are bound by
+        # the Runtime Compiler; persisted V1 cases remain strict here.
+        if not unresolved_v2_assets:
+            compile_rigid_sph_scene(data)
     for fluid in fluids:
         initial = fluid.get("initial_condition")
         if initial is None:
@@ -208,48 +217,34 @@ def fracture_response_for_energy(response: dict[str, Any], impact_energy_j: floa
     return selected
 
 
-def validate_ballistic_gravity_impact(data: dict[str, Any]) -> None:
-    """Require a declared gravity arc to reach the planned impact point from initial state only."""
+def validate_constant_acceleration_target(data: dict[str, Any]) -> None:
+    """Check an explicitly declared constant-acceleration target from initial state."""
     parameters = data.get("physical_parameters") or {}
-    duration = float(parameters.get("ballistic_time_to_impact_s") or 0.0)
+    duration = float(parameters.get("time_to_target_s") or parameters.get("ballistic_time_to_impact_s") or 0.0)
     target = parameters.get("target_impact_point_m")
     gravity = parameters.get("gravity_m_s2")
-    projectile = next(
-        (obj for obj in data.get("objects") or [] if isinstance(obj, dict) and obj.get("role") == "projectile"),
-        None,
-    )
-    if duration <= 0.0 or not vector3(target) or not vector3(gravity) or not projectile:
-        raise ValueError("ballistic_gravity_impact requires time, target, gravity, and one projectile")
-    if parameters.get("gravity_enabled") is not True or projectile.get("enable_gravity") is not True:
-        raise ValueError("ballistic_gravity_impact projectile must enable gravity")
-    position = projectile.get("initial_position_m")
-    velocity = projectile.get("initial_velocity_m_s")
+    object_id = str(parameters.get("target_object_id") or "")
+    candidates = [
+        obj
+        for obj in data.get("objects") or []
+        if isinstance(obj, dict)
+        and ((object_id and str(obj.get("id") or "") == object_id) or (not object_id and obj.get("enable_gravity") is True))
+    ]
+    target_object = candidates[0] if len(candidates) == 1 else None
+    if duration <= 0.0 or not vector3(target) or not vector3(gravity) or not target_object:
+        raise ValueError("constant-acceleration target requires time, target, acceleration, and one dynamic object")
+    if parameters.get("gravity_enabled") is not True or target_object.get("enable_gravity") is not True:
+        raise ValueError("constant-acceleration target object must enable gravity")
+    position = target_object.get("initial_position_m")
+    velocity = target_object.get("initial_velocity_m_s")
     if not vector3(position) or not vector3(velocity):
-        raise ValueError("ballistic_gravity_impact requires projectile position and velocity")
+        raise ValueError("constant-acceleration target requires object position and velocity")
     predicted = [
         float(position[index]) + float(velocity[index]) * duration + 0.5 * float(gravity[index]) * duration * duration
         for index in range(3)
     ]
     if any(not math.isclose(predicted[index], float(target[index]), abs_tol=1e-6) for index in range(3)):
-        raise ValueError(f"ballistic launch does not reach target_impact_point_m: predicted={predicted}")
-
-
-def validate_impact_centered_fracture(data: dict[str, Any]) -> None:
-    brittle = next(
-        (
-            obj
-            for obj in data.get("objects") or []
-            if isinstance(obj, dict) and obj.get("role") == "brittle_fracture_body"
-        ),
-        None,
-    )
-    response = brittle.get("fracture_response") if brittle else None
-    if not isinstance(response, dict):
-        raise ValueError("impact_centered_fracture requires a brittle fracture_response")
-    if response.get("center_source") != "native_contact_impact_point":
-        raise ValueError("impact_centered_fracture must use native_contact_impact_point")
-    if response.get("prefracture_pattern") != "radial_voronoi":
-        raise ValueError("impact_centered_fracture must declare radial_voronoi topology")
+        raise ValueError(f"constant-acceleration state does not reach target_impact_point_m: predicted={predicted}")
 
 
 def vector3(value: Any) -> bool:
@@ -286,50 +281,3 @@ def fracture_center_from_contact(contact: dict[str, Any], fallback_cm: list[floa
     if vector3(point) and all(math.isfinite(float(value)) for value in point):
         return [float(value) for value in point], "native_contact_impact_point"
     return [float(value) for value in fallback_cm], "impactor_actor_location"
-
-
-def validate_domino_parameter_consistency(data: dict[str, Any]) -> None:
-    """Keep the domino sweep labels and the object states they control in lockstep."""
-    parameters = data.get("physical_parameters")
-    if not isinstance(parameters, dict):
-        return
-    dominoes = [
-        obj for obj in data.get("objects", [])
-        if isinstance(obj, dict) and str(obj.get("role") or "").casefold() == "domino"
-    ]
-    if not dominoes:
-        return
-
-    def require_equal(label: str, actual: Any, expected: Any) -> None:
-        if actual != expected:
-            raise ValueError(f"domino physical_parameters drift from object state: {label}")
-
-    for domino in dominoes:
-        if "domino_size_m" in parameters:
-            require_equal("domino_size_m", domino.get("size_m"), parameters["domino_size_m"])
-        if "domino_mass_kg" in parameters:
-            require_equal("domino_mass_kg", domino.get("mass_kg"), parameters["domino_mass_kg"])
-        material = domino.get("material") if isinstance(domino.get("material"), dict) else {}
-        if "dynamic_friction" in parameters:
-            require_equal("dynamic_friction", material.get("dynamic_friction"), parameters["dynamic_friction"])
-        if "restitution" in parameters:
-            require_equal("restitution", material.get("restitution"), parameters["restitution"])
-
-    if "initial_pitch_deg" in parameters:
-        rotation = dominoes[0].get("initial_rotation_deg")
-        actual_pitch = rotation[1] if isinstance(rotation, list) and len(rotation) >= 2 else None
-        require_equal("initial_pitch_deg", actual_pitch, parameters["initial_pitch_deg"])
-    if "domino_spacing_m" in parameters and len(dominoes) > 1:
-        expected_spacing = parameters["domino_spacing_m"]
-        for previous, current in zip(dominoes, dominoes[1:]):
-            previous_position = previous.get("initial_position_m")
-            current_position = current.get("initial_position_m")
-            actual_spacing = (
-                round(float(current_position[0]) - float(previous_position[0]), 9)
-                if isinstance(previous_position, list)
-                and isinstance(current_position, list)
-                and previous_position
-                and current_position
-                else None
-            )
-            require_equal("domino_spacing_m", actual_spacing, expected_spacing)

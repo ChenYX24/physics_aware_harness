@@ -6,6 +6,7 @@ from pathlib import Path
 
 from harness.core.artifact_schema import read_json, write_json
 from harness.core.case_spec import CaseSpec
+from harness.core.physics_contract import infer_scene_domain
 from harness.core.workspace import workspace_root
 
 
@@ -21,8 +22,8 @@ class TaichiClothBackend:
         output_root: str | Path,
         **_: object,
     ) -> Path:
-        if case.capability_id != "soft_body_deformation":
-            raise ValueError(f"taichi_cloth only supports soft_body_deformation, got {case.capability_id}")
+        if infer_scene_domain(case.data) != "deformable":
+            raise ValueError("taichi_cloth requires a deformable-domain scene contract")
         run_dir = Path(output_root) / f"{case.case_id}_{self.name}"
         run_dir.mkdir(parents=True, exist_ok=True)
         write_json(run_dir / "case_spec.json", case.data)

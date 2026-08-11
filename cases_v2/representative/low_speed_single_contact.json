@@ -6,9 +6,9 @@
     "source_request": "A low-speed cue ball hits one passive target ball on a flat low-friction table."
   },
   "capabilities": {
-    "primary": "rigid_body_contact_causality",
+    "primary": "rigid_body_dynamics",
     "required": [
-      "rigid_body_contact_causality"
+      "rigid_body_dynamics"
     ]
   },
   "scene": {
@@ -195,7 +195,8 @@
   "verification_requirements": {
     "assertions": [
       {
-        "type": "contact_causality",
+        "type": "event_exists",
+        "event": "contact",
         "objects": [
           "cue_ball",
           "target_ball_1"

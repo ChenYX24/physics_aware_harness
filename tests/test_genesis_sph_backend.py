@@ -16,6 +16,7 @@ from harness.runtime.genesis_sph_backend import (
     genesis_command,
     genesis_parameters,
     genesis_python,
+    run_ue_surface_replay,
     write_genesis_artifacts,
 )
 from scripts.harness_genesis_fluid import apply_negative_mode, confine_surface_vertices, initial_velocity_rows, percentile, surface_component_metrics
@@ -165,13 +166,56 @@ class GenesisSPHBackendTests(unittest.TestCase):
             manifest = read_json(run_dir / "artifact_manifest.json")
             self.assertEqual(verifier["status"], "pass")
             self.assertTrue(readiness["physics_ready"])
-            self.assertTrue(readiness["local_preview_ready"])
+            self.assertFalse(readiness["local_preview_ready"])
+            self.assertFalse(readiness["visual_ready"])
+            self.assertTrue(readiness["solver_preview_ready"])
             self.assertFalse(readiness["reference_ready"])
             self.assertFalse(readiness["ue_render_real"])
             self.assertEqual(manifest["artifacts"]["particle_cache"], "particle_cache.json")
             trajectory = read_json(run_dir / "trajectory.json")
             self.assertEqual(trajectory[0]["objects"]["water"]["particle_count"], 2)
             self.assertEqual(read_json(run_dir / "contact_events.json"), [])
+
+    def test_completed_cache_can_enter_existing_ue_replay_without_publishing_solver_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            write_valid_cache(run_dir)
+            write_json(run_dir / "case_spec.json", load_case_spec(ROOT / "cases/fluid/fluid_drop_in_basin.json").data)
+            write_json(
+                run_dir / "render_manifest.json",
+                {"render_kind": "solver_surface_preview", "ue_render_real": False},
+            )
+            project = root / "SimulatorWorkspace.uproject"
+            executable = root / "UnrealEditor-Cmd"
+            project.write_text("{}", encoding="utf-8")
+            executable.touch()
+            completed = subprocess.CompletedProcess([], 0, '{"status":"completed"}', "")
+
+            with patch.dict(
+                os.environ,
+                {
+                    "SIM_STUDIO_UE_PROJECT": str(project),
+                    "SIM_STUDIO_UE_EXECUTABLE": str(executable),
+                    "SIM_STUDIO_UE_MAP": "/Game/Maps/Test.Test",
+                },
+                clear=False,
+            ), patch("harness.runtime.genesis_sph_backend.subprocess.run", return_value=completed) as runner:
+                report = run_ue_surface_replay(
+                    run_dir,
+                    profile="smoke",
+                    requested_views=["event_closeup"],
+                    width=1280,
+                    height=720,
+                )
+
+            command = runner.call_args.args[0]
+            self.assertEqual(report["status"], "completed")
+            self.assertTrue((run_dir / "solver_preview.mp4").is_file())
+            self.assertFalse((run_dir / "video.mp4").exists())
+            self.assertIn("harness_render_fluid_ue.py", command[1])
+            self.assertEqual(command[command.index("--views") + 1], "event_closeup")
+            self.assertTrue((run_dir / "ue_replay_input" / "fluid_surface_replay.json").is_file())
 
     def test_registered_negative_case_is_rejected_by_unified_verifier(self) -> None:
         capability = read_json(ROOT / "capabilities/fluid_particle_dynamics.json")
@@ -236,7 +280,7 @@ class GenesisSPHBackendTests(unittest.TestCase):
 def write_valid_cache(run_dir: Path, *, falling: bool = True) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     surface = run_dir / "surface.obj"
-    surface.write_text("v 0 0 0\nf 1 1 1\n", encoding="utf-8")
+    surface.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", encoding="utf-8")
     final_z = 0.8 if falling else 1.0
     frame_surface = {"path": "surface.obj", "vertex_count": 3, "triangle_count": 1, "topology_consistent": True}
     cache = {

@@ -46,7 +46,7 @@ class RepresentativeCaseSpecV2MigrationTests(unittest.TestCase):
 
                 projected = project_case_spec_v2_to_v1(v2)
                 self.assertEqual(projected.case_id, v1.case_id)
-                self.assertEqual(projected.capability_id, v1.capability_id)
+                self.assertEqual(projected.capability_id, "rigid_body_dynamics")
                 self.assertEqual(projected.should_pass, v1.should_pass)
                 self.assertEqual(
                     [obj["id"] for obj in projected.objects],

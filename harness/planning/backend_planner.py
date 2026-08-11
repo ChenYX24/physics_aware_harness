@@ -4,20 +4,19 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from harness.core.capability import canonical_capability_id
+from harness.core.physics_contract import (
+    allowed_backends_for_scene,
+    default_backend_for_scene,
+    execution_capability_id,
+    infer_scene_domain,
+)
 from harness.core.case_spec_v2 import BACKEND_SOLVER_CAPABILITIES, CaseSpecV2
-from harness.runtime.backend_policy import backend_plan as legacy_backend_policy
 
 
 EXECUTION_BACKENDS = {"fallback", "genesis_fem", "genesis_sph", "taichi_cloth", "ue"}
-CAPABILITY_DEFAULT_BACKEND = {
-    "fluid_particle_dynamics": "genesis_sph",
-    "soft_body_deformation": "taichi_cloth",
-}
-CAPABILITY_BACKEND_RESTRICTIONS = {
-    "fluid_particle_dynamics": {"fallback", "genesis_sph"},
-    "soft_body_deformation": {"fallback", "genesis_fem", "taichi_cloth"},
-}
-DEFAULT_CAPABILITY_BACKENDS = {"fallback", "ue"}
+SUPPORTED_STAGED_EXECUTORS = {("genesis_sph", "ue")}
+
+
 @dataclass(frozen=True)
 class BackendPlanningError(ValueError):
     code: str
@@ -33,7 +32,9 @@ def plan_backend(
     source_case_spec: CaseSpecV2 | None = None,
     requested_backend: str | None = None,
 ) -> dict[str, Any]:
-    capability_id = canonical_capability_id(str(runtime_case_spec.get("capability_id") or ""))
+    source_capability_id = canonical_capability_id(str(runtime_case_spec.get("capability_id") or ""))
+    capability_id = execution_capability_id(runtime_case_spec)
+    scene_domain = infer_scene_domain(runtime_case_spec)
     constraints = (
         source_case_spec.data.get("backend_constraints")
         if source_case_spec and isinstance(source_case_spec.data.get("backend_constraints"), dict)
@@ -59,17 +60,17 @@ def plan_backend(
             "backend_constraint_conflict",
             f"requested backend {requested} is not in allowed_solvers={sorted(allowed)}",
         )
-    selected = requested or _default_backend(capability_id, allowed, required_solver_capabilities)
-    supported = CAPABILITY_BACKEND_RESTRICTIONS.get(capability_id, DEFAULT_CAPABILITY_BACKENDS)
+    selected = requested or _default_backend(runtime_case_spec, allowed, required_solver_capabilities)
+    supported = allowed_backends_for_scene(runtime_case_spec)
     if selected not in supported:
         raise BackendPlanningError(
-            "unsupported_capability_backend",
-            f"{capability_id} cannot execute on {selected}; supported={sorted(supported)}",
+            "unsupported_scene_backend",
+            f"scene domain {scene_domain} cannot execute on {selected}; supported={sorted(supported)}",
         )
     if allowed and selected not in allowed:
         raise BackendPlanningError(
             "no_legal_backend",
-            f"no registered backend satisfies allowed_solvers={sorted(allowed)} for {capability_id}",
+            f"no registered backend satisfies allowed_solvers={sorted(allowed)} for scene domain {scene_domain}",
         )
     missing_solver_capabilities = sorted(
         required_solver_capabilities - BACKEND_SOLVER_CAPABILITIES.get(selected, set())
@@ -79,11 +80,17 @@ def plan_backend(
             "unsupported_solver_capabilities",
             f"backend {selected} does not provide required solver capabilities: {missing_solver_capabilities}",
         )
-    # A solver remains its own capture backend unless V2 explicitly requests a
-    # separate renderer. This preserves the existing standalone Genesis/Taichi
-    # execution paths and creates a staged runtime_plan only for an intentional
-    # multi-backend case.
+    requires_ue_replay_assets = (
+        selected == "genesis_sph"
+        and isinstance(runtime_case_spec.get("solver_scene"), Mapping)
+        and runtime_case_spec["solver_scene"].get("type") == "rigid_sph"
+    )
+    # Solvers remain their own capture backend unless the CaseSpec requests a
+    # separate renderer or the declared solver contract requires resolved UE
+    # visual assets to replay its state cache.
     render_backend = normalize_backend(constraints.get("render_backend")) if constraints.get("render_backend") else selected
+    if requires_ue_replay_assets and render_backend == selected:
+        render_backend = "ue"
     multi_backend = render_backend != selected
     if multi_backend and constraints.get("allow_multi_backend") is False:
         raise BackendPlanningError(
@@ -91,10 +98,12 @@ def plan_backend(
             f"solver {selected} and render backend {render_backend} require a multi-backend plan",
         )
     stages = _stages(selected, render_backend)
-    legacy_policy = legacy_backend_policy(capability_id)
+    staged_execution_supported = (selected, render_backend) in SUPPORTED_STAGED_EXECUTORS
     return {
         "schema_version": "harness_backend_selection_v1",
         "capability_id": capability_id,
+        "source_capability_id": source_capability_id,
+        "scene_domain": scene_domain,
         "required_capabilities": sorted(required_solver_capabilities),
         "provided_solver_capabilities": sorted(BACKEND_SOLVER_CAPABILITIES[selected]),
         "required_case_capabilities": [
@@ -105,25 +114,25 @@ def plan_backend(
         "solver_backend": selected,
         "render_backend": render_backend,
         "multi_backend": multi_backend,
-        "selection_policy": "case_constraints_then_capability_registry_v1",
+        "selection_policy": "case_constraints_then_scene_domain_v1",
         "selection_reason": (
             "explicit_runtime_override"
             if requested
             else "allowed_solver_constraint"
             if allowed
-            else "capability_default"
+            else "scene_domain_default"
         ),
-        "target_asset_backend": "unreal" if render_backend == "ue" else render_backend,
+        "target_asset_backend": "unreal" if render_backend == "ue" or requires_ue_replay_assets else render_backend,
         "stages": stages,
         "runtime_plan_required": multi_backend,
-        "execution_supported": not multi_backend,
+        "execution_supported": not multi_backend or staged_execution_supported,
         "execution_blocker": (
             "multi_backend_stage_executor_not_implemented"
-            if multi_backend
+            if multi_backend and not staged_execution_supported
             else None
         ),
         "fallback_is_reference_truth": False,
-        "legacy_policy": legacy_policy,
+        "legacy_policy": None,
     }
 
 
@@ -141,9 +150,9 @@ def normalize_backend(value: Any) -> str:
     return aliases.get(normalized, normalized)
 
 
-def _default_backend(capability_id: str, allowed: set[str], required_capabilities: set[str]) -> str:
-    preferred = CAPABILITY_DEFAULT_BACKEND.get(capability_id, "ue")
-    supported = CAPABILITY_BACKEND_RESTRICTIONS.get(capability_id, DEFAULT_CAPABILITY_BACKENDS)
+def _default_backend(case_spec: Mapping[str, Any], allowed: set[str], required_capabilities: set[str]) -> str:
+    preferred = default_backend_for_scene(case_spec)
+    supported = allowed_backends_for_scene(case_spec)
     candidates = EXECUTION_BACKENDS.intersection(allowed or EXECUTION_BACKENDS).intersection(supported)
     capable = {
         backend

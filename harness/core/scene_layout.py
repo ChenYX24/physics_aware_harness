@@ -7,41 +7,46 @@ from harness.assets.asset_intent import intent_from_object
 
 
 SCENE_LAYOUT_SCHEMA_VERSION = "harness_scene_layout_v1"
-SUPPORT_ROLES = {"support", "floor", "ground", "table", "ramp", "slope_surface", "inclined_plane"}
-DYNAMIC_ABOVE_SUPPORT_ROLES = {
-    "active_chain_driver",
-    "constrained_chain_body",
-    "constraint_anchor",
-    "falling_body",
-    "stack_block",
-    "projectile",
-    "thrown_body",
-    "launched_body",
-    "elastic_payload",
-    "bungee_payload",
-    "elastic_constraint_anchor",
-    "elastic_constrained_body",
-    "wind_drift_body",
-    "wind_subject",
-    "balloon",
-    "light_body",
-    "magnetized_body",
-    "magnetic_body",
-    "magnetic_subject",
-    "magnetic_source",
-    "magnet_source",
-}
+SUPPORT_ROLES = {"support", "floor", "ground", "table"}
 
 
-def build_object_node(obj: dict[str, Any], asset_row: dict[str, Any] | None = None) -> dict[str, Any]:
+def build_object_node(
+    obj: dict[str, Any],
+    asset_row: dict[str, Any] | None = None,
+    *,
+    objects_by_id: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     intent = intent_from_object(obj)
     selected_asset = asset_row.get("selected_asset") if asset_row else None
     required_asset_unresolved = _required_asset_unresolved(asset_row)
-    position = vec3(obj.get("initial_position_m") or obj.get("position_m") or obj.get("position") or [0.0, 0.0, 0.0])
-    rotation = vec3(obj.get("rotation_deg") or obj.get("initial_rotation_deg") or [0.0, 0.0, 0.0])
-    instance_geometry = resolve_instance_geometry(obj, selected_asset)
+    solver = obj.get("solver") if isinstance(obj.get("solver"), dict) else {}
+    position, rotation, declared_scale = declared_object_transform(obj, objects_by_id or {})
+    geometry_obj = dict(obj)
+    geometry_obj["scale"] = declared_scale
+    initial_volume = solver.get("initial_volume") if isinstance(solver.get("initial_volume"), dict) else {}
+    if initial_volume:
+        geometry_obj.update(
+            {
+                key: initial_volume[key]
+                for key in ("shape", "size_m", "radius_m", "height_m")
+                if initial_volume.get(key) is not None
+            }
+        )
+    declared_asset = obj.get("asset") if isinstance(obj.get("asset"), dict) else {}
+    declared_asset_size = first_positive_size(declared_asset.get("bbox_m"), declared_asset.get("bbox_size_m"))
+    geometry_asset = selected_asset
+    if declared_asset_size is not None:
+        world_size = [declared_asset_size[index] * declared_scale[index] for index in range(3)]
+        geometry_asset = {**(selected_asset or {}), "authored_size_m": world_size, "bbox_size_m": world_size}
+    instance_geometry = resolve_instance_geometry(geometry_obj, geometry_asset)
     extents = instance_geometry["extents_m"]
     radius = round(math.sqrt(sum(value * value for value in extents)), 6)
+    state_kind = declared_state_kind(obj)
+    body_type = obj.get("body_type") or solver.get("mobility") or ("particle" if state_kind == "particle" else None)
+    collision = solver.get("collision") if isinstance(solver.get("collision"), dict) else {}
+    collision_required = obj.get("collision_required")
+    if collision_required is None:
+        collision_required = False if state_kind == "particle" else True if collision else None
     mass = obj.get("mass_kg")
     if mass is None and isinstance(selected_asset, dict):
         mass = selected_asset.get("mass_kg")
@@ -49,12 +54,19 @@ def build_object_node(obj: dict[str, Any], asset_row: dict[str, Any] | None = No
     if material is None and isinstance(selected_asset, dict):
         material = selected_asset.get("material")
     collider = obj.get("collider")
+    if collider is None:
+        collider = collision.get("type")
     if collider is None and isinstance(selected_asset, dict):
         collider = selected_asset.get("collider")
     collision_profile = obj.get("collision_profile")
     if collision_profile is None and isinstance(selected_asset, dict):
         collision_profile = selected_asset.get("collision_profile")
-    if selected_asset is None and asset_row and asset_row.get("fallback_reason") and not required_asset_unresolved:
+    if (
+        state_kind != "particle"
+        and selected_asset is None
+        and not required_asset_unresolved
+        and (collision or (asset_row and asset_row.get("fallback_reason")))
+    ):
         defaults = analytic_physics_defaults(obj, intent.role)
         mass = mass if mass is not None else defaults["mass_kg"]
         collider = collider if collider is not None else defaults["collider"]
@@ -72,6 +84,8 @@ def build_object_node(obj: dict[str, Any], asset_row: dict[str, Any] | None = No
         ),
     )
     shape = obj.get("shape")
+    if shape is None:
+        shape = initial_volume.get("shape") or collision.get("type")
     if shape is None and isinstance(selected_asset, dict):
         shape = selected_asset.get("shape") or selected_asset.get("collider")
     if shape is None:
@@ -95,8 +109,9 @@ def build_object_node(obj: dict[str, Any], asset_row: dict[str, Any] | None = No
             "top_z": bounds["top_z"],
         },
         "physics": {
-            "body_type": obj.get("body_type"),
-            "collision_required": obj.get("collision_required"),
+            "state_kind": state_kind,
+            "body_type": body_type,
+            "collision_required": collision_required,
             "mass_kg": mass,
             "collider": collider,
             "collision_profile": collision_profile,
@@ -106,7 +121,7 @@ def build_object_node(obj: dict[str, Any], asset_row: dict[str, Any] | None = No
             "enable_gravity": obj.get("enable_gravity"),
             "use_ccd": obj.get("use_ccd"),
             "initial_angular_velocity_rad_s": obj.get("initial_angular_velocity_rad_s"),
-            "kinematic": bool(obj.get("kinematic", is_support_role(intent.role))),
+            "kinematic": bool(obj.get("kinematic", str(body_type).casefold() in {"static", "kinematic"} or is_support_role(intent.role))),
             "proxy": (
                 bool(selected_asset.get("proxy"))
                 if isinstance(selected_asset, dict)
@@ -143,12 +158,72 @@ def build_object_node(obj: dict[str, Any], asset_row: dict[str, Any] | None = No
             "uniform_scale_factor": instance_geometry["uniform_scale_factor"],
             "target_size_m": instance_geometry["target_size_m"],
             "effective_size_m": instance_geometry["effective_size_m"],
+            "geometry_source": "declared_object_asset" if declared_asset_size is not None else "asset_resolution_or_object_geometry",
             "quality_gate": selected_asset.get("quality_gate") if isinstance(selected_asset, dict) else None,
             "fallback_reason": asset_row.get("fallback_reason") if asset_row else "asset resolution missing",
             "required_asset_unresolved": required_asset_unresolved,
             "runtime_binding_requirements": asset_row.get("runtime_binding_requirements", []) if asset_row else [],
         },
     }
+
+
+def declared_state_kind(obj: dict[str, Any]) -> str:
+    solver = obj.get("solver") if isinstance(obj.get("solver"), dict) else {}
+    material_model = str(solver.get("material_model") or "").casefold()
+    role = str(obj.get("role") or "").casefold()
+    if material_model.startswith("sph_") or role in {"fluid", "fluid_volume"}:
+        return "particle"
+    return "rigid"
+
+
+def declared_object_transform(
+    obj: dict[str, Any],
+    objects_by_id: dict[str, dict[str, Any]],
+) -> tuple[list[float], list[float], list[float]]:
+    solver = obj.get("solver") if isinstance(obj.get("solver"), dict) else {}
+    transform = solver.get("transform") if isinstance(solver.get("transform"), dict) else {}
+    position = vec3(
+        transform.get("position_m")
+        or obj.get("initial_position_m")
+        or obj.get("position_m")
+        or obj.get("position")
+        or [0.0, 0.0, 0.0]
+    )
+    rotation = vec3(
+        transform.get("euler_xyz_deg")
+        or obj.get("rotation_deg")
+        or obj.get("initial_rotation_deg")
+        or [0.0, 0.0, 0.0]
+    )
+    scale = vec3(transform.get("scale") or obj.get("scale") or [1.0, 1.0, 1.0])
+    initial = solver.get("initial_volume") if isinstance(solver.get("initial_volume"), dict) else {}
+    frame = initial.get("frame") if isinstance(initial.get("frame"), dict) else {}
+    if frame.get("type") == "world":
+        position = vec3(initial.get("position_m"))
+        rotation = vec3(initial.get("euler_xyz_deg"))
+    elif frame.get("type") == "body_local":
+        parent = objects_by_id.get(str(frame.get("body_id") or ""))
+        if isinstance(parent, dict):
+            parent_position, parent_rotation, _parent_scale = declared_object_transform(parent, {})
+            local_position = vec3(initial.get("position_m"))
+            rotated = matrix_vector(rotation_matrix_xyz(parent_rotation), local_position)
+            position = [parent_position[index] + rotated[index] for index in range(3)]
+            rotation = [parent_rotation[index] + vec3(initial.get("euler_xyz_deg"))[index] for index in range(3)]
+    return position, rotation, scale
+
+
+def rotation_matrix_xyz(euler_deg: list[float]) -> list[list[float]]:
+    x, y, z = [math.radians(float(value)) for value in euler_deg]
+    cx, sx, cy, sy, cz, sz = math.cos(x), math.sin(x), math.cos(y), math.sin(y), math.cos(z), math.sin(z)
+    return [
+        [cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx],
+        [sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx],
+        [-sy, cy * sx, cy * cx],
+    ]
+
+
+def matrix_vector(matrix: list[list[float]], vector: list[float]) -> list[float]:
+    return [sum(matrix[row][axis] * vector[axis] for axis in range(3)) for row in range(3)]
 
 
 def _required_asset_unresolved(asset_row: dict[str, Any] | None) -> bool:
@@ -298,12 +373,11 @@ def estimate_shape_extents(obj: dict[str, Any], selected_asset: dict[str, Any] |
 
 def is_support_role(role: str) -> bool:
     normalized = str(role).casefold().replace("-", "_").replace(" ", "_")
-    return normalized in SUPPORT_ROLES or any(token in normalized for token in ("support", "floor", "ground", "table", "ramp", "slope"))
+    return normalized in SUPPORT_ROLES or any(token in normalized for token in ("support", "floor", "ground", "table"))
 
 
 def allows_above_support(role: str) -> bool:
-    normalized = str(role).casefold().replace("-", "_").replace(" ", "_")
-    return normalized in DYNAMIC_ABOVE_SUPPORT_ROLES
+    return not is_support_role(role)
 
 
 def asset_id(selected_asset: Any) -> str | None:
