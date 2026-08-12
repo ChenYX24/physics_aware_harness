@@ -11,6 +11,11 @@ from harness.core.case_spec_v2 import CaseSpecV2
 from harness.core.runtime_case import RuntimeCase
 from harness.core.artifact_schema import read_json, write_json
 from harness.core.artifact_manager import ArtifactManager
+from harness.core.stage_result import (
+    stage_result_from_preflight_report,
+    stage_result_from_verifier_report,
+    write_stage_result,
+)
 from harness.assets.asset_resolver import requested_map_reference
 from harness.planning.runtime_compiler import RuntimeCompilation, compile_runtime_case
 from harness.runtime.observation_planner import camera_ids_from_observation_plan, render_passes_from_observation_plan
@@ -128,7 +133,7 @@ class UEBackend:
             case.data,
             resolved_map_package=str((scene_spec.get("map") or {}).get("requested_package") or ""),
         )
-        write_json(run_dir / "ue_preflight_report.json", preflight)
+        write_ue_preflight_result(run_dir, preflight)
         if preflight["failure_code"]:
             report = build_backend_report(case, run_id, preflight, phase="preflight", real_ue_invoked=False)
             write_failed_ue_artifacts(run_dir, output_dir, case, run_id, report, camera_plan=camera_plan, render_passes=ue_render_passes, requested_view_count=len(ue_requested_views))
@@ -337,6 +342,7 @@ def write_failed_ue_artifacts(
     }
     write_json(run_dir / "harness_verifier.json", verifier)
     write_json(run_dir / "verifier_report.json", verifier)
+    write_stage_result(run_dir, stage_result_from_verifier_report(verifier))
     write_json(
         run_dir / "artifact_manifest.json",
         {
@@ -370,6 +376,14 @@ def write_failed_ue_artifacts(
         },
     )
     write_json(run_dir / "ue_backend_report.json", report)
+
+
+def write_ue_preflight_result(
+    run_dir: Path,
+    preflight: dict[str, Any],
+) -> None:
+    write_json(run_dir / "ue_preflight_report.json", preflight)
+    write_stage_result(run_dir, stage_result_from_preflight_report(preflight))
 
 
 def preserve_completed_runtime(run_dir: Path, report: dict[str, Any]) -> bool:

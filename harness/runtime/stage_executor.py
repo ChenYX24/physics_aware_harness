@@ -4,11 +4,13 @@ import inspect
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from harness.core.artifact_schema import read_json, write_json
 from harness.core.runtime_case import RuntimeCase
+from harness.core.stage_result import stage_result_from_execution_report, write_stage_result
 from harness.core.workspace import workspace_root
 from harness.planning.runtime_compiler import RuntimeCompilation
 from harness.runtime.deformable_surface_adapter import prepare_ue_deformable_replay
@@ -68,6 +70,7 @@ def execute_runtime_plan(
     adapters = dict(render_adapters or {"ue": render_ue_handoff})
     completed: list[dict[str, Any]] = []
     run_dir: Path | None = None
+    started = time.perf_counter()
     try:
         for stage in stages:
             kind = str(stage.get("kind") or "")
@@ -119,27 +122,31 @@ def execute_runtime_plan(
     except Exception as exc:
         destination = run_dir or Path(output_root) / f"{case.case_id}_{compilation.selected_backend}"
         destination.mkdir(parents=True, exist_ok=True)
-        write_json(
-            destination / "stage_execution_report.json",
-            {
-                "schema_version": "harness_stage_execution_report_v1",
-                "status": "failed",
-                "completed_stages": completed,
-                "failure_code": getattr(exc, "code", type(exc).__name__),
-                "failure_message": str(exc),
-            },
+        report = {
+            "schema_version": "harness_stage_execution_report_v1",
+            "status": "failed",
+            "completed_stages": completed,
+            "failure_code": getattr(exc, "code", "stage_execution_exception"),
+            "failure_message": str(exc),
+        }
+        write_json(destination / "stage_execution_report.json", report)
+        write_stage_result(
+            destination,
+            stage_result_from_execution_report(report, elapsed_seconds=time.perf_counter() - started),
         )
         raise
     assert run_dir is not None
-    write_json(
-        run_dir / "stage_execution_report.json",
-        {
-            "schema_version": "harness_stage_execution_report_v1",
-            "status": "completed",
-            "completed_stages": completed,
-            "failure_code": None,
-            "failure_message": None,
-        },
+    report = {
+        "schema_version": "harness_stage_execution_report_v1",
+        "status": "completed",
+        "completed_stages": completed,
+        "failure_code": None,
+        "failure_message": None,
+    }
+    write_json(run_dir / "stage_execution_report.json", report)
+    write_stage_result(
+        run_dir,
+        stage_result_from_execution_report(report, elapsed_seconds=time.perf_counter() - started),
     )
     return run_dir
 

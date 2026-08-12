@@ -27,6 +27,8 @@ class RunQualityTests(unittest.TestCase):
             self.assertTrue(report["ranking"]["eligible"])
             self.assertIsInstance(report["ranking"]["technical_score"], float)
             self.assertTrue((run_dir / "quality_report.json").is_file())
+            quality_stage = self.read_json(run_dir / "stage_results" / "quality_gate.json")
+            self.assertEqual(quality_stage["status"], "completed")
             readiness = self.read_json(run_dir / "run_readiness.json")
             self.assertTrue(readiness["physics_ready"])
             self.assertEqual(readiness["physics_provenance"]["status"], "pass")

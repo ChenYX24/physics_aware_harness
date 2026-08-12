@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from harness.core.artifact_schema import read_json, write_json
+from harness.core.stage_result import stage_result_from_render_sync_report, write_stage_result
 
 
 ARTIFACT_SCHEMA_VERSION = "2.3"
@@ -140,6 +141,7 @@ def check_render_sync(
     }
     if write:
         write_json(run_dir / "render_sync_report.json", report)
+        write_stage_result(run_dir, stage_result_from_render_sync_report(report))
     return report
 
 

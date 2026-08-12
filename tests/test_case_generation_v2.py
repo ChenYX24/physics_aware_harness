@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 from harness.core.case_spec_v2 import CaseSpecV2ValidationError, case_spec_v2_from_dict
 from harness.planning.case_generation import (
+    CaseGenerationError,
     LLMJSONResponse,
     _apply_request_identity,
     build_case_request,
@@ -43,6 +44,11 @@ class FakeJSONClient:
             payload=payload,
             receipt={"schema_version": "harness_llm_call_receipt_v1", "purpose": purpose, "model": "fake-json-model"},
         )
+
+
+class FailingJSONClient:
+    def complete_json(self, **_: Any) -> LLMJSONResponse:
+        raise CaseGenerationError("llm_network_error", "temporary reset", retryable=True)
 
 
 def expansion_fixture() -> dict[str, Any]:
@@ -89,6 +95,18 @@ def source_constraint_expansion() -> dict[str, Any]:
 
 
 class CaseGenerationV2Tests(unittest.TestCase):
+    def test_structured_generation_failure_is_landed_without_changing_exception_behavior(self) -> None:
+        request = build_case_request(case_id="failed_generation", text="Make one ball hit another.")
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(CaseGenerationError):
+                generate_case_spec_v2(request, client=FailingJSONClient(), artifact_dir=temporary)
+
+            stage_result = json.loads(
+                (Path(temporary) / "stage_results" / "generation.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(stage_result["failure_class"], "transient")
+            self.assertTrue(stage_result["retryable"])
+
     def test_exactly_two_normal_calls_generate_v2(self) -> None:
         request = build_case_request(case_id="generated_v2", text="Make one ball hit another.")
         client = FakeJSONClient([expansion_fixture(), case_spec_v2_fixture()])
@@ -99,8 +117,10 @@ class CaseGenerationV2Tests(unittest.TestCase):
             self.assertTrue((Path(temporary) / "case_spec_v2.json").is_file())
             self.assertTrue((Path(temporary) / "case_spec_generation_raw.json").is_file())
             self.assertTrue((Path(temporary) / "case_spec_generation_call_receipt.json").is_file())
+            self.assertTrue((Path(temporary) / "stage_results" / "generation.json").is_file())
 
         self.assertEqual([call["purpose"] for call in client.calls], ["expansion", "case_spec_generation"])
+        self.assertEqual(result.stage_result["status"], "completed")
         contract = client.calls[1]["payload"]["case_spec_contract"]
         self.assertEqual(
             contract["enums"]["local_procedural_recipe"],

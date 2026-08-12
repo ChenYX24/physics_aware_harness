@@ -5,6 +5,7 @@ from typing import Any
 
 from harness.core.artifact_schema import read_json, write_json
 from harness.core.physics_contract import execution_capability_id, infer_scene_domain
+from harness.core.stage_result import stage_result_from_verifier_report, write_stage_result
 from harness.core.verifier_schema import verifier_report
 from harness.verification.diagnosis import repair_suggestion
 from harness.verification.particle_cache_verifier import verify_particle_cache
@@ -28,6 +29,7 @@ class PhysicsVerifier:
                         "harness_verifier": report,
                     },
                 )
+                write_stage_result(run_dir, stage_result_from_verifier_report(report))
             return report
         ue_backend_report_path = run_dir / "ue_backend_report.json"
         if ue_backend_report_path.exists():
@@ -54,6 +56,7 @@ class PhysicsVerifier:
                     write_json(run_dir / "harness_verifier.json", report)
                     write_json(run_dir / "verifier_report.json", report)
                     write_json(run_dir / "verifier.json", {"reference_ready": False, "harness_verifier": report})
+                    write_stage_result(run_dir, stage_result_from_verifier_report(report))
                 return report
         output_dir = resolve_output_dir(run_dir)
         trajectory_path = run_dir / "trajectory.json"
@@ -65,6 +68,7 @@ class PhysicsVerifier:
             write_json(run_dir / "harness_verifier.json", report)
             write_json(run_dir / "verifier_report.json", report)
             write_json(run_dir / "verifier.json", {"reference_ready": report["status"] == "pass", "harness_verifier": report})
+            write_stage_result(run_dir, stage_result_from_verifier_report(report))
         return report
 
     def verify(self, case_spec: dict[str, Any], trajectory: list[dict[str, Any]], *, output_dir: str | Path | None = None) -> dict[str, Any]:

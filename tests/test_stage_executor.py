@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from harness.core.artifact_schema import write_json
+from harness.core.artifact_schema import read_json, write_json
 from harness.core.runtime_case import RuntimeCase
 from harness.runtime.stage_contracts import stage_handoff_contract
 from harness.runtime.stage_executor import StageExecutionError, execute_runtime_plan
@@ -80,6 +80,8 @@ class StageExecutorTests(unittest.TestCase):
 
             self.assertEqual(rendered, [(run_dir, "deformable_mesh_cache_v1")])
             self.assertTrue((run_dir / "stage_execution_report.json").is_file())
+            stage_result = read_json(run_dir / "stage_results" / "execute.json")
+            self.assertEqual(stage_result["status"], "completed")
 
     def test_rejects_missing_handoff_artifacts_before_render(self) -> None:
         class _IncompleteBackend:
@@ -106,6 +108,8 @@ class StageExecutorTests(unittest.TestCase):
                 )
 
             self.assertEqual(context.exception.code, "stage_handoff_incomplete")
+            stage_result = read_json(Path(temporary) / "generic_staged_case_solver" / "stage_results" / "execute.json")
+            self.assertEqual(stage_result["failure_class"], "artifact_incomplete")
 
     def test_compatible_backends_are_discovered_by_shared_contract(self) -> None:
         handoff = stage_handoff_contract("taichi_cloth", "ue")

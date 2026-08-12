@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 
 from harness.core.case_spec_v2 import load_case_spec_v2
 from harness.core.artifact_schema import write_json
+from harness.core.stage_result import write_stage_result
 from harness.core.artifact_manager import ArtifactManager
 from harness.core.case_library import build_run_control_execution, write_run_control_page
 from harness.core.workspace import WORKSPACE_ENV, case_output_root, workspace_path, workspace_root
@@ -153,6 +154,7 @@ def main() -> int:
             if not isinstance(loaded_manifest, dict):
                 raise SystemExit("Provider input manifest root must be an object")
             provider_input_manifest = loaded_manifest
+    pre_run_stage_dir = Path(output_root) / "_planning" / source_case.case_id
     if profile:
         requested_views = list(profile.views)
         render_passes = list(profile.render_passes)
@@ -184,6 +186,7 @@ def main() -> int:
         camera_strategy=args.camera_strategy,
         provider_orchestrator=provider_orchestrator,
         provider_input_manifest=provider_input_manifest,
+        stage_result_dir=pre_run_stage_dir,
     )
     case = compilation.runtime_case
     selected_backend = compilation.selected_backend
@@ -193,6 +196,8 @@ def main() -> int:
         write_json(run_dir / "request.json", generation.request)
         write_json(run_dir / "expansion.json", generation.expansion)
         write_json(run_dir / "case_generation_trace.json", generation.llm_trace)
+        if generation.stage_result is not None:
+            write_stage_result(run_dir, generation.stage_result)
     if selected_backend == "ue":
         os.environ["SIM_STUDIO_UE_RENDER_MODE"] = render_mode
         if profile:

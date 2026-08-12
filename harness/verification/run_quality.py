@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from harness.core.artifact_schema import write_json
+from harness.core.stage_result import stage_result_from_quality_report, write_stage_result
 from harness.runtime.backend_policy import backend_plan
 from harness.verification.depth_geometry_verifier import verify_depth_geometry
 from harness.verification.render_sync_checker import depth_pixel_statistics, sequence_evidence_for_view
@@ -89,6 +90,7 @@ def evaluate_run(
     }
     if write:
         write_json(run_dir / "quality_report.json", report)
+        write_stage_result(run_dir, stage_result_from_quality_report(report))
         synchronize_run_readiness(run_dir, report)
     return report
 

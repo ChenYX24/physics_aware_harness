@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -111,6 +112,7 @@ class AssetProviderOrchestrator:
         registry: AssetRegistry,
         input_manifest: Mapping[str, Any] | None = None,
     ) -> ProviderOrchestration:
+        started = time.perf_counter()
         requests: list[dict[str, Any]] = []
         results: dict[tuple[str, str], dict[str, Any]] = {}
         receipts: list[dict[str, Any]] = []
@@ -181,6 +183,7 @@ class AssetProviderOrchestrator:
                 "results": [results[key] for key in sorted(results)],
                 "receipt_ids": [str(receipt["receipt_id"]) for receipt in receipts],
                 "import_summary": import_summary,
+                "elapsed_seconds": round(time.perf_counter() - started, 6),
             }
         ).to_dict()
         return ProviderOrchestration(batch=batch, results=results, receipts=tuple(receipts))

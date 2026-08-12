@@ -28,6 +28,21 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RuntimeCompilerV2Tests(unittest.TestCase):
+    def test_compile_exception_lands_structured_failure_and_still_raises(self) -> None:
+        case = case_spec_v2_from_dict(case_spec_v2_fixture())
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(BackendPlanningError):
+                compile_runtime_case(
+                    case,
+                    requested_backend="unknown_backend",
+                    registry=self.registry(),
+                    stage_result_dir=temporary,
+                )
+
+            stage_result = read_json(Path(temporary) / "stage_results" / "compile.json")
+            self.assertEqual(stage_result["failure_class"], "capability_missing")
+            self.assertEqual(stage_result["failure_code"], "unsupported_backend")
+
     def test_model_generated_solver_frame_registers_to_resolved_visual_bounds(self) -> None:
         case = {
             "solver_scene": {
@@ -350,6 +365,8 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
                 requested_views=["front_static"],
                 render_passes=["rgb"],
                 registry=self.registry(),
+                job_id="job_test",
+                attempt_id="attempt_001",
             )
 
         self.assertEqual(resolver.call_count, 1)
@@ -391,6 +408,12 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
                 "runtime_compilation_report.json",
             ):
                 self.assertTrue((Path(temporary) / name).is_file(), name)
+            self.assertTrue((Path(temporary) / "stage_results" / "compile.json").is_file())
+            self.assertTrue((Path(temporary) / "stage_results" / "provider.json").is_file())
+            compile_stage = read_json(Path(temporary) / "stage_results" / "compile.json")
+            provider_stage = read_json(Path(temporary) / "stage_results" / "provider.json")
+            self.assertEqual(compile_stage["job_id"], "job_test")
+            self.assertEqual(provider_stage["attempt_id"], "attempt_001")
             self.assertFalse((Path(temporary) / "backend_plan.json").exists())
 
     def test_v2_dynamic_contract_does_not_depend_on_free_form_role(self) -> None:

@@ -7,13 +7,15 @@ import json
 import mimetypes
 import os
 import re
+import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from harness.core.artifact_schema import write_json
+from harness.core.stage_result import artifact_ref, build_stage_result, failure_stage_result, write_stage_result
 from harness.core.case_spec_v2 import (
     ACQUISITION_ROUTES,
     ASSET_MUST_FIELDS,
@@ -88,12 +90,20 @@ class JSONCompletionClient(Protocol):
         ...
 
 
+class CaseGenerationError(RuntimeError):
+    def __init__(self, code: str, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
+
+
 @dataclass(frozen=True)
 class CaseGenerationResult:
     request: dict[str, Any]
     expansion: dict[str, Any]
     case_spec: CaseSpecV2
     llm_trace: dict[str, Any]
+    stage_result: dict[str, Any] | None = None
 
     @property
     def repair_count(self) -> int:
@@ -128,9 +138,15 @@ class OpenAICompatibleJSONClient:
         purpose: str,
     ) -> LLMJSONResponse:
         if not self.model:
-            raise RuntimeError("Set SIM_HARNESS_LLM_MODEL (or OPENAI_MODEL) for CaseSpec V2 generation.")
+            raise CaseGenerationError(
+                "llm_model_missing",
+                "Set SIM_HARNESS_LLM_MODEL (or OPENAI_MODEL) for CaseSpec V2 generation.",
+            )
         if self.base_url.startswith("https://api.openai.com/") and not self.api_key:
-            raise RuntimeError("Set SIM_HARNESS_LLM_API_KEY (or OPENAI_API_KEY) for the configured LLM endpoint.")
+            raise CaseGenerationError(
+                "llm_credentials_missing",
+                "Set SIM_HARNESS_LLM_API_KEY (or OPENAI_API_KEY) for the configured LLM endpoint.",
+            )
         content: str | list[dict[str, Any]] = json.dumps(user_payload, ensure_ascii=False)
         if images:
             content = [{"type": "text", "text": content}]
@@ -161,12 +177,21 @@ class OpenAICompatibleJSONClient:
                 raw = response.read()
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:2000]
-            raise RuntimeError(f"LLM {purpose} request failed with HTTP {exc.code}: {detail}") from exc
+            retryable = exc.code in {408, 409, 425, 429} or exc.code >= 500
+            raise CaseGenerationError(
+                "llm_http_retriable" if retryable else "llm_http_error",
+                f"LLM {purpose} request failed with HTTP {exc.code}: {detail}",
+                retryable=retryable,
+            ) from exc
         except urllib.error.URLError as exc:
-            raise RuntimeError(f"LLM {purpose} request failed: {exc.reason}") from exc
+            raise CaseGenerationError(
+                "llm_network_error",
+                f"LLM {purpose} request failed: {exc.reason}",
+                retryable=True,
+            ) from exc
         decoded = json.loads(raw.decode("utf-8"))
         if not isinstance(decoded, dict):
-            raise RuntimeError(f"LLM {purpose} response must be a JSON object")
+            raise CaseGenerationError("llm_response_invalid", f"LLM {purpose} response must be a JSON object")
         payload = _completion_payload(decoded)
         receipt = {
             "schema_version": "harness_llm_call_receipt_v1",
@@ -224,6 +249,67 @@ def build_case_request(
 
 
 def generate_case_spec_v2(
+    request: Mapping[str, Any],
+    *,
+    client: JSONCompletionClient | None = None,
+    artifact_dir: str | Path | None = None,
+    job_id: str | None = None,
+    attempt_id: str | None = None,
+) -> CaseGenerationResult:
+    started = time.perf_counter()
+    destination = Path(artifact_dir) if artifact_dir is not None else None
+    try:
+        result = _generate_case_spec_v2_impl(request, client=client, artifact_dir=artifact_dir)
+    except BaseException as exc:
+        if isinstance(exc, CaseSpecV2ValidationError) and exc.issues:
+            failure_code = exc.issues[0].code
+        else:
+            failure_code = str(getattr(exc, "code", "generation_unhandled_exception"))
+        stage_result = failure_stage_result(
+            stage="generation",
+            failure_code=failure_code,
+            message=str(exc) or type(exc).__name__,
+            retryable=getattr(exc, "retryable", None),
+            source_status="interrupted" if isinstance(exc, (KeyboardInterrupt, SystemExit)) else None,
+            job_id=job_id,
+            attempt_id=attempt_id,
+            artifact_refs=(
+                [artifact_ref("request", "request.json", REQUEST_SCHEMA_VERSION)]
+                if destination is not None and (destination / "request.json").is_file()
+                else []
+            ),
+            elapsed_seconds=time.perf_counter() - started,
+            invocation_count=(
+                len(list(destination.glob("*_call_receipt.json")))
+                if destination is not None and destination.is_dir()
+                else 0
+            ),
+        )
+        if destination is not None:
+            write_stage_result(destination, stage_result)
+        raise
+    calls = [value for value in result.llm_trace.get("calls") or [] if isinstance(value, Mapping)]
+    stage_result = build_stage_result(
+        stage="generation",
+        status="completed",
+        job_id=job_id,
+        attempt_id=attempt_id,
+        artifact_refs=[
+            artifact_ref("request", "request.json", REQUEST_SCHEMA_VERSION),
+            artifact_ref("expansion", "expansion.json", EXPANSION_SCHEMA_VERSION),
+            artifact_ref("case_spec", "case_spec_v2.json", CASE_SPEC_V2_SCHEMA_VERSION),
+            artifact_ref("generation_trace", "case_generation_trace.json", "harness_case_generation_trace_v1"),
+        ],
+        elapsed_seconds=time.perf_counter() - started,
+        invocation_count=len(calls),
+        request_identities=[str(value.get("request_sha256") or "") for value in calls],
+    )
+    if destination is not None:
+        write_stage_result(destination, stage_result)
+    return replace(result, stage_result=stage_result)
+
+
+def _generate_case_spec_v2_impl(
     request: Mapping[str, Any],
     *,
     client: JSONCompletionClient | None = None,

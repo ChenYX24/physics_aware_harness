@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import copy
 import math
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -11,6 +12,13 @@ from harness.assets.asset_registry import AssetRegistry
 from harness.assets.asset_resolver import resolve_asset_intents
 from harness.assets.providers.orchestrator import AssetProviderOrchestrator
 from harness.core.artifact_schema import write_json
+from harness.core.stage_result import (
+    artifact_ref,
+    failure_stage_result,
+    stage_result_from_compilation_report,
+    stage_result_from_provider_batch,
+    write_stage_result,
+)
 from harness.core.case_spec_v2 import CaseSpecV2, compile_case_spec_v2_runtime
 from harness.core.runtime_case import RuntimeCase
 from harness.planning.backend_planner import plan_backend
@@ -54,6 +62,7 @@ class RuntimeCompilation:
     artifacts: dict[str, dict[str, Any]]
     report: dict[str, Any]
     provider_receipts: tuple[dict[str, Any], ...] = ()
+    stage_result: dict[str, Any] | None = None
 
     @property
     def status(self) -> str:
@@ -79,10 +88,85 @@ class RuntimeCompilation:
         for receipt in self.provider_receipts:
             write_json(destination / "provider_receipts" / f"{receipt['receipt_id']}.json", receipt)
         write_json(destination / "runtime_compilation_report.json", self.report)
+        write_stage_result(
+            destination,
+            self.stage_result or stage_result_from_compilation_report(self.report),
+        )
+        provider_batch = self.artifacts.get("asset_provider_batch")
+        if isinstance(provider_batch, Mapping):
+            context = self.stage_result or {}
+            write_stage_result(
+                destination,
+                stage_result_from_provider_batch(
+                    provider_batch,
+                    job_id=context.get("job_id"),
+                    attempt_id=context.get("attempt_id"),
+                ),
+            )
         return destination
 
 
 def compile_runtime_case(
+    case_spec: CaseSpecV2,
+    *,
+    requested_backend: str | None = None,
+    requested_views: list[str] | None = None,
+    render_passes: list[str] | None = None,
+    camera_strategy: str = "bounds_auto_v1",
+    registry: AssetRegistry | None = None,
+    provider_orchestrator: AssetProviderOrchestrator | None = None,
+    provider_input_manifest: Mapping[str, Any] | None = None,
+    stage_result_dir: str | Path | None = None,
+    job_id: str | None = None,
+    attempt_id: str | None = None,
+) -> RuntimeCompilation:
+    started = time.perf_counter()
+    try:
+        compilation = _compile_runtime_case_impl(
+            case_spec,
+            requested_backend=requested_backend,
+            requested_views=requested_views,
+            render_passes=render_passes,
+            camera_strategy=camera_strategy,
+            registry=registry,
+            provider_orchestrator=provider_orchestrator,
+            provider_input_manifest=provider_input_manifest,
+        )
+    except BaseException as exc:
+        source_schema_version = case_spec.data.get("schema_version") if isinstance(case_spec, CaseSpecV2) else None
+        stage_result = failure_stage_result(
+            stage="compile",
+            failure_code=str(getattr(exc, "code", "runtime_compilation_exception")),
+            message=str(exc) or type(exc).__name__,
+            retryable=getattr(exc, "retryable", None),
+            source_status="interrupted" if isinstance(exc, (KeyboardInterrupt, SystemExit)) else None,
+            job_id=job_id,
+            attempt_id=attempt_id,
+            artifact_refs=[artifact_ref("case_spec", "case_spec_v2.json", source_schema_version)],
+            elapsed_seconds=time.perf_counter() - started,
+            invocation_count=1,
+        )
+        if stage_result_dir is not None:
+            write_stage_result(stage_result_dir, stage_result)
+        raise
+    stage_result = stage_result_from_compilation_report(
+        compilation.report,
+        job_id=job_id,
+        attempt_id=attempt_id,
+        elapsed_seconds=time.perf_counter() - started,
+    )
+    if stage_result_dir is not None:
+        write_stage_result(stage_result_dir, stage_result)
+        provider_batch = compilation.artifacts.get("asset_provider_batch")
+        if isinstance(provider_batch, Mapping):
+            write_stage_result(
+                stage_result_dir,
+                stage_result_from_provider_batch(provider_batch, job_id=job_id, attempt_id=attempt_id),
+            )
+    return replace(compilation, stage_result=stage_result)
+
+
+def _compile_runtime_case_impl(
     case_spec: CaseSpecV2,
     *,
     requested_backend: str | None = None,

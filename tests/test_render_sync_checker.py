@@ -19,6 +19,8 @@ class RenderSyncCheckerTests(unittest.TestCase):
             write_valid_views(run_dir)
             report = check_render_sync(run_dir)
             self.assertEqual(report["status"], "pass")
+            stage_result = read_json(run_dir / "stage_results" / "render_sync.json")
+            self.assertEqual(stage_result["status"], "completed")
             self.assertTrue(report["ue_render_real"])
             self.assertEqual(report["depth_source"], "ue")
             self.assertTrue(report["multi_view_sync_ok"])
