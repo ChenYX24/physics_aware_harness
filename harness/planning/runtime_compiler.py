@@ -531,7 +531,7 @@ def _compilation_errors(
             {
                 "stage": "runtime_plan",
                 "code": backend_selection.get("execution_blocker") or "backend_execution_unsupported",
-                "message": "runtime plan is valid but its multi-backend stage executor is not implemented",
+                "message": "solver and renderer do not share a compatible versioned handoff contract",
             }
         )
     return _dedupe_errors(errors)

@@ -23,12 +23,9 @@ from harness.assets.providers.contracts import ProviderRequest
 from harness.assets.providers.orchestrator import AssetProviderOrchestrator
 from harness.assets.providers.remote import MeshyModelGenerationAdapter, PolyHavenExternalSiteAdapter
 from harness.planning.runtime_compiler import compile_runtime_case
-from harness.runtime.fallback_backend import FallbackBackend
-from harness.runtime.genesis_sph_backend import GenesisSPHBackend, run_ue_surface_replay
-from harness.runtime.genesis_fem_backend import GenesisFEMBackend
-from harness.runtime.taichi_cloth_backend import TaichiClothBackend
+from harness.runtime.stage_executor import execute_runtime_plan
 from harness.runtime.execution_profile import EXECUTION_PROFILES, execution_profile, verified_run_status, write_execution_reports
-from harness.runtime.ue_backend import UEBackend, UEBackendUnavailable
+from harness.runtime.ue_backend import UEBackendUnavailable
 
 
 def parse_args() -> argparse.Namespace:
@@ -203,13 +200,6 @@ def main() -> int:
         elif args.width and args.height:
             os.environ["SIM_STUDIO_UE_WIDTH"] = str(args.width)
             os.environ["SIM_STUDIO_UE_HEIGHT"] = str(args.height)
-    backend = {
-        "fallback": FallbackBackend,
-        "genesis_fem": GenesisFEMBackend,
-        "genesis_sph": GenesisSPHBackend,
-        "taichi_cloth": TaichiClothBackend,
-        "ue": UEBackend,
-    }[selected_backend]()
     width = profile.width if profile else int(args.width or os.environ.get("SIM_STUDIO_UE_WIDTH", 1920))
     height = profile.height if profile else int(args.height or os.environ.get("SIM_STUDIO_UE_HEIGHT", 1080))
     execution, reproduce_command = build_run_control_execution(
@@ -264,29 +254,18 @@ def main() -> int:
         return 2
     started = time.perf_counter()
     try:
-        run_kwargs = {
-            "requested_views": requested_views,
-            "render_passes": render_passes,
-            "camera_strategy": args.camera_strategy,
-        }
-        if selected_backend in {"ue", "fallback"}:
-            run_kwargs["compilation"] = compilation
-        if selected_backend == "ue":
-            run_kwargs["complete_sensor_contract"] = profile.complete_sensor_contract if profile else False
-        run_dir = backend.run_case(case, output_root, **run_kwargs)
-        backend_selection = compilation.backend_selection
-        if (
-            backend_selection.get("solver_backend") == "genesis_sph"
-            and backend_selection.get("render_backend") == "ue"
-        ):
-            replay_profile = profile.name if profile else "smoke"
-            run_ue_surface_replay(
-                run_dir,
-                profile=replay_profile,
-                requested_views=requested_views,
-                width=width,
-                height=height,
-            )
+        run_dir = execute_runtime_plan(
+            case,
+            output_root,
+            compilation=compilation,
+            requested_views=requested_views,
+            render_passes=render_passes,
+            camera_strategy=args.camera_strategy,
+            profile=profile.name if profile else "smoke",
+            width=width,
+            height=height,
+            complete_sensor_contract=profile.complete_sensor_contract if profile else False,
+        )
     except UEBackendUnavailable as exc:
         write_run_control_page(
             exc.run_dir,

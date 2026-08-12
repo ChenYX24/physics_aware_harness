@@ -33,6 +33,7 @@ from harness.core.case_spec_v2 import (
     normalize_case_spec_v2,
     stable_case_spec_digest,
 )
+from harness.runtime.stage_contracts import BACKEND_STAGE_IO, stage_handoff_contract
 
 
 REQUEST_SCHEMA_VERSION = "harness_case_request_v1"
@@ -666,13 +667,11 @@ def _apply_request_identity(case_spec: Mapping[str, Any], request: Mapping[str, 
     if requested_backend:
         backend = dict(result.get("backend_constraints")) if isinstance(result.get("backend_constraints"), Mapping) else {}
         backend["allowed_solvers"] = [requested_backend]
-        solver_scene = result.get("solver_scene") if isinstance(result.get("solver_scene"), Mapping) else {}
-        if requested_backend == "genesis_sph" and solver_scene.get("type") == "rigid_sph":
-            backend["render_backend"] = "ue"
-            backend["allow_multi_backend"] = True
-        else:
-            backend["render_backend"] = requested_backend
-            backend["allow_multi_backend"] = False
+        render_backend = str(backend.get("render_backend") or requested_backend)
+        if render_backend != requested_backend and stage_handoff_contract(requested_backend, render_backend) is None:
+            render_backend = requested_backend
+        backend["render_backend"] = render_backend
+        backend["allow_multi_backend"] = render_backend != requested_backend
         result["backend_constraints"] = backend
     return result
 
@@ -868,12 +867,11 @@ FIELD-BY-FIELD INSTRUCTIONS
    natural-language phrases. If request.execution_constraints has a requested_backend, use exactly that
    backend in allowed_solvers and do not add or substitute another solver or fallback. Renderer capabilities
    never satisfy required_solver_capabilities. A declared rigid_sph scene solved by genesis_sph uses exactly
-   particle_dynamics, particle_cache, and surface_mesh_cache as required_solver_capabilities, plus
-   render_backend=ue and allow_multi_backend=true because UE only replays the solver's generic surface/state
-   cache with resolved visual assets. The rigid_body role on a static or kinematic rigid_sph participant is
-   a scene-role requirement and must not add the unsupported rigid_body solver capability to genesis_sph.
-   Otherwise use the requested backend as render_backend. Use allow_multi_backend only for an intentional
-   separate solver/render plan.
+   particle_dynamics, particle_cache, and surface_mesh_cache as required_solver_capabilities. The rigid_body
+   role on a static or kinematic rigid_sph participant is a scene-role requirement and must not add the unsupported
+   rigid_body solver capability to genesis_sph. Use the solver itself as render_backend unless
+   the requested evidence needs a separate renderer and case_spec_contract.backend_stage_io shows a shared,
+   versioned artifact contract. Set allow_multi_backend=true exactly when solver and renderer differ.
 6. asset_policy: use booleans for allow_local, allow_external, allow_generation, and
    allow_analytic_proxy. Set allow_generation=true for procedural_generation or model_generation.
    required_license_tier is local_preview or reference and must reflect the user's request. Default to
@@ -1262,6 +1260,13 @@ def _case_spec_contract() -> dict[str, Any]:
         "backend_solver_capability_matrix": {
             backend: sorted(capabilities)
             for backend, capabilities in sorted(BACKEND_SOLVER_CAPABILITIES.items())
+        },
+        "backend_stage_io": {
+            backend: {
+                direction: sorted(contracts)
+                for direction, contracts in io.items()
+            }
+            for backend, io in sorted(BACKEND_STAGE_IO.items())
         },
         "hard_rules": [
             "capabilities must be an object and capabilities.required must contain exactly capabilities.primary",

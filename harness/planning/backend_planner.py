@@ -11,10 +11,10 @@ from harness.core.physics_contract import (
     infer_scene_domain,
 )
 from harness.core.case_spec_v2 import BACKEND_SOLVER_CAPABILITIES, CaseSpecV2
+from harness.runtime.stage_contracts import stage_handoff_contract
 
 
 EXECUTION_BACKENDS = {"fallback", "genesis_fem", "genesis_sph", "taichi_cloth", "ue"}
-SUPPORTED_STAGED_EXECUTORS = {("genesis_sph", "ue")}
 
 
 @dataclass(frozen=True)
@@ -80,25 +80,19 @@ def plan_backend(
             "unsupported_solver_capabilities",
             f"backend {selected} does not provide required solver capabilities: {missing_solver_capabilities}",
         )
-    requires_ue_replay_assets = (
-        selected == "genesis_sph"
-        and isinstance(runtime_case_spec.get("solver_scene"), Mapping)
-        and runtime_case_spec["solver_scene"].get("type") == "rigid_sph"
-    )
-    # Solvers remain their own capture backend unless the CaseSpec requests a
-    # separate renderer or the declared solver contract requires resolved UE
-    # visual assets to replay its state cache.
+    # Solvers remain their own capture backend unless the declarative contract
+    # requests a separate renderer. Compatibility is decided by versioned
+    # artifact I/O, never by a named process or a backend-pair allowlist.
     render_backend = normalize_backend(constraints.get("render_backend")) if constraints.get("render_backend") else selected
-    if requires_ue_replay_assets and render_backend == selected:
-        render_backend = "ue"
     multi_backend = render_backend != selected
     if multi_backend and constraints.get("allow_multi_backend") is False:
         raise BackendPlanningError(
             "multi_backend_disallowed",
             f"solver {selected} and render backend {render_backend} require a multi-backend plan",
         )
-    stages = _stages(selected, render_backend)
-    staged_execution_supported = (selected, render_backend) in SUPPORTED_STAGED_EXECUTORS
+    handoff_contract = stage_handoff_contract(selected, render_backend) if multi_backend else None
+    stages = _stages(selected, render_backend, handoff_contract=handoff_contract)
+    staged_execution_supported = handoff_contract is not None
     return {
         "schema_version": "harness_backend_selection_v1",
         "capability_id": capability_id,
@@ -122,12 +116,13 @@ def plan_backend(
             if allowed
             else "scene_domain_default"
         ),
-        "target_asset_backend": "unreal" if render_backend == "ue" or requires_ue_replay_assets else render_backend,
+        "target_asset_backend": "unreal" if render_backend == "ue" else render_backend,
+        "handoff_contract": handoff_contract,
         "stages": stages,
         "runtime_plan_required": multi_backend,
         "execution_supported": not multi_backend or staged_execution_supported,
         "execution_blocker": (
-            "multi_backend_stage_executor_not_implemented"
+            "multi_backend_handoff_contract_unavailable"
             if multi_backend and not staged_execution_supported
             else None
         ),
@@ -169,32 +164,38 @@ def _default_backend(case_spec: Mapping[str, Any], allowed: set[str], required_c
     return sorted(capable)[0]
 
 
-def _stages(solver_backend: str, render_backend: str) -> list[dict[str, Any]]:
+def _stages(
+    solver_backend: str,
+    render_backend: str,
+    *,
+    handoff_contract: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
     if solver_backend == render_backend:
         return [
             {
                 "id": "solve_render" if solver_backend == "ue" else "solve_capture",
+                "kind": "solve_render",
                 "backend": solver_backend,
                 "inputs": ["asset_resolution", "scene_layout", "runtime_actor_placement"],
                 "outputs": ["trajectory", "render_artifacts", "signals"],
             }
         ]
-    cache_kind = {
-        "genesis_sph": "particle_surface_cache",
-        "taichi_cloth": "mesh_cache",
-        "genesis_fem": "deformable_mesh_cache",
-    }.get(solver_backend, "state_cache")
+    cache_kind = str((handoff_contract or {}).get("contract_id") or "unsupported_state_handoff")
     return [
         {
             "id": "solve",
+            "kind": "solve",
             "backend": solver_backend,
             "inputs": ["asset_resolution", "scene_layout"],
             "outputs": [cache_kind, "trajectory", "signals"],
+            "handoff_contract": dict(handoff_contract) if handoff_contract is not None else None,
         },
         {
             "id": "render",
+            "kind": "render",
             "backend": render_backend,
             "inputs": [cache_kind, "runtime_actor_placement", "observation_plan"],
             "outputs": ["render_artifacts"],
+            "handoff_contract": dict(handoff_contract) if handoff_contract is not None else None,
         },
     ]

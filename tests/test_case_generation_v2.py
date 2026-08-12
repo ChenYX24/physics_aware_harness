@@ -166,7 +166,7 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertIn("Never classify the\n   request as a named physical process", case_prompt)
         self.assertIn("Never invent a\n   placeholder mesh asset for solver-generated output", case_prompt)
         self.assertIn("set physics.enable_gravity=false only when the user explicitly requests", case_prompt)
-        self.assertIn("must not add the unsupported rigid_body solver capability", case_prompt)
+        self.assertIn("must not add the unsupported\n   rigid_body solver capability", case_prompt)
         self.assertIn("write that nonnegative value as surface_gap_m", case_prompt)
         self.assertIn("passes close to each body's center of mass", case_prompt)
         self.assertIn("Do not raise box, cylinder, container", case_prompt)
@@ -410,7 +410,7 @@ class CaseGenerationV2Tests(unittest.TestCase):
             {"requested_backend": "ue"},
         )
 
-    def test_explicit_particle_solver_keeps_separate_real_asset_renderer(self) -> None:
+    def test_explicit_particle_solver_does_not_invent_a_separate_renderer(self) -> None:
         result = _apply_request_identity(
             {
                 "backend_constraints": {},
@@ -424,8 +424,8 @@ class CaseGenerationV2Tests(unittest.TestCase):
         )
 
         self.assertEqual(result["backend_constraints"]["allowed_solvers"], ["genesis_sph"])
-        self.assertEqual(result["backend_constraints"]["render_backend"], "ue")
-        self.assertTrue(result["backend_constraints"]["allow_multi_backend"])
+        self.assertEqual(result["backend_constraints"]["render_backend"], "genesis_sph")
+        self.assertFalse(result["backend_constraints"]["allow_multi_backend"])
 
     def test_unregistered_natural_language_solver_capability_enters_bounded_repair(self) -> None:
         invalid = case_spec_v2_fixture()

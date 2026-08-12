@@ -472,7 +472,8 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
             requested_backend="genesis_fem",
         )
         self.assertTrue(staged["multi_backend"])
-        self.assertFalse(staged["execution_supported"])
+        self.assertTrue(staged["execution_supported"])
+        self.assertEqual(staged["handoff_contract"]["contract_id"], "deformable_mesh_cache_v1")
         self.assertEqual([stage["id"] for stage in staged["stages"]], ["solve", "render"])
 
     def test_required_solver_capability_must_be_provided_by_selected_backend(self) -> None:
