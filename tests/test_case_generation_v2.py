@@ -162,6 +162,21 @@ class CaseGenerationV2Tests(unittest.TestCase):
             self.assertEqual(stage_result["failure_class"], "transient")
             self.assertTrue(stage_result["retryable"])
 
+    def test_generation_resume_reuses_completed_expansion_call(self) -> None:
+        request = build_case_request(case_id="resumed_generation", text="Make one ball hit another.")
+        with tempfile.TemporaryDirectory() as temporary:
+            partial = PartialFailureJSONClient()
+            with self.assertRaises(CaseGenerationError):
+                generate_case_spec_v2(request, client=partial, artifact_dir=temporary)
+            self.assertEqual(partial.invocation_count, 2)
+
+            resumed_client = FakeJSONClient([case_spec_v2_fixture()])
+            result = generate_case_spec_v2(request, client=resumed_client, artifact_dir=temporary)
+
+            self.assertEqual([call["purpose"] for call in resumed_client.calls], ["case_spec_generation"])
+            self.assertEqual(result.stage_result["invocation_count"], 2)
+            self.assertIn("a" * 64, result.stage_result["request_identities"])
+
     def test_exactly_two_normal_calls_generate_v2(self) -> None:
         request = build_case_request(case_id="generated_v2", text="Make one ball hit another.")
         client = FakeJSONClient([expansion_fixture(), case_spec_v2_fixture()])

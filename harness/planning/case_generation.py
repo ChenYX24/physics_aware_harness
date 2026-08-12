@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
-from harness.core.artifact_schema import write_json
+from harness.core.artifact_schema import read_json, write_json
 from harness.core.stage_result import artifact_ref, build_stage_result, failure_stage_result, write_stage_result
 from harness.core.case_spec_v2 import (
     ACQUISITION_ROUTES,
@@ -31,6 +31,7 @@ from harness.core.case_spec_v2 import (
     CaseSpecV2ValidationError,
     ValidationIssue,
     asset_requests,
+    case_spec_v2_from_dict,
     collect_case_spec_v2_issues,
     normalize_case_spec_v2,
     stable_case_spec_digest,
@@ -323,6 +324,12 @@ def generate_case_spec_v2(
             write_stage_result(destination, stage_result)
         raise
     calls = [value for value in result.llm_trace.get("calls") or [] if isinstance(value, Mapping)]
+    request_identities = list(audited_client.request_identities)
+    request_identities.extend(
+        str(value.get("request_sha256"))
+        for value in calls
+        if isinstance(value.get("request_sha256"), str)
+    )
     stage_result = build_stage_result(
         stage="generation",
         status="completed",
@@ -336,7 +343,7 @@ def generate_case_spec_v2(
         ],
         elapsed_seconds=time.perf_counter() - started,
         invocation_count=len(calls),
-        request_identities=audited_client.request_identities,
+        request_identities=request_identities,
     )
     if destination is not None:
         write_stage_result(destination, stage_result)
@@ -353,46 +360,88 @@ def _generate_case_spec_v2_impl(
     client = client or OpenAICompatibleJSONClient()
     destination = Path(artifact_dir) if artifact_dir is not None else None
     if destination is not None:
-        write_json(destination / "request.json", validated_request)
+        request_path = destination / "request.json"
+        if request_path.is_file() and read_json(request_path) != validated_request:
+            raise ValueError("generation checkpoint request differs from the immutable job request")
+        write_json(request_path, validated_request)
+        completed_paths = (
+            destination / "expansion.json",
+            destination / "case_spec_v2.json",
+            destination / "case_generation_trace.json",
+        )
+        if all(path.is_file() for path in completed_paths):
+            expansion = read_json(completed_paths[0])
+            trace = read_json(completed_paths[2])
+            case_spec = case_spec_v2_from_dict(
+                read_json(completed_paths[1]),
+                available_input_ids=[str(item["input_id"]) for item in validated_request.get("inputs") or []],
+            )
+            return CaseGenerationResult(
+                request=validated_request,
+                expansion=expansion,
+                case_spec=case_spec,
+                llm_trace=trace,
+            )
     images = [
         dict(item)
         for item in validated_request.get("inputs") or []
         if item.get("kind") == "image" and item.get("external_upload_authorized") is True
     ]
-    expansion_response = client.complete_json(
-        system_prompt=_expansion_system_prompt(),
-        user_payload={
-            "request": _request_for_model(validated_request),
-            "planning_contract": {
-                "executable_primary_capabilities": _executable_primary_capabilities(),
+    expansion_cached = bool(
+        destination is not None
+        and (destination / "expansion.json").is_file()
+        and (destination / "expansion_call_receipt.json").is_file()
+    )
+    if expansion_cached:
+        expansion = _normalize_expansion(read_json(destination / "expansion.json"))
+        expansion_receipt = read_json(destination / "expansion_call_receipt.json")
+    else:
+        expansion_response = client.complete_json(
+            system_prompt=_expansion_system_prompt(),
+            user_payload={
+                "request": _request_for_model(validated_request),
+                "planning_contract": {
+                    "executable_primary_capabilities": _executable_primary_capabilities(),
+                },
+                "expansion_contract": _expansion_contract(),
             },
-            "expansion_contract": _expansion_contract(),
-        },
-        images=images,
-        purpose="expansion",
+            images=images,
+            purpose="expansion",
+        )
+        expansion_receipt = expansion_response.receipt
+        if destination is not None:
+            write_json(destination / "expansion_raw.json", expansion_response.payload)
+            write_json(destination / "expansion_call_receipt.json", expansion_receipt)
+        expansion = _normalize_expansion(expansion_response.payload)
+        if destination is not None:
+            write_json(destination / "expansion.json", expansion)
+    generation_cached = bool(
+        destination is not None
+        and (destination / "case_spec_generation_raw.json").is_file()
+        and (destination / "case_spec_generation_call_receipt.json").is_file()
     )
-    if destination is not None:
-        write_json(destination / "expansion_raw.json", expansion_response.payload)
-        write_json(destination / "expansion_call_receipt.json", expansion_response.receipt)
-    expansion = _normalize_expansion(expansion_response.payload)
-    if destination is not None:
-        write_json(destination / "expansion.json", expansion)
-    generation_response = client.complete_json(
-        system_prompt=_case_spec_system_prompt(),
-        user_payload={
-            "request": _request_for_model(validated_request),
-            "expansion": expansion,
-            "case_spec_contract": _case_spec_contract(),
-        },
-        images=None,
-        purpose="case_spec_generation",
-    )
-    if destination is not None:
-        write_json(destination / "case_spec_generation_raw.json", generation_response.payload)
-        write_json(destination / "case_spec_generation_call_receipt.json", generation_response.receipt)
-    raw_case_spec = _unwrap_case_spec(generation_response.payload)
+    if generation_cached:
+        generation_payload = read_json(destination / "case_spec_generation_raw.json")
+        generation_receipt = read_json(destination / "case_spec_generation_call_receipt.json")
+    else:
+        generation_response = client.complete_json(
+            system_prompt=_case_spec_system_prompt(),
+            user_payload={
+                "request": _request_for_model(validated_request),
+                "expansion": expansion,
+                "case_spec_contract": _case_spec_contract(),
+            },
+            images=None,
+            purpose="case_spec_generation",
+        )
+        generation_payload = generation_response.payload
+        generation_receipt = generation_response.receipt
+        if destination is not None:
+            write_json(destination / "case_spec_generation_raw.json", generation_payload)
+            write_json(destination / "case_spec_generation_call_receipt.json", generation_receipt)
+    raw_case_spec = _unwrap_case_spec(generation_payload)
     raw_case_spec = _apply_request_identity(raw_case_spec, validated_request)
-    receipts = [expansion_response.receipt, generation_response.receipt]
+    receipts = [expansion_receipt, generation_receipt]
     repair_count = 0
     try:
         case_spec = _case_spec_from_generation(
@@ -403,31 +452,42 @@ def _generate_case_spec_v2_impl(
     except CaseSpecV2ValidationError as validation_error:
         if destination is not None:
             write_json(destination / "case_spec_validation_errors.json", validation_error.to_dict())
-        repair_response = client.complete_json(
-            system_prompt=_repair_system_prompt(),
-            user_payload={
-                "invalid_case_spec": normalize_case_spec_v2(raw_case_spec),
-                "validation_errors": validation_error.to_dict(),
-                "repair_constraints": {
-                    "maximum_repairs": 1,
-                    "preserve_user_intent": True,
-                    "do_not_change_valid_fields_unless_required_by_an_error": True,
-                    "requested_backend": str(
-                        (validated_request.get("execution_constraints") or {}).get("requested_backend") or ""
-                    ) or None,
-                    "asset_source_constraints": copy.deepcopy(expansion.get("asset_source_constraints") or []),
-                },
-                "case_spec_contract": _case_spec_contract(),
-            },
-            images=None,
-            purpose="case_spec_validation_repair",
+        repair_cached = bool(
+            destination is not None
+            and (destination / "case_spec_repair_raw.json").is_file()
+            and (destination / "case_spec_repair_call_receipt.json").is_file()
         )
-        if destination is not None:
-            write_json(destination / "case_spec_repair_raw.json", repair_response.payload)
-            write_json(destination / "case_spec_repair_call_receipt.json", repair_response.receipt)
+        if repair_cached:
+            repair_payload = read_json(destination / "case_spec_repair_raw.json")
+            repair_receipt = read_json(destination / "case_spec_repair_call_receipt.json")
+        else:
+            repair_response = client.complete_json(
+                system_prompt=_repair_system_prompt(),
+                user_payload={
+                    "invalid_case_spec": normalize_case_spec_v2(raw_case_spec),
+                    "validation_errors": validation_error.to_dict(),
+                    "repair_constraints": {
+                        "maximum_repairs": 1,
+                        "preserve_user_intent": True,
+                        "do_not_change_valid_fields_unless_required_by_an_error": True,
+                        "requested_backend": str(
+                            (validated_request.get("execution_constraints") or {}).get("requested_backend") or ""
+                        ) or None,
+                        "asset_source_constraints": copy.deepcopy(expansion.get("asset_source_constraints") or []),
+                    },
+                    "case_spec_contract": _case_spec_contract(),
+                },
+                images=None,
+                purpose="case_spec_validation_repair",
+            )
+            repair_payload = repair_response.payload
+            repair_receipt = repair_response.receipt
+            if destination is not None:
+                write_json(destination / "case_spec_repair_raw.json", repair_payload)
+                write_json(destination / "case_spec_repair_call_receipt.json", repair_receipt)
         repair_count = 1
-        receipts.append(repair_response.receipt)
-        repaired = _apply_request_identity(_unwrap_case_spec(repair_response.payload), validated_request)
+        receipts.append(repair_receipt)
+        repaired = _apply_request_identity(_unwrap_case_spec(repair_payload), validated_request)
         try:
             case_spec = _case_spec_from_generation(
                 repaired,

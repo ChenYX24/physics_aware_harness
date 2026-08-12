@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import math
 import time
 from dataclasses import dataclass, replace
@@ -11,12 +13,13 @@ from harness.assets.asset_intent_compiler import CompiledAssetIntent, compile_v2
 from harness.assets.asset_registry import AssetRegistry
 from harness.assets.asset_resolver import resolve_asset_intents
 from harness.assets.providers.orchestrator import AssetProviderOrchestrator
-from harness.core.artifact_schema import write_json
+from harness.core.artifact_schema import read_json, write_json
 from harness.core.stage_result import (
     artifact_ref,
     failure_stage_result,
     stage_result_from_compilation_report,
     stage_result_from_provider_batch,
+    StageResult,
     write_stage_result,
 )
 from harness.core.case_spec_v2 import CaseSpecV2, compile_case_spec_v2_runtime
@@ -53,6 +56,24 @@ COMPILATION_STAGE_ORDER = [
     "observation_planner",
     "runtime_binding_and_stage_compiler",
 ]
+COMPILATION_TRANSACTION_SCHEMA_VERSION = "harness_runtime_compilation_transaction_v1"
+
+
+class RuntimeCompilationPaused(RuntimeError):
+    """A recoverable compilation boundary was persisted before returning control."""
+
+    def __init__(self, stage_result: Mapping[str, Any]) -> None:
+        result = StageResult.from_dict(stage_result).to_dict()
+        super().__init__(str(result.get("message") or result.get("failure_code") or "compilation paused"))
+        self.stage_result = result
+        self.code = str(result.get("failure_code") or "runtime_compilation_paused")
+        self.retryable = bool(result.get("retryable"))
+        self.checkpoint_ref = result.get("checkpoint_ref")
+        self.request_identities = list(result.get("request_identities") or [])
+        self._harness_stage = str(result["stage"])
+        self._harness_invocation_count = int(result.get("invocation_count") or 0)
+
+
 @dataclass(frozen=True)
 class RuntimeCompilation:
     source_case_spec: dict[str, Any]
@@ -119,6 +140,7 @@ def compile_runtime_case(
     stage_result_dir: str | Path | None = None,
     job_id: str | None = None,
     attempt_id: str | None = None,
+    transaction_dir: str | Path | None = None,
 ) -> RuntimeCompilation:
     started = time.perf_counter()
     try:
@@ -131,8 +153,17 @@ def compile_runtime_case(
             registry=registry,
             provider_orchestrator=provider_orchestrator,
             provider_input_manifest=provider_input_manifest,
+            transaction_dir=transaction_dir,
+            job_id=job_id,
+            attempt_id=attempt_id,
         )
     except BaseException as exc:
+        persisted_result = getattr(exc, "stage_result", None)
+        if isinstance(persisted_result, Mapping):
+            stage_result = StageResult.from_dict(persisted_result).to_dict()
+            if stage_result_dir is not None:
+                write_stage_result(stage_result_dir, stage_result)
+            raise
         source_schema_version = case_spec.data.get("schema_version") if isinstance(case_spec, CaseSpecV2) else None
         failed_stage = str(getattr(exc, "_harness_stage", "compile"))
         stage_result = failure_stage_result(
@@ -189,6 +220,9 @@ def _compile_runtime_case_impl(
     registry: AssetRegistry | None = None,
     provider_orchestrator: AssetProviderOrchestrator | None = None,
     provider_input_manifest: Mapping[str, Any] | None = None,
+    transaction_dir: str | Path | None = None,
+    job_id: str | None = None,
+    attempt_id: str | None = None,
 ) -> RuntimeCompilation:
     if not isinstance(case_spec, CaseSpecV2):
         raise TypeError("Runtime Compiler accepts only a validated CaseSpec V2")
@@ -209,26 +243,42 @@ def _compile_runtime_case_impl(
             target_backend=target_asset_backend,
         )
     )
-    try:
-        provider_orchestration = (provider_orchestrator or AssetProviderOrchestrator()).fulfill(
-            case_id=runtime_case.case_id,
-            source_case_spec=case_spec.data,
-            compiled_intents=compiled_intents,
-            target_backend=target_asset_backend,
-            registry=registry,
-            input_manifest=provider_input_manifest,
-        )
-    except BaseException as exc:
-        setattr(exc, "_harness_stage", "provider")
-        setattr(exc, "_harness_invocation_count", getattr(exc, "_harness_invocation_count", 1))
-        raise
-    asset_resolution = resolve_asset_intents(
-        runtime_case.data,
+    transaction_root = Path(transaction_dir) if transaction_dir is not None else None
+    transaction = _begin_compilation_transaction(
+        transaction_root,
+        case_spec=case_spec,
+        requested_backend=requested_backend,
+        requested_views=requested_views,
+        render_passes=render_passes,
+        camera_strategy=camera_strategy,
+        backend_selection=backend_selection,
+        runtime_case=runtime_case,
+        compiled_intents=compiled_intents,
+    )
+    provider_orchestration = _provider_for_compilation_transaction(
+        transaction_root,
+        transaction,
+        orchestrator=provider_orchestrator or AssetProviderOrchestrator(),
+        case_spec=case_spec,
+        runtime_case=runtime_case,
+        compiled_intents=compiled_intents,
+        target_asset_backend=target_asset_backend,
         registry=registry,
-        compiled_intents=list(compiled_intents),
-        provider_results=provider_orchestration.results,
-        target_backend=target_asset_backend,
-        allow_local_preview=(case_spec.data.get("asset_policy") or {}).get("required_license_tier") == "local_preview",
+        provider_input_manifest=provider_input_manifest,
+        job_id=job_id,
+        attempt_id=attempt_id,
+    )
+    asset_resolution = _resolve_for_compilation_transaction(
+        transaction_root,
+        transaction,
+        runtime_case=runtime_case,
+        case_spec=case_spec,
+        compiled_intents=compiled_intents,
+        provider_orchestration=provider_orchestration,
+        target_asset_backend=target_asset_backend,
+        registry=registry,
+        job_id=job_id,
+        attempt_id=attempt_id,
     )
     solver_contract_error = bind_resolved_solver_assets(runtime_case.data, asset_resolution)
     scene_layout = build_static_scene_layout(
@@ -297,7 +347,7 @@ def _compile_runtime_case_impl(
         "status": "fail" if errors else "pass",
         "stage_order": list(COMPILATION_STAGE_ORDER),
         "completed_stages": list(COMPILATION_STAGE_ORDER),
-        "asset_resolve_invocation_count": 1,
+        "asset_resolve_invocation_count": int(transaction.get("asset_resolve_invocation_count") or 1),
         "backend_selection": copy.deepcopy(backend_selection),
         "artifact_schemas": {
             ARTIFACT_FILENAMES[key]: value.get("schema_version")
@@ -306,6 +356,15 @@ def _compile_runtime_case_impl(
         },
         "errors": errors,
     }
+    if transaction_root is not None:
+        for key, value in artifacts.items():
+            if key in ARTIFACT_FILENAMES:
+                write_json(transaction_root / ARTIFACT_FILENAMES[key], value)
+        for receipt in provider_orchestration.receipts:
+            write_json(transaction_root / "provider_receipts" / f"{receipt['receipt_id']}.json", receipt)
+        write_json(transaction_root / "runtime_compilation_report.json", report)
+        transaction.update({"state": "completed", "updated_at_epoch": time.time()})
+        _write_compilation_transaction(transaction_root, transaction)
     return RuntimeCompilation(
         source_case_spec=source_data,
         runtime_case=runtime_case,
@@ -315,6 +374,207 @@ def _compile_runtime_case_impl(
         report=report,
         provider_receipts=provider_orchestration.receipts,
     )
+
+
+def _begin_compilation_transaction(
+    root: Path | None,
+    *,
+    case_spec: CaseSpecV2,
+    requested_backend: str | None,
+    requested_views: list[str] | None,
+    render_passes: list[str] | None,
+    camera_strategy: str,
+    backend_selection: Mapping[str, Any],
+    runtime_case: RuntimeCase,
+    compiled_intents: tuple[CompiledAssetIntent, ...],
+) -> dict[str, Any]:
+    identity = {
+        "case_spec_digest": _stable_digest(case_spec.data),
+        "requested_backend": requested_backend,
+    }
+    transaction_id = f"compilation_{_stable_digest(identity)[:24]}"
+    fresh = {
+        "schema_version": COMPILATION_TRANSACTION_SCHEMA_VERSION,
+        "transaction_id": transaction_id,
+        "input_identity": identity,
+        "latest_projection": {
+            "requested_views": list(requested_views) if requested_views is not None else None,
+            "render_passes": list(render_passes) if render_passes is not None else None,
+            "camera_strategy": camera_strategy,
+        },
+        "state": "planned",
+        "asset_resolve_invocation_count": 0,
+        "catalog_snapshot": None,
+        "updated_at_epoch": time.time(),
+    }
+    if root is None:
+        return fresh
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "compilation_transaction.json"
+    if path.is_file():
+        existing = read_json(path)
+        if not isinstance(existing, Mapping) or existing.get("schema_version") != COMPILATION_TRANSACTION_SCHEMA_VERSION:
+            raise ValueError("compilation transaction checkpoint has an unsupported schema")
+        if existing.get("transaction_id") != transaction_id or existing.get("input_identity") != identity:
+            raise ValueError("compilation transaction input digest changed; create a new CaseSpec attempt")
+        resumed = dict(existing)
+        resumed["latest_projection"] = fresh["latest_projection"]
+        _write_compilation_transaction(root, resumed)
+        return resumed
+    write_json(root / "runtime_case.json", runtime_case.data)
+    write_json(root / "backend_selection.json", dict(backend_selection))
+    write_json(root / "compiled_asset_intents.json", [intent.to_dict() for intent in compiled_intents])
+    _write_compilation_transaction(root, fresh)
+    return fresh
+
+
+def _provider_for_compilation_transaction(
+    root: Path | None,
+    transaction: dict[str, Any],
+    *,
+    orchestrator: AssetProviderOrchestrator,
+    case_spec: CaseSpecV2,
+    runtime_case: RuntimeCase,
+    compiled_intents: tuple[CompiledAssetIntent, ...],
+    target_asset_backend: str,
+    registry: AssetRegistry,
+    provider_input_manifest: Mapping[str, Any] | None,
+    job_id: str | None,
+    attempt_id: str | None,
+) -> Any:
+    cached_batch = read_json(root / "asset_provider_batch.json") if root is not None and (root / "asset_provider_batch.json").is_file() else None
+    cached_result = (
+        stage_result_from_provider_batch(cached_batch, job_id=job_id, attempt_id=attempt_id)
+        if isinstance(cached_batch, Mapping)
+        else None
+    )
+    if cached_result is not None and cached_result.get("status") == "completed":
+        return _provider_orchestration_from_artifacts(root, cached_batch)
+    try:
+        orchestration = orchestrator.fulfill(
+            case_id=runtime_case.case_id,
+            source_case_spec=case_spec.data,
+            compiled_intents=compiled_intents,
+            target_backend=target_asset_backend,
+            registry=registry,
+            input_manifest=provider_input_manifest,
+        )
+    except BaseException as exc:
+        setattr(exc, "_harness_stage", "provider")
+        setattr(exc, "_harness_invocation_count", getattr(exc, "_harness_invocation_count", 1))
+        raise
+    if root is not None:
+        write_json(root / "asset_provider_batch.json", orchestration.batch)
+        for receipt in orchestration.receipts:
+            write_json(root / "provider_receipts" / f"{receipt['receipt_id']}.json", receipt)
+    provider_result = stage_result_from_provider_batch(orchestration.batch, job_id=job_id, attempt_id=attempt_id)
+    if root is not None:
+        write_stage_result(root, provider_result)
+        transaction.update({"state": "provider_completed" if provider_result["status"] == "completed" else "provider_paused", "updated_at_epoch": time.time()})
+        _write_compilation_transaction(root, transaction)
+    if root is not None and provider_result["status"] != "completed":
+        checkpoint = str(root / "compilation_transaction.json")
+        paused = dict(provider_result)
+        paused["checkpoint_ref"] = checkpoint
+        paused = StageResult.from_dict(paused).to_dict()
+        write_stage_result(root, paused)
+        raise RuntimeCompilationPaused(paused)
+    return orchestration
+
+
+def _resolve_for_compilation_transaction(
+    root: Path | None,
+    transaction: dict[str, Any],
+    *,
+    runtime_case: RuntimeCase,
+    case_spec: CaseSpecV2,
+    compiled_intents: tuple[CompiledAssetIntent, ...],
+    provider_orchestration: Any,
+    target_asset_backend: str,
+    registry: AssetRegistry,
+    job_id: str | None,
+    attempt_id: str | None,
+) -> dict[str, Any]:
+    resolution_path = root / ARTIFACT_FILENAMES["asset_resolution"] if root is not None else None
+    if resolution_path is not None and resolution_path.is_file():
+        if int(transaction.get("asset_resolve_invocation_count") or 0) != 1:
+            raise ValueError("asset resolution artifact exists without exactly one recorded invocation")
+        return dict(read_json(resolution_path))
+    if root is not None and transaction.get("state") == "asset_resolve_started":
+        result = failure_stage_result(
+            stage="compile",
+            failure_code="asset_resolve_completion_unknown",
+            message="Asset Resolve started but no committed result exists; refusing a second invocation",
+            job_id=job_id,
+            attempt_id=attempt_id,
+            checkpoint_ref=str(root / "compilation_transaction.json"),
+        )
+        raise RuntimeCompilationPaused(result)
+    transaction.update(
+        {
+            "state": "asset_resolve_started",
+            "asset_resolve_invocation_count": 1,
+            "catalog_snapshot": _catalog_snapshot(registry),
+            "updated_at_epoch": time.time(),
+        }
+    )
+    if root is not None:
+        _write_compilation_transaction(root, transaction)
+    resolution = resolve_asset_intents(
+        runtime_case.data,
+        registry=registry,
+        compiled_intents=list(compiled_intents),
+        provider_results=provider_orchestration.results,
+        target_backend=target_asset_backend,
+        allow_local_preview=(case_spec.data.get("asset_policy") or {}).get("required_license_tier") == "local_preview",
+    )
+    if resolution_path is not None:
+        write_json(resolution_path, resolution)
+        transaction.update({"state": "asset_resolved", "updated_at_epoch": time.time()})
+        _write_compilation_transaction(root, transaction)
+    return resolution
+
+
+def _provider_orchestration_from_artifacts(root: Path, batch: Mapping[str, Any]) -> Any:
+    from harness.assets.providers.orchestrator import ProviderOrchestration
+
+    results = {
+        (str(row.get("object_id") or ""), str(row.get("slot") or "primary")): dict(row)
+        for row in batch.get("results") or []
+        if isinstance(row, Mapping)
+    }
+    receipts = []
+    for receipt_id in batch.get("receipt_ids") or []:
+        path = root / "provider_receipts" / f"{receipt_id}.json"
+        if not path.is_file():
+            raise ValueError(f"provider receipt checkpoint is missing: {receipt_id}")
+        receipts.append(dict(read_json(path)))
+    return ProviderOrchestration(batch=dict(batch), results=results, receipts=tuple(receipts))
+
+
+def _write_compilation_transaction(root: Path, transaction: Mapping[str, Any]) -> None:
+    write_json(root / "compilation_transaction.json", dict(transaction))
+
+
+def _catalog_snapshot(registry: AssetRegistry) -> dict[str, Any]:
+    path = registry.path.resolve(strict=False)
+    return {
+        "path": str(path),
+        "sha256": _sha256_file(path) if path.is_file() else None,
+    }
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _stable_digest(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _compile_runtime_plan(

@@ -26,6 +26,7 @@ WORKSPACE_DIRS = (
     "cases",
     "runs",
     "runs/case_routes",
+    "jobs",
     "catalog",
     "review",
     "review/inbox",

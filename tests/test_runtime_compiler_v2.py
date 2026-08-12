@@ -14,10 +14,11 @@ from harness.assets.asset_registry import AssetRegistry
 from harness.assets.asset_intent_compiler import compile_v2_asset_intents
 from harness.assets.asset_resolver import resolve_asset_intents
 from harness.assets.sqlite_catalog import initialize_catalog
+from harness.assets.providers.orchestrator import ProviderOrchestration
 from harness.core.artifact_schema import read_json
 from harness.core.case_spec_v2 import CaseSpecV2, case_spec_v2_from_dict, compile_case_spec_v2_runtime
 from harness.planning.backend_planner import BackendPlanningError, plan_backend
-from harness.planning.runtime_compiler import bind_resolved_solver_assets, compile_runtime_case
+from harness.planning.runtime_compiler import RuntimeCompilationPaused, bind_resolved_solver_assets, compile_runtime_case
 from harness.runtime.fallback_backend import FallbackBackend
 from harness.runtime.ue_backend import UEBackend, UEBackendUnavailable, empty_preflight
 from harness.verification.runtime_actor_placement_verifier import verify_runtime_actor_placement
@@ -28,6 +29,104 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RuntimeCompilerV2Tests(unittest.TestCase):
+    def test_transaction_resumes_provider_and_never_repeats_asset_resolve(self) -> None:
+        class _CheckpointedOrchestrator:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def fulfill(self, **_: object) -> ProviderOrchestration:
+                self.calls += 1
+                if self.calls == 1:
+                    return ProviderOrchestration(
+                        batch={
+                            "schema_version": "harness_asset_provider_batch_v1",
+                            "case_id": "v2_ball_contact",
+                            "requests": [{"request_digest": "a" * 64}],
+                            "results": [
+                                {
+                                    "status": "failed",
+                                    "failure": {
+                                        "code": "provider_network_error",
+                                        "message": "reset",
+                                        "retriable": True,
+                                    },
+                                }
+                            ],
+                            "receipt_ids": [],
+                        },
+                        results={},
+                        receipts=(),
+                    )
+                return ProviderOrchestration(
+                    batch={
+                        "schema_version": "harness_asset_provider_batch_v1",
+                        "case_id": "v2_ball_contact",
+                        "requests": [],
+                        "results": [],
+                        "receipt_ids": [],
+                    },
+                    results={},
+                    receipts=(),
+                )
+
+        case = case_spec_v2_from_dict(case_spec_v2_fixture())
+        orchestrator = _CheckpointedOrchestrator()
+        resolve_calls = 0
+        from harness.planning import runtime_compiler as module
+
+        original_resolve = module.resolve_asset_intents
+
+        def counted_resolve(*args, **kwargs):
+            nonlocal resolve_calls
+            resolve_calls += 1
+            return original_resolve(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "harness.planning.runtime_compiler.resolve_asset_intents",
+            side_effect=counted_resolve,
+        ):
+            transaction = Path(temporary) / "compilation"
+            with self.assertRaises(RuntimeCompilationPaused) as context:
+                compile_runtime_case(
+                    case,
+                    requested_backend="fallback",
+                    registry=self.registry(),
+                    provider_orchestrator=orchestrator,
+                    transaction_dir=transaction,
+                )
+            self.assertTrue(context.exception.retryable)
+            self.assertEqual(resolve_calls, 0)
+            self.assertEqual(read_json(transaction / "compilation_transaction.json")["asset_resolve_invocation_count"], 0)
+
+            smoke = compile_runtime_case(
+                case,
+                requested_backend="fallback",
+                requested_views=["event_closeup"],
+                render_passes=["rgb"],
+                registry=self.registry(),
+                provider_orchestrator=orchestrator,
+                transaction_dir=transaction,
+            )
+            candidate = compile_runtime_case(
+                case,
+                requested_backend="fallback",
+                requested_views=["front_static", "side_static"],
+                render_passes=["rgb", "depth", "segmentation"],
+                registry=self.registry(),
+                provider_orchestrator=orchestrator,
+                transaction_dir=transaction,
+            )
+
+        self.assertEqual(smoke.status, "pass")
+        self.assertEqual(candidate.status, "pass")
+        self.assertEqual(resolve_calls, 1)
+        self.assertEqual(orchestrator.calls, 2)
+        self.assertEqual(candidate.report["asset_resolve_invocation_count"], 1)
+        self.assertEqual(
+            [view["camera_id"] for view in candidate.artifacts["observation_plan"]["cameras"][:2]],
+            ["front_static", "side_static"],
+        )
+
     def test_provider_exception_is_landed_at_provider_stage_not_compile(self) -> None:
         class _ProviderFailure(RuntimeError):
             code = "provider_network_error"

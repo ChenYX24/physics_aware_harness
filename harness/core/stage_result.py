@@ -71,16 +71,31 @@ _CAPABILITY_CODES = {
     "unsupported_solver_capabilities",
 }
 _USER_ACTION_CODES = {
+    "budget_exhausted",
+    "candidate_budget_reserve_insufficient",
+    "degraded_preview_only",
+    "external_provider_authorization_missing",
+    "intent_ambiguity_requires_decision",
     "catalog_not_writable",
     "llm_credentials_missing",
+    "meshy_upload_authorization_missing",
+    "paid_provider_authorization_missing",
+    "paid_provider_budget_missing",
+    "paid_provider_budget_exhausted",
+    "publication_tier_not_satisfied",
     "provider_credentials_missing",
     "provider_input_manifest_missing",
     "provider_input_missing",
     "provider_resume_checkpoint_missing",
     "provider_submission_state_unknown",
+    "request_input_missing",
+    "soft_deadline_reached",
+    "ue_launch_budget_exhausted",
 }
 _CONFIGURATION_CODES = {
     "backend_importer_unavailable",
+    "catalog_missing",
+    "disk_budget_insufficient",
     "f1_uproject_invalid",
     "f1_uproject_missing",
     "f2_ue_executable_missing",
@@ -95,6 +110,8 @@ _CONFIGURATION_CODES = {
     "llm_model_missing",
     "ue_executable_missing",
     "ue_project_missing",
+    "request_digest_mismatch",
+    "request_input_identity_mismatch",
 }
 _TRANSIENT_CODES = {
     "backend_importer_timeout",
@@ -108,6 +125,7 @@ _TRANSIENT_CODES = {
     "provider_task_timeout",
 }
 _ARTIFACT_CODES = {
+    "asset_resolve_completion_unknown",
     "f7_runtime_artifact_incomplete",
     "f9_ue_output_missing",
     "stage_handoff_incomplete",
