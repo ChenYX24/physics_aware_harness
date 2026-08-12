@@ -91,10 +91,39 @@ class JSONCompletionClient(Protocol):
 
 
 class CaseGenerationError(RuntimeError):
-    def __init__(self, code: str, message: str, *, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        request_identity: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+        self.request_identity = request_identity
+
+
+class _AuditedJSONClient:
+    def __init__(self, client: JSONCompletionClient) -> None:
+        self.client = client
+        self.invocation_count = 0
+        self.request_identities: list[str] = []
+
+    def complete_json(self, **kwargs: Any) -> LLMJSONResponse:
+        self.invocation_count += 1
+        try:
+            response = self.client.complete_json(**kwargs)
+        except BaseException as exc:
+            identity = getattr(exc, "request_identity", None)
+            if isinstance(identity, str) and identity:
+                self.request_identities.append(identity)
+            raise
+        identity = response.receipt.get("request_sha256")
+        if isinstance(identity, str) and identity:
+            self.request_identities.append(identity)
+        return response
 
 
 @dataclass(frozen=True)
@@ -167,6 +196,7 @@ class OpenAICompatibleJSONClient:
             "temperature": 0,
         }
         encoded = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        request_identity = hashlib.sha256(encoded).hexdigest()
         endpoint = f"{self.base_url}/chat/completions"
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -182,12 +212,14 @@ class OpenAICompatibleJSONClient:
                 "llm_http_retriable" if retryable else "llm_http_error",
                 f"LLM {purpose} request failed with HTTP {exc.code}: {detail}",
                 retryable=retryable,
+                request_identity=request_identity,
             ) from exc
         except urllib.error.URLError as exc:
             raise CaseGenerationError(
                 "llm_network_error",
                 f"LLM {purpose} request failed: {exc.reason}",
                 retryable=True,
+                request_identity=request_identity,
             ) from exc
         decoded = json.loads(raw.decode("utf-8"))
         if not isinstance(decoded, dict):
@@ -199,7 +231,7 @@ class OpenAICompatibleJSONClient:
             "response_id": decoded.get("id"),
             "model": decoded.get("model") or self.model,
             "usage": decoded.get("usage") or {},
-            "request_sha256": hashlib.sha256(encoded).hexdigest(),
+            "request_sha256": request_identity,
             "response_sha256": hashlib.sha256(raw).hexdigest(),
             "endpoint_kind": "openai_compatible_chat_completions",
         }
@@ -258,8 +290,9 @@ def generate_case_spec_v2(
 ) -> CaseGenerationResult:
     started = time.perf_counter()
     destination = Path(artifact_dir) if artifact_dir is not None else None
+    audited_client = _AuditedJSONClient(client or OpenAICompatibleJSONClient())
     try:
-        result = _generate_case_spec_v2_impl(request, client=client, artifact_dir=artifact_dir)
+        result = _generate_case_spec_v2_impl(request, client=audited_client, artifact_dir=artifact_dir)
     except BaseException as exc:
         if isinstance(exc, CaseSpecV2ValidationError) and exc.issues:
             failure_code = exc.issues[0].code
@@ -279,11 +312,8 @@ def generate_case_spec_v2(
                 else []
             ),
             elapsed_seconds=time.perf_counter() - started,
-            invocation_count=(
-                len(list(destination.glob("*_call_receipt.json")))
-                if destination is not None and destination.is_dir()
-                else 0
-            ),
+            invocation_count=audited_client.invocation_count,
+            request_identities=audited_client.request_identities,
         )
         if destination is not None:
             write_stage_result(destination, stage_result)
@@ -302,7 +332,7 @@ def generate_case_spec_v2(
         ],
         elapsed_seconds=time.perf_counter() - started,
         invocation_count=len(calls),
-        request_identities=[str(value.get("request_sha256") or "") for value in calls],
+        request_identities=audited_client.request_identities,
     )
     if destination is not None:
         write_stage_result(destination, stage_result)

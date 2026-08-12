@@ -22,6 +22,7 @@ from harness.core.stage_result import (
     write_stage_result,
 )
 from harness.runtime.ue_backend import write_ue_preflight_result
+from harness.verification.physics_verifier import PhysicsVerifier
 
 
 class StageResultContractTests(unittest.TestCase):
@@ -71,6 +72,36 @@ class StageResultContractTests(unittest.TestCase):
         self.assertNotIn("token=private", serialized)
         self.assertIn("[REDACTED]", serialized)
 
+        json_style = failure_stage_result(
+            stage="provider",
+            failure_code="provider_credentials_missing",
+            message='{"Authorization":"Bearer json-secret","api_key":"json-key"}',
+        )
+        self.assertNotIn("json-secret", str(json_style))
+        self.assertNotIn("json-key", str(json_style))
+
+    def test_validator_rejects_numeric_identity_and_artifact_fields(self) -> None:
+        result = build_stage_result(stage="compile", status="completed")
+        for field, value in (("job_id", 7), ("attempt_id", 1), ("stage", 2)):
+            invalid = dict(result)
+            invalid[field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                StageResult.from_dict(invalid)
+        for field in ("name", "path"):
+            invalid = dict(result)
+            invalid["artifact_refs"] = [{"name": "report", "path": "report.json", field: 3}]
+            with self.subTest(artifact_field=field), self.assertRaises(ValueError):
+                StageResult.from_dict(invalid)
+
+    def test_retryable_cannot_override_hard_blockers(self) -> None:
+        credentials = classify_failure("provider", "provider_credentials_missing", retryable=True)
+        capability = classify_failure("compile", "unsupported_solver_capabilities", retryable=True)
+
+        self.assertEqual(credentials["failure_class"], "blocked_user_action")
+        self.assertFalse(credentials["retryable"])
+        self.assertEqual(capability["failure_class"], "capability_missing")
+        self.assertFalse(capability["retryable"])
+
     def test_invalid_success_failure_mix_is_rejected(self) -> None:
         result = build_stage_result(stage="compile", status="completed")
         result["failure_code"] = "impossible"
@@ -100,6 +131,18 @@ class StageResultContractTests(unittest.TestCase):
             self.assertEqual(read_json(root / "ue_preflight_report.json"), report)
             stage_result = read_json(root / "stage_results" / "preflight.json")
             self.assertEqual(stage_result["failure_class"], "blocked_configuration")
+
+    def test_corrupt_verifier_input_writes_failure_sidecar_before_raising(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "case_spec.json").write_text("{not-json", encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                PhysicsVerifier().verify_run_dir(root, write=True)
+
+            result = read_json(root / "stage_results" / "verifier.json")
+            self.assertEqual(result["failure_code"], "verifier_input_invalid")
+            self.assertEqual(result["failure_class"], "artifact_incomplete")
 
     def test_capability_and_configuration_failures_have_distinct_actions(self) -> None:
         capability = classify_failure("compile", "multi_backend_handoff_contract_unavailable")
@@ -149,6 +192,29 @@ class StageResultAdapterTests(unittest.TestCase):
         self.assertEqual(result["request_identities"], [digest])
         self.assertEqual(result["invocation_count"], 1)
         self.assertIn("resume_checkpoint", result["allowed_next_actions"])
+
+    def test_provider_adapter_retains_all_codes_and_prioritizes_hard_blocker(self) -> None:
+        result = stage_result_from_provider_batch(
+            {
+                "schema_version": "harness_asset_provider_batch_v1",
+                "requests": [{"request_digest": "a" * 64}, {"request_digest": "b" * 64}],
+                "results": [
+                    {
+                        "status": "failed",
+                        "failure": {"code": "provider_network_error", "message": "reset", "retriable": True},
+                    },
+                    {
+                        "status": "blocked",
+                        "failure": {"code": "provider_credentials_missing", "message": "key missing", "retriable": True},
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(result["failure_code"], "provider_credentials_missing")
+        self.assertEqual(result["failure_codes"], ["provider_network_error", "provider_credentials_missing"])
+        self.assertEqual(result["failure_class"], "blocked_user_action")
+        self.assertFalse(result["retryable"])
 
     def test_preflight_adapter_requires_configuration_action(self) -> None:
         result = stage_result_from_preflight_report(
@@ -201,6 +267,29 @@ class StageResultAdapterTests(unittest.TestCase):
         self.assertEqual(verifier["failure_class"], "verification_failed")
         self.assertEqual(render_sync["failure_class"], "render_sync_failed")
         self.assertEqual(quality["failure_class"], "quality_gate_failed")
+
+    def test_quality_adapter_retains_all_codes_and_prioritizes_solver_provenance(self) -> None:
+        result = stage_result_from_quality_report(
+            {
+                "schema_version": "harness_run_quality_v1",
+                "status": "fail",
+                "hard_gate": {
+                    "failures": [
+                        {"code": "F_DEPTH_MISSING", "message": "depth missing"},
+                        {"code": "F_RIGID_SOLVER_PROVENANCE", "message": "capture not proven"},
+                        {"code": "F_SEGMENTATION_MISSING", "message": "segmentation missing"},
+                    ]
+                },
+            }
+        )
+
+        self.assertEqual(result["failure_code"], "F_RIGID_SOLVER_PROVENANCE")
+        self.assertEqual(
+            result["failure_codes"],
+            ["F_DEPTH_MISSING", "F_RIGID_SOLVER_PROVENANCE", "F_SEGMENTATION_MISSING"],
+        )
+        self.assertEqual(result["failure_class"], "execution_failed")
+        self.assertIn("open_development_issue", result["allowed_next_actions"])
 
 
 if __name__ == "__main__":

@@ -46,6 +46,7 @@ _REQUIRED_FIELDS = {
     "elapsed_seconds",
     "failure_class",
     "failure_code",
+    "failure_codes",
     "invocation_count",
     "job_id",
     "message",
@@ -111,10 +112,11 @@ _ARTIFACT_CODES = {
     "f9_ue_output_missing",
     "stage_handoff_incomplete",
     "stage_handoff_schema_mismatch",
+    "verifier_input_invalid",
 }
 _SECRET_PATTERNS = (
-    re.compile(r"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;]+"),
-    re.compile(r"(?i)((?:api[_-]?key|access[_-]?token|token|secret|password)\s*[:=]\s*)[^\s,;]+"),
+    re.compile(r"(?i)([\"']?authorization[\"']?\s*[:=]\s*[\"']?(?:bearer\s+)?)[^\"'\s,;}]+"),
+    re.compile(r"(?i)([\"']?(?:api[_-]?key|access[_-]?token|token|secret|password)[\"']?\s*[:=]\s*[\"']?)[^\"'\s,;}]+"),
     re.compile(r"(?i)([?&](?:api[_-]?key|access[_-]?token|token|secret)=)[^&\s]+"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b"),
 )
@@ -136,12 +138,16 @@ class StageResult:
         if data.get("schema_version") != STAGE_RESULT_SCHEMA_VERSION:
             raise ValueError(f"stage result schema_version must be {STAGE_RESULT_SCHEMA_VERSION}")
         for field in ("job_id", "attempt_id"):
-            if data.get(field) is not None and not str(data[field]).strip():
+            if data.get(field) is not None and (not isinstance(data[field], str) or not data[field].strip()):
                 raise ValueError(f"{field} must be null or a non-empty string")
-        stage = str(data.get("stage") or "").strip()
+        if not isinstance(data.get("stage"), str):
+            raise ValueError("stage must be a string")
+        stage = data["stage"].strip()
         if not re.fullmatch(r"[a-z][a-z0-9_]*", stage):
             raise ValueError("stage must use lowercase letters, digits, and underscores")
-        status = str(data.get("status") or "")
+        if not isinstance(data.get("status"), str):
+            raise ValueError("status must be a string")
+        status = data["status"]
         if status not in STAGE_RESULT_STATUSES:
             raise ValueError(f"invalid stage result status: {status}")
         elapsed = data.get("elapsed_seconds")
@@ -160,15 +166,17 @@ class StageResult:
         ):
             raise ValueError("cost.amount must be a non-negative number")
         for field in ("currency", "provider"):
-            if field in cost and not str(cost[field]).strip():
+            if field in cost and (not isinstance(cost[field], str) or not cost[field].strip()):
                 raise ValueError(f"cost.{field} must be a non-empty string")
         if "estimated" in cost and not isinstance(cost["estimated"], bool):
             raise ValueError("cost.estimated must be boolean")
         request_identities = data.get("request_identities")
-        if not isinstance(request_identities, list) or any(not _is_sha256(str(value)) for value in request_identities):
+        if not isinstance(request_identities, list) or any(
+            not isinstance(value, str) or not _is_sha256(value) for value in request_identities
+        ):
             raise ValueError("request_identities must be a list of SHA-256 digests")
         checkpoint_ref = data.get("checkpoint_ref")
-        if checkpoint_ref is not None and not str(checkpoint_ref).strip():
+        if checkpoint_ref is not None and (not isinstance(checkpoint_ref, str) or not checkpoint_ref.strip()):
             raise ValueError("checkpoint_ref must be null or a non-empty string")
         artifact_refs = data.get("artifact_refs")
         if not isinstance(artifact_refs, list) or any(not _valid_artifact_ref(value) for value in artifact_refs):
@@ -186,13 +194,26 @@ class StageResult:
                 raise ValueError("completed stage results must set retryable=false")
             if required_user_action is not None:
                 raise ValueError("completed stage results cannot require user action")
+            if data.get("failure_codes") != []:
+                raise ValueError("completed stage results must have an empty failure_codes list")
         else:
-            failure_class = str(data.get("failure_class") or "")
+            if not isinstance(data.get("failure_class"), str):
+                raise ValueError("failure_class must be a string")
+            failure_class = data["failure_class"]
             if failure_class not in FAILURE_CLASSES:
                 raise ValueError(f"invalid failure_class: {failure_class}")
-            if not str(data.get("failure_code") or "").strip():
+            if not isinstance(data.get("failure_code"), str) or not data["failure_code"].strip():
                 raise ValueError("non-completed stage results require failure_code")
-            if not str(data.get("message") or "").strip():
+            failure_codes = data.get("failure_codes")
+            if (
+                not isinstance(failure_codes, list)
+                or not failure_codes
+                or any(not isinstance(value, str) or not value.strip() for value in failure_codes)
+                or len(failure_codes) != len(set(failure_codes))
+                or data["failure_code"] not in failure_codes
+            ):
+                raise ValueError("failure_codes must be unique non-empty strings containing failure_code")
+            if not isinstance(data.get("message"), str) or not data["message"].strip():
                 raise ValueError("non-completed stage results require message")
             if not isinstance(data.get("retryable"), bool):
                 raise ValueError("retryable must be boolean")
@@ -210,6 +231,7 @@ def build_stage_result(
     attempt_id: str | None = None,
     failure_class: str | None = None,
     failure_code: str | None = None,
+    failure_codes: Sequence[str] | None = None,
     message: str | None = None,
     retryable: bool = False,
     checkpoint_ref: str | None = None,
@@ -225,17 +247,22 @@ def build_stage_result(
     safe_user_action = None
     if required_user_action is not None:
         safe_user_action = {
-            "code": str(required_user_action.get("code") or ""),
-            "message": redact_text(str(required_user_action.get("message") or "")),
+            "code": required_user_action.get("code"),
+            "message": (
+                redact_text(required_user_action.get("message"))
+                if isinstance(required_user_action.get("message"), str)
+                else required_user_action.get("message")
+            ),
         }
     payload = {
         "schema_version": STAGE_RESULT_SCHEMA_VERSION,
-        "job_id": str(job_id) if job_id is not None else None,
-        "attempt_id": str(attempt_id) if attempt_id is not None else None,
-        "stage": str(stage),
-        "status": str(status),
+        "job_id": job_id,
+        "attempt_id": attempt_id,
+        "stage": stage,
+        "status": status,
         "failure_class": failure_class,
-        "failure_code": str(failure_code) if failure_code is not None else None,
+        "failure_code": failure_code,
+        "failure_codes": list(dict.fromkeys(failure_codes or ([failure_code] if failure_code else []))),
         "message": safe_message,
         "retryable": bool(retryable),
         "checkpoint_ref": redact_text(str(checkpoint_ref)) if checkpoint_ref is not None else None,
@@ -258,6 +285,7 @@ def failure_stage_result(
     retryable: bool | None = None,
     source_status: str | None = None,
     required_action_message: str | None = None,
+    failure_codes: Sequence[str] | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     classification = classify_failure(stage, failure_code, retryable=retryable, source_status=source_status)
@@ -275,6 +303,7 @@ def failure_stage_result(
         status=classification["status"],
         failure_class=classification["failure_class"],
         failure_code=failure_code,
+        failure_codes=failure_codes,
         message=message,
         retryable=classification["retryable"],
         allowed_next_actions=classification["allowed_next_actions"],
@@ -295,15 +324,19 @@ def classify_failure(
     normalized_stage = str(stage or "").strip().casefold()
     if source_status == "interrupted" or code in {"interrupted", "keyboardinterrupt"}:
         return _classification("interrupted", "interrupted", False, ["resume_checkpoint", "cancel"])
-    if retryable is True or (retryable is None and code in _TRANSIENT_CODES):
-        actions = ["resume_checkpoint", "retry_stage"] if "provider" in normalized_stage else ["retry_stage"]
-        return _classification("failed", "transient", True, actions)
     if code in _CAPABILITY_CODES or "capability" in code or "handoff_contract_unavailable" in code:
         return _classification("blocked", "capability_missing", False, ["open_development_issue", "cancel"])
     if code in _USER_ACTION_CODES or code.startswith("provider_input_") or "authorization" in code or "credits" in code:
         return _classification("blocked", "blocked_user_action", False, ["request_user_action", "cancel"])
     if code in _CONFIGURATION_CODES or normalized_stage in {"readiness", "preflight"}:
         return _classification("blocked", "blocked_configuration", False, ["fix_configuration", "cancel"])
+    if retryable is True or (retryable is None and code in _TRANSIENT_CODES):
+        actions = ["resume_checkpoint", "retry_stage"] if "provider" in normalized_stage else ["retry_stage"]
+        return _classification("failed", "transient", True, actions)
+    if "solver_provenance" in code or "physics_capture" in code:
+        return _classification("failed", "execution_failed", False, ["inspect_artifacts", "open_development_issue"])
+    if code.endswith("_exception") or code.endswith("_unhandled_exception"):
+        return _classification("failed", "harness_bug", False, ["inspect_artifacts", "open_development_issue"])
     if code in _ARTIFACT_CODES or "artifact_missing" in code or "output_missing" in code:
         return _classification("failed", "artifact_incomplete", False, ["inspect_artifacts", "open_development_issue"])
     if normalized_stage == "generation" or normalized_stage == "compile":
@@ -326,6 +359,52 @@ def classify_failure(
     return _classification("failed", "harness_bug", False, ["inspect_artifacts", "open_development_issue"])
 
 
+def select_primary_failure(stage: str, failures: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Select a deterministic primary failure while retaining every stable code."""
+    normalized: list[dict[str, Any]] = []
+    for index, failure in enumerate(failures):
+        code = failure.get("code")
+        if not isinstance(code, str) or not code.strip():
+            continue
+        retryable = failure.get("retryable")
+        if retryable is None:
+            retryable = failure.get("retriable")
+        retryable = retryable if isinstance(retryable, bool) else None
+        source_status = failure.get("source_status")
+        classification = classify_failure(
+            stage,
+            code,
+            retryable=retryable,
+            source_status=str(source_status) if source_status is not None else None,
+        )
+        normalized.append(
+            {
+                "code": code,
+                "message": str(failure.get("message") or code),
+                "retryable": retryable,
+                "source_status": source_status,
+                "classification": classification,
+                "index": index,
+            }
+        )
+    if not normalized:
+        return {
+            "code": f"{stage}_failed",
+            "message": f"{stage} failed.",
+            "retryable": None,
+            "source_status": None,
+            "failure_codes": [f"{stage}_failed"],
+        }
+    primary = min(normalized, key=lambda value: (_failure_priority(value["classification"]), value["index"]))
+    return {
+        "code": primary["code"],
+        "message": primary["message"],
+        "retryable": primary["retryable"],
+        "source_status": primary["source_status"],
+        "failure_codes": list(dict.fromkeys(value["code"] for value in normalized)),
+    }
+
+
 def stage_result_from_compilation_report(
     report: Mapping[str, Any],
     *,
@@ -343,11 +422,13 @@ def stage_result_from_compilation_report(
             artifact_refs=refs,
             elapsed_seconds=elapsed_seconds,
         )
-    error = next((value for value in report.get("errors") or [] if isinstance(value, Mapping)), {})
+    failures = [value for value in report.get("errors") or [] if isinstance(value, Mapping)]
+    primary = select_primary_failure("compile", failures)
     return failure_stage_result(
         stage="compile",
-        failure_code=str(error.get("code") or "runtime_compilation_failed"),
-        message=str(error.get("message") or "Runtime compilation failed."),
+        failure_code=primary["code"],
+        failure_codes=primary["failure_codes"],
+        message=primary["message"],
         job_id=job_id,
         attempt_id=attempt_id,
         artifact_refs=refs,
@@ -367,8 +448,8 @@ def stage_result_from_provider_batch(
     identities = [str(value.get("request_digest") or "") for value in requests]
     refs = [artifact_ref("asset_provider_batch", "asset_provider_batch.json", batch.get("schema_version"))]
     elapsed = float(batch.get("elapsed_seconds") or 0.0) if elapsed_seconds is None else elapsed_seconds
-    failed = next((value for value in results if value.get("status") != "fulfilled"), None)
-    if failed is None:
+    failed = [value for value in results if value.get("status") != "fulfilled"]
+    if not failed:
         return build_stage_result(
             stage="provider",
             status="completed",
@@ -379,14 +460,27 @@ def stage_result_from_provider_batch(
             invocation_count=len(requests),
             request_identities=identities,
         )
-    failure = failed.get("failure") if isinstance(failed.get("failure"), Mapping) else {}
-    receipt_ids = [str(value) for value in failed.get("receipt_ids") or [] if str(value).strip()]
+    failures = []
+    receipt_ids = []
+    for result in failed:
+        failure = result.get("failure") if isinstance(result.get("failure"), Mapping) else {}
+        failures.append(
+            {
+                "code": failure.get("code") or "provider_execution_failed",
+                "message": failure.get("message") or "Provider execution failed.",
+                "retryable": failure.get("retriable"),
+                "source_status": result.get("status") or "failed",
+            }
+        )
+        receipt_ids.extend(str(value) for value in result.get("receipt_ids") or [] if str(value).strip())
+    primary = select_primary_failure("provider", failures)
     return failure_stage_result(
         stage="provider",
-        failure_code=str(failure.get("code") or "provider_execution_failed"),
-        message=str(failure.get("message") or "Provider execution failed."),
-        retryable=bool(failure.get("retriable")),
-        source_status=str(failed.get("status") or "failed"),
+        failure_code=primary["code"],
+        failure_codes=primary["failure_codes"],
+        message=primary["message"],
+        retryable=primary["retryable"],
+        source_status=primary["source_status"],
         job_id=job_id,
         attempt_id=attempt_id,
         artifact_refs=refs,
@@ -447,6 +541,7 @@ def stage_result_from_execution_report(
         stage="execute",
         failure_code=str(report.get("failure_code") or "stage_execution_failed"),
         message=str(report.get("failure_message") or "Runtime stage execution failed."),
+        source_status=str(report.get("status") or "failed"),
         job_id=job_id,
         attempt_id=attempt_id,
         artifact_refs=refs,
@@ -484,12 +579,15 @@ def stage_result_from_render_sync_report(
     refs = [artifact_ref("render_sync_report", "render_sync_report.json", report.get("schema_version"))]
     if report.get("status") == "pass":
         return build_stage_result(stage="render_sync", status="completed", job_id=job_id, attempt_id=attempt_id, artifact_refs=refs)
-    code = next(iter(report.get("failure_codes") or []), "render_sync_failed")
-    failure = next((value for value in report.get("failures") or [] if isinstance(value, Mapping)), {})
+    failures = [value for value in report.get("failures") or [] if isinstance(value, Mapping)]
+    if not failures:
+        failures = [{"code": value, "message": "Render synchronization failed."} for value in report.get("failure_codes") or []]
+    primary = select_primary_failure("render_sync", failures)
     return failure_stage_result(
         stage="render_sync",
-        failure_code=str(code),
-        message=str(failure.get("message") or "Render synchronization failed."),
+        failure_code=primary["code"],
+        failure_codes=primary["failure_codes"],
+        message=primary["message"],
         job_id=job_id,
         attempt_id=attempt_id,
         artifact_refs=refs,
@@ -506,11 +604,13 @@ def stage_result_from_quality_report(
     if report.get("status") == "pass":
         return build_stage_result(stage="quality_gate", status="completed", job_id=job_id, attempt_id=attempt_id, artifact_refs=refs)
     hard_gate = report.get("hard_gate") if isinstance(report.get("hard_gate"), Mapping) else {}
-    failure = next((value for value in hard_gate.get("failures") or [] if isinstance(value, Mapping)), {})
+    failures = [value for value in hard_gate.get("failures") or [] if isinstance(value, Mapping)]
+    primary = select_primary_failure("quality_gate", failures)
     return failure_stage_result(
         stage="quality_gate",
-        failure_code=str(failure.get("code") or "quality_gate_failed"),
-        message=str(failure.get("message") or "Run quality gate failed."),
+        failure_code=primary["code"],
+        failure_codes=primary["failure_codes"],
+        message=primary["message"],
         job_id=job_id,
         attempt_id=attempt_id,
         artifact_refs=refs,
@@ -550,10 +650,28 @@ def _classification(status: str, failure_class: str, retryable: bool, actions: l
     }
 
 
+def _failure_priority(classification: Mapping[str, Any]) -> int:
+    return {
+        "blocked_user_action": 0,
+        "blocked_configuration": 1,
+        "capability_missing": 2,
+        "interrupted": 3,
+        "execution_failed": 10,
+        "harness_bug": 11,
+        "artifact_incomplete": 20,
+        "verification_failed": 30,
+        "transient": 40,
+        "provider_failed": 50,
+        "render_sync_failed": 60,
+        "case_spec_invalid": 70,
+        "quality_gate_failed": 80,
+    }.get(str(classification.get("failure_class") or ""), 100)
+
+
 def _sanitize_artifact_ref(value: Mapping[str, Any]) -> dict[str, Any]:
     result = {
-        "name": redact_text(str(value.get("name") or "")),
-        "path": redact_text(str(value.get("path") or "")),
+        "name": redact_text(value.get("name")) if isinstance(value.get("name"), str) else value.get("name"),
+        "path": redact_text(value.get("path")) if isinstance(value.get("path"), str) else value.get("path"),
     }
     if value.get("schema_version"):
         result["schema_version"] = str(value["schema_version"])
@@ -565,14 +683,33 @@ def _sanitize_artifact_ref(value: Mapping[str, Any]) -> dict[str, Any]:
 def _valid_artifact_ref(value: Any) -> bool:
     if not isinstance(value, Mapping):
         return False
-    if not str(value.get("name") or "").strip() or not str(value.get("path") or "").strip():
+    if set(value) - {"name", "path", "schema_version", "sha256"}:
+        return False
+    if (
+        not isinstance(value.get("name"), str)
+        or not value["name"].strip()
+        or not isinstance(value.get("path"), str)
+        or not value["path"].strip()
+    ):
         return False
     digest = value.get("sha256")
-    return digest is None or (isinstance(digest, str) and len(digest) == 64 and all(char in "0123456789abcdef" for char in digest.casefold()))
+    schema_version = value.get("schema_version")
+    if schema_version is not None and (not isinstance(schema_version, str) or not schema_version.strip()):
+        return False
+    if digest is None:
+        return True
+    return isinstance(digest, str) and _is_sha256(digest)
 
 
 def _valid_user_action(value: Any) -> bool:
-    return isinstance(value, Mapping) and bool(str(value.get("code") or "").strip()) and bool(str(value.get("message") or "").strip())
+    return (
+        isinstance(value, Mapping)
+        and set(value) == {"code", "message"}
+        and isinstance(value.get("code"), str)
+        and bool(value["code"].strip())
+        and isinstance(value.get("message"), str)
+        and bool(value["message"].strip())
+    )
 
 
 def _is_sha256(value: str) -> bool:

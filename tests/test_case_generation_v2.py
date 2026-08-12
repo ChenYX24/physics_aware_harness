@@ -51,6 +51,30 @@ class FailingJSONClient:
         raise CaseGenerationError("llm_network_error", "temporary reset", retryable=True)
 
 
+class PartialFailureJSONClient:
+    def __init__(self) -> None:
+        self.invocation_count = 0
+
+    def complete_json(self, **_: Any) -> LLMJSONResponse:
+        self.invocation_count += 1
+        if self.invocation_count == 1:
+            return LLMJSONResponse(
+                payload=expansion_fixture(),
+                receipt={
+                    "schema_version": "harness_llm_call_receipt_v1",
+                    "purpose": "expansion",
+                    "model": "fake-json-model",
+                    "request_sha256": "a" * 64,
+                },
+            )
+        raise CaseGenerationError(
+            "llm_network_error",
+            "second call failed",
+            retryable=True,
+            request_identity="b" * 64,
+        )
+
+
 def expansion_fixture() -> dict[str, Any]:
     return {
         "request_summary": "one ball contacts another",
@@ -95,6 +119,18 @@ def source_constraint_expansion() -> dict[str, Any]:
 
 
 class CaseGenerationV2Tests(unittest.TestCase):
+    def test_partial_generation_failure_retains_all_external_request_identities(self) -> None:
+        request = build_case_request(case_id="partial_failure", text="Make one ball hit another.")
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(CaseGenerationError):
+                generate_case_spec_v2(request, client=PartialFailureJSONClient(), artifact_dir=temporary)
+
+            stage_result = json.loads(
+                (Path(temporary) / "stage_results" / "generation.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(stage_result["invocation_count"], 2)
+            self.assertEqual(stage_result["request_identities"], ["a" * 64, "b" * 64])
+
     def test_structured_generation_failure_is_landed_without_changing_exception_behavior(self) -> None:
         request = build_case_request(case_id="failed_generation", text="Make one ball hit another.")
         with tempfile.TemporaryDirectory() as temporary:

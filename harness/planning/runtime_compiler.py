@@ -134,17 +134,30 @@ def compile_runtime_case(
         )
     except BaseException as exc:
         source_schema_version = case_spec.data.get("schema_version") if isinstance(case_spec, CaseSpecV2) else None
+        failed_stage = str(getattr(exc, "_harness_stage", "compile"))
         stage_result = failure_stage_result(
-            stage="compile",
-            failure_code=str(getattr(exc, "code", "runtime_compilation_exception")),
+            stage=failed_stage,
+            failure_code=str(
+                getattr(
+                    exc,
+                    "code",
+                    "provider_execution_exception" if failed_stage == "provider" else "runtime_compilation_exception",
+                )
+            ),
             message=str(exc) or type(exc).__name__,
             retryable=getattr(exc, "retryable", None),
             source_status="interrupted" if isinstance(exc, (KeyboardInterrupt, SystemExit)) else None,
             job_id=job_id,
             attempt_id=attempt_id,
-            artifact_refs=[artifact_ref("case_spec", "case_spec_v2.json", source_schema_version)],
+            checkpoint_ref=getattr(exc, "checkpoint_ref", None),
+            artifact_refs=(
+                [artifact_ref("case_spec", "case_spec_v2.json", source_schema_version)]
+                if failed_stage == "compile"
+                else []
+            ),
             elapsed_seconds=time.perf_counter() - started,
-            invocation_count=1,
+            invocation_count=int(getattr(exc, "_harness_invocation_count", 1)),
+            request_identities=list(getattr(exc, "request_identities", []) or []),
         )
         if stage_result_dir is not None:
             write_stage_result(stage_result_dir, stage_result)
@@ -196,14 +209,19 @@ def _compile_runtime_case_impl(
             target_backend=target_asset_backend,
         )
     )
-    provider_orchestration = (provider_orchestrator or AssetProviderOrchestrator()).fulfill(
-        case_id=runtime_case.case_id,
-        source_case_spec=case_spec.data,
-        compiled_intents=compiled_intents,
-        target_backend=target_asset_backend,
-        registry=registry,
-        input_manifest=provider_input_manifest,
-    )
+    try:
+        provider_orchestration = (provider_orchestrator or AssetProviderOrchestrator()).fulfill(
+            case_id=runtime_case.case_id,
+            source_case_spec=case_spec.data,
+            compiled_intents=compiled_intents,
+            target_backend=target_asset_backend,
+            registry=registry,
+            input_manifest=provider_input_manifest,
+        )
+    except BaseException as exc:
+        setattr(exc, "_harness_stage", "provider")
+        setattr(exc, "_harness_invocation_count", getattr(exc, "_harness_invocation_count", 1))
+        raise
     asset_resolution = resolve_asset_intents(
         runtime_case.data,
         registry=registry,

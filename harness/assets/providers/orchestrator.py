@@ -112,6 +112,30 @@ class AssetProviderOrchestrator:
         registry: AssetRegistry,
         input_manifest: Mapping[str, Any] | None = None,
     ) -> ProviderOrchestration:
+        try:
+            return self._fulfill(
+                case_id=case_id,
+                source_case_spec=source_case_spec,
+                compiled_intents=compiled_intents,
+                target_backend=target_backend,
+                registry=registry,
+                input_manifest=input_manifest,
+            )
+        except BaseException as exc:
+            setattr(exc, "_harness_stage", "provider")
+            setattr(exc, "_harness_invocation_count", getattr(exc, "_harness_invocation_count", 1))
+            raise
+
+    def _fulfill(
+        self,
+        *,
+        case_id: str,
+        source_case_spec: Mapping[str, Any],
+        compiled_intents: tuple[CompiledAssetIntent, ...] | list[CompiledAssetIntent],
+        target_backend: str,
+        registry: AssetRegistry,
+        input_manifest: Mapping[str, Any] | None = None,
+    ) -> ProviderOrchestration:
         started = time.perf_counter()
         requests: list[dict[str, Any]] = []
         results: dict[tuple[str, str], dict[str, Any]] = {}

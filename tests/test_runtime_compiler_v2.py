@@ -28,6 +28,34 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RuntimeCompilerV2Tests(unittest.TestCase):
+    def test_provider_exception_is_landed_at_provider_stage_not_compile(self) -> None:
+        class _ProviderFailure(RuntimeError):
+            code = "provider_network_error"
+            retryable = True
+            request_identities = ["c" * 64]
+
+        class _FailingOrchestrator:
+            def fulfill(self, **_: object) -> object:
+                raise _ProviderFailure("provider reset")
+
+        case = case_spec_v2_from_dict(case_spec_v2_fixture())
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(_ProviderFailure):
+                compile_runtime_case(
+                    case,
+                    requested_backend="fallback",
+                    registry=self.registry(),
+                    provider_orchestrator=_FailingOrchestrator(),
+                    stage_result_dir=temporary,
+                )
+
+            sidecars = sorted(path.name for path in (Path(temporary) / "stage_results").glob("*.json"))
+            self.assertEqual(sidecars, ["provider.json"])
+            result = read_json(Path(temporary) / "stage_results" / "provider.json")
+            self.assertEqual(result["stage"], "provider")
+            self.assertEqual(result["failure_code"], "provider_network_error")
+            self.assertEqual(result["request_identities"], ["c" * 64])
+
     def test_compile_exception_lands_structured_failure_and_still_raises(self) -> None:
         case = case_spec_v2_from_dict(case_spec_v2_fixture())
         with tempfile.TemporaryDirectory() as temporary:

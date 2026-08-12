@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 from harness.core.artifact_schema import read_json, write_json
 from harness.core.physics_contract import execution_capability_id, infer_scene_domain
-from harness.core.stage_result import stage_result_from_verifier_report, write_stage_result
+from harness.core.stage_result import failure_stage_result, stage_result_from_verifier_report, write_stage_result
 from harness.core.verifier_schema import verifier_report
 from harness.verification.diagnosis import repair_suggestion
 from harness.verification.particle_cache_verifier import verify_particle_cache
@@ -15,6 +16,30 @@ from harness.verification.trajectory_assertion_verifier import verify_trajectory
 class PhysicsVerifier:
     def verify_run_dir(self, run_dir: str | Path, *, write: bool = False) -> dict[str, Any]:
         run_dir = Path(run_dir)
+        try:
+            return self._verify_run_dir(run_dir, write=write)
+        except BaseException as exc:
+            interrupted = isinstance(exc, (KeyboardInterrupt, SystemExit))
+            input_invalid = isinstance(exc, (OSError, UnicodeError, json.JSONDecodeError))
+            write_stage_result(
+                run_dir,
+                failure_stage_result(
+                    stage="verifier",
+                    failure_code=(
+                        "interrupted"
+                        if interrupted
+                        else "verifier_input_invalid"
+                        if input_invalid
+                        else "verifier_execution_exception"
+                    ),
+                    message=str(exc) or type(exc).__name__,
+                    source_status="interrupted" if interrupted else None,
+                    artifact_refs=[],
+                ),
+            )
+            raise
+
+    def _verify_run_dir(self, run_dir: Path, *, write: bool = False) -> dict[str, Any]:
         case_spec = read_json(run_dir / "case_spec.json")
         if infer_scene_domain(case_spec) == "particle":
             report = verify_fluid_run(case_spec, run_dir)

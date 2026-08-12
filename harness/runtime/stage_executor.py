@@ -62,16 +62,16 @@ def execute_runtime_plan(
     invoke registered backends; render stages consume the handoff contract
     emitted by Runtime Compiler.
     """
-    plan = compilation.artifacts["runtime_plan"]
-    stages = [dict(stage) for stage in plan.get("stages") or [] if isinstance(stage, Mapping)]
-    if not stages:
-        raise StageExecutionError("runtime_plan_empty", "runtime_plan contains no executable stages")
-    factories = dict(backend_factories or BACKEND_FACTORIES)
-    adapters = dict(render_adapters or {"ue": render_ue_handoff})
     completed: list[dict[str, Any]] = []
     run_dir: Path | None = None
     started = time.perf_counter()
     try:
+        plan = compilation.artifacts["runtime_plan"]
+        stages = [dict(stage) for stage in plan.get("stages") or [] if isinstance(stage, Mapping)]
+        if not stages:
+            raise StageExecutionError("runtime_plan_empty", "runtime_plan contains no executable stages")
+        factories = dict(backend_factories or BACKEND_FACTORIES)
+        adapters = dict(render_adapters or {"ue": render_ue_handoff})
         for stage in stages:
             kind = str(stage.get("kind") or "")
             backend_name = str(stage.get("backend") or "")
@@ -119,15 +119,17 @@ def execute_runtime_plan(
             else:
                 raise StageExecutionError("stage_kind_unsupported", f"unsupported runtime stage kind: {kind}")
             completed.append({"id": stage.get("id"), "kind": kind, "backend": backend_name})
-    except Exception as exc:
-        destination = run_dir or Path(output_root) / f"{case.case_id}_{compilation.selected_backend}"
+    except BaseException as exc:
+        selected_backend = str(getattr(compilation, "selected_backend", "unknown"))
+        destination = run_dir or Path(output_root) / f"{case.case_id}_{selected_backend}"
         destination.mkdir(parents=True, exist_ok=True)
+        interrupted = isinstance(exc, (KeyboardInterrupt, SystemExit))
         report = {
             "schema_version": "harness_stage_execution_report_v1",
-            "status": "failed",
+            "status": "interrupted" if interrupted else "failed",
             "completed_stages": completed,
-            "failure_code": getattr(exc, "code", "stage_execution_exception"),
-            "failure_message": str(exc),
+            "failure_code": "interrupted" if interrupted else getattr(exc, "code", "stage_execution_exception"),
+            "failure_message": str(exc) or type(exc).__name__,
         }
         write_json(destination / "stage_execution_report.json", report)
         write_stage_result(

@@ -111,6 +111,51 @@ class StageExecutorTests(unittest.TestCase):
             stage_result = read_json(Path(temporary) / "generic_staged_case_solver" / "stage_results" / "execute.json")
             self.assertEqual(stage_result["failure_class"], "artifact_incomplete")
 
+    def test_empty_plan_writes_execute_sidecar_before_raising(self) -> None:
+        compilation = SimpleNamespace(selected_backend="solver_a", artifacts={"runtime_plan": {"stages": []}})
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(StageExecutionError):
+                execute_runtime_plan(
+                    self.case,
+                    temporary,
+                    compilation=compilation,
+                    requested_views=None,
+                    render_passes=None,
+                    camera_strategy="bounds_auto_v1",
+                    profile="smoke",
+                    width=320,
+                    height=180,
+                    complete_sensor_contract=False,
+                )
+
+            result = read_json(Path(temporary) / "generic_staged_case_solver_a" / "stage_results" / "execute.json")
+            self.assertEqual(result["failure_code"], "runtime_plan_empty")
+
+    def test_keyboard_interrupt_writes_interrupted_execute_sidecar(self) -> None:
+        class _InterruptedBackend:
+            def run_case(self, *_args: object, **_kwargs: object) -> Path:
+                raise KeyboardInterrupt()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(KeyboardInterrupt):
+                execute_runtime_plan(
+                    self.case,
+                    temporary,
+                    compilation=self.compilation,
+                    requested_views=None,
+                    render_passes=None,
+                    camera_strategy="bounds_auto_v1",
+                    profile="smoke",
+                    width=320,
+                    height=180,
+                    complete_sensor_contract=False,
+                    backend_factories={"solver_a": _InterruptedBackend},
+                )
+
+            result = read_json(Path(temporary) / "generic_staged_case_solver_a" / "stage_results" / "execute.json")
+            self.assertEqual(result["status"], "interrupted")
+            self.assertEqual(result["failure_class"], "interrupted")
+
     def test_compatible_backends_are_discovered_by_shared_contract(self) -> None:
         handoff = stage_handoff_contract("taichi_cloth", "ue")
 
