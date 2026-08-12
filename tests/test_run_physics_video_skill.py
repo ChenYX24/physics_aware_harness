@@ -34,6 +34,8 @@ class RunPhysicsVideoSkillTests(unittest.TestCase):
             "allowed_next_actions",
             "paused_interrupted",
             "awaiting_semantic_review",
+            "apply-revision",
+            "semantic_reviewer_image_upload",
             "Do not edit Harness source",
         ):
             self.assertIn(required, text)

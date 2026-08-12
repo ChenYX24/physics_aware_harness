@@ -36,14 +36,20 @@ def parse_args() -> argparse.Namespace:
     create.add_argument("--allow-meshy-upload", action="store_true")
     create.add_argument("--allow-external-provider", action="store_true")
     create.add_argument("--allow-paid-provider", action="store_true")
+    create.add_argument("--allow-semantic-reviewer-image-upload", action="store_true")
     create.add_argument("--publication-tier", choices=["diagnostic_only", "local_preview", "reference"], default="reference")
-    create.add_argument("--budget", help="JSON object overriding M2 budget defaults.")
+    create.add_argument("--budget", help="JSON object overriding Controller budget defaults.")
     create.add_argument("--seed-case-spec", help="Validated CaseSpec V2 fixture; skips LLM generation but remains audited.")
     create.add_argument("--job-id")
 
-    for name in ("inspect", "advance-until-blocked", "cancel"):
+    for name in ("inspect", "advance-until-blocked", "review", "cancel"):
         command = commands.add_parser(name)
         command.add_argument("job_id")
+
+    revise = commands.add_parser("apply-revision", help="Materialize an Intent-authorized automatic revision proposal.")
+    revise.add_argument("job_id")
+    revise.add_argument("--revised-case-spec", required=True)
+    revise.add_argument("--revision-reason", required=True)
 
     resume = commands.add_parser("resume")
     resume.add_argument("job_id")
@@ -52,6 +58,7 @@ def parse_args() -> argparse.Namespace:
     resume.add_argument("--allow-meshy-upload", action="store_true")
     resume.add_argument("--allow-external-provider", action="store_true")
     resume.add_argument("--allow-paid-provider", action="store_true")
+    resume.add_argument("--allow-semantic-reviewer-image-upload", action="store_true")
     resume.add_argument("--revised-case-spec")
     resume.add_argument("--revision-reason")
     resume.add_argument("--intent-amendment", help="JSON ambiguity-resolution amendment.")
@@ -92,6 +99,7 @@ def main() -> int:
                 "meshy_upload": args.allow_meshy_upload,
                 "external_provider": args.allow_external_provider,
                 "paid_provider_submission": args.allow_paid_provider,
+                "semantic_reviewer_image_upload": args.allow_semantic_reviewer_image_upload,
             },
             publication_tier=args.publication_tier,
             seed_case_spec=read_json(args.seed_case_spec) if args.seed_case_spec else None,
@@ -100,12 +108,21 @@ def main() -> int:
         result = controller.inspect(args.job_id)
     elif args.command == "advance-until-blocked":
         result = controller.advance_until_blocked(args.job_id)
+    elif args.command == "review":
+        result = controller.run_semantic_review(args.job_id)
+    elif args.command == "apply-revision":
+        result = controller.apply_revision_proposal(
+            args.job_id,
+            read_json(args.revised_case_spec),
+            reason=args.revision_reason,
+        )
     elif args.command == "resume":
         authorizations = {}
         for field, enabled in (
             ("meshy_upload", args.allow_meshy_upload),
             ("external_provider", args.allow_external_provider),
             ("paid_provider_submission", args.allow_paid_provider),
+            ("semantic_reviewer_image_upload", args.allow_semantic_reviewer_image_upload),
         ):
             if enabled:
                 authorizations[field] = True

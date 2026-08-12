@@ -29,6 +29,16 @@ from harness.agent.job_schema import (
     validate_job_id,
 )
 from harness.agent.job_store import JobStore, JobStoreError
+from harness.agent.evidence_bundle import build_evidence_bundle
+from harness.agent.review_schema import (
+    REVISION_PROPOSAL_SCHEMA_VERSION,
+    SEMANTIC_REVIEW_SCHEMA_VERSION,
+    EvidenceBundleManifest,
+    ReviewerInvocationReceipt,
+    RevisionProposal,
+    SemanticReview,
+)
+from harness.agent.semantic_reviewer import CodexAppServerReviewer, SemanticReviewerError
 from harness.assets.asset_registry import AssetRegistry
 from harness.assets.providers.orchestrator import AssetProviderOrchestrator
 from harness.assets.providers.input_manifest import PROVIDER_INPUT_MANIFEST_SCHEMA, build_provider_input_manifest
@@ -67,6 +77,8 @@ class ControllerHooks:
     verify: Callable[[Path], Mapping[str, Any]] = lambda run_dir: PhysicsVerifier().verify_run_dir(run_dir, write=True)
     render_sync: Callable[..., Mapping[str, Any]] = check_render_sync
     quality: Callable[[Path], Mapping[str, Any]] = lambda run_dir: evaluate_run(run_dir, write=True)
+    evidence: Callable[..., Mapping[str, Any]] = build_evidence_bundle
+    semantic_review: Callable[..., Mapping[str, Any]] = lambda **kwargs: CodexAppServerReviewer().review(**kwargs)
     monotonic: Callable[[], float] = time.monotonic
 
 
@@ -109,6 +121,7 @@ class AgentJobController:
             "meshy_upload": False,
             "external_provider": False,
             "paid_provider_submission": False,
+            "semantic_reviewer_image_upload": False,
         }
         for key, value in dict(authorizations or {}).items():
             if key not in auth or not isinstance(value, bool):
@@ -275,6 +288,7 @@ class AgentJobController:
         revised_case_spec: Mapping[str, Any] | None = None,
         revision_reason: str | None = None,
     ) -> dict[str, Any]:
+        resume_to_review_boundary = False
         with self.store.lock(job_id):
             manifest = self.store.load_manifest(job_id)
             if manifest["state"] not in {"blocked", "needs_user_decision", "paused_interrupted", "failed"}:
@@ -323,9 +337,292 @@ class AgentJobController:
             if intent_amendment is not None:
                 manifest = self._apply_intent_amendment(manifest, intent_amendment)
             if revised_case_spec is not None:
-                manifest = self._create_revision(manifest, revised_case_spec, revision_reason or "user-approved revision")
-            manifest = self._update_manifest(manifest, state="running", blocker=None, allowed_next_actions=["cancel"])
+                manifest = self._create_revision(
+                    manifest,
+                    revised_case_spec,
+                    revision_reason or "user-approved revision",
+                    repair_layer="case_spec_source",
+                    trigger_stage=str((manifest.get("blocker") or {}).get("stage") or manifest["current_stage"]),
+                    trigger_failure_code=str((manifest.get("blocker") or {}).get("code") or "user_approved_revision"),
+                )
+            if manifest["current_stage"] == "semantic_review" and revised_case_spec is None:
+                manifest = self._update_manifest(
+                    manifest,
+                    state="awaiting_semantic_review",
+                    blocker=None,
+                    allowed_next_actions=["run_semantic_review", "cancel"],
+                )
+                resume_to_review_boundary = True
+            else:
+                manifest = self._update_manifest(manifest, state="running", blocker=None, allowed_next_actions=["cancel"])
+        if resume_to_review_boundary:
+            return self.inspect(job_id)
         return self.advance_until_blocked(job_id)
+
+    def run_semantic_review(self, job_id: str) -> dict[str, Any]:
+        with self.store.lock(job_id):
+            manifest = self.store.load_manifest(job_id)
+            if manifest["state"] != "awaiting_semantic_review" or manifest["current_stage"] != "semantic_review":
+                raise JobStoreError("semantic review requires awaiting_semantic_review at the explicit review boundary")
+            self._stage_event(manifest, "stage_started", "semantic_review")
+            attempt_id = str(manifest["current_attempt_id"])
+            attempt_dir = self.store.attempt_dir(job_id, attempt_id)
+            attempt = self.store.load_attempt(job_id, attempt_id)
+            bundle_path = attempt_dir / "evidence_bundle" / "manifest.json"
+            if not bundle_path.is_file():
+                raise JobStoreError("formal semantic review requires a completed Evidence Bundle")
+            bundle = EvidenceBundleManifest.from_dict(read_json(bundle_path)).to_dict()
+            if not self._technical_completion_intact(manifest, bundle):
+                result = failure_stage_result(
+                    stage="semantic_review",
+                    failure_code="semantic_review_technical_gate_stale",
+                    message="Candidate technical gates or Evidence Bundle identity changed before review",
+                    job_id=job_id,
+                    attempt_id=attempt_id,
+                )
+                self._write_controller_stage_result(manifest, result)
+                self._checkpoint(manifest, "semantic_review", "failed", stable_digest(bundle), [str(bundle_path)])
+                manifest = self._apply_stage_result(manifest, result)
+                self._stage_event(manifest, "stage_blocked", "semantic_review", result=result)
+                self._emit(job_id, "job_terminal", stage="semantic_review", state=manifest["state"])
+                return self.inspect(job_id)
+            request = read_json(self.store.job_dir(job_id) / "request" / "user_request.json")
+            has_images = any(
+                isinstance(row, Mapping) and row.get("kind") == "image"
+                for row in request.get("inputs") or []
+            )
+            if has_images and manifest["authorizations"]["semantic_reviewer_image_upload"] is not True:
+                result = failure_stage_result(
+                    stage="semantic_review",
+                    failure_code="semantic_reviewer_image_upload_authorization_missing",
+                    message="Semantic Reviewer image upload requires its own explicit authorization",
+                    source_status="blocked",
+                    job_id=job_id,
+                    attempt_id=attempt_id,
+                )
+                self._write_controller_stage_result(manifest, result)
+                self._checkpoint(manifest, "semantic_review", "blocked", stable_digest(bundle), [str(bundle_path)])
+                manifest = self._apply_stage_result(manifest, result)
+                self._stage_event(manifest, "stage_blocked", "semantic_review", result=result)
+                self._emit(job_id, "job_terminal", stage="semantic_review", state=manifest["state"])
+                return self.inspect(job_id)
+
+            maximum_calls = int(manifest["budget"]["max_reviewer_invocations"]) + int(
+                manifest["budget"]["max_reviewer_technical_retries"]
+            )
+            while int(manifest["usage"]["reviewer_invocations"]) < maximum_calls:
+                usage = copy.deepcopy(manifest["usage"])
+                usage["reviewer_invocations"] += 1
+                invocation_count = int(usage["reviewer_invocations"])
+                manifest = self._update_manifest(manifest, state="running", usage=usage, allowed_next_actions=["cancel"])
+                try:
+                    invocation = dict(
+                        self.hooks.semantic_review(
+                            job_id=job_id,
+                            attempt_id=attempt_id,
+                            bundle_dir=attempt_dir / "evidence_bundle",
+                            bundle_manifest=bundle,
+                            invocation_count=invocation_count,
+                            include_original_images=has_images,
+                        )
+                    )
+                    receipt = ReviewerInvocationReceipt.from_dict(invocation["receipt"]).to_dict()
+                    receipt_path = attempt_dir / f"reviewer_invocation_{invocation_count:03d}.json"
+                    write_json(receipt_path, receipt)
+                    intent = IntentContract.from_dict(
+                        read_json(self.store.job_dir(job_id) / "request" / "intent_contract.json")
+                    ).to_dict()
+                    raw_review = dict(invocation["review"])
+                    review = SemanticReview.from_dict(
+                        {
+                            "schema_version": SEMANTIC_REVIEW_SCHEMA_VERSION,
+                            "job_id": job_id,
+                            "attempt_id": attempt_id,
+                            "evidence_bundle_digest": stable_digest(bundle),
+                            "reviewer_receipt_digest": stable_digest(receipt),
+                            **raw_review,
+                            "created_at": utc_now(),
+                        },
+                        expected_requirement_ids={str(row["id"]) for row in intent["hard_requirements"]},
+                        evidence_artifact_ids={str(row["artifact_id"]) for row in bundle["artifacts"]},
+                    ).to_dict()
+                    review_path = attempt_dir / "semantic_review.json"
+                    write_json(review_path, review)
+                    stage_result = build_stage_result(
+                        stage="semantic_review",
+                        status="completed",
+                        job_id=job_id,
+                        attempt_id=attempt_id,
+                        invocation_count=invocation_count,
+                        artifact_refs=[
+                            {"name": "semantic_review", "path": str(review_path), "schema_version": SEMANTIC_REVIEW_SCHEMA_VERSION},
+                            {"name": "reviewer_receipt", "path": str(receipt_path), "schema_version": receipt["schema_version"]},
+                        ],
+                    )
+                    write_stage_result(attempt_dir, stage_result)
+                    self._checkpoint(
+                        manifest,
+                        "semantic_review",
+                        "completed",
+                        stable_digest(review),
+                        [str(review_path), str(receipt_path)],
+                    )
+                    if not self._technical_completion_intact(manifest, bundle):
+                        stale = failure_stage_result(
+                            stage="semantic_review",
+                            failure_code="semantic_review_technical_gate_stale",
+                            message="Candidate technical gates changed while Semantic Review was running",
+                            job_id=job_id,
+                            attempt_id=attempt_id,
+                        )
+                        write_stage_result(attempt_dir, stale)
+                        self._checkpoint(manifest, "semantic_review", "failed", stable_digest(bundle), [str(review_path)])
+                        manifest = self._apply_stage_result(manifest, stale)
+                        self._stage_event(manifest, "stage_blocked", "semantic_review", result=stale)
+                        self._emit(job_id, "job_terminal", stage="semantic_review", state=manifest["state"])
+                        return self.inspect(job_id)
+                    manifest = self._apply_semantic_outcome(manifest, attempt, intent, review)
+                    self._stage_event(manifest, "stage_completed", "semantic_review")
+                    self._emit(job_id, "job_terminal", stage=manifest["current_stage"], state=manifest["state"])
+                    return self.inspect(job_id)
+                except SemanticReviewerError as exc:
+                    receipt_path = attempt_dir / f"reviewer_invocation_{invocation_count:03d}.json"
+                    write_json(receipt_path, ReviewerInvocationReceipt.from_dict(exc.receipt).to_dict())
+                    result = failure_stage_result(
+                        stage="semantic_review",
+                        failure_code=exc.code,
+                        message=str(exc),
+                        retryable=exc.retryable,
+                        job_id=job_id,
+                        attempt_id=attempt_id,
+                        invocation_count=invocation_count,
+                        artifact_refs=[{"name": "reviewer_receipt", "path": str(receipt_path), "schema_version": exc.receipt["schema_version"]}],
+                    )
+                except (ValueError, KeyError, TypeError) as exc:
+                    result = failure_stage_result(
+                        stage="semantic_review",
+                        failure_code="reviewer_output_schema_invalid",
+                        message=str(exc),
+                        retryable=True,
+                        job_id=job_id,
+                        attempt_id=attempt_id,
+                        invocation_count=invocation_count,
+                    )
+                write_stage_result(attempt_dir, result)
+                retries = int(manifest["usage"]["stage_retries"].get("semantic_review", 0))
+                can_retry = (
+                    result["retryable"]
+                    and retries < int(manifest["budget"]["max_reviewer_technical_retries"])
+                    and int(manifest["usage"]["reviewer_invocations"]) < maximum_calls
+                )
+                if can_retry:
+                    usage = copy.deepcopy(manifest["usage"])
+                    usage["stage_retries"]["semantic_review"] = retries + 1
+                    usage["total_retries"] += 1
+                    manifest = self._update_manifest(manifest, usage=usage)
+                    continue
+                self._checkpoint(manifest, "semantic_review", "failed", stable_digest(bundle), [str(bundle_path)])
+                exhausted = dict(result)
+                exhausted["retryable"] = False
+                exhausted["allowed_next_actions"] = ["inspect_artifacts"]
+                exhausted = StageResult.from_dict(exhausted).to_dict()
+                manifest = self._apply_stage_result(manifest, exhausted)
+                self._stage_event(manifest, "stage_blocked", "semantic_review", result=exhausted)
+                self._emit(job_id, "job_terminal", stage="semantic_review", state=manifest["state"])
+                return self.inspect(job_id)
+            result = failure_stage_result(
+                stage="semantic_review",
+                failure_code="reviewer_invocation_budget_exhausted",
+                message="Semantic Reviewer invocation budget is exhausted",
+                source_status="blocked",
+                job_id=job_id,
+                attempt_id=attempt_id,
+            )
+            self._write_controller_stage_result(manifest, result)
+            manifest = self._apply_stage_result(manifest, result)
+            self._stage_event(manifest, "stage_blocked", "semantic_review", result=result)
+            self._emit(job_id, "job_terminal", stage="semantic_review", state=manifest["state"])
+            return self.inspect(job_id)
+
+    def apply_revision_proposal(
+        self,
+        job_id: str,
+        revised_case_spec: Mapping[str, Any],
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        with self.store.lock(job_id):
+            manifest = self.store.load_manifest(job_id)
+            if "apply_revision_proposal" not in manifest["allowed_next_actions"]:
+                raise JobStoreError("current job state does not permit an automatic revision proposal")
+            attempt_dir = self.store.attempt_dir(job_id, manifest["current_attempt_id"])
+            review = self._load_validated_semantic_review(manifest)
+            if review["overall_status"] != "fail":
+                raise JobStoreError("automatic revision proposals require a semantic fail verdict")
+            manifest = self._create_revision(
+                manifest,
+                revised_case_spec,
+                reason,
+                repair_layer=review["repair_layer"],
+                trigger_stage="semantic_review",
+                trigger_failure_code="semantic_intent_mismatch",
+                evidence_refs=sorted(
+                    {
+                        str(ref["artifact_id"])
+                        for row in review["requirements"]
+                        for ref in row["evidence_refs"]
+                    }
+                ),
+            )
+            self._update_manifest(manifest, state="running", blocker=None, allowed_next_actions=["cancel"])
+        return self.advance_until_blocked(job_id)
+
+    def _apply_semantic_outcome(
+        self,
+        manifest: dict[str, Any],
+        attempt: dict[str, Any],
+        intent: Mapping[str, Any],
+        review: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        attempt = dict(attempt)
+        if review["overall_status"] == "pass":
+            if not self._publication_tier_satisfied(manifest):
+                result = failure_stage_result(
+                    stage="semantic_review",
+                    failure_code="publication_tier_not_satisfied",
+                    message="Semantic pass cannot override the requested publication tier",
+                    source_status="blocked",
+                    job_id=manifest["job_id"],
+                    attempt_id=attempt["attempt_id"],
+                )
+                return self._apply_stage_result(manifest, result)
+            attempt.update({"status": "completed", "updated_at": utc_now()})
+            self.store.write_attempt(attempt)
+            return self._update_manifest(
+                manifest,
+                state="completed",
+                current_stage="completed",
+                blocker=None,
+                allowed_next_actions=[],
+            )
+        if review["overall_status"] == "uncertain":
+            attempt.update({"status": "semantic_uncertain", "updated_at": utc_now()})
+            self.store.write_attempt(attempt)
+            return self._update_manifest(
+                manifest,
+                state="needs_user_decision",
+                blocker={"code": "semantic_review_uncertain", "message": review["summary"], "stage": "semantic_review"},
+                allowed_next_actions=["resume", "cancel"],
+            )
+        attempt.update({"status": "semantic_failed", "updated_at": utc_now()})
+        self.store.write_attempt(attempt)
+        auto_allowed = self._semantic_repair_allowed(intent, review)
+        return self._update_manifest(
+            manifest,
+            state="blocked" if auto_allowed else "needs_user_decision",
+            blocker={"code": "semantic_intent_mismatch", "message": review["summary"], "stage": "semantic_review"},
+            allowed_next_actions=["apply_revision_proposal", "cancel"] if auto_allowed else ["resume_with_revision", "cancel"],
+        )
 
     def cancel(self, job_id: str) -> dict[str, Any]:
         with self.store.lock(job_id):
@@ -384,6 +681,8 @@ class AgentJobController:
             return self._advance_run(manifest, profile_name="candidate")
         if stage == "quality_gate":
             return self._advance_quality(manifest)
+        if stage == "evidence_bundle":
+            return self._advance_evidence(manifest)
         raise RuntimeError(f"unsupported controller stage: {stage}")
 
     def _advance_l0(self, manifest: dict[str, Any]) -> dict[str, Any]:
@@ -803,9 +1102,55 @@ class AgentJobController:
         if report.get("hard_gate_passed") is not True:
             return self._apply_stage_result(manifest, self._with_identity(result, manifest["job_id"], manifest["current_attempt_id"]))
         attempt = self.store.load_attempt(manifest["job_id"], manifest["current_attempt_id"])
-        attempt.update({"status": "awaiting_semantic_review", "updated_at": utc_now()})
+        attempt.update({"status": "quality_gate_passed", "updated_at": utc_now()})
         self.store.write_attempt(attempt)
         self._checkpoint(manifest, "quality_gate", "completed", stable_digest(report), [str(run_dir / "quality_report.json")])
+        return self._update_manifest(manifest, current_stage="evidence_bundle")
+
+    def _advance_evidence(self, manifest: dict[str, Any]) -> dict[str, Any]:
+        job_id = manifest["job_id"]
+        attempt_id = manifest["current_attempt_id"]
+        attempt_dir = self.store.attempt_dir(job_id, attempt_id)
+        attempt = self.store.load_attempt(job_id, attempt_id)
+        candidate = read_json(attempt_dir / "candidate_run.json")
+        request = read_json(self.store.job_dir(job_id) / "request" / "user_request.json")
+        intent = IntentContract.from_dict(
+            read_json(self.store.job_dir(job_id) / "request" / "intent_contract.json")
+        ).to_dict()
+        request_root = self.store.job_dir(job_id) / "request"
+        intent_amendments = [
+            read_json(path)
+            for path in sorted(
+                [*request_root.glob("intent_amendment_*.json"), *request_root.glob("authorization_amendment_*.json")],
+                key=lambda value: value.name,
+            )
+        ]
+        result = dict(
+            self.hooks.evidence(
+                job_id=job_id,
+                attempt=attempt,
+                attempt_dir=attempt_dir,
+                candidate_run_dir=Path(str(candidate["run_dir"])),
+                request=request,
+                intent_contract=intent,
+                intent_amendments=intent_amendments,
+            )
+        )
+        stage_result = self._with_identity(result["stage_result"], job_id, attempt_id)
+        write_stage_result(attempt_dir, stage_result)
+        manifest_path = Path(str(result["manifest_path"]))
+        bundle = EvidenceBundleManifest.from_dict(result["manifest"]).to_dict()
+        if manifest_path != attempt_dir / "evidence_bundle" / "manifest.json":
+            raise JobStoreError("Evidence Bundle manifest path is not canonical")
+        attempt.update({"status": "awaiting_semantic_review", "updated_at": utc_now()})
+        self.store.write_attempt(attempt)
+        self._checkpoint(
+            manifest,
+            "evidence_bundle",
+            "completed",
+            stable_digest(bundle),
+            [str(manifest_path)],
+        )
         return self._update_manifest(
             manifest,
             state="awaiting_semantic_review",
@@ -859,6 +1204,14 @@ class AgentJobController:
             {key: row.get(key) for key in ("input_id", "kind", "mime_type", "sha256", "byte_size")}
             for row in request.get("inputs") or []
         ]
+        if not hard and input_identities:
+            hard.append(
+                {
+                    "id": "original_user_visual_inputs",
+                    "text": "The result must semantically match the immutable original visual inputs.",
+                    "frozen": True,
+                }
+            )
         ambiguities = []
         for index, raw in enumerate(expansion.get("ambiguities") or [], start=1):
             if not isinstance(raw, Mapping):
@@ -908,6 +1261,11 @@ class AgentJobController:
         manifest: dict[str, Any],
         raw_case_spec: Mapping[str, Any],
         reason: str,
+        *,
+        repair_layer: str,
+        trigger_stage: str,
+        trigger_failure_code: str,
+        evidence_refs: list[str] | None = None,
     ) -> dict[str, Any]:
         if manifest["usage"]["case_spec_revisions"] >= manifest["budget"]["max_case_spec_revisions"]:
             raise JobStoreError("CaseSpec revision budget is exhausted")
@@ -921,25 +1279,40 @@ class AgentJobController:
         if stable_digest((case_spec.data.get("verification_requirements") or {}).get("assertions") or []) != frozen["verification_assertions"]:
             raise JobStoreError("revision cannot weaken or replace frozen verification assertions")
         if stable_digest(case_spec.data.get("backend_constraints") or {}) != frozen["backend_constraints"]:
-            raise JobStoreError("revision cannot change frozen backend constraints in M2")
+            raise JobStoreError("revision cannot change frozen backend constraints")
         if stable_digest(case_spec.data.get("asset_policy") or {}) != frozen["asset_policy"]:
             raise JobStoreError("revision cannot change the frozen asset policy")
         parent_id = manifest["current_attempt_id"]
         parent_spec = read_json(self.store.attempt_dir(manifest["job_id"], parent_id) / "case_spec.json")
         changes = self._json_diff(parent_spec, case_spec.data)
+        if not changes:
+            raise JobStoreError("revision proposal does not change the source CaseSpec")
         allowed = intent["allowed_adjustments"]
-        allowed_paths = [str(path) for path in allowed.get("paths") or [] if str(path).startswith("$.")]
-        disallowed = [
-            str(change.get("path") or "")
-            for change in changes
-            if not any(
-                str(change.get("path") or "") == path
-                or str(change.get("path") or "").startswith(f"{path}.")
-                for path in allowed_paths
-            )
-        ]
-        if disallowed:
-            raise JobStoreError(f"revision changes paths outside Intent Contract allowed_adjustments: {disallowed}")
+        self._validate_revision_changes(changes, allowed, repair_layer=repair_layer)
+        proposal_core = {
+            "job_id": manifest["job_id"],
+            "base_attempt_id": parent_id,
+            "base_case_spec_digest": stable_digest(parent_spec),
+            "intent_contract_digest": manifest["intent_contract_digest"],
+            "trigger_stage": trigger_stage,
+            "trigger_failure_code": trigger_failure_code,
+            "repair_layer": repair_layer,
+            "changes": changes,
+            "revised_case_spec_digest": stable_digest(case_spec.data),
+            "reason": reason,
+            "evidence_refs": list(evidence_refs or []),
+        }
+        proposal = RevisionProposal.from_dict(
+            {
+                "schema_version": REVISION_PROPOSAL_SCHEMA_VERSION,
+                "proposal_id": f"proposal_{stable_digest(proposal_core)[:16]}",
+                **proposal_core,
+                "created_at": utc_now(),
+            }
+        ).to_dict()
+        parent_root = self.store.attempt_dir(manifest["job_id"], parent_id)
+        sequence = len(list(parent_root.glob("revision_proposal_*.json"))) + 1
+        write_json(parent_root / f"revision_proposal_{sequence:03d}.json", proposal)
         revision = int(manifest["usage"]["case_spec_revisions"]) + 1
         attempt_id = validate_attempt_id(f"attempt_{revision:03d}")
         now = utc_now()
@@ -963,7 +1336,8 @@ class AgentJobController:
         ).to_dict()
         root = self.store.create_attempt(attempt, case_spec.data)
         write_json(root / "case_spec_diff.json", {"schema_version": "harness_case_spec_diff_v1", "changes": changes})
-        write_json(root / "revision_reason.json", {"reason": reason, "trigger": "user_or_agent_approved_source_revision"})
+        write_json(root / "revision_reason.json", {"reason": reason, "trigger": trigger_stage, "failure_code": trigger_failure_code})
+        write_json(root / "revision_proposal.json", proposal)
         usage = copy.deepcopy(manifest["usage"])
         usage["case_spec_revisions"] = revision
         return self._update_manifest(
@@ -1238,6 +1612,8 @@ class AgentJobController:
                 "verifier": 5,
                 "render_sync": 6,
                 "quality_gate": 7,
+                "evidence_bundle": 8,
+                "semantic_review": 9,
             }
             _, selected = max(
                 candidates,
@@ -1551,13 +1927,176 @@ class AgentJobController:
             for key in sorted(set(before).union(after)):
                 child = f"{path}.{key}"
                 if key not in before:
-                    changes.append({"path": child, "operation": "add", "after": after[key]})
+                    changes.append({"path": child, "operation": "add", "before": None, "after": after[key]})
                 elif key not in after:
-                    changes.append({"path": child, "operation": "remove", "before": before[key]})
+                    changes.append({"path": child, "operation": "remove", "before": before[key], "after": None})
                 else:
                     changes.extend(cls._json_diff(before[key], after[key], child))
             return changes
         return [{"path": path, "operation": "replace", "before": before, "after": after}]
+
+    @staticmethod
+    def _validate_revision_changes(
+        changes: list[dict[str, Any]],
+        allowed: Mapping[str, Any],
+        *,
+        repair_layer: str,
+    ) -> None:
+        allowed_paths = [str(path) for path in allowed.get("paths") or [] if str(path).startswith("$.")]
+        disallowed = []
+        for change in changes:
+            path = str(change.get("path") or "")
+            if not any(path == root or path.startswith(f"{root}.") for root in allowed_paths):
+                disallowed.append(path)
+        if disallowed:
+            raise JobStoreError(f"revision changes paths outside Intent Contract allowed_adjustments: {disallowed}")
+        ranges = allowed.get("ranges") if isinstance(allowed.get("ranges"), Mapping) else {}
+        for change in changes:
+            path = str(change["path"])
+            constraint = ranges.get(path)
+            if constraint is None:
+                continue
+            if isinstance(constraint, Mapping):
+                minimum, maximum = constraint.get("min"), constraint.get("max")
+            elif isinstance(constraint, list) and len(constraint) == 2:
+                minimum, maximum = constraint
+            else:
+                raise JobStoreError(f"Intent Contract range for {path} is invalid")
+            value = change.get("after")
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise JobStoreError(f"revision value at {path} is outside its numeric adjustment contract")
+            if minimum is not None and value < minimum or maximum is not None and value > maximum:
+                raise JobStoreError(f"revision value at {path} exceeds Intent Contract allowed range")
+        if repair_layer == "observation" and any(
+            not str(change["path"]).startswith("$.observation_requirements") for change in changes
+        ):
+            raise JobStoreError("observation repair may only change observation_requirements source intent")
+        if repair_layer == "camera" and any(
+            not (
+                str(change["path"]).startswith("$.observation_requirements")
+                or str(change["path"]).startswith("$.scene.camera")
+            )
+            for change in changes
+        ):
+            raise JobStoreError("camera repair may only change camera/observation source intent")
+
+    def _technical_completion_intact(
+        self,
+        manifest: Mapping[str, Any],
+        bundle: Mapping[str, Any],
+    ) -> bool:
+        attempt_dir = self.store.attempt_dir(manifest["job_id"], manifest["current_attempt_id"])
+        try:
+            candidate = read_json(attempt_dir / "candidate_run.json")
+            raw_run_dir = Path(str(candidate["run_dir"]))
+            run_dir = raw_run_dir.resolve(strict=True)
+            candidate_root = (attempt_dir / "runs" / "candidate").resolve(strict=True)
+            if not run_dir.is_relative_to(candidate_root) or self._path_chain_has_symlink(raw_run_dir, candidate_root):
+                return False
+            for stage in ("verifier", "render_sync", "quality_gate"):
+                value = StageResult.from_dict(read_json(run_dir / "stage_results" / f"{stage}.json")).to_dict()
+                if value["status"] != "completed":
+                    return False
+            quality = read_json(run_dir / "quality_report.json")
+            if quality.get("hard_gate_passed") is not True:
+                return False
+            for gate in bundle["technical_gates"].values():
+                raw_path = attempt_dir / gate["path"]
+                path = raw_path.resolve(strict=True)
+                if (
+                    not path.is_relative_to(attempt_dir.resolve(strict=True))
+                    or self._path_chain_has_symlink(raw_path, attempt_dir)
+                    or self._sha256_file(path) != gate["sha256"]
+                ):
+                    return False
+            manifest_path = attempt_dir / "evidence_bundle" / "manifest.json"
+            EvidenceBundleManifest.from_dict(read_json(manifest_path))
+            for artifact in bundle["artifacts"]:
+                raw_path = manifest_path.parent / artifact["path"]
+                path = raw_path.resolve(strict=True)
+                if (
+                    not path.is_relative_to(manifest_path.parent)
+                    or self._path_chain_has_symlink(raw_path, manifest_path.parent)
+                    or self._sha256_file(path) != artifact["sha256"]
+                ):
+                    return False
+        except (OSError, ValueError, TypeError, KeyError):
+            return False
+        return True
+
+    @staticmethod
+    def _path_chain_has_symlink(path: Path, root: Path) -> bool:
+        raw_path = path if path.is_absolute() else path.absolute()
+        raw_root = root if root.is_absolute() else root.absolute()
+        try:
+            relative = raw_path.relative_to(raw_root)
+        except ValueError:
+            return True
+        current = raw_root.resolve(strict=True)
+        for part in relative.parts:
+            current = current / part
+            if current.is_symlink():
+                return True
+        return False
+
+    def _publication_tier_satisfied(self, manifest: Mapping[str, Any]) -> bool:
+        if manifest["target"]["publication_tier"] != "reference":
+            return True
+        attempt_dir = self.store.attempt_dir(manifest["job_id"], manifest["current_attempt_id"])
+        candidate = read_json(attempt_dir / "candidate_run.json")
+        quality = read_json(Path(str(candidate["run_dir"])) / "quality_report.json")
+        readiness = ((quality.get("source_reports") or {}).get("run_readiness") or {})
+        return readiness.get("reference_ready") is True
+
+    def _load_validated_semantic_review(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
+        attempt_dir = self.store.attempt_dir(manifest["job_id"], manifest["current_attempt_id"])
+        bundle = EvidenceBundleManifest.from_dict(
+            read_json(attempt_dir / "evidence_bundle" / "manifest.json")
+        ).to_dict()
+        intent = IntentContract.from_dict(
+            read_json(self.store.job_dir(manifest["job_id"]) / "request" / "intent_contract.json")
+        ).to_dict()
+        review = SemanticReview.from_dict(
+            read_json(attempt_dir / "semantic_review.json"),
+            expected_requirement_ids={str(row["id"]) for row in intent["hard_requirements"]},
+            evidence_artifact_ids={str(row["artifact_id"]) for row in bundle["artifacts"]},
+        ).to_dict()
+        if review["job_id"] != manifest["job_id"] or review["attempt_id"] != manifest["current_attempt_id"]:
+            raise JobStoreError("Semantic Review identity does not match the current attempt")
+        if review["evidence_bundle_digest"] != stable_digest(bundle):
+            raise JobStoreError("Semantic Review Evidence Bundle digest no longer matches")
+        receipts = []
+        for path in sorted(attempt_dir.glob("reviewer_invocation_*.json")):
+            receipt = ReviewerInvocationReceipt.from_dict(read_json(path)).to_dict()
+            if stable_digest(receipt) == review["reviewer_receipt_digest"]:
+                receipts.append(receipt)
+        if len(receipts) != 1:
+            raise JobStoreError("Semantic Review does not identify exactly one valid Reviewer receipt")
+        raw_output = {
+            key: review[key]
+            for key in ("overall_status", "requirements", "repair_layer", "summary", "suggested_adjustments")
+        }
+        if receipts[0]["output_digest"] != stable_digest(raw_output):
+            raise JobStoreError("Semantic Review content no longer matches the Reviewer output digest")
+        return review
+
+    @staticmethod
+    def _semantic_repair_allowed(intent: Mapping[str, Any], review: Mapping[str, Any]) -> bool:
+        if review.get("repair_layer") not in {"observation", "camera", "case_spec_source"}:
+            return False
+        suggestions = review.get("suggested_adjustments") or []
+        if not suggestions:
+            return False
+        allowed_paths = [str(value) for value in (intent.get("allowed_adjustments") or {}).get("paths") or []]
+        return all(
+            any(
+                str(suggestion.get("path") or "") == path
+                or str(suggestion.get("path") or "").startswith(f"{path}.")
+                for path in allowed_paths
+            )
+            for suggestion in suggestions
+            if isinstance(suggestion, Mapping)
+        )
 
     @staticmethod
     def _smoke_mode(attempt_dir: Path) -> str:

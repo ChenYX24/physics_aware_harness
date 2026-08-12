@@ -1,0 +1,472 @@
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import PurePosixPath
+from typing import Any, Mapping
+
+from harness.agent.job_schema import validate_attempt_id, validate_job_id
+
+
+REVISION_PROPOSAL_SCHEMA_VERSION = "harness_case_spec_revision_proposal_v1"
+EVIDENCE_BUNDLE_SCHEMA_VERSION = "harness_evidence_bundle_v1"
+REVIEWER_RECEIPT_SCHEMA_VERSION = "harness_semantic_reviewer_receipt_v1"
+SEMANTIC_REVIEW_SCHEMA_VERSION = "harness_semantic_review_v1"
+
+REPAIR_LAYERS = {
+    "none",
+    "observation",
+    "camera",
+    "case_spec_source",
+    "evidence",
+    "user_decision",
+}
+SEMANTIC_STATUSES = {"pass", "fail", "uncertain"}
+
+
+@dataclass(frozen=True)
+class RevisionProposal:
+    data: dict[str, Any]
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> RevisionProposal:
+        data = dict(raw)
+        _exact(
+            data,
+            {
+                "schema_version",
+                "job_id",
+                "proposal_id",
+                "base_attempt_id",
+                "base_case_spec_digest",
+                "intent_contract_digest",
+                "trigger_stage",
+                "trigger_failure_code",
+                "repair_layer",
+                "changes",
+                "revised_case_spec_digest",
+                "reason",
+                "evidence_refs",
+                "created_at",
+            },
+            "revision proposal",
+        )
+        if data["schema_version"] != REVISION_PROPOSAL_SCHEMA_VERSION:
+            raise ValueError("unsupported revision proposal schema")
+        validate_job_id(data["job_id"])
+        validate_attempt_id(data["base_attempt_id"])
+        if not re.fullmatch(r"proposal_[0-9a-f]{16}", str(data["proposal_id"])):
+            raise ValueError("proposal_id must match proposal_<16 hex>")
+        for field in ("base_case_spec_digest", "intent_contract_digest", "revised_case_spec_digest"):
+            _sha256(data[field], field)
+        for field in ("trigger_stage", "trigger_failure_code", "reason"):
+            _nonempty(data[field], field)
+        if data["repair_layer"] not in REPAIR_LAYERS - {"none", "user_decision"}:
+            raise ValueError("revision proposal repair_layer is not materializable")
+        changes = data["changes"]
+        if not isinstance(changes, list) or not changes:
+            raise ValueError("revision proposal requires at least one canonical change")
+        for index, change in enumerate(changes):
+            value = _mapping(change, f"changes[{index}]")
+            _exact(value, {"path", "operation", "before", "after"}, f"changes[{index}]")
+            if not str(value["path"]).startswith("$."):
+                raise ValueError("revision change paths must be canonical JSON paths")
+            if value["operation"] not in {"add", "remove", "replace"}:
+                raise ValueError("revision change operation is invalid")
+        _string_list(data["evidence_refs"], "evidence_refs")
+        _timestamp(data["created_at"], "created_at")
+        return cls(data)
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self.data)
+
+
+@dataclass(frozen=True)
+class EvidenceBundleManifest:
+    data: dict[str, Any]
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> EvidenceBundleManifest:
+        data = dict(raw)
+        _exact(
+            data,
+            {
+                "schema_version",
+                "job_id",
+                "attempt_id",
+                "case_spec_digest",
+                "intent_contract_digest",
+                "candidate_run",
+                "technical_gates",
+                "event_selection",
+                "trajectory_summary",
+                "contact_timeline",
+                "artifacts",
+                "created_at",
+            },
+            "evidence bundle manifest",
+        )
+        if data["schema_version"] != EVIDENCE_BUNDLE_SCHEMA_VERSION:
+            raise ValueError("unsupported Evidence Bundle schema")
+        validate_job_id(data["job_id"])
+        validate_attempt_id(data["attempt_id"])
+        _sha256(data["case_spec_digest"], "case_spec_digest")
+        _sha256(data["intent_contract_digest"], "intent_contract_digest")
+        candidate = _mapping(data["candidate_run"], "candidate_run")
+        _exact(candidate, {"path", "fingerprint"}, "candidate_run")
+        _safe_relative(candidate["path"], "candidate_run.path")
+        _sha256(candidate["fingerprint"], "candidate_run.fingerprint")
+        gates = _mapping(data["technical_gates"], "technical_gates")
+        _exact(gates, {"verifier", "render_sync", "quality_gate"}, "technical_gates")
+        for name, gate in gates.items():
+            value = _mapping(gate, f"technical_gates.{name}")
+            _exact(value, {"status", "path", "sha256"}, f"technical_gates.{name}")
+            if value["status"] != "pass":
+                raise ValueError("formal Evidence Bundle requires every technical gate to pass")
+            _safe_relative(value["path"], f"technical_gates.{name}.path")
+            _sha256(value["sha256"], f"technical_gates.{name}.sha256")
+        selection = _mapping(data["event_selection"], "event_selection")
+        _exact(selection, {"strategy", "reason", "points"}, "event_selection")
+        if selection["strategy"] not in {"event_anchored", "start_mid_end"}:
+            raise ValueError("event_selection.strategy is invalid")
+        _nonempty(selection["reason"], "event_selection.reason")
+        points = selection["points"]
+        if not isinstance(points, list) or [row.get("label") for row in points if isinstance(row, Mapping)] != ["before", "during", "after"]:
+            raise ValueError("event_selection.points must contain before/during/after in order")
+        for index, point in enumerate(points):
+            value = _mapping(point, f"event_selection.points[{index}]")
+            _exact(value, {"label", "time_s", "frame_index", "event_refs"}, f"event_selection.points[{index}]")
+            _number(value["time_s"], f"event_selection.points[{index}].time_s")
+            if not isinstance(value["frame_index"], int) or isinstance(value["frame_index"], bool) or value["frame_index"] < 0:
+                raise ValueError("event selection frame_index must be non-negative")
+            _string_list(value["event_refs"], "event_refs")
+        trajectory = _mapping(data["trajectory_summary"], "trajectory_summary")
+        _exact(trajectory, {"source_path", "source_sha256", "frame_count", "start_time_s", "end_time_s", "objects"}, "trajectory_summary")
+        _safe_relative(trajectory["source_path"], "trajectory_summary.source_path")
+        _sha256(trajectory["source_sha256"], "trajectory_summary.source_sha256")
+        if not isinstance(trajectory["frame_count"], int) or trajectory["frame_count"] < 1:
+            raise ValueError("trajectory_summary.frame_count must be positive")
+        _number(trajectory["start_time_s"], "trajectory_summary.start_time_s")
+        _number(trajectory["end_time_s"], "trajectory_summary.end_time_s")
+        if not isinstance(trajectory["objects"], list):
+            raise ValueError("trajectory_summary.objects must be a list")
+        if not isinstance(data["contact_timeline"], list) or any(not isinstance(row, Mapping) for row in data["contact_timeline"]):
+            raise ValueError("contact_timeline must be a list of objects")
+        artifacts = data["artifacts"]
+        if not isinstance(artifacts, list) or not artifacts:
+            raise ValueError("Evidence Bundle requires artifacts")
+        identities: set[str] = set()
+        for index, artifact in enumerate(artifacts):
+            value = _mapping(artifact, f"artifacts[{index}]")
+            _exact(value, {"artifact_id", "kind", "path", "sha256", "mime_type", "time_s", "view_id", "source_ref"}, f"artifacts[{index}]")
+            identity = str(value["artifact_id"])
+            if not re.fullmatch(r"[a-z][a-z0-9_]{2,95}", identity) or identity in identities:
+                raise ValueError("Evidence Bundle artifact IDs must be unique stable identifiers")
+            identities.add(identity)
+            _nonempty(value["kind"], "artifact.kind")
+            _safe_relative(value["path"], "artifact.path")
+            _sha256(value["sha256"], "artifact.sha256")
+            _nonempty(value["mime_type"], "artifact.mime_type")
+            if value["time_s"] is not None:
+                _number(value["time_s"], "artifact.time_s")
+            if value["view_id"] is not None:
+                _nonempty(value["view_id"], "artifact.view_id")
+            if value["source_ref"] is not None:
+                _safe_relative(value["source_ref"], "artifact.source_ref")
+        _timestamp(data["created_at"], "created_at")
+        return cls(data)
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self.data)
+
+
+@dataclass(frozen=True)
+class ReviewerInvocationReceipt:
+    data: dict[str, Any]
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> ReviewerInvocationReceipt:
+        data = dict(raw)
+        _exact(
+            data,
+            {
+                "schema_version",
+                "job_id",
+                "attempt_id",
+                "invocation_count",
+                "transport",
+                "executable",
+                "codex_version",
+                "thread_id",
+                "turn_id",
+                "model",
+                "model_provider",
+                "requested_new_thread",
+                "sandbox_requested",
+                "sandbox_effective",
+                "readable_roots",
+                "instruction_sources",
+                "network_access",
+                "input_digest",
+                "output_digest",
+                "status",
+                "error_code",
+                "started_at",
+                "completed_at",
+            },
+            "reviewer invocation receipt",
+        )
+        if data["schema_version"] != REVIEWER_RECEIPT_SCHEMA_VERSION:
+            raise ValueError("unsupported Reviewer receipt schema")
+        validate_job_id(data["job_id"])
+        validate_attempt_id(data["attempt_id"])
+        if not isinstance(data["invocation_count"], int) or isinstance(data["invocation_count"], bool) or data["invocation_count"] < 1:
+            raise ValueError("reviewer invocation_count must be positive")
+        if data["transport"] != "stdio_jsonl":
+            raise ValueError("Reviewer transport must be stdio_jsonl")
+        for field in ("executable", "codex_version"):
+            _nonempty(data[field], field)
+        for field in ("thread_id", "turn_id", "model", "model_provider", "output_digest", "error_code"):
+            if data[field] is not None:
+                _nonempty(data[field], field)
+        if data["requested_new_thread"] is not True:
+            raise ValueError("Reviewer receipt must prove a new thread was requested")
+        requested = _mapping(data["sandbox_requested"], "sandbox_requested")
+        effective = _mapping(data["sandbox_effective"], "sandbox_effective")
+        if requested.get("type") != "readOnly" or requested.get("networkAccess") is not False:
+            raise ValueError("Reviewer must request readOnly sandbox with network disabled")
+        if data["status"] == "completed" and effective != requested:
+            raise ValueError("completed Reviewer receipt must prove the requested sandbox became effective")
+        roots = data["readable_roots"]
+        if not isinstance(roots, list) or len(roots) != 1:
+            raise ValueError("Reviewer must have exactly one readable root")
+        _nonempty(roots[0], "readable_roots[0]")
+        access = requested.get("access") if isinstance(requested.get("access"), Mapping) else {}
+        if access.get("type") != "restricted" or access.get("readableRoots") != roots:
+            raise ValueError("Reviewer requested sandbox must restrict reads to the recorded root")
+        _string_list(data["instruction_sources"], "instruction_sources")
+        if data["network_access"] is not False:
+            raise ValueError("Reviewer network access must be disabled")
+        _sha256(data["input_digest"], "input_digest")
+        if data["output_digest"] is not None:
+            _sha256(data["output_digest"], "output_digest")
+        if data["status"] not in {"completed", "failed", "interrupted"}:
+            raise ValueError("Reviewer receipt status is invalid")
+        if data["status"] == "completed" and (not data["thread_id"] or not data["turn_id"] or not data["model"] or not data["output_digest"] or data["error_code"] is not None):
+            raise ValueError("completed Reviewer receipt is incomplete")
+        if data["status"] != "completed" and data["error_code"] is None:
+            raise ValueError("failed Reviewer receipt requires error_code")
+        _timestamp(data["started_at"], "started_at")
+        _timestamp(data["completed_at"], "completed_at")
+        return cls(data)
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self.data)
+
+
+@dataclass(frozen=True)
+class SemanticReview:
+    data: dict[str, Any]
+
+    @classmethod
+    def from_dict(
+        cls,
+        raw: Mapping[str, Any],
+        *,
+        expected_requirement_ids: set[str] | None = None,
+        evidence_artifact_ids: set[str] | None = None,
+    ) -> SemanticReview:
+        data = dict(raw)
+        _exact(
+            data,
+            {
+                "schema_version",
+                "job_id",
+                "attempt_id",
+                "evidence_bundle_digest",
+                "reviewer_receipt_digest",
+                "overall_status",
+                "requirements",
+                "repair_layer",
+                "summary",
+                "suggested_adjustments",
+                "created_at",
+            },
+            "semantic review",
+        )
+        if data["schema_version"] != SEMANTIC_REVIEW_SCHEMA_VERSION:
+            raise ValueError("unsupported Semantic Review schema")
+        validate_job_id(data["job_id"])
+        validate_attempt_id(data["attempt_id"])
+        _sha256(data["evidence_bundle_digest"], "evidence_bundle_digest")
+        _sha256(data["reviewer_receipt_digest"], "reviewer_receipt_digest")
+        if data["overall_status"] not in SEMANTIC_STATUSES:
+            raise ValueError("semantic overall_status is invalid")
+        rows = data["requirements"]
+        if not isinstance(rows, list) or not rows:
+            raise ValueError("semantic review requires requirement verdicts")
+        seen: set[str] = set()
+        statuses: list[str] = []
+        for index, row in enumerate(rows):
+            value = _mapping(row, f"requirements[{index}]")
+            _exact(value, {"requirement_id", "status", "rationale", "evidence_refs"}, f"requirements[{index}]")
+            identity = str(value["requirement_id"])
+            _nonempty(identity, "requirement_id")
+            if identity in seen:
+                raise ValueError("semantic requirement IDs must be unique")
+            seen.add(identity)
+            if value["status"] not in SEMANTIC_STATUSES:
+                raise ValueError("semantic requirement status is invalid")
+            statuses.append(value["status"])
+            _nonempty(value["rationale"], "requirement.rationale")
+            refs = value["evidence_refs"]
+            if not isinstance(refs, list) or not refs:
+                raise ValueError("requirement.evidence_refs must be a non-empty list")
+            for ref_index, ref in enumerate(refs):
+                item = _mapping(ref, f"evidence_refs[{ref_index}]")
+                _exact(item, {"artifact_id", "time_s", "view_id", "trajectory_range", "contact_event_id"}, f"evidence_refs[{ref_index}]")
+                _nonempty(item["artifact_id"], "evidence_ref.artifact_id")
+                if evidence_artifact_ids is not None and item["artifact_id"] not in evidence_artifact_ids:
+                    raise ValueError("semantic review references an unknown Evidence Bundle artifact")
+                if item["time_s"] is not None:
+                    _number(item["time_s"], "evidence_ref.time_s")
+                for field in ("view_id", "trajectory_range", "contact_event_id"):
+                    if item[field] is not None:
+                        _nonempty(item[field], f"evidence_ref.{field}")
+                if all(item[field] is None for field in ("time_s", "view_id", "trajectory_range", "contact_event_id")):
+                    raise ValueError("each semantic evidence reference requires a concrete locator")
+        if expected_requirement_ids is not None and seen != expected_requirement_ids:
+            raise ValueError("semantic review must cover every hard requirement exactly once")
+        derived = "uncertain" if "uncertain" in statuses else "fail" if "fail" in statuses else "pass"
+        if data["overall_status"] != derived:
+            raise ValueError("semantic overall_status does not match requirement verdicts")
+        if data["repair_layer"] not in REPAIR_LAYERS:
+            raise ValueError("semantic repair_layer is invalid")
+        if derived == "pass" and data["repair_layer"] != "none":
+            raise ValueError("semantic pass must use repair_layer=none")
+        if derived != "pass" and data["repair_layer"] == "none":
+            raise ValueError("semantic non-pass requires a repair layer")
+        _nonempty(data["summary"], "summary")
+        suggestions = data["suggested_adjustments"]
+        if not isinstance(suggestions, list):
+            raise ValueError("suggested_adjustments must be a list")
+        for index, suggestion in enumerate(suggestions):
+            value = _mapping(suggestion, f"suggested_adjustments[{index}]")
+            _exact(value, {"path", "desired_outcome", "evidence_refs"}, f"suggested_adjustments[{index}]")
+            if not str(value["path"]).startswith("$."):
+                raise ValueError("suggested adjustment path must be a source CaseSpec JSON path")
+            _nonempty(value["desired_outcome"], "suggested_adjustment.desired_outcome")
+            _string_list(value["evidence_refs"], "suggested_adjustment.evidence_refs")
+            if evidence_artifact_ids is not None and any(
+                artifact_id not in evidence_artifact_ids for artifact_id in value["evidence_refs"]
+            ):
+                raise ValueError("suggested adjustment references an unknown Evidence Bundle artifact")
+        _timestamp(data["created_at"], "created_at")
+        return cls(data)
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self.data)
+
+
+def semantic_review_output_schema() -> dict[str, Any]:
+    nullable_string = {"type": ["string", "null"]}
+    nullable_number = {"type": ["number", "null"]}
+    evidence_ref = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "artifact_id": {"type": "string"},
+            "time_s": nullable_number,
+            "view_id": nullable_string,
+            "trajectory_range": nullable_string,
+            "contact_event_id": nullable_string,
+        },
+        "required": ["artifact_id", "time_s", "view_id", "trajectory_range", "contact_event_id"],
+    }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "overall_status": {"type": "string", "enum": sorted(SEMANTIC_STATUSES)},
+            "requirements": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "requirement_id": {"type": "string"},
+                        "status": {"type": "string", "enum": sorted(SEMANTIC_STATUSES)},
+                        "rationale": {"type": "string"},
+                        "evidence_refs": {"type": "array", "minItems": 1, "items": evidence_ref},
+                    },
+                    "required": ["requirement_id", "status", "rationale", "evidence_refs"],
+                },
+            },
+            "repair_layer": {"type": "string", "enum": sorted(REPAIR_LAYERS)},
+            "summary": {"type": "string"},
+            "suggested_adjustments": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "path": {"type": "string"},
+                        "desired_outcome": {"type": "string"},
+                        "evidence_refs": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["path", "desired_outcome", "evidence_refs"],
+                },
+            },
+        },
+        "required": ["overall_status", "requirements", "repair_layer", "summary", "suggested_adjustments"],
+    }
+
+
+def _exact(data: Mapping[str, Any], expected: set[str], label: str) -> None:
+    missing = sorted(expected - set(data))
+    extra = sorted(set(data) - expected)
+    if missing or extra:
+        raise ValueError(f"{label} fields mismatch; missing={missing}, extra={extra}")
+
+
+def _mapping(value: Any, label: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be an object")
+    return dict(value)
+
+
+def _nonempty(value: Any, label: str) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} must be a non-empty string")
+
+
+def _sha256(value: Any, label: str) -> None:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value.casefold()):
+        raise ValueError(f"{label} must be a SHA-256 digest")
+
+
+def _timestamp(value: Any, label: str) -> None:
+    _nonempty(value, label)
+    try:
+        datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{label} must be an ISO timestamp") from exc
+
+
+def _safe_relative(value: Any, label: str) -> None:
+    _nonempty(value, label)
+    path = PurePosixPath(str(value))
+    if path.is_absolute() or ".." in path.parts or str(path) in {".", ""}:
+        raise ValueError(f"{label} must be a safe relative path")
+
+
+def _number(value: Any, label: str) -> None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f"{label} must be numeric")
+
+
+def _string_list(value: Any, label: str) -> None:
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
+        raise ValueError(f"{label} must be a string list")

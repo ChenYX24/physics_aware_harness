@@ -137,11 +137,22 @@ class JobManifest:
             _sha256(data["intent_contract_digest"], "intent_contract_digest")
         target = _mapping(data["target"], "target")
         if target.get("execution_profile") != "candidate":
-            raise ValueError("M2 target.execution_profile must be candidate")
+            raise ValueError("target.execution_profile must be candidate")
         if target.get("publication_tier") not in PUBLICATION_TIERS:
             raise ValueError("target.publication_tier is invalid")
         authorizations = _mapping(data["authorizations"], "authorizations")
-        for field in ("planning_llm_upload", "meshy_upload", "external_provider", "paid_provider_submission"):
+        # Deterministic in-memory migration for M2/M3 manifests. Semantic
+        # Reviewer image upload is purpose-specific and therefore defaults to
+        # denied for every historical job.
+        authorizations.setdefault("semantic_reviewer_image_upload", False)
+        data["authorizations"] = authorizations
+        for field in (
+            "planning_llm_upload",
+            "meshy_upload",
+            "external_provider",
+            "paid_provider_submission",
+            "semantic_reviewer_image_upload",
+        ):
             if not isinstance(authorizations.get(field), bool):
                 raise ValueError(f"authorizations.{field} must be boolean")
         normalized = normalized_budget(_mapping(data["budget"], "budget"))

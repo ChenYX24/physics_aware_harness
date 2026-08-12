@@ -11,7 +11,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from harness.agent.job_controller import AgentJobController, ControllerHooks
-from harness.agent.job_schema import DEFAULT_BUDGET, JobManifest
+from harness.agent.job_schema import DEFAULT_BUDGET, JobManifest, stable_digest, utc_now
+from harness.agent.review_schema import EVIDENCE_BUNDLE_SCHEMA_VERSION, REVIEWER_RECEIPT_SCHEMA_VERSION
+from harness.agent.semantic_reviewer import SemanticReviewerError
 from harness.assets.providers.input_manifest import build_provider_input_manifest
 from harness.assets.sqlite_catalog import initialize_catalog
 from harness.core.artifact_schema import read_json, write_json
@@ -23,13 +25,15 @@ from tests.case_spec_v2_fixture import case_spec_v2_fixture
 
 
 class SuccessfulHarness:
-    def __init__(self, *, selected_backend: str = "fallback", fail_verifier: bool = False) -> None:
+    def __init__(self, *, selected_backend: str = "fallback", fail_verifier: bool = False, semantic_status: str = "pass") -> None:
         self.selected_backend = selected_backend
         self.fail_verifier = fail_verifier
         self.compile_calls: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
         self.execute_calls: list[str] = []
         self.provider_manifests: list[dict | None] = []
         self.generation_calls = 0
+        self.semantic_status = semantic_status
+        self.semantic_calls = 0
 
     def generate(self, request: dict, *, artifact_dir: Path, job_id: str, attempt_id: str):
         self.generation_calls += 1
@@ -169,6 +173,136 @@ class SuccessfulHarness:
         write_stage_result(run_dir, build_stage_result(stage="quality_gate", status="completed"))
         return report
 
+    @staticmethod
+    def evidence(*, job_id: str, attempt: dict, attempt_dir: Path, candidate_run_dir: Path, **kwargs):
+        del kwargs
+        bundle_dir = attempt_dir / "evidence_bundle"
+        summary = bundle_dir / "evidence_summary.json"
+        write_json(summary, {"schema_version": "harness_evidence_summary_v1", "summary": "fixture"})
+
+        def digest(path: Path) -> str:
+            import hashlib
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+
+        gates = {}
+        report_paths = {
+            "verifier": candidate_run_dir / "harness_verifier.json",
+            "render_sync": candidate_run_dir / "render_sync_report.json",
+            "quality_gate": candidate_run_dir / "quality_report.json",
+        }
+        for name, path in report_paths.items():
+            gates[name] = {"status": "pass", "path": path.relative_to(attempt_dir).as_posix(), "sha256": digest(path)}
+        trajectory = candidate_run_dir / "trajectory.json"
+        point = {"label": "before", "time_s": 0.0, "frame_index": 0, "event_refs": []}
+        manifest = {
+            "schema_version": EVIDENCE_BUNDLE_SCHEMA_VERSION,
+            "job_id": job_id,
+            "attempt_id": attempt["attempt_id"],
+            "case_spec_digest": attempt["case_spec_digest"],
+            "intent_contract_digest": attempt["intent_contract_digest"],
+            "candidate_run": {
+                "path": candidate_run_dir.relative_to(attempt_dir).as_posix(),
+                "fingerprint": stable_digest(read_json(attempt_dir / "candidate_run.json")),
+            },
+            "technical_gates": gates,
+            "event_selection": {
+                "strategy": "start_mid_end",
+                "reason": "fixture has no event",
+                "points": [point, {**point, "label": "during"}, {**point, "label": "after"}],
+            },
+            "trajectory_summary": {
+                "source_path": trajectory.relative_to(attempt_dir).as_posix(),
+                "source_sha256": digest(trajectory),
+                "frame_count": 1,
+                "start_time_s": 0.0,
+                "end_time_s": 0.0,
+                "objects": [],
+            },
+            "contact_timeline": [],
+            "artifacts": [
+                {
+                    "artifact_id": "evidence_summary",
+                    "kind": "structured_summary",
+                    "path": "evidence_summary.json",
+                    "sha256": digest(summary),
+                    "mime_type": "application/json",
+                    "time_s": None,
+                    "view_id": None,
+                    "source_ref": None,
+                }
+            ],
+            "created_at": utc_now(),
+        }
+        manifest_path = bundle_dir / "manifest.json"
+        write_json(manifest_path, manifest)
+        return {
+            "manifest": manifest,
+            "manifest_path": str(manifest_path),
+            "stage_result": build_stage_result(stage="evidence_bundle", status="completed"),
+        }
+
+    def semantic_review(self, *, job_id: str, attempt_id: str, bundle_dir: Path, bundle_manifest: dict, invocation_count: int, **kwargs):
+        del kwargs
+        self.semantic_calls += 1
+        repair_layer = "none" if self.semantic_status == "pass" else "camera" if self.semantic_status == "fail" else "user_decision"
+        raw = {
+            "overall_status": self.semantic_status,
+            "requirements": [
+                {
+                    "requirement_id": "original_user_request",
+                    "status": self.semantic_status,
+                    "rationale": "fixture semantic verdict",
+                    "evidence_refs": [
+                        {
+                            "artifact_id": "evidence_summary",
+                            "time_s": None,
+                            "view_id": None,
+                            "trajectory_range": "0.0-0.0s",
+                            "contact_event_id": None,
+                        }
+                    ],
+                }
+            ],
+            "repair_layer": repair_layer,
+            "summary": "fixture semantic verdict",
+            "suggested_adjustments": (
+                [{"path": "$.observation_requirements", "desired_outcome": "improve view", "evidence_refs": ["evidence_summary"]}]
+                if self.semantic_status == "fail"
+                else []
+            ),
+        }
+        sandbox = {
+            "type": "readOnly",
+            "networkAccess": False,
+            "access": {"type": "restricted", "includePlatformDefaults": True, "readableRoots": [str(bundle_dir)]},
+        }
+        receipt = {
+            "schema_version": REVIEWER_RECEIPT_SCHEMA_VERSION,
+            "job_id": job_id,
+            "attempt_id": attempt_id,
+            "invocation_count": invocation_count,
+            "transport": "stdio_jsonl",
+            "executable": "/usr/bin/fake-codex",
+            "codex_version": "codex-cli fixture",
+            "thread_id": f"thr_fixture_{invocation_count}",
+            "turn_id": f"turn_fixture_{invocation_count}",
+            "model": "app-server-default",
+            "model_provider": "fixture",
+            "requested_new_thread": True,
+            "sandbox_requested": sandbox,
+            "sandbox_effective": sandbox,
+            "readable_roots": [str(bundle_dir)],
+            "instruction_sources": [],
+            "network_access": False,
+            "input_digest": stable_digest(bundle_manifest),
+            "output_digest": stable_digest(raw),
+            "status": "completed",
+            "error_code": None,
+            "started_at": utc_now(),
+            "completed_at": utc_now(),
+        }
+        return {"review": raw, "receipt": receipt}
+
     def hooks(self) -> ControllerHooks:
         return ControllerHooks(
             generate=self.generate,
@@ -177,6 +311,8 @@ class SuccessfulHarness:
             verify=self.verify,
             render_sync=self.render_sync,
             quality=self.quality,
+            evidence=self.evidence,
+            semantic_review=self.semantic_review,
         )
 
 
@@ -193,7 +329,7 @@ class AgentJobControllerTests(unittest.TestCase):
         fake = harness or SuccessfulHarness()
         return AgentJobController(self.workspace, hooks=fake.hooks()), fake
 
-    def test_full_m2_technical_chain_stops_before_semantic_review(self) -> None:
+    def test_full_technical_chain_stops_before_explicit_semantic_review(self) -> None:
         controller, fake = self.controller()
         controller.create(
             self.request,
@@ -216,6 +352,244 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertNotEqual(fake.compile_calls[0], fake.compile_calls[-1])
         candidate = read_json(attempt_root / "candidate_run.json")
         self.assertTrue((Path(candidate["run_dir"]) / "quality_report.json").is_file())
+
+    def test_m4_explicit_semantic_review_completes_the_job(self) -> None:
+        controller, fake = self.controller()
+        controller.create(
+            self.request,
+            job_id="job_m4_semantic_pass",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        boundary = controller.advance_until_blocked("job_m4_semantic_pass")
+
+        completed = controller.run_semantic_review("job_m4_semantic_pass")
+
+        self.assertEqual(boundary["job"]["state"], "awaiting_semantic_review")
+        self.assertEqual(completed["job"]["state"], "completed")
+        self.assertEqual(fake.semantic_calls, 1)
+        attempt = Path(completed["paths"]["job_root"]) / "attempts" / "attempt_001"
+        self.assertTrue((attempt / "semantic_review.json").is_file())
+        receipt = read_json(attempt / "reviewer_invocation_001.json")
+        self.assertTrue(receipt["requested_new_thread"])
+        self.assertEqual(receipt["sandbox_effective"]["type"], "readOnly")
+        self.assertFalse(receipt["network_access"])
+        events = [read_json(path) for path in sorted((Path(completed["paths"]["job_root"]) / "events").glob("*.json"))]
+        semantic_events = [row["event"] for row in events if row.get("stage") == "semantic_review"]
+        self.assertIn("stage_started", semantic_events)
+        self.assertIn("stage_completed", semantic_events)
+        self.assertEqual(events[-1]["event"], "job_terminal")
+        self.assertEqual(events[-1]["state"], "completed")
+
+    def test_semantic_fail_allows_intent_bounded_automatic_revision(self) -> None:
+        fake = SuccessfulHarness(semantic_status="fail")
+        controller, _ = self.controller(fake)
+        controller.create(
+            self.request,
+            job_id="job_m4_semantic_revision",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        controller.advance_until_blocked("job_m4_semantic_revision")
+        failed = controller.run_semantic_review("job_m4_semantic_revision")
+        self.assertEqual(failed["job"]["allowed_next_actions"], ["apply_revision_proposal", "cancel"])
+        first_root = Path(failed["paths"]["job_root"]) / "attempts" / "attempt_001"
+        first_bytes = (first_root / "case_spec.json").read_bytes()
+        revised = case_spec_v2_fixture()
+        revised["observation_requirements"]["cameras"].append(
+            {"role": "side_static", "target_objects": ["cue_ball", "target_ball"]}
+        )
+        fake.semantic_status = "pass"
+
+        second = controller.apply_revision_proposal(
+            "job_m4_semantic_revision",
+            revised,
+            reason="add Intent-authorized side evidence",
+        )
+
+        self.assertEqual(second["job"]["state"], "awaiting_semantic_review")
+        self.assertEqual(second["job"]["current_attempt_id"], "attempt_002")
+        self.assertEqual((first_root / "case_spec.json").read_bytes(), first_bytes)
+        proposal = read_json(first_root / "revision_proposal_001.json")
+        self.assertEqual(proposal["repair_layer"], "camera")
+        self.assertTrue(read_json(Path(second["paths"]["job_root"]) / "attempts" / "attempt_002" / "case_spec_diff.json")["changes"])
+        self.assertEqual(controller.run_semantic_review("job_m4_semantic_revision")["job"]["state"], "completed")
+
+    def test_camera_repair_cannot_change_even_an_otherwise_allowed_non_camera_path(self) -> None:
+        controller, _ = self.controller(SuccessfulHarness(semantic_status="fail"))
+        controller.create(
+            self.request,
+            job_id="job_m4_camera_scope",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        controller.advance_until_blocked("job_m4_camera_scope")
+        controller.run_semantic_review("job_m4_camera_scope")
+        invalid = case_spec_v2_fixture()
+        invalid["scene"]["duration_s"] += 0.5
+
+        with self.assertRaisesRegex(ValueError, "camera repair"):
+            controller.apply_revision_proposal(
+                "job_m4_camera_scope",
+                invalid,
+                reason="do not permit physics duration repair through camera layer",
+            )
+
+    def test_tampered_semantic_review_cannot_authorize_a_revision(self) -> None:
+        controller, _ = self.controller(SuccessfulHarness(semantic_status="fail"))
+        controller.create(
+            self.request,
+            job_id="job_m4_review_tamper",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        controller.advance_until_blocked("job_m4_review_tamper")
+        inspection = controller.run_semantic_review("job_m4_review_tamper")
+        attempt = Path(inspection["paths"]["job_root"]) / "attempts" / "attempt_001"
+        review = read_json(attempt / "semantic_review.json")
+        review["summary"] = "tampered after review"
+        write_json(attempt / "semantic_review.json", review)
+        revised = case_spec_v2_fixture()
+        revised["observation_requirements"]["cameras"].append(
+            {"role": "side_static", "target_objects": ["cue_ball", "target_ball"]}
+        )
+
+        with self.assertRaisesRegex(ValueError, "output digest"):
+            controller.apply_revision_proposal(
+                "job_m4_review_tamper",
+                revised,
+                reason="must reject tampered review",
+            )
+
+    def test_semantic_uncertain_never_completes(self) -> None:
+        controller, fake = self.controller(SuccessfulHarness(semantic_status="uncertain"))
+        controller.create(
+            self.request,
+            job_id="job_m4_semantic_uncertain",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        controller.advance_until_blocked("job_m4_semantic_uncertain")
+
+        inspection = controller.run_semantic_review("job_m4_semantic_uncertain")
+
+        self.assertEqual(inspection["job"]["state"], "needs_user_decision")
+        self.assertEqual(inspection["job"]["blocker"]["code"], "semantic_review_uncertain")
+        self.assertNotEqual(inspection["job"]["state"], "completed")
+        self.assertEqual(fake.semantic_calls, 1)
+
+    def test_semantic_reviewer_image_authorization_is_independent_and_precedes_turn(self) -> None:
+        image = self.workspace / "semantic-review.png"
+        image.write_bytes(b"semantic-review-image")
+        request = build_case_request(
+            case_id="semantic_image_case",
+            text="match this image",
+            image_paths=[image],
+            allow_image_upload=False,
+            requested_backend="fallback",
+        )
+        controller, fake = self.controller()
+        controller.create(
+            request,
+            job_id="job_m4_semantic_image_auth",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+            authorizations={"planning_llm_upload": False, "meshy_upload": True},
+        )
+        controller.advance_until_blocked("job_m4_semantic_image_auth")
+
+        blocked = controller.run_semantic_review("job_m4_semantic_image_auth")
+
+        self.assertEqual(blocked["job"]["state"], "blocked")
+        self.assertEqual(blocked["job"]["blocker"]["code"], "semantic_reviewer_image_upload_authorization_missing")
+        self.assertEqual(fake.semantic_calls, 0)
+        boundary = controller.resume(
+            "job_m4_semantic_image_auth",
+            authorizations={"semantic_reviewer_image_upload": True},
+        )
+        self.assertEqual(boundary["job"]["state"], "awaiting_semantic_review")
+        self.assertEqual(controller.run_semantic_review("job_m4_semantic_image_auth")["job"]["state"], "completed")
+
+    def test_semantic_pass_cannot_override_changed_technical_evidence(self) -> None:
+        controller, fake = self.controller()
+        controller.create(
+            self.request,
+            job_id="job_m4_stale_gate",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        boundary = controller.advance_until_blocked("job_m4_stale_gate")
+        attempt = Path(boundary["paths"]["job_root"]) / "attempts" / "attempt_001"
+        candidate = Path(read_json(attempt / "candidate_run.json")["run_dir"])
+        write_json(candidate / "quality_report.json", {"schema_version": "harness_run_quality_v1", "status": "fail", "hard_gate_passed": False})
+
+        inspection = controller.run_semantic_review("job_m4_stale_gate")
+
+        self.assertEqual(inspection["job"]["state"], "failed")
+        self.assertEqual(inspection["job"]["blocker"]["code"], "semantic_review_technical_gate_stale")
+        self.assertEqual(fake.semantic_calls, 0)
+
+    def test_reviewer_technical_failure_retries_once_without_new_attempt(self) -> None:
+        controller, fake = self.controller()
+        hooks = fake.hooks()
+        calls = 0
+        successful = hooks.semantic_review
+
+        def flaky(**kwargs):
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                return successful(**kwargs)
+            bundle_dir = Path(kwargs["bundle_dir"])
+            sandbox = {
+                "type": "readOnly",
+                "networkAccess": False,
+                "access": {"type": "restricted", "includePlatformDefaults": True, "readableRoots": [str(bundle_dir)]},
+            }
+            now = utc_now()
+            receipt = {
+                "schema_version": REVIEWER_RECEIPT_SCHEMA_VERSION,
+                "job_id": kwargs["job_id"],
+                "attempt_id": kwargs["attempt_id"],
+                "invocation_count": kwargs["invocation_count"],
+                "transport": "stdio_jsonl",
+                "executable": "/usr/bin/fake-codex",
+                "codex_version": "fixture",
+                "thread_id": None,
+                "turn_id": None,
+                "model": None,
+                "model_provider": None,
+                "requested_new_thread": True,
+                "sandbox_requested": sandbox,
+                "sandbox_effective": {},
+                "readable_roots": [str(bundle_dir)],
+                "instruction_sources": [],
+                "network_access": False,
+                "input_digest": stable_digest(kwargs["bundle_manifest"]),
+                "output_digest": None,
+                "status": "failed",
+                "error_code": "reviewer_app_server_failure",
+                "started_at": now,
+                "completed_at": now,
+            }
+            raise SemanticReviewerError("reviewer_app_server_failure", "temporary failure", retryable=True, receipt=receipt)
+
+        hooks.semantic_review = flaky
+        controller = AgentJobController(self.workspace, hooks=hooks)
+        controller.create(
+            self.request,
+            job_id="job_m4_reviewer_retry",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        controller.advance_until_blocked("job_m4_reviewer_retry")
+
+        inspection = controller.run_semantic_review("job_m4_reviewer_retry")
+
+        self.assertEqual(inspection["job"]["state"], "completed")
+        self.assertEqual(inspection["job"]["usage"]["reviewer_invocations"], 2)
+        self.assertEqual(inspection["job"]["usage"]["stage_retries"]["semantic_review"], 1)
+        self.assertEqual([row["attempt_id"] for row in inspection["attempts"]], ["attempt_001"])
 
     def test_l0_missing_catalog_blocks_before_generation(self) -> None:
         missing_workspace = Path(self.temporary.name) / "missing_catalog_workspace"
@@ -880,6 +1254,19 @@ class AgentJobCliTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("--max-paid-submissions", completed.stdout)
+        self.assertIn("--allow-semantic-reviewer-image-upload", completed.stdout)
+
+    def test_m4_cli_exposes_explicit_review_and_revision_actions(self) -> None:
+        script = Path(__file__).resolve().parents[1] / "scripts" / "harness_agent_job.py"
+        completed = subprocess.run(
+            [sys.executable, str(script), "--help"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("review", completed.stdout)
+        self.assertIn("apply-revision", completed.stdout)
 
     def test_create_and_inspect_emit_structured_json(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

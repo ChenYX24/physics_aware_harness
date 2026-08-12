@@ -22,6 +22,7 @@ FAILURE_CLASSES = {
     "provider_failed",
     "quality_gate_failed",
     "render_sync_failed",
+    "semantic_review_failed",
     "transient",
     "verification_failed",
 }
@@ -35,6 +36,7 @@ ALLOWED_NEXT_ACTIONS = {
     "resume_checkpoint",
     "retry_stage",
     "revise_case_spec",
+    "run_semantic_review",
 }
 _COST_FIELDS = {"amount", "currency", "estimated", "provider"}
 _REQUIRED_FIELDS = {
@@ -89,7 +91,9 @@ _USER_ACTION_CODES = {
     "provider_resume_checkpoint_missing",
     "provider_submission_state_unknown",
     "request_input_missing",
+    "reviewer_invocation_budget_exhausted",
     "soft_deadline_reached",
+    "semantic_reviewer_image_upload_authorization_missing",
     "ue_launch_budget_exhausted",
 }
 _CONFIGURATION_CODES = {
@@ -112,6 +116,10 @@ _CONFIGURATION_CODES = {
     "ue_project_missing",
     "request_digest_mismatch",
     "request_input_identity_mismatch",
+    "reviewer_app_server_unavailable",
+    "reviewer_restricted_read_unsupported",
+    "reviewer_isolation_unproven",
+    "reviewer_unrelated_instruction_source",
 }
 _TRANSIENT_CODES = {
     "backend_importer_timeout",
@@ -131,6 +139,17 @@ _ARTIFACT_CODES = {
     "stage_handoff_incomplete",
     "stage_handoff_schema_mismatch",
     "verifier_input_invalid",
+    "evidence_artifact_identity_mismatch",
+    "evidence_candidate_path_invalid",
+    "evidence_technical_gate_missing",
+    "evidence_technical_gate_incomplete",
+    "evidence_technical_gate_failed",
+    "evidence_trajectory_missing",
+    "evidence_trajectory_empty",
+    "evidence_trajectory_time_invalid",
+    "evidence_canonical_view_missing",
+    "reviewer_output_invalid_json",
+    "reviewer_output_schema_invalid",
 }
 _SECRET_PATTERNS = (
     re.compile(r"(?i)([\"']?authorization[\"']?\s*[:=]\s*[\"']?(?:bearer\s+)?)[^\"'\s,;}]+"),
@@ -374,6 +393,10 @@ def classify_failure(
         return _classification("failed", "render_sync_failed", False, ["inspect_artifacts", "retry_stage"])
     if normalized_stage == "quality_gate":
         return _classification("failed", "quality_gate_failed", False, ["inspect_artifacts", "revise_case_spec"])
+    if normalized_stage == "evidence_bundle":
+        return _classification("failed", "artifact_incomplete", False, ["inspect_artifacts", "open_development_issue"])
+    if normalized_stage == "semantic_review":
+        return _classification("failed", "semantic_review_failed", False, ["inspect_artifacts", "revise_case_spec"])
     if normalized_stage in {"execute", "execution"}:
         return _classification("failed", "execution_failed", False, ["inspect_artifacts", "open_development_issue"])
     return _classification("failed", "harness_bug", False, ["inspect_artifacts", "open_development_issue"])
@@ -698,6 +721,7 @@ def _failure_priority(classification: Mapping[str, Any]) -> int:
         "render_sync_failed": 60,
         "case_spec_invalid": 70,
         "quality_gate_failed": 80,
+        "semantic_review_failed": 90,
     }.get(str(classification.get("failure_class") or ""), 100)
 
 
