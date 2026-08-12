@@ -1,4 +1,0 @@
-interface:
-  display_name: "Physics-Aware Harness"
-  short_description: "Run and verify rigid, fluid, and UE simulation cases"
-  default_prompt: "Use $physics-aware-harness to run the smallest trustworthy simulation case and inspect its quality gates."

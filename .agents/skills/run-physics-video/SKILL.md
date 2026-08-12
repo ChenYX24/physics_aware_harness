@@ -1,0 +1,66 @@
+---
+name: run-physics-video
+description: Create, inspect, advance, pause, resume, or cancel durable Physics-Aware Harness agent jobs from the normal Codex TUI through scripts/harness_agent_job.py and a job_id. Use when a user requests a physics simulation video or asks to continue an existing Harness job. Do not use for Harness source development or for direct legacy case, backend, batch, or review execution.
+---
+
+# Run Physics Video
+
+Operate one durable Physics-Aware Harness job from the normal Codex TUI. Use the repository Controller as the control-plane truth; do not implement a second state machine in the conversation.
+
+## Establish the job
+
+Work from the repository root containing `harness/` and `scripts/harness_agent_job.py`. Keep the Catalog, jobs, runs, media, caches, and imported assets in the external Harness workspace. Never create runtime output in the Git worktree.
+
+For an existing `job_id`, inspect it before doing anything else, including in a new Codex session:
+
+```bash
+python3 scripts/harness_agent_job.py inspect <job_id>
+```
+
+Pass `--workspace <external-workspace>` before the subcommand when `SIM_HARNESS_WORKSPACE` is not set. Treat the returned `harness_agent_job_inspection_v1` and its on-disk manifest as truth; conversation history and stdout events are not job state.
+
+For a new request, create exactly one job. Preserve the user's text and image identities. Omit `--backend` unless the user explicitly requires one. Keep the default `reference` publication tier unless the user explicitly chooses `local_preview` or `diagnostic_only` in advance.
+
+```bash
+python3 scripts/harness_agent_job.py create --prompt '<immutable user request>'
+```
+
+Add image paths and authorization flags only when supplied by the current user request. Treat planning-model image upload, Meshy image upload, external Provider use, and paid Provider submission as separate authorizations. Never infer one authorization from another. Never enable paid submission without explicit approval; the default paid-submission budget is zero.
+
+Report the new `job_id` immediately so a later session can resume it.
+
+## Advance through the Controller
+
+Let the Controller run L0/L1 task-aware readiness, generation, compilation, Provider, Smoke, Candidate, verifier, render sync, and Quality Gate stages:
+
+```bash
+python3 scripts/harness_agent_job.py --jsonl advance-until-blocked <job_id>
+```
+
+Use JSONL for long operations. After the command stops or is interrupted, run `inspect` again. Read the manifest's `state`, `current_stage`, `blocker`, and `allowed_next_actions`, then inspect the referenced leaf `harness_stage_result_v1` artifact when a failure requires diagnosis.
+
+Make control decisions only from stable structured fields: `status`, `failure_class`, `failure_code`, `retryable`, `checkpoint_ref`, `artifact_refs`, `allowed_next_actions`, and `required_user_action`. Do not classify failures from traceback or message wording, and do not copy the schema, failure-code registry, retry loop, budgets, or checkpoints into this Skill.
+
+## Choose the next action
+
+- Continue only when the manifest permits `advance`.
+- Let the Controller consume its transient retry budget. A transient failure or `paused_interrupted` resumes the same job and attempt from its checkpoint; never create a CaseSpec revision for it.
+- When blocked on configuration, credentials, authorization, budget, publication tier, or ambiguity, request only the structured `required_user_action`. Resume with the matching CLI option after the user supplies it. Never probe by submitting paid work or uploading an image.
+- When `resume_with_revision` is allowed, inspect the immutable Intent Contract, current CaseSpec, attempt manifest, and cited artifacts. Propose the smallest source CaseSpec change and obtain user approval before materializing it. Keep every change inside `allowed_adjustments`; never weaken frozen assertions, backend constraints, asset policy, or publication tier. Supply both `--revised-case-spec` and `--revision-reason` to `resume`.
+- Resolve an Intent ambiguity only with an explicit user decision and an immutable `--intent-amendment` matching the reported ambiguity identity.
+- For capability missing, artifact corruption, execution provenance failure, or a Harness bug, stop the production job and present a reproducible development issue with artifact references. Do not edit Harness source to make that job pass.
+- Call `cancel` only after the user explicitly cancels the job. Treat Esc/SIGINT as a resumable pause, not cancellation; do not cancel an already-submitted paid remote task merely because local polling stopped.
+
+Use `resume --help` and the inspected `allowed_next_actions` to select supported resume flags. Never invent a Controller command or edit a manifest directly.
+
+## Preserve the in-flight request
+
+Do not apply ordinary new requirements to a running job. Defer them until the current task finishes. Accept input for the current job only when it answers a structured blocker or when the user has interrupted the job and is choosing its recovery action.
+
+Never edit CaseSpec compiler outputs, receipts, checkpoints, stage results, Catalog rows, or run evidence by hand. Never invoke standalone case, backend, batch, review, Provider, importer, solver, or renderer entry points for a production Agent job. CaseSpec V2 and the Runtime Compiler remain the only runtime source and compilation path.
+
+## Report status accurately
+
+After every stop, report the `job_id`, current state and stage, structured blocker if any, budget/usage relevant to the next action, and durable artifact paths.
+
+Treat `awaiting_semantic_review` as technical gates passed but not completion. M3 does not implement the isolated read-only Semantic Reviewer; do not run an ad hoc self-review, invent `semantic_review.json`, call a nonexistent review command, or report `completed`. A formal job remains pending until M4 supplies that gate.
