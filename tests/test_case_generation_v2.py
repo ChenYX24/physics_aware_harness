@@ -6,11 +6,13 @@ import unittest
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping
+from unittest.mock import patch
 
 from harness.core.case_spec_v2 import CaseSpecV2ValidationError, case_spec_v2_from_dict
 from harness.planning.case_generation import (
     CaseGenerationError,
     LLMJSONResponse,
+    OpenAICompatibleJSONClient,
     _apply_request_identity,
     build_case_request,
     generate_case_spec_v2,
@@ -119,6 +121,23 @@ def source_constraint_expansion() -> dict[str, Any]:
 
 
 class CaseGenerationV2Tests(unittest.TestCase):
+    def test_malformed_http_response_retains_external_request_identity(self) -> None:
+        request = build_case_request(case_id="malformed_response", text="Make one ball hit another.")
+        client = OpenAICompatibleJSONClient(base_url="https://llm.example/v1", model="test-model")
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch("urllib.request.urlopen") as urlopen:
+                urlopen.return_value.__enter__.return_value.read.return_value = b"{not-json"
+                with self.assertRaises(json.JSONDecodeError):
+                    generate_case_spec_v2(request, client=client, artifact_dir=temporary)
+
+            stage_result = json.loads(
+                (Path(temporary) / "stage_results" / "generation.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(stage_result["invocation_count"], 1)
+        self.assertEqual(len(stage_result["request_identities"]), 1)
+        self.assertEqual(len(stage_result["request_identities"][0]), 64)
+
     def test_partial_generation_failure_retains_all_external_request_identities(self) -> None:
         request = build_case_request(case_id="partial_failure", text="Make one ball hit another.")
         with tempfile.TemporaryDirectory() as temporary:

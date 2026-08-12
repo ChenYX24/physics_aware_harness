@@ -109,6 +109,22 @@ class StageResultContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             StageResult.from_dict(result)
 
+    def test_v1_reader_migrates_results_without_failure_codes(self) -> None:
+        completed = build_stage_result(stage="compile", status="completed")
+        completed.pop("failure_codes")
+        failed = failure_stage_result(
+            stage="provider",
+            failure_code="provider_network_error",
+            message="connection reset",
+        )
+        failed.pop("failure_codes")
+
+        self.assertEqual(StageResult.from_dict(completed).to_dict()["failure_codes"], [])
+        self.assertEqual(
+            StageResult.from_dict(failed).to_dict()["failure_codes"],
+            ["provider_network_error"],
+        )
+
     def test_atomic_writer_uses_stage_results_directory(self) -> None:
         result = build_stage_result(stage="compile", status="completed")
         with tempfile.TemporaryDirectory() as temporary:
@@ -116,6 +132,20 @@ class StageResultContractTests(unittest.TestCase):
 
             self.assertEqual(path, Path(temporary) / "stage_results" / "compile.json")
             self.assertEqual(read_json(path), result)
+
+    def test_writer_redacts_secrets_from_direct_envelopes(self) -> None:
+        result = failure_stage_result(
+            stage="provider",
+            failure_code="provider_execution_failed",
+            message="safe placeholder",
+        )
+        result["message"] = '{"Authorization":"Bearer writer-secret"}'
+        with tempfile.TemporaryDirectory() as temporary:
+            path = write_stage_result(temporary, result)
+            landed = read_json(path)
+
+        self.assertNotIn("writer-secret", str(landed))
+        self.assertIn("[REDACTED]", landed["message"])
 
     def test_ue_preflight_writer_preserves_source_report_and_adds_sidecar(self) -> None:
         report = {

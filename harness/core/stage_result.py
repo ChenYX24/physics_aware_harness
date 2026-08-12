@@ -129,6 +129,8 @@ class StageResult:
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> StageResult:
         data = dict(raw)
+        if data.get("schema_version") == STAGE_RESULT_SCHEMA_VERSION and "failure_codes" not in data:
+            data["failure_codes"] = [] if data.get("status") == "completed" else [data.get("failure_code")]
         missing = sorted(_REQUIRED_FIELDS - set(data))
         if missing:
             raise ValueError(f"stage result is missing required fields: {missing}")
@@ -625,7 +627,8 @@ def artifact_ref(name: str, path: str | Path, schema_version: Any = None) -> dic
 
 
 def write_stage_result(root: str | Path, result: Mapping[str, Any]) -> Path:
-    validated = StageResult.from_dict(result).to_dict()
+    sanitized = _redact_value(result)
+    validated = StageResult.from_dict(sanitized).to_dict()
     destination = Path(root) / "stage_results" / f"{validated['stage']}.json"
     write_json(destination, validated)
     return destination
@@ -639,6 +642,18 @@ def redact_text(value: str | None) -> str:
         else:
             text = pattern.sub(lambda match: f"{match.group(1)}[REDACTED]", text)
     return text[:4000]
+
+
+def _redact_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, Mapping):
+        return {key: _redact_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_value(item) for item in value]
+    return value
 
 
 def _classification(status: str, failure_class: str, retryable: bool, actions: list[str]) -> dict[str, Any]:

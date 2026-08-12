@@ -221,10 +221,14 @@ class OpenAICompatibleJSONClient:
                 retryable=True,
                 request_identity=request_identity,
             ) from exc
-        decoded = json.loads(raw.decode("utf-8"))
-        if not isinstance(decoded, dict):
-            raise CaseGenerationError("llm_response_invalid", f"LLM {purpose} response must be a JSON object")
-        payload = _completion_payload(decoded)
+        try:
+            decoded = json.loads(raw.decode("utf-8"))
+            if not isinstance(decoded, dict):
+                raise CaseGenerationError("llm_response_invalid", f"LLM {purpose} response must be a JSON object")
+            payload = _completion_payload(decoded)
+        except BaseException as exc:
+            setattr(exc, "request_identity", request_identity)
+            raise
         receipt = {
             "schema_version": "harness_llm_call_receipt_v1",
             "purpose": purpose,
