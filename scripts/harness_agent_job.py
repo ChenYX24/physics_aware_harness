@@ -48,6 +48,7 @@ def parse_args() -> argparse.Namespace:
     resume = commands.add_parser("resume")
     resume.add_argument("job_id")
     resume.add_argument("--budget-extension-seconds", type=int, default=0)
+    resume.add_argument("--max-paid-submissions", type=int)
     resume.add_argument("--allow-meshy-upload", action="store_true")
     resume.add_argument("--allow-external-provider", action="store_true")
     resume.add_argument("--allow-paid-provider", action="store_true")
@@ -111,6 +112,7 @@ def main() -> int:
         result = controller.resume(
             args.job_id,
             budget_extension_seconds=args.budget_extension_seconds,
+            max_paid_submissions=args.max_paid_submissions,
             authorizations=authorizations,
             intent_amendment=read_json(args.intent_amendment) if args.intent_amendment else None,
             revised_case_spec=read_json(args.revised_case_spec) if args.revised_case_spec else None,

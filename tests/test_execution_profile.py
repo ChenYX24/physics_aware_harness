@@ -66,6 +66,8 @@ class ExecutionProfileTests(unittest.TestCase):
             self.assertEqual(verified_run_status(run_dir), "fail")
             write_json(run_dir / "harness_verifier.json", {"status": "pass"})
             self.assertEqual(verified_run_status(run_dir), "pass")
+            (run_dir / "render_sync_report.json").unlink()
+            self.assertEqual(verified_run_status(run_dir), "fail")
 
     def test_hybrid_genesis_ue_replay_does_not_claim_another_solver_pass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

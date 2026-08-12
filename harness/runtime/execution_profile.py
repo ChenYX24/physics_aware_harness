@@ -158,9 +158,7 @@ def verified_run_status(run_dir: str | Path) -> str:
     run_dir = Path(run_dir)
     verifier = optional_json(run_dir / "harness_verifier.json")
     render_sync = optional_json(run_dir / "render_sync_report.json")
-    if verifier.get("status") != "pass":
-        return "fail"
-    if render_sync and render_sync.get("status") != "pass":
+    if verifier.get("status") != "pass" or render_sync.get("status") != "pass":
         return "fail"
     return "pass"
 

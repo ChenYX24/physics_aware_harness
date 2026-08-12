@@ -8,9 +8,11 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from harness.agent.job_controller import AgentJobController, ControllerHooks
 from harness.agent.job_schema import DEFAULT_BUDGET, JobManifest
+from harness.assets.providers.input_manifest import build_provider_input_manifest
 from harness.assets.sqlite_catalog import initialize_catalog
 from harness.core.artifact_schema import read_json, write_json
 from harness.core.case_spec_v2 import case_spec_v2_from_dict, compile_case_spec_v2_runtime
@@ -26,6 +28,7 @@ class SuccessfulHarness:
         self.fail_verifier = fail_verifier
         self.compile_calls: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
         self.execute_calls: list[str] = []
+        self.provider_manifests: list[dict | None] = []
         self.generation_calls = 0
 
     def generate(self, request: dict, *, artifact_dir: Path, job_id: str, attempt_id: str):
@@ -49,6 +52,7 @@ class SuccessfulHarness:
         views = tuple(kwargs.get("requested_views") or ())
         passes = tuple(kwargs.get("render_passes") or ())
         self.compile_calls.append((views, passes))
+        self.provider_manifests.append(copy.deepcopy(kwargs.get("provider_input_manifest")))
         runtime_case = compile_case_spec_v2_runtime(case_spec)
         backend = self.selected_backend
         artifacts = {
@@ -317,6 +321,105 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertEqual(resumed["job"]["state"], "awaiting_semantic_review")
         self.assertEqual(resumed["job"]["current_attempt_id"], "attempt_001")
 
+    def test_generation_resume_after_intent_commit_reuses_immutable_contract(self) -> None:
+        controller, fake = self.controller()
+        controller.create(self.request, job_id="job_intent_commit_crash", publication_tier="local_preview")
+        original_create_attempt = controller.store.create_attempt
+        calls = 0
+
+        def interrupt_after_intent(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise KeyboardInterrupt()
+            return original_create_attempt(*args, **kwargs)
+
+        controller.store.create_attempt = interrupt_after_intent
+        paused = controller.advance_until_blocked("job_intent_commit_crash")
+        intent_path = Path(paused["paths"]["intent_contract"])
+        intent_bytes = intent_path.read_bytes()
+        self.assertEqual(paused["job"]["state"], "paused_interrupted")
+
+        resumed = controller.resume("job_intent_commit_crash")
+
+        self.assertEqual(resumed["job"]["state"], "awaiting_semantic_review")
+        self.assertEqual(intent_path.read_bytes(), intent_bytes)
+        self.assertEqual(resumed["job"]["blocker"], None)
+
+    def test_compile_exception_consumes_changed_provider_stage_result(self) -> None:
+        fake = SuccessfulHarness()
+
+        def provider_failure(case_spec, **kwargs):
+            del case_spec
+            write_stage_result(
+                kwargs["stage_result_dir"],
+                failure_stage_result(
+                    stage="provider",
+                    failure_code="provider_credentials_missing",
+                    message="credential is unavailable",
+                    source_status="blocked",
+                ),
+            )
+            raise RuntimeError("provider adapter stopped")
+
+        hooks = fake.hooks()
+        hooks.compile = provider_failure
+        controller = AgentJobController(self.workspace, hooks=hooks)
+        controller.create(
+            self.request,
+            job_id="job_provider_stage_truth",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+
+        inspection = controller.advance_until_blocked("job_provider_stage_truth")
+
+        self.assertEqual(inspection["job"]["state"], "blocked")
+        self.assertEqual(inspection["job"]["blocker"]["stage"], "provider")
+        self.assertEqual(inspection["job"]["blocker"]["code"], "provider_credentials_missing")
+        self.assertEqual(inspection["job"]["usage"]["stage_retries"], {})
+
+    def test_runtime_exception_consumes_leaf_preflight_stage_result(self) -> None:
+        fake = SuccessfulHarness()
+
+        def preflight_failure(case, output_root, *, compilation, **kwargs):
+            del kwargs
+            run_dir = Path(output_root) / f"{case.case_id}_{compilation.selected_backend}"
+            write_stage_result(
+                run_dir,
+                failure_stage_result(
+                    stage="preflight",
+                    failure_code="ue_project_missing",
+                    message="project is unavailable",
+                    source_status="blocked",
+                ),
+            )
+            write_stage_result(
+                run_dir,
+                failure_stage_result(
+                    stage="execute",
+                    failure_code="stage_execution_exception",
+                    message="preflight wrapper failed",
+                ),
+            )
+            raise RuntimeError("execution stopped")
+
+        hooks = fake.hooks()
+        hooks.execute = preflight_failure
+        controller = AgentJobController(self.workspace, hooks=hooks)
+        controller.create(
+            self.request,
+            job_id="job_preflight_stage_truth",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+
+        inspection = controller.advance_until_blocked("job_preflight_stage_truth")
+
+        self.assertEqual(inspection["job"]["state"], "blocked")
+        self.assertEqual(inspection["job"]["blocker"]["stage"], "preflight")
+        self.assertEqual(inspection["job"]["blocker"]["code"], "ue_project_missing")
+
     def test_transient_stage_retries_once_without_new_attempt(self) -> None:
         fake = SuccessfulHarness()
         original = fake.generate
@@ -350,6 +453,15 @@ class AgentJobControllerTests(unittest.TestCase):
             nonlocal calls
             calls += 1
             if calls == 1:
+                write_stage_result(
+                    run_dir,
+                    failure_stage_result(
+                        stage="verifier",
+                        failure_code="interrupted",
+                        message="verifier interrupted",
+                        source_status="interrupted",
+                    ),
+                )
                 raise KeyboardInterrupt()
             return original_verify(run_dir)
 
@@ -365,6 +477,7 @@ class AgentJobControllerTests(unittest.TestCase):
 
         paused = controller.advance_until_blocked("job_verifier_resume")
         self.assertEqual(paused["job"]["state"], "paused_interrupted")
+        self.assertEqual(paused["job"]["blocker"]["stage"], "verifier")
         self.assertEqual(fake.execute_calls, ["smoke"])
 
         restarted = AgentJobController(self.workspace, hooks=hooks)
@@ -497,7 +610,7 @@ class AgentJobControllerTests(unittest.TestCase):
         second_root = Path(resumed["paths"]["job_root"]) / "attempts" / "attempt_002"
         self.assertTrue(read_json(second_root / "case_spec_diff.json")["changes"])
 
-    def test_observation_only_revision_records_targeted_smoke(self) -> None:
+    def test_observation_only_revision_records_executed_smoke_without_replay_evidence(self) -> None:
         fake = SuccessfulHarness(fail_verifier=True)
         controller, _ = self.controller(fake)
         controller.create(
@@ -522,7 +635,7 @@ class AgentJobControllerTests(unittest.TestCase):
         gate = read_json(
             Path(inspection["paths"]["job_root"]) / "attempts" / "attempt_002" / "smoke_gate.json"
         )
-        self.assertEqual(gate["mode"], "targeted")
+        self.assertEqual(gate["mode"], "executed")
 
     def test_matching_completed_smoke_gate_is_reused_by_fingerprint(self) -> None:
         controller, fake = self.controller()
@@ -553,6 +666,36 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertEqual(gate["mode"], "reused")
         self.assertEqual(fake.execute_calls, ["smoke", "candidate"])
 
+    def test_incomplete_smoke_evidence_is_not_reused(self) -> None:
+        controller, fake = self.controller()
+        controller.create(
+            self.request,
+            job_id="job_incomplete_smoke",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        inspection = controller.advance_until_blocked("job_incomplete_smoke")
+        root = Path(inspection["paths"]["job_root"])
+        gate_path = root / "attempts" / "attempt_001" / "smoke_gate.json"
+        smoke_run = Path(read_json(gate_path)["run_dir"])
+        (smoke_run / "render_sync_report.json").unlink()
+        manifest = inspection["job"]
+        manifest.update(
+            {
+                "state": "paused_interrupted",
+                "current_stage": "smoke",
+                "blocker": {"code": "interrupted", "message": "resume smoke", "stage": "smoke"},
+                "allowed_next_actions": ["resume", "cancel"],
+            }
+        )
+        controller.store.write_manifest(manifest)
+
+        resumed = controller.resume("job_incomplete_smoke")
+
+        self.assertEqual(resumed["job"]["state"], "awaiting_semantic_review")
+        self.assertEqual(read_json(gate_path)["mode"], "executed")
+        self.assertTrue((smoke_run / "render_sync_report.json").is_file())
+
     def test_revision_cannot_remove_frozen_assertion(self) -> None:
         controller, _ = self.controller(SuccessfulHarness(fail_verifier=True))
         controller.create(
@@ -567,6 +710,114 @@ class AgentJobControllerTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "frozen verification assertions"):
             controller.resume("job_frozen_assertion", revised_case_spec=weakened, revision_reason="weaken")
+
+    def test_revision_cannot_change_frozen_asset_policy_or_unlisted_path(self) -> None:
+        controller, _ = self.controller(SuccessfulHarness(fail_verifier=True))
+        controller.create(
+            self.request,
+            job_id="job_frozen_policy",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        controller.advance_until_blocked("job_frozen_policy")
+        downgraded = case_spec_v2_fixture()
+        downgraded["asset_policy"]["required_license_tier"] = "reference"
+        with self.assertRaisesRegex(ValueError, "frozen asset policy"):
+            controller.resume("job_frozen_policy", revised_case_spec=downgraded, revision_reason="change tier")
+
+        unlisted = case_spec_v2_fixture()
+        unlisted["objects"][0]["physics"]["mass_kg"] = 0.2
+        with self.assertRaisesRegex(ValueError, "allowed_adjustments"):
+            controller.resume("job_frozen_policy", revised_case_spec=unlisted, revision_reason="change mass")
+
+    def test_ambiguity_amendment_requires_exact_identity_and_decision(self) -> None:
+        fake = SuccessfulHarness()
+
+        def ambiguous(request: dict, *, artifact_dir: Path, job_id: str, attempt_id: str):
+            generated = fake.generate(request, artifact_dir=artifact_dir, job_id=job_id, attempt_id=attempt_id)
+            generated.expansion["ambiguities"] = [{"question": "which object should move?"}]
+            write_json(artifact_dir / "expansion.json", generated.expansion)
+            return generated
+
+        hooks = fake.hooks()
+        hooks.generate = ambiguous
+        controller = AgentJobController(self.workspace, hooks=hooks)
+        controller.create(self.request, job_id="job_ambiguity_identity", publication_tier="local_preview")
+        blocked = controller.advance_until_blocked("job_ambiguity_identity")
+        intent = read_json(blocked["paths"]["intent_contract"])
+        ambiguity_id = intent["ambiguities"][0]["ambiguity_id"]
+
+        with self.assertRaisesRegex(ValueError, "ambiguity_id"):
+            controller.resume("job_ambiguity_identity", intent_amendment={"ambiguity_resolutions": [{}]})
+        with self.assertRaisesRegex(ValueError, "recorded ambiguities"):
+            controller.resume(
+                "job_ambiguity_identity",
+                intent_amendment={"ambiguity_resolutions": [{"ambiguity_id": "wrong", "decision": "cue_ball"}]},
+            )
+        resumed = controller.resume(
+            "job_ambiguity_identity",
+            intent_amendment={"ambiguity_resolutions": [{"ambiguity_id": ambiguity_id, "decision": "cue_ball"}]},
+        )
+        self.assertEqual(resumed["job"]["state"], "awaiting_semantic_review")
+
+    def test_authorization_resume_writes_amendment_and_effective_provider_manifest(self) -> None:
+        image = self.workspace / "authorization.png"
+        image.write_bytes(b"image")
+        request = build_case_request(
+            case_id="authorization_case",
+            text="generate a ball from this image",
+            image_paths=[str(image)],
+            allow_image_upload=False,
+            requested_backend="fallback",
+        )
+        input_id = request["inputs"][0]["input_id"]
+        generated = case_spec_v2_fixture()
+        generated["objects"][0]["asset"] = {
+            "description": "generated ball",
+            "resource_kind": "mesh_3d",
+            "acquisition": {
+                "route": "model_generation",
+                "requirement": "required",
+                "origin": "user_explicit",
+                "provider_hint": "meshy",
+                "reference_inputs": [{"input_id": input_id, "usage": ["generation_condition"]}],
+                "fallback_order": [],
+            },
+        }
+        controller, fake = self.controller()
+        controller.create(
+            request,
+            provider_input_manifest=build_provider_input_manifest(
+                request["inputs"],
+                workspace=self.workspace,
+                meshy_upload_authorized=False,
+            ),
+            job_id="job_authorization_amendment",
+            publication_tier="local_preview",
+            seed_case_spec=generated,
+        )
+        blocked = controller.advance_until_blocked("job_authorization_amendment")
+        self.assertEqual(blocked["job"]["blocker"]["code"], "external_provider_authorization_missing")
+
+        with patch.dict("os.environ", {"SIM_HARNESS_MESHY_API_KEY": "test-key"}, clear=False):
+            resumed = controller.resume(
+                "job_authorization_amendment",
+                authorizations={
+                    "meshy_upload": True,
+                    "external_provider": True,
+                    "paid_provider_submission": True,
+                },
+                max_paid_submissions=1,
+            )
+
+        root = Path(resumed["paths"]["job_root"])
+        amendment = read_json(root / "request" / "authorization_amendment_001.json")
+        effective = read_json(root / "request" / "provider_input_manifest_effective_001.json")
+        self.assertEqual(amendment["budget_changes"]["max_paid_submissions"]["after"], 1)
+        self.assertEqual(effective["schema_version"], "harness_provider_input_manifest_v1")
+        self.assertTrue(effective["inputs"][0]["authorizations"]["meshy_upload"])
+        self.assertEqual(resumed["job"]["budget"]["max_paid_submissions"], 1)
+        self.assertEqual(fake.provider_manifests[-1], effective)
 
     def test_cancel_is_distinct_from_interruption(self) -> None:
         controller, _ = self.controller()
@@ -619,6 +870,17 @@ class JobManifestSchemaTests(unittest.TestCase):
 
 
 class AgentJobCliTests(unittest.TestCase):
+    def test_resume_cli_exposes_paid_submission_limit(self) -> None:
+        script = Path(__file__).resolve().parents[1] / "scripts" / "harness_agent_job.py"
+        completed = subprocess.run(
+            [sys.executable, str(script), "resume", "--help"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("--max-paid-submissions", completed.stdout)
+
     def test_create_and_inspect_emit_structured_json(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

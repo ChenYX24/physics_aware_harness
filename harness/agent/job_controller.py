@@ -31,7 +31,7 @@ from harness.agent.job_schema import (
 from harness.agent.job_store import JobStore, JobStoreError
 from harness.assets.asset_registry import AssetRegistry
 from harness.assets.providers.orchestrator import AssetProviderOrchestrator
-from harness.assets.providers.input_manifest import PROVIDER_INPUT_MANIFEST_SCHEMA
+from harness.assets.providers.input_manifest import PROVIDER_INPUT_MANIFEST_SCHEMA, build_provider_input_manifest
 from harness.assets.providers.remote import MESHY_API_KEY_ENV
 from harness.core.artifact_schema import read_json, write_json
 from harness.core.case_spec_v2 import (
@@ -204,10 +204,11 @@ class AgentJobController:
                     break
                 stage = str(manifest["current_stage"])
                 started = self.hooks.monotonic()
+                stage_result_snapshot = self._stage_result_snapshot(manifest)
                 self._stage_event(manifest, "stage_started", stage)
                 try:
                     manifest = self._advance_one(manifest)
-                except (KeyboardInterrupt, SystemExit):
+                except (KeyboardInterrupt, SystemExit) as exc:
                     if stage == "compile":
                         manifest = self._reconcile_provider_usage(manifest)
                     elapsed = max(0.0, self.hooks.monotonic() - started)
@@ -218,15 +219,22 @@ class AgentJobController:
                         "interrupted",
                         self._stage_input_digest(manifest, stage),
                     )
-                    result = failure_stage_result(
-                        stage=stage,
-                        failure_code="interrupted",
-                        message=f"{stage} was interrupted at a safe controller boundary",
-                        source_status="interrupted",
-                        job_id=job_id,
-                        attempt_id=manifest.get("current_attempt_id"),
-                        checkpoint_ref=str(self.store.job_dir(job_id) / "checkpoints" / f"{stage}.json"),
+                    result = self._exception_stage_result(
+                        manifest,
+                        stage,
+                        exc,
+                        stage_result_snapshot=stage_result_snapshot,
                     )
+                    if result["failure_class"] != "interrupted":
+                        result = failure_stage_result(
+                            stage=result["stage"],
+                            failure_code="interrupted",
+                            message=f"{result['stage']} was interrupted at a safe controller boundary",
+                            source_status="interrupted",
+                            job_id=job_id,
+                            attempt_id=manifest.get("current_attempt_id"),
+                            checkpoint_ref=str(self.store.job_dir(job_id) / "checkpoints" / f"{stage}.json"),
+                        )
                     self._write_controller_stage_result(manifest, result)
                     manifest = self._apply_stage_result(manifest, result)
                     self._stage_event(manifest, "stage_blocked", stage, result=result)
@@ -236,7 +244,12 @@ class AgentJobController:
                         manifest = self._reconcile_provider_usage(manifest)
                     elapsed = max(0.0, self.hooks.monotonic() - started)
                     manifest = self._add_active_elapsed(manifest, elapsed)
-                    result = self._exception_stage_result(manifest, stage, exc)
+                    result = self._exception_stage_result(
+                        manifest,
+                        stage,
+                        exc,
+                        stage_result_snapshot=stage_result_snapshot,
+                    )
                     self._write_controller_stage_result(manifest, result)
                     manifest = self._apply_stage_result(manifest, result)
                     self._stage_event(manifest, "stage_blocked", stage, result=result)
@@ -256,6 +269,7 @@ class AgentJobController:
         job_id: str,
         *,
         budget_extension_seconds: int = 0,
+        max_paid_submissions: int | None = None,
         authorizations: Mapping[str, Any] | None = None,
         intent_amendment: Mapping[str, Any] | None = None,
         revised_case_spec: Mapping[str, Any] | None = None,
@@ -267,12 +281,24 @@ class AgentJobController:
                 raise JobStoreError(f"job cannot be resumed from state {manifest['state']}")
             if manifest["state"] == "failed" and (manifest.get("blocker") or {}).get("code") != "budget_exhausted":
                 raise JobStoreError("only budget-exhausted failed jobs may be resumed")
+            prior_authorizations = copy.deepcopy(manifest["authorizations"])
+            prior_budget = copy.deepcopy(manifest["budget"])
             if budget_extension_seconds:
                 if not isinstance(budget_extension_seconds, int) or budget_extension_seconds < 1:
                     raise ValueError("budget_extension_seconds must be a positive integer")
                 budget = dict(manifest["budget"])
                 budget["hard_deadline_seconds"] += budget_extension_seconds
                 budget["soft_deadline_seconds"] += budget_extension_seconds
+                manifest["budget"] = normalized_budget(budget)
+            if max_paid_submissions is not None:
+                if (
+                    not isinstance(max_paid_submissions, int)
+                    or isinstance(max_paid_submissions, bool)
+                    or max_paid_submissions < manifest["budget"]["max_paid_submissions"]
+                ):
+                    raise ValueError("max_paid_submissions may only increase the current non-negative limit")
+                budget = dict(manifest["budget"])
+                budget["max_paid_submissions"] = max_paid_submissions
                 manifest["budget"] = normalized_budget(budget)
             if authorizations:
                 current = dict(manifest["authorizations"])
@@ -283,6 +309,15 @@ class AgentJobController:
                 if current["paid_provider_submission"] and manifest["budget"]["max_paid_submissions"] == 0:
                     raise ValueError("paid provider authorization requires a positive paid submission budget")
                 manifest["authorizations"] = current
+            if (
+                manifest["authorizations"] != prior_authorizations
+                or manifest["budget"]["max_paid_submissions"] != prior_budget["max_paid_submissions"]
+            ):
+                manifest = self._record_authorization_amendment(
+                    manifest,
+                    prior_authorizations=prior_authorizations,
+                    prior_budget=prior_budget,
+                )
             if (manifest.get("blocker") or {}).get("code") == "intent_ambiguity_requires_decision" and intent_amendment is None:
                 raise JobStoreError("resolving an Intent Contract ambiguity requires an intent_amendment")
             if intent_amendment is not None:
@@ -417,8 +452,17 @@ class AgentJobController:
             case_spec = generated.case_spec
             expansion = generated.expansion
             stage_result = generated.stage_result or read_json(generation_dir / "stage_results" / "generation.json")
-        intent = self._project_intent_contract(manifest, request, expansion, case_spec.data)
-        intent_path = self.store.write_intent_contract(intent)
+        projected_intent = self._project_intent_contract(manifest, request, expansion, case_spec.data)
+        intent_path = root / "request" / "intent_contract.json"
+        if intent_path.is_file():
+            intent = IntentContract.from_dict(read_json(intent_path)).to_dict()
+            existing_identity = self._intent_recovery_identity(intent)
+            projected_identity = self._intent_recovery_identity(projected_intent)
+            if existing_identity != projected_identity:
+                raise JobStoreError("immutable Intent Contract differs from the recovered generation projection")
+        else:
+            intent = projected_intent
+            intent_path = self.store.write_intent_contract(intent)
         intent_digest = stable_digest(intent)
         attempt_id = "attempt_001"
         now = utc_now()
@@ -494,7 +538,7 @@ class AgentJobController:
             return self._apply_stage_result(manifest, result)
         routes = self._provider_routes(case_spec)
         meshy_references = self._meshy_image_references(case_spec)
-        provider_manifest = self.store.read_optional(manifest["job_id"], "request/provider_input_manifest.json")
+        provider_manifest = self._effective_provider_input_manifest(manifest["job_id"])
         auth = manifest["authorizations"]
         blocker: tuple[str, str] | None = None
         if routes.intersection({"external_site", "model_generation"}) and not auth["external_provider"]:
@@ -560,7 +604,7 @@ class AgentJobController:
         case_spec = self._load_current_case_spec(manifest)
         attempt_dir = self.store.attempt_dir(manifest["job_id"], manifest["current_attempt_id"])
         request = read_json(self.store.job_dir(manifest["job_id"]) / "request" / "user_request.json")
-        provider_manifest = self.store.read_optional(manifest["job_id"], "request/provider_input_manifest.json")
+        provider_manifest = self._effective_provider_input_manifest(manifest["job_id"])
         requested = str((request.get("execution_constraints") or {}).get("requested_backend") or "") or None
         compilation = self.hooks.compile(
             case_spec,
@@ -568,7 +612,7 @@ class AgentJobController:
             requested_views=list(execution_profile("smoke").views),
             render_passes=list(execution_profile("smoke").render_passes),
             registry=self._registry(),
-            provider_orchestrator=AssetProviderOrchestrator(workspace=self.store.workspace),
+            provider_orchestrator=self._provider_orchestrator(manifest),
             provider_input_manifest=provider_manifest,
             stage_result_dir=attempt_dir,
             job_id=manifest["job_id"],
@@ -653,46 +697,58 @@ class AgentJobController:
         if execution_reusable:
             run_dir = expected_run
         else:
-            with self._profile_environment(profile.environment() if ue_required else {}):
-                run_dir = Path(
-                    self.hooks.execute(
-                        compilation.runtime_case,
-                        run_slot,
-                        compilation=compilation,
-                        requested_views=list(profile.views),
-                        render_passes=list(profile.render_passes),
-                        camera_strategy="bounds_auto_v1",
-                        profile=profile.name,
-                        width=profile.width,
-                        height=profile.height,
-                        complete_sensor_contract=profile.complete_sensor_contract,
+            try:
+                with self._profile_environment(profile.environment() if ue_required else {}):
+                    run_dir = Path(
+                        self.hooks.execute(
+                            compilation.runtime_case,
+                            run_slot,
+                            compilation=compilation,
+                            requested_views=list(profile.views),
+                            render_passes=list(profile.render_passes),
+                            camera_strategy="bounds_auto_v1",
+                            profile=profile.name,
+                            width=profile.width,
+                            height=profile.height,
+                            complete_sensor_contract=profile.complete_sensor_contract,
+                        )
                     )
-                )
+            except BaseException as exc:
+                self._attach_exception_stage_result(exc, expected_run, "execute")
+                raise
         verifier_path = run_dir / "harness_verifier.json"
         verifier_stage_path = run_dir / "stage_results" / "verifier.json"
-        verifier = (
-            read_json(verifier_path)
-            if verifier_path.is_file()
-            and verifier_stage_path.is_file()
-            and read_json(verifier_stage_path).get("status") in {"completed", "failed", "blocked"}
-            else dict(self.hooks.verify(run_dir))
-        )
+        try:
+            verifier = (
+                read_json(verifier_path)
+                if verifier_path.is_file()
+                and verifier_stage_path.is_file()
+                and read_json(verifier_stage_path).get("status") in {"completed", "failed", "blocked"}
+                else dict(self.hooks.verify(run_dir))
+            )
+        except BaseException as exc:
+            self._attach_exception_stage_result(exc, run_dir, "verifier")
+            raise
         render_path = run_dir / "render_sync_report.json"
         render_stage_path = run_dir / "stage_results" / "render_sync.json"
-        render_sync = (
-            read_json(render_path)
-            if render_path.is_file()
-            and render_stage_path.is_file()
-            and read_json(render_stage_path).get("status") in {"completed", "failed", "blocked"}
-            else dict(
-                self.hooks.render_sync(
-                    run_dir,
-                    require_depth="depth" in profile.render_passes,
-                    require_segmentation="segmentation" in profile.render_passes,
-                    write=True,
+        try:
+            render_sync = (
+                read_json(render_path)
+                if render_path.is_file()
+                and render_stage_path.is_file()
+                and read_json(render_stage_path).get("status") in {"completed", "failed", "blocked"}
+                else dict(
+                    self.hooks.render_sync(
+                        run_dir,
+                        require_depth="depth" in profile.render_passes,
+                        require_segmentation="segmentation" in profile.render_passes,
+                        write=True,
+                    )
                 )
             )
-        )
+        except BaseException as exc:
+            self._attach_exception_stage_result(exc, run_dir, "render_sync")
+            raise
         write_execution_reports(
             run_dir,
             profile,
@@ -737,7 +793,11 @@ class AgentJobController:
         attempt_dir = self.store.attempt_dir(manifest["job_id"], manifest["current_attempt_id"])
         candidate = read_json(attempt_dir / "candidate_run.json")
         run_dir = Path(str(candidate["run_dir"]))
-        report = dict(self.hooks.quality(run_dir))
+        try:
+            report = dict(self.hooks.quality(run_dir))
+        except BaseException as exc:
+            self._attach_exception_stage_result(exc, run_dir, "quality_gate")
+            raise
         self._adopt_run_stage_results(run_dir, manifest["job_id"], manifest["current_attempt_id"])
         result = read_json(run_dir / "stage_results" / "quality_gate.json")
         if report.get("hard_gate_passed") is not True:
@@ -773,8 +833,8 @@ class AgentJobController:
             requested_views=list(execution_profile(profile_name).views),
             render_passes=list(execution_profile(profile_name).render_passes),
             registry=self._registry(),
-            provider_orchestrator=AssetProviderOrchestrator(workspace=self.store.workspace),
-            provider_input_manifest=self.store.read_optional(key[0], "request/provider_input_manifest.json"),
+            provider_orchestrator=self._provider_orchestrator(manifest),
+            provider_input_manifest=self._effective_provider_input_manifest(key[0]),
             stage_result_dir=attempt_dir,
             job_id=key[0],
             attempt_id=key[1],
@@ -799,7 +859,13 @@ class AgentJobController:
             {key: row.get(key) for key in ("input_id", "kind", "mime_type", "sha256", "byte_size")}
             for row in request.get("inputs") or []
         ]
-        ambiguities = [dict(row) for row in expansion.get("ambiguities") or [] if isinstance(row, Mapping)]
+        ambiguities = []
+        for index, raw in enumerate(expansion.get("ambiguities") or [], start=1):
+            if not isinstance(raw, Mapping):
+                continue
+            row = dict(raw)
+            row["ambiguity_id"] = f"ambiguity_{index:03d}_{stable_digest(row)[:12]}"
+            ambiguities.append(row)
         assumptions = [dict(row) for row in expansion.get("assumptions") or [] if isinstance(row, Mapping)]
         execution = {
             "backend_constraints": copy.deepcopy(case_spec.get("backend_constraints") or {}),
@@ -823,7 +889,10 @@ class AgentJobController:
             "execution": execution,
             "authorizations": copy.deepcopy(manifest["authorizations"]),
             "verification": {"assertions": copy.deepcopy(assertions or []), "frozen": True},
-            "allowed_adjustments": {"paths": [], "ranges": {}},
+            "allowed_adjustments": {
+                "paths": ["$.scene.duration_s", "$.observation_requirements", "$.scene.camera"],
+                "ranges": {},
+            },
             "frozen_digests": {
                 "original_request": stable_digest({"text": request.get("text") or "", "inputs": input_identities}),
                 "verification_assertions": stable_digest(assertions or []),
@@ -853,8 +922,24 @@ class AgentJobController:
             raise JobStoreError("revision cannot weaken or replace frozen verification assertions")
         if stable_digest(case_spec.data.get("backend_constraints") or {}) != frozen["backend_constraints"]:
             raise JobStoreError("revision cannot change frozen backend constraints in M2")
+        if stable_digest(case_spec.data.get("asset_policy") or {}) != frozen["asset_policy"]:
+            raise JobStoreError("revision cannot change the frozen asset policy")
         parent_id = manifest["current_attempt_id"]
         parent_spec = read_json(self.store.attempt_dir(manifest["job_id"], parent_id) / "case_spec.json")
+        changes = self._json_diff(parent_spec, case_spec.data)
+        allowed = intent["allowed_adjustments"]
+        allowed_paths = [str(path) for path in allowed.get("paths") or [] if str(path).startswith("$.")]
+        disallowed = [
+            str(change.get("path") or "")
+            for change in changes
+            if not any(
+                str(change.get("path") or "") == path
+                or str(change.get("path") or "").startswith(f"{path}.")
+                for path in allowed_paths
+            )
+        ]
+        if disallowed:
+            raise JobStoreError(f"revision changes paths outside Intent Contract allowed_adjustments: {disallowed}")
         revision = int(manifest["usage"]["case_spec_revisions"]) + 1
         attempt_id = validate_attempt_id(f"attempt_{revision:03d}")
         now = utc_now()
@@ -877,7 +962,7 @@ class AgentJobController:
             }
         ).to_dict()
         root = self.store.create_attempt(attempt, case_spec.data)
-        write_json(root / "case_spec_diff.json", {"schema_version": "harness_case_spec_diff_v1", "changes": self._json_diff(parent_spec, case_spec.data)})
+        write_json(root / "case_spec_diff.json", {"schema_version": "harness_case_spec_diff_v1", "changes": changes})
         write_json(root / "revision_reason.json", {"reason": reason, "trigger": "user_or_agent_approved_source_revision"})
         usage = copy.deepcopy(manifest["usage"])
         usage["case_spec_revisions"] = revision
@@ -901,8 +986,41 @@ class AgentJobController:
         base = IntentContract.from_dict(
             read_json(self.store.job_dir(manifest["job_id"]) / "request" / "intent_contract.json")
         ).to_dict()
-        if len(resolutions) < len(base["ambiguities"]):
-            raise ValueError("intent amendment must resolve every recorded ambiguity")
+        expected = {}
+        for index, ambiguity in enumerate(base["ambiguities"], start=1):
+            identity = str(ambiguity.get("ambiguity_id") or "").strip()
+            if not identity:
+                identity = f"ambiguity_{index:03d}_{stable_digest(ambiguity)[:12]}"
+            if identity in expected:
+                raise ValueError("Intent Contract ambiguity identities must be unique")
+            expected[identity] = ambiguity
+        canonical_resolutions = []
+        seen: set[str] = set()
+        for raw_resolution in resolutions:
+            resolution = dict(raw_resolution)
+            ambiguity_id = str(resolution.get("ambiguity_id") or "").strip()
+            if not ambiguity_id:
+                question = str(resolution.get("question") or "").strip()
+                matches = [
+                    identity
+                    for identity, ambiguity in expected.items()
+                    if question and str(ambiguity.get("question") or "").strip() == question
+                ]
+                if len(matches) == 1:
+                    ambiguity_id = matches[0]
+            if not ambiguity_id:
+                raise ValueError("every ambiguity resolution requires an ambiguity_id (or exact recorded question)")
+            decision = resolution.get("decision")
+            if not isinstance(decision, str) or not decision.strip():
+                raise ValueError("every ambiguity resolution requires a non-empty decision")
+            if ambiguity_id not in expected or ambiguity_id in seen:
+                raise ValueError("intent amendment must match the recorded ambiguities exactly once")
+            seen.add(ambiguity_id)
+            resolution["ambiguity_id"] = ambiguity_id
+            resolution["decision"] = decision.strip()
+            canonical_resolutions.append(resolution)
+        if seen != set(expected):
+            raise ValueError("intent amendment must resolve every recorded ambiguity exactly once")
         root = self.store.job_dir(manifest["job_id"]) / "request"
         prior = sorted(root.glob("intent_amendment_*.json"))
         payload = {
@@ -910,7 +1028,7 @@ class AgentJobController:
             "job_id": manifest["job_id"],
             "sequence": len(prior) + 1,
             "parent_intent_digest": manifest["intent_contract_digest"],
-            "ambiguity_resolutions": resolutions,
+            "ambiguity_resolutions": canonical_resolutions,
             "reason": str(amendment.get("reason") or "user decision"),
             "created_at": utc_now(),
         }
@@ -919,8 +1037,7 @@ class AgentJobController:
             f"intent_amendment_{payload['sequence']:03d}.json",
             payload,
         )
-        digests = [stable_digest(read_json(item)) for item in [*prior, path]]
-        effective_digest = stable_digest({"base": stable_digest(base), "amendments": digests})
+        effective_digest = self._effective_intent_digest(manifest["job_id"], base)
         if manifest.get("current_attempt_id"):
             attempt = self.store.load_attempt(manifest["job_id"], manifest["current_attempt_id"])
             attempt.update({"intent_contract_digest": effective_digest, "updated_at": utc_now()})
@@ -928,6 +1045,80 @@ class AgentJobController:
         return self._update_manifest(
             manifest,
             intent_contract_digest=effective_digest,
+        )
+
+    def _record_authorization_amendment(
+        self,
+        manifest: Mapping[str, Any],
+        *,
+        prior_authorizations: Mapping[str, Any],
+        prior_budget: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        root = self.store.job_dir(manifest["job_id"]) / "request"
+        prior = sorted(root.glob("authorization_amendment_*.json"))
+        sequence = len(prior) + 1
+        authorization_changes = {
+            key: {"before": prior_authorizations[key], "after": manifest["authorizations"][key]}
+            for key in manifest["authorizations"]
+            if prior_authorizations[key] != manifest["authorizations"][key]
+        }
+        budget_changes = {}
+        if prior_budget["max_paid_submissions"] != manifest["budget"]["max_paid_submissions"]:
+            budget_changes["max_paid_submissions"] = {
+                "before": prior_budget["max_paid_submissions"],
+                "after": manifest["budget"]["max_paid_submissions"],
+            }
+        request = read_json(root / "user_request.json")
+        effective_provider_manifest = build_provider_input_manifest(
+            list(request.get("inputs") or []),
+            workspace=self.store.workspace,
+            meshy_upload_authorized=manifest["authorizations"]["meshy_upload"],
+        )
+        provider_path = self.store.write_request_artifact(
+            manifest["job_id"],
+            f"provider_input_manifest_effective_{sequence:03d}.json",
+            effective_provider_manifest,
+        )
+        payload = {
+            "schema_version": "harness_authorization_amendment_v1",
+            "job_id": manifest["job_id"],
+            "sequence": sequence,
+            "parent_intent_digest": manifest["intent_contract_digest"],
+            "authorization_changes": authorization_changes,
+            "budget_changes": budget_changes,
+            "effective_provider_input_manifest": {
+                "path": str(provider_path),
+                "digest": stable_digest(effective_provider_manifest),
+            },
+            "created_at": utc_now(),
+        }
+        self.store.write_request_artifact(
+            manifest["job_id"],
+            f"authorization_amendment_{sequence:03d}.json",
+            payload,
+        )
+        base = IntentContract.from_dict(read_json(root / "intent_contract.json")).to_dict()
+        effective_digest = self._effective_intent_digest(manifest["job_id"], base)
+        if manifest.get("current_attempt_id"):
+            attempt = self.store.load_attempt(manifest["job_id"], manifest["current_attempt_id"])
+            attempt.update({"intent_contract_digest": effective_digest, "updated_at": utc_now()})
+            self.store.write_attempt(attempt)
+        return self._update_manifest(manifest, intent_contract_digest=effective_digest)
+
+    def _effective_intent_digest(self, job_id: str, base: Mapping[str, Any]) -> str:
+        root = self.store.job_dir(job_id) / "request"
+        amendments = sorted(
+            [*root.glob("intent_amendment_*.json"), *root.glob("authorization_amendment_*.json")],
+            key=lambda path: path.name,
+        )
+        return stable_digest(
+            {
+                "base": stable_digest(base),
+                "amendments": [
+                    {"name": path.name, "digest": stable_digest(read_json(path))}
+                    for path in amendments
+                ],
+            }
         )
 
     def _budget_gate(self, manifest: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -1011,24 +1202,88 @@ class AgentJobController:
             allowed_next_actions=["inspect_artifacts"],
         )
 
-    def _exception_stage_result(self, manifest: Mapping[str, Any], stage: str, exc: BaseException) -> dict[str, Any]:
+    def _exception_stage_result(
+        self,
+        manifest: Mapping[str, Any],
+        stage: str,
+        exc: BaseException,
+        *,
+        stage_result_snapshot: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
         persisted = getattr(exc, "stage_result", None)
-        if isinstance(persisted, Mapping):
+        if isinstance(persisted, Mapping) and persisted.get("status") != "completed":
             return self._with_identity(persisted, manifest["job_id"], manifest.get("current_attempt_id"))
         stage_dir = self._stage_artifact_root(manifest)
-        path = stage_dir / "stage_results" / f"{stage}.json"
-        if path.is_file():
-            return self._with_identity(read_json(path), manifest["job_id"], manifest.get("current_attempt_id"))
+        hint = str(getattr(exc, "_harness_stage", "") or "")
+        candidates: list[tuple[Path, dict[str, Any]]] = []
+        before = dict(stage_result_snapshot or {})
+        for path in sorted(stage_dir.rglob("stage_results/*.json")):
+            try:
+                raw = read_json(path)
+                parsed = StageResult.from_dict(raw).to_dict()
+            except (OSError, ValueError, TypeError):
+                continue
+            if parsed["status"] == "completed":
+                continue
+            changed = before.get(str(path)) != self._sha256_file(path)
+            if changed or (hint and parsed["stage"] == hint):
+                candidates.append((path, parsed))
+        if candidates:
+            order = {
+                "generation": 0,
+                "provider": 1,
+                "compile": 2,
+                "preflight": 3,
+                "execute": 4,
+                "verifier": 5,
+                "render_sync": 6,
+                "quality_gate": 7,
+            }
+            _, selected = max(
+                candidates,
+                key=lambda item: (
+                    item[1]["stage"] == hint,
+                    order.get(item[1]["stage"], -1),
+                    str(item[0]),
+                ),
+            )
+            return self._with_identity(selected, manifest["job_id"], manifest.get("current_attempt_id"))
         return failure_stage_result(
             stage=stage,
             failure_code=str(getattr(exc, "code", f"{stage}_unhandled_exception")),
             message=str(exc) or type(exc).__name__,
             retryable=getattr(exc, "retryable", None),
+            source_status="interrupted" if isinstance(exc, (KeyboardInterrupt, SystemExit)) else None,
             job_id=manifest["job_id"],
             attempt_id=manifest.get("current_attempt_id"),
             checkpoint_ref=getattr(exc, "checkpoint_ref", None),
             request_identities=list(getattr(exc, "request_identities", []) or []),
         )
+
+    def _stage_result_snapshot(self, manifest: Mapping[str, Any]) -> dict[str, str]:
+        snapshot: dict[str, str] = {}
+        for path in self._stage_artifact_root(manifest).rglob("stage_results/*.json"):
+            try:
+                snapshot[str(path)] = self._sha256_file(path)
+            except OSError:
+                continue
+        return snapshot
+
+    @staticmethod
+    def _attach_exception_stage_result(exc: BaseException, root: Path, stage: str) -> None:
+        candidates = ("preflight", stage) if stage == "execute" else (stage,)
+        for actual_stage in candidates:
+            path = root / "stage_results" / f"{actual_stage}.json"
+            if not path.is_file():
+                continue
+            try:
+                result = StageResult.from_dict(read_json(path)).to_dict()
+            except (OSError, ValueError, TypeError):
+                continue
+            if result["status"] != "completed":
+                setattr(exc, "stage_result", result)
+                setattr(exc, "_harness_stage", actual_stage)
+                return
 
     def _write_controller_stage_result(self, manifest: Mapping[str, Any], result: Mapping[str, Any]) -> Path:
         return write_stage_result(self._stage_artifact_root(manifest), result)
@@ -1113,6 +1368,23 @@ class AgentJobController:
     def _registry(self) -> AssetRegistry:
         return AssetRegistry(self.store.workspace / "catalog" / "assets" / "catalog.sqlite")
 
+    def _effective_provider_input_manifest(self, job_id: str) -> dict[str, Any] | None:
+        request_root = self.store.job_dir(job_id) / "request"
+        effective = sorted(request_root.glob("provider_input_manifest_effective_*.json"))
+        path = effective[-1] if effective else request_root / "provider_input_manifest.json"
+        if not path.is_file():
+            return None
+        return self._validate_provider_manifest(read_json(path))
+
+    def _provider_orchestrator(self, manifest: Mapping[str, Any]) -> AssetProviderOrchestrator:
+        return AssetProviderOrchestrator(
+            workspace=self.store.workspace,
+            max_paid_submissions=int(manifest["budget"]["max_paid_submissions"]),
+            paid_submission_ledger_path=(
+                self.store.job_dir(manifest["job_id"]) / "receipts" / "provider_usage.json"
+            ),
+        )
+
     def _reconcile_provider_usage(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
         attempt_id = manifest.get("current_attempt_id")
         if not attempt_id:
@@ -1167,7 +1439,15 @@ class AgentJobController:
     def _run_technical_pass(run_dir: Path) -> bool:
         if not run_dir.is_dir():
             return False
-        return verified_run_status(run_dir) == "pass"
+        required = ("execute", "verifier", "render_sync")
+        try:
+            stages = {
+                stage: StageResult.from_dict(read_json(run_dir / "stage_results" / f"{stage}.json")).to_dict()
+                for stage in required
+            }
+        except (OSError, ValueError, TypeError):
+            return False
+        return all(value["status"] == "completed" for value in stages.values()) and verified_run_status(run_dir) == "pass"
 
     @staticmethod
     def _with_identity(result: Mapping[str, Any], job_id: str, attempt_id: str | None) -> dict[str, Any]:
@@ -1249,6 +1529,19 @@ class AgentJobController:
                 else:
                     os.environ[key] = value
 
+    @staticmethod
+    def _intent_recovery_identity(contract: Mapping[str, Any]) -> dict[str, Any]:
+        identity = copy.deepcopy(dict(contract))
+        identity.pop("created_at", None)
+        # These controller-policy fields were tightened after the first M2
+        # release. They do not change the generated CaseSpec or frozen request
+        # identity, so an already committed valid Contract remains recoverable.
+        identity.pop("allowed_adjustments", None)
+        for ambiguity in identity.get("ambiguities") or []:
+            if isinstance(ambiguity, dict):
+                ambiguity.pop("ambiguity_id", None)
+        return identity
+
     @classmethod
     def _json_diff(cls, before: Any, after: Any, path: str = "$") -> list[dict[str, Any]]:
         if before == after:
@@ -1268,14 +1561,8 @@ class AgentJobController:
 
     @staticmethod
     def _smoke_mode(attempt_dir: Path) -> str:
-        diff_path = attempt_dir / "case_spec_diff.json"
-        if not diff_path.is_file():
-            return "executed"
-        changes = read_json(diff_path).get("changes") or []
-        if changes and all(
-            str(change.get("path") or "").startswith(("$.observation_requirements", "$.scene.camera"))
-            for change in changes
-            if isinstance(change, Mapping)
-        ):
-            return "targeted"
+        del attempt_dir
+        # The current executor runs the complete runtime plan. A future
+        # observation-only replay may return "targeted" only after it writes a
+        # parent-run/cache receipt proving that the solver was not rerun.
         return "executed"

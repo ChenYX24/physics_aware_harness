@@ -54,7 +54,7 @@ from harness.assets.providers.remote import (
     RemoteProviderAdapter,
     RemoteProviderError,
 )
-from harness.core.artifact_schema import write_json
+from harness.core.artifact_schema import read_json, write_json
 
 
 PROVIDER_ROUTES = {"external_site", "procedural_generation", "model_generation"}
@@ -89,10 +89,23 @@ class AssetProviderOrchestrator:
         importer: BackendImporterAdapter | None = None,
         redistribution_evidence: Mapping[str, Any] | None = None,
         remote_providers: Mapping[str, RemoteProviderAdapter] | None = None,
+        max_paid_submissions: int | None = None,
+        paid_submission_ledger_path: str | Path | None = None,
     ) -> None:
         self.workspace = Path(workspace or os.environ.get("SIM_HARNESS_WORKSPACE", DEFAULT_WORKSPACE)).resolve()
         self.importer = importer or UECommandImporterAdapter()
         self.redistribution_evidence = dict(redistribution_evidence or {})
+        if max_paid_submissions is not None and (
+            not isinstance(max_paid_submissions, int)
+            or isinstance(max_paid_submissions, bool)
+            or max_paid_submissions < 0
+        ):
+            raise ValueError("max_paid_submissions must be a non-negative integer or null")
+        self.max_paid_submissions = max_paid_submissions
+        self.paid_submission_ledger_path = (
+            Path(paid_submission_ledger_path) if paid_submission_ledger_path is not None else None
+        )
+        self._paid_submission_reservations: dict[str, dict[str, Any]] = {}
         self.remote_providers = dict(
             remote_providers
             if remote_providers is not None
@@ -378,6 +391,14 @@ class AssetProviderOrchestrator:
         if workspace_failure is not None:
             return None, workspace_failure
         request_dir = self.workspace / "providers" / adapter.provider_id / request["request_digest"]
+        if request.get("route") == "model_generation":
+            budget_failure = self._reserve_paid_submission(
+                request,
+                provider_id=adapter.provider_id,
+                request_dir=request_dir,
+            )
+            if budget_failure is not None:
+                return None, (budget_failure, None)
         legacy_empty_submission = (
             adapter.provider_id == "meshy_model_generation_v1"
             and request_dir.is_dir()
@@ -520,6 +541,76 @@ class AssetProviderOrchestrator:
             ),
             None,
         )
+
+    def _reserve_paid_submission(
+        self,
+        request: Mapping[str, Any],
+        *,
+        provider_id: str,
+        request_dir: Path,
+    ) -> dict[str, Any] | None:
+        """Reserve a job-scoped paid slot before an adapter can issue a new POST.
+
+        Existing acquisition/task evidence is recovery work and consumes no new
+        slot. A reservation is durable before the adapter call so a crash cannot
+        reopen the batch budget for another distinct request.
+        """
+        if self.max_paid_submissions is None:
+            return None
+        if (request_dir / "acquisition.json").is_file() or (request_dir / "task_checkpoint.json").is_file():
+            return None
+        submission_path = request_dir / "submission_attempt.json"
+        if submission_path.is_file():
+            try:
+                submission = read_json(submission_path)
+            except (OSError, ValueError, TypeError):
+                submission = {}
+            if str(submission.get("state") or "") in {"attempting", "unknown", "acknowledged"}:
+                return None
+
+        ledger = self._load_paid_submission_ledger()
+        requests = ledger["requests"]
+        digest = str(request.get("request_digest") or "")
+        if digest in requests:
+            return None
+        if len(requests) >= self.max_paid_submissions:
+            return provider_failure(
+                request,
+                status="blocked",
+                code="paid_provider_budget_exhausted",
+                message="the job paid Provider submission budget is exhausted before this request",
+            )
+        requests[digest] = {
+            "request_digest": digest,
+            "provider_id": provider_id,
+            "submission_state": "reserved",
+            "reserved_at_epoch": time.time(),
+        }
+        self._write_paid_submission_ledger(ledger)
+        return None
+
+    def _load_paid_submission_ledger(self) -> dict[str, Any]:
+        if self.paid_submission_ledger_path is None:
+            return {
+                "schema_version": "harness_agent_provider_usage_v1",
+                "requests": self._paid_submission_reservations,
+            }
+        if not self.paid_submission_ledger_path.is_file():
+            return {"schema_version": "harness_agent_provider_usage_v1", "requests": {}}
+        value = read_json(self.paid_submission_ledger_path)
+        if (
+            not isinstance(value, Mapping)
+            or value.get("schema_version") != "harness_agent_provider_usage_v1"
+            or not isinstance(value.get("requests"), Mapping)
+        ):
+            raise ValueError("paid Provider submission ledger is invalid")
+        return {"schema_version": "harness_agent_provider_usage_v1", "requests": dict(value["requests"])}
+
+    def _write_paid_submission_ledger(self, ledger: Mapping[str, Any]) -> None:
+        if self.paid_submission_ledger_path is None:
+            self._paid_submission_reservations = dict(ledger["requests"])
+            return
+        write_json(self.paid_submission_ledger_path, dict(ledger))
 
     def _workspace_failure(
         self,

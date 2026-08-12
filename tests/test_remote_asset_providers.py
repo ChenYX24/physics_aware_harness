@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import io
 import json
@@ -22,7 +23,7 @@ from harness.assets.providers.remote import (
 )
 from harness.assets.sqlite_catalog import initialize_catalog
 from harness.core.case_spec_v2 import case_spec_v2_from_dict
-from harness.planning.runtime_compiler import compile_runtime_case
+from harness.planning.runtime_compiler import RuntimeCompilationPaused, compile_runtime_case
 from tests.case_spec_v2_fixture import case_spec_v2_fixture
 
 
@@ -1188,6 +1189,85 @@ class RemoteAssetProviderTests(unittest.TestCase):
         self.assertEqual(selected["collider"], "box")
         self.assertEqual(selected["authored_size_m"], [0.17, 0.17, 0.17])
         self.assertEqual(selected["provider_reported_size_m"], [0.18, 0.18, 0.18])
+
+    def test_paid_submission_budget_is_reserved_before_each_distinct_meshy_request(self) -> None:
+        image = self.workspace / "budget.png"
+        image.write_bytes(b"image")
+        references = [{"input_id": "front", "usage": ["generation_condition"]}]
+        data = self._case(route="model_generation", provider_hint="meshy", references=references).data
+        data["objects"][1]["asset"] = copy.deepcopy(data["objects"][0]["asset"])
+        transport = FakeTransport(
+            json_responses=[
+                {"result": "paid-task-1"},
+                {
+                    "status": "SUCCEEDED",
+                    "model_urls": {"glb": "https://d/one.glb", "obj": "https://d/one.obj"},
+                },
+            ],
+            downloads={"https://d/one.glb": b"glb", "https://d/one.obj": b"v 0 0 0\n"},
+        )
+        ledger = self.workspace / "jobs" / "job_budget" / "receipts" / "provider_usage.json"
+        manifest = build_provider_input_manifest(
+            [self._provider_input(image)],
+            workspace=self.workspace,
+            meshy_upload_authorized=True,
+        )
+        transaction = self.workspace / "transactions" / "paid-budget"
+
+        with self.assertRaises(RuntimeCompilationPaused):
+            compile_runtime_case(
+                case_spec_v2_from_dict(data, available_input_ids=["front"]),
+                requested_backend="ue",
+                registry=self.registry,
+                provider_orchestrator=AssetProviderOrchestrator(
+                    workspace=self.workspace,
+                    importer=StubImporter(),
+                    remote_providers={
+                        "model_generation": MeshyModelGenerationAdapter(
+                            transport=transport,
+                            api_key="test",
+                            poll_interval_s=0,
+                        )
+                    },
+                    max_paid_submissions=1,
+                    paid_submission_ledger_path=ledger,
+                ),
+                provider_input_manifest=manifest,
+                transaction_dir=transaction,
+            )
+
+        self.assertEqual([row["method"] for row in transport.requests].count("POST"), 1)
+        usage = json.loads(ledger.read_text(encoding="utf-8"))
+        self.assertEqual(len(usage["requests"]), 1)
+        batch = json.loads((transaction / "asset_provider_batch.json").read_text(encoding="utf-8"))
+        self.assertIn(
+            "paid_provider_budget_exhausted",
+            [(row.get("failure") or {}).get("code") for row in batch["results"]],
+        )
+
+        resumed_transport = FakeTransport(json_responses=[], downloads={})
+        with self.assertRaises(RuntimeCompilationPaused):
+            compile_runtime_case(
+                case_spec_v2_from_dict(data, available_input_ids=["front"]),
+                requested_backend="ue",
+                registry=self.registry,
+                provider_orchestrator=AssetProviderOrchestrator(
+                    workspace=self.workspace,
+                    importer=StubImporter(),
+                    remote_providers={
+                        "model_generation": MeshyModelGenerationAdapter(
+                            transport=resumed_transport,
+                            api_key="test",
+                            poll_interval_s=0,
+                        )
+                    },
+                    max_paid_submissions=1,
+                    paid_submission_ledger_path=ledger,
+                ),
+                provider_input_manifest=manifest,
+                transaction_dir=self.workspace / "transactions" / "paid-budget-resume",
+            )
+        self.assertEqual(resumed_transport.requests, [])
 
     def test_external_shape_and_source_alias_compile_without_taxonomy(self) -> None:
         data = case_spec_v2_fixture()
