@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping
 
 from harness.agent.job_schema import stable_digest, utc_now
 from harness.agent.review_schema import (
@@ -212,14 +212,20 @@ class CodexAppServerReviewer:
             config_result = config_response.get("result") if isinstance(config_response.get("result"), Mapping) else {}
             effective_config = config_result.get("config") if isinstance(config_result.get("config"), Mapping) else {}
             configured_mcp = effective_config.get("mcp_servers", effective_config.get("mcpServers", {}))
-            if not isinstance(configured_mcp, Mapping):
+            if not isinstance(configured_mcp, Mapping) or any(
+                not isinstance(server_config, Mapping)
+                for server_config in configured_mcp.values()
+            ):
                 self._raise(
                     "reviewer_protocol_error",
                     "config/read returned an invalid MCP server configuration",
                     retryable=False,
                     receipt=receipt,
                 )
-            disabled_mcp_servers = sorted({"codex_apps", *(str(name) for name in configured_mcp)})
+            disabled_mcp_servers = {
+                str(name): {**dict(server_config), "enabled": False}
+                for name, server_config in configured_mcp.items()
+            }
             self._send(
                 process,
                 {
@@ -388,7 +394,7 @@ class CodexAppServerReviewer:
         requested_profile: Mapping[str, Any],
         shell_environment_policy: Mapping[str, Any],
         *,
-        disabled_mcp_servers: Sequence[str],
+        disabled_mcp_servers: Mapping[str, Mapping[str, Any]],
     ) -> dict[str, Any]:
         profile_id = str(requested_profile["id"])
         root = next(iter(requested_profile["filesystem"]))
@@ -422,9 +428,11 @@ class CodexAppServerReviewer:
             "memories.use_memories": False,
             "memories.dedicated_tools": False,
             "web_search": "disabled",
+            "mcp_servers": {
+                name: dict(server_config)
+                for name, server_config in disabled_mcp_servers.items()
+            },
         }
-        for server_name in disabled_mcp_servers:
-            config[f"mcp_servers.{json.dumps(server_name, ensure_ascii=False)}.enabled"] = False
         return config
 
     @staticmethod

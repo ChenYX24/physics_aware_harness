@@ -256,8 +256,12 @@ class SemanticReviewerAdapterTests(unittest.TestCase):
                             if config.get("project_doc_max_bytes") != 0:
                                 print(json.dumps({"id": message["id"], "error": {"code": 8, "message": "instruction discovery is enabled"}}), flush=True)
                                 continue
-                            if config.get('mcp_servers."host_secret_server".enabled') is not False:
+                            inherited_mcp = (config.get("mcp_servers") or {}).get("host_secret_server") or {}
+                            if inherited_mcp.get("command") != "/usr/bin/host-secret-mcp" or inherited_mcp.get("enabled") is not False:
                                 print(json.dumps({"id": message["id"], "error": {"code": 9, "message": "host MCP was inherited"}}), flush=True)
+                                continue
+                            if "codex_apps" in (config.get("mcp_servers") or {}):
+                                print(json.dumps({"id": message["id"], "error": {"code": 11, "message": "synthetic MCP lacks transport"}}), flush=True)
                                 continue
                             if config.get("features.apps") is not False or config.get("skills.include_instructions") is not False:
                                 print(json.dumps({"id": message["id"], "error": {"code": 10, "message": "host extensions were inherited"}}), flush=True)
