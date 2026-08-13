@@ -11,8 +11,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from harness.agent.job_controller import AgentJobController, ControllerHooks
-from harness.agent.evidence_bundle import current_evidence_snapshots
-from harness.agent.job_schema import DEFAULT_BUDGET, JobManifest, stable_digest, utc_now
+from harness.agent.evidence_bundle import current_evidence_snapshots, semantic_review_requirements
+from harness.agent.job_schema import DEFAULT_BUDGET, IntentContract, JobManifest, stable_digest, utc_now
 from harness.agent.review_schema import EVIDENCE_BUNDLE_SCHEMA_VERSION, REVIEWER_RECEIPT_SCHEMA_VERSION
 from harness.agent.semantic_reviewer import (
     SemanticReviewerError,
@@ -266,7 +266,17 @@ class SuccessfulHarness:
     def evidence(*, job_id: str, attempt: dict, attempt_dir: Path, candidate_run_dir: Path, **kwargs):
         bundle_dir = attempt_dir / "evidence_bundle"
         summary = bundle_dir / "evidence_summary.json"
-        write_json(summary, {"schema_version": "harness_evidence_summary_v2", "summary": "fixture"})
+        write_json(
+            summary,
+            {
+                "schema_version": "harness_evidence_summary_v2",
+                "summary": "fixture",
+                "semantic_requirements": semantic_review_requirements(
+                    kwargs["intent_contract"],
+                    kwargs.get("intent_amendments") or [],
+                ),
+            },
+        )
 
         def digest(path: Path) -> str:
             import hashlib
@@ -394,12 +404,16 @@ class SuccessfulHarness:
 
     def semantic_review(self, *, job_id: str, attempt_id: str, bundle_dir: Path, bundle_manifest: dict, invocation_count: int, **kwargs):
         self.semantic_calls += 1
+        lifecycle_callback = kwargs.get("lifecycle_callback")
+        if lifecycle_callback is not None:
+            lifecycle_callback("started")
         repair_layer = "none" if self.semantic_status == "pass" else "camera" if self.semantic_status == "fail" else "user_decision"
+        semantic_requirements = read_json(bundle_dir / "evidence_summary.json")["semantic_requirements"]
         raw = {
             "overall_status": self.semantic_status,
             "requirements": [
                 {
-                    "requirement_id": "original_user_request",
+                    "requirement_id": str(requirement["id"]),
                     "status": self.semantic_status,
                     "rationale": "fixture semantic verdict",
                     "evidence_refs": [
@@ -412,6 +426,7 @@ class SuccessfulHarness:
                         }
                     ],
                 }
+                for requirement in semantic_requirements
             ],
             "repair_layer": repair_layer,
             "summary": "fixture semantic verdict",
@@ -804,6 +819,7 @@ class AgentJobControllerTests(unittest.TestCase):
             calls += 1
             if calls > 1:
                 return successful(**kwargs)
+            kwargs["lifecycle_callback"]("started")
             bundle_dir = Path(kwargs["bundle_dir"])
             profile = reviewer_permission_profile(
                 job_id=kwargs["job_id"],
@@ -912,6 +928,7 @@ class AgentJobControllerTests(unittest.TestCase):
         hooks = fake.hooks()
 
         def interrupted(**kwargs):
+            kwargs["lifecycle_callback"]("started")
             raise SemanticReviewerError(
                 "reviewer_interrupted",
                 "user interrupted review",
@@ -939,8 +956,44 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertEqual(boundary["job"]["state"], "awaiting_semantic_review")
         completed = controller.run_semantic_review("job_m4_reviewer_interrupted")
         self.assertEqual(completed["job"]["state"], "completed")
+        self.assertEqual(completed["job"]["usage"]["reviewer_invocations"], 2)
         self.assertEqual(completed["job"]["usage"]["total_retries"], 0)
         self.assertEqual(read_json(attempt / "reviewer_reservation_002.json")["role"], "resume")
+
+    def test_repeated_started_interruptions_cannot_exceed_reviewer_launch_limit(self) -> None:
+        fake = SuccessfulHarness()
+        hooks = fake.hooks()
+        calls = 0
+
+        def interrupted(**kwargs):
+            nonlocal calls
+            calls += 1
+            kwargs["lifecycle_callback"]("started")
+            raise SemanticReviewerError(
+                "reviewer_interrupted",
+                "user interrupted review",
+                retryable=False,
+                receipt=failed_reviewer_receipt(kwargs, "reviewer_interrupted", status="interrupted"),
+            )
+
+        hooks.semantic_review = interrupted
+        controller = AgentJobController(self.workspace, hooks=hooks)
+        controller.create(
+            self.request,
+            job_id="job_m4_reviewer_interrupt_cap",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        controller.advance_until_blocked("job_m4_reviewer_interrupt_cap")
+        self.assertEqual(controller.run_semantic_review("job_m4_reviewer_interrupt_cap")["job"]["state"], "paused_interrupted")
+        controller.resume("job_m4_reviewer_interrupt_cap")
+        second = controller.run_semantic_review("job_m4_reviewer_interrupt_cap")
+        self.assertEqual(second["job"]["state"], "paused_interrupted")
+        self.assertEqual(second["job"]["usage"]["reviewer_invocations"], 2)
+        controller.resume("job_m4_reviewer_interrupt_cap")
+        exhausted = controller.run_semantic_review("job_m4_reviewer_interrupt_cap")
+        self.assertEqual(calls, 2)
+        self.assertEqual(exhausted["job"]["blocker"]["code"], "reviewer_invocation_budget_exhausted")
 
     def test_permission_profile_block_is_stable_and_resumes_same_attempt(self) -> None:
         fake = SuccessfulHarness()
@@ -966,12 +1019,59 @@ class AgentJobControllerTests(unittest.TestCase):
         blocked = controller.run_semantic_review("job_m4_permission_profile")
         self.assertEqual(blocked["job"]["state"], "blocked")
         self.assertEqual(blocked["job"]["blocker"]["code"], "reviewer_permission_profile_unsupported")
+        self.assertEqual(blocked["job"]["usage"]["reviewer_invocations"], 0)
         self.assertEqual(blocked["job"]["usage"]["total_retries"], 0)
+        attempt = Path(blocked["paths"]["job_root"]) / "attempts" / "attempt_001"
+        legacy_reservation = read_json(attempt / "reviewer_reservation_001.json")
+        legacy_reservation["usage_counted"] = True
+        write_json(attempt / "reviewer_reservation_001.json", legacy_reservation)
+        legacy_manifest = controller.store.load_manifest("job_m4_permission_profile")
+        legacy_manifest["usage"]["reviewer_invocations"] = 1
+        controller.store.write_manifest(legacy_manifest)
         controller.hooks.semantic_review = fake.semantic_review
         controller.resume("job_m4_permission_profile")
         completed = controller.run_semantic_review("job_m4_permission_profile")
         self.assertEqual(completed["job"]["state"], "completed")
+        self.assertEqual(completed["job"]["usage"]["reviewer_invocations"], 1)
+        self.assertFalse(read_json(attempt / "reviewer_reservation_001.json")["usage_counted"])
         self.assertEqual([row["attempt_id"] for row in completed["attempts"]], ["attempt_001"])
+
+    def test_reviewer_usage_rebuild_repairs_manifest_counted_reservation_not_launched(self) -> None:
+        fake = SuccessfulHarness()
+        hooks = fake.hooks()
+
+        def unsupported(**kwargs):
+            raise SemanticReviewerError(
+                "reviewer_permission_profile_unsupported",
+                "upgrade Codex permission profile support",
+                retryable=False,
+                receipt=failed_reviewer_receipt(kwargs, "reviewer_permission_profile_unsupported"),
+            )
+
+        hooks.semantic_review = unsupported
+        controller = AgentJobController(self.workspace, hooks=hooks)
+        controller.create(
+            self.request,
+            job_id="job_m4_reviewer_usage_rebuild",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        controller.advance_until_blocked("job_m4_reviewer_usage_rebuild")
+        blocked = controller.run_semantic_review("job_m4_reviewer_usage_rebuild")
+        attempt = Path(blocked["paths"]["job_root"]) / "attempts" / "attempt_001"
+        self.assertFalse(read_json(attempt / "reviewer_reservation_001.json")["usage_counted"])
+
+        stale = controller.store.load_manifest("job_m4_reviewer_usage_rebuild")
+        stale["usage"]["reviewer_invocations"] = 1
+        controller.store.write_manifest(stale)
+        controller.hooks.semantic_review = fake.semantic_review
+        controller.resume("job_m4_reviewer_usage_rebuild")
+        completed = controller.run_semantic_review("job_m4_reviewer_usage_rebuild")
+
+        self.assertEqual(completed["job"]["state"], "completed")
+        self.assertEqual(completed["job"]["usage"]["reviewer_invocations"], 1)
+        self.assertFalse(read_json(attempt / "reviewer_reservation_001.json")["usage_counted"])
+        self.assertTrue(read_json(attempt / "reviewer_reservation_002.json")["usage_counted"])
 
     def test_semantic_review_checks_deadline_counts_runtime_and_obeys_total_retry_budget(self) -> None:
         fake = SuccessfulHarness()
@@ -991,6 +1091,7 @@ class AgentJobControllerTests(unittest.TestCase):
         def technical_failure(**kwargs):
             nonlocal calls
             calls += 1
+            kwargs["lifecycle_callback"]("started")
             raise SemanticReviewerError(
                 "reviewer_app_server_failure",
                 "temporary failure",
@@ -1166,6 +1267,44 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertEqual(resumed["job"]["state"], "awaiting_semantic_review")
         self.assertEqual(intent_path.read_bytes(), intent_bytes)
         self.assertEqual(resumed["job"]["blocker"], None)
+
+    def test_generation_resume_reads_real_legacy_v1_contract_fail_closed(self) -> None:
+        controller, _ = self.controller()
+        controller.create(self.request, job_id="job_legacy_v1_intent", publication_tier="local_preview")
+        original_create_attempt = controller.store.create_attempt
+        calls = 0
+
+        def interrupt_after_intent(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise KeyboardInterrupt()
+            return original_create_attempt(*args, **kwargs)
+
+        controller.store.create_attempt = interrupt_after_intent
+        paused = controller.advance_until_blocked("job_legacy_v1_intent")
+        intent_path = Path(paused["paths"]["intent_contract"])
+        legacy = read_json(intent_path)
+        legacy["schema_version"] = "harness_intent_contract_v1"
+        legacy["allowed_adjustments"] = {
+            "paths": ["$.scene.duration_s", "$.observation_requirements", "$.scene.camera"],
+            "ranges": {},
+        }
+        write_json(intent_path, legacy)
+
+        resumed = controller.resume("job_legacy_v1_intent")
+
+        self.assertEqual(resumed["job"]["state"], "awaiting_semantic_review")
+        self.assertEqual(IntentContract.from_dict(read_json(intent_path)).to_dict(), legacy)
+        self.assertEqual(resumed["job"]["intent_contract_digest"], stable_digest(legacy))
+        effective_allowed = controller._effective_allowed_adjustments(legacy)
+        self.assertEqual(effective_allowed, {"paths": [], "ranges": {}})
+        with self.assertRaisesRegex(ValueError, "outside Intent Contract allowed_adjustments"):
+            controller._validate_revision_changes(
+                [{"path": "$.scene.duration_s", "operation": "replace", "before": 2.0, "after": 2.2}],
+                effective_allowed,
+                repair_layer="case_spec_source",
+            )
 
     def test_compile_exception_consumes_changed_provider_stage_result(self) -> None:
         fake = SuccessfulHarness()
@@ -1577,6 +1716,7 @@ class AgentJobControllerTests(unittest.TestCase):
         )
         blocked = controller.advance_until_blocked("job_intent_leaf_scope")
         intent = read_json(blocked["paths"]["intent_contract"])
+        self.assertEqual(intent["schema_version"], "harness_intent_contract_v2")
         self.assertEqual(intent["allowed_adjustments"], {"paths": [], "ranges": {}})
         revised = copy.deepcopy(seed)
         revised["scene"]["duration_s"] = 2.2
@@ -1642,6 +1782,59 @@ class AgentJobControllerTests(unittest.TestCase):
             intent_amendment={"ambiguity_resolutions": [{"ambiguity_id": ambiguity_id, "decision": "cue_ball"}]},
         )
         self.assertEqual(resumed["job"]["state"], "awaiting_semantic_review")
+        completed = controller.run_semantic_review("job_ambiguity_identity")
+        self.assertEqual(completed["job"]["state"], "completed")
+        attempt = Path(completed["paths"]["job_root"]) / "attempts" / "attempt_001"
+        review = read_json(attempt / "semantic_review.json")
+        self.assertEqual(
+            {row["requirement_id"] for row in review["requirements"]},
+            {"original_user_request", f"ambiguity_decision_{stable_digest(ambiguity_id)[:16]}"},
+        )
+
+    def test_semantic_pass_cannot_omit_ambiguity_decision_requirement(self) -> None:
+        fake = SuccessfulHarness()
+
+        def ambiguous(request: dict, *, artifact_dir: Path, job_id: str, attempt_id: str):
+            generated = fake.generate(request, artifact_dir=artifact_dir, job_id=job_id, attempt_id=attempt_id)
+            generated.expansion["ambiguities"] = [{"question": "which object should move?"}]
+            write_json(artifact_dir / "expansion.json", generated.expansion)
+            return generated
+
+        hooks = fake.hooks()
+        hooks.generate = ambiguous
+        successful_review = hooks.semantic_review
+
+        def incomplete_review(**kwargs):
+            result = successful_review(**kwargs)
+            result["review"]["requirements"] = [
+                row
+                for row in result["review"]["requirements"]
+                if row["requirement_id"] == "original_user_request"
+            ]
+            result["receipt"]["output_digest"] = stable_digest(result["review"])
+            return result
+
+        hooks.semantic_review = incomplete_review
+        controller = AgentJobController(self.workspace, hooks=hooks)
+        controller.create(
+            self.request,
+            job_id="job_ambiguity_review_coverage",
+            budget={"max_reviewer_technical_retries": 0},
+            publication_tier="local_preview",
+        )
+        blocked = controller.advance_until_blocked("job_ambiguity_review_coverage")
+        ambiguity_id = read_json(blocked["paths"]["intent_contract"])["ambiguities"][0]["ambiguity_id"]
+        controller.resume(
+            "job_ambiguity_review_coverage",
+            intent_amendment={"ambiguity_resolutions": [{"ambiguity_id": ambiguity_id, "decision": "cue_ball"}]},
+        )
+
+        failed = controller.run_semantic_review("job_ambiguity_review_coverage")
+
+        self.assertEqual(failed["job"]["state"], "failed")
+        self.assertEqual(failed["job"]["blocker"]["code"], "reviewer_output_schema_invalid")
+        attempt = Path(failed["paths"]["job_root"]) / "attempts" / "attempt_001"
+        self.assertFalse((attempt / "semantic_review.json").exists())
 
     def test_authorization_resume_writes_amendment_and_effective_provider_manifest(self) -> None:
         image = self.workspace / "authorization.png"

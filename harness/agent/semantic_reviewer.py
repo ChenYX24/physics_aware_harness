@@ -174,7 +174,7 @@ class CodexAppServerReviewer:
         process: subprocess.Popen[str] | None = None
         try:
             process = self.popen_factory(
-                [executable, "app-server", "--listen", "stdio://"],
+                self._app_server_command(executable, requested_profile),
                 cwd=bundle_dir,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -243,8 +243,52 @@ class CodexAppServerReviewer:
             self._send(
                 process,
                 {
-                    "method": "thread/start",
+                    "method": "permissionProfile/list",
                     "id": 3,
+                    "params": {"cwd": str(bundle_dir)},
+                },
+            )
+            try:
+                profile_response = self._wait_response(messages, 3)
+            except (RuntimeError, TimeoutError, ValueError) as exc:
+                self._raise(
+                    "reviewer_permission_profile_unsupported",
+                    f"permissionProfile/list is unavailable: {exc}",
+                    retryable=False,
+                    receipt=receipt,
+                )
+            profile_result = profile_response.get("result")
+            if not isinstance(profile_result, Mapping) or not isinstance(profile_result.get("data"), list):
+                self._raise(
+                    "reviewer_protocol_error",
+                    "permissionProfile/list returned an invalid response",
+                    retryable=False,
+                    receipt=receipt,
+                )
+            matches = [
+                row
+                for row in profile_result["data"]
+                if isinstance(row, Mapping) and row.get("id") == requested_profile["id"]
+            ]
+            if len(matches) != 1 or not isinstance(matches[0].get("allowed"), bool):
+                self._raise(
+                    "reviewer_permission_profile_unsupported",
+                    "Installed codex app-server did not expose the requested permission profile",
+                    retryable=False,
+                    receipt=receipt,
+                )
+            if matches[0]["allowed"] is not True:
+                self._raise(
+                    "reviewer_permission_profile_forbidden",
+                    "Managed Codex requirements prohibit the requested Reviewer permission profile",
+                    retryable=False,
+                    receipt=receipt,
+                )
+            self._send(
+                process,
+                {
+                    "method": "thread/start",
+                    "id": 4,
                     "params": {
                         "cwd": str(bundle_dir),
                         "runtimeWorkspaceRoots": [str(bundle_dir)],
@@ -268,7 +312,7 @@ class CodexAppServerReviewer:
                     },
                 },
             )
-            thread_response = self._wait_response(messages, 3)
+            thread_response = self._wait_response(messages, 4)
             result = thread_response.get("result") if isinstance(thread_response.get("result"), Mapping) else {}
             thread = result.get("thread") if isinstance(result.get("thread"), Mapping) else {}
             thread_id = str(thread.get("id") or "")
@@ -312,7 +356,7 @@ class CodexAppServerReviewer:
                 process,
                 {
                     "method": "turn/start",
-                    "id": 4,
+                    "id": 5,
                     "params": {
                         "threadId": thread_id,
                         "input": input_items,
@@ -322,7 +366,7 @@ class CodexAppServerReviewer:
                     },
                 },
             )
-            turn_response = self._wait_response(messages, 4)
+            turn_response = self._wait_response(messages, 5)
             initial_turn = ((turn_response.get("result") or {}).get("turn") or {}) if isinstance(turn_response.get("result"), Mapping) else {}
             turn_id = str(initial_turn.get("id") or "")
             if not turn_id:
@@ -382,6 +426,29 @@ class CodexAppServerReviewer:
             raise RuntimeError("codex --version failed")
         return completed.stdout.strip()[:200]
 
+    @staticmethod
+    def _app_server_command(executable: str, requested_profile: Mapping[str, Any]) -> list[str]:
+        profile_id = str(requested_profile["id"])
+        filesystem = requested_profile["filesystem"]
+        root, access = next(iter(filesystem.items()))
+        filesystem_toml = (
+            "{ "
+            + json.dumps(str(root), ensure_ascii=False)
+            + " = "
+            + json.dumps(str(access), ensure_ascii=False)
+            + " }"
+        )
+        return [
+            executable,
+            "app-server",
+            "-c",
+            f"permissions.{profile_id}.filesystem={filesystem_toml}",
+            "-c",
+            f"permissions.{profile_id}.network={{ enabled = false }}",
+            "--listen",
+            "stdio://",
+        ]
+
     def _supports_permission_profiles(self, executable: str) -> bool:
         with tempfile.TemporaryDirectory(prefix="harness-codex-schema-") as temporary:
             completed = self.run_command(
@@ -395,14 +462,23 @@ class CodexAppServerReviewer:
                 return False
             thread_path = Path(temporary) / "v2" / "ThreadStartParams.json"
             response_path = Path(temporary) / "v2" / "ThreadStartResponse.json"
-            if not thread_path.is_file() or not response_path.is_file():
+            list_params_path = Path(temporary) / "v2" / "PermissionProfileListParams.json"
+            list_response_path = Path(temporary) / "v2" / "PermissionProfileListResponse.json"
+            if not all(
+                path.is_file()
+                for path in (thread_path, response_path, list_params_path, list_response_path)
+            ):
                 return False
             thread_schema = json.loads(thread_path.read_text(encoding="utf-8"))
             response_schema = json.loads(response_path.read_text(encoding="utf-8"))
+            list_params_schema = json.loads(list_params_path.read_text(encoding="utf-8"))
+            list_response_schema = json.loads(list_response_path.read_text(encoding="utf-8"))
             return (
                 "permissions" in (thread_schema.get("properties") or {})
                 and "ephemeral" in (thread_schema.get("properties") or {})
                 and "activePermissionProfile" in (response_schema.get("properties") or {})
+                and "cwd" in (list_params_schema.get("properties") or {})
+                and "data" in (list_response_schema.get("properties") or {})
             )
 
     @staticmethod
@@ -463,10 +539,10 @@ class CodexAppServerReviewer:
     @staticmethod
     def _input_items(bundle_dir: Path, manifest: Mapping[str, Any], *, include_original_images: bool) -> list[dict[str, Any]]:
         prompt = (
-            "Compare the immutable original request and every hard requirement in inputs/intent_contract.json "
-            "including decisions in inputs/intent_amendments.json directly against manifest.json, "
+            "Compare every requirement listed in evidence_summary.json semantic_requirements, including each "
+            "stable ambiguity_decision requirement, directly against manifest.json, "
             "evidence_summary.json, and the supplied visual evidence. "
-            "Return pass/fail/uncertain for every recorded requirement. A technically valid CaseSpec may still "
+            "Return pass/fail/uncertain exactly once for every listed requirement_id. A technically valid CaseSpec may still "
             "misunderstand the user. Do not treat missing evidence as pass. Cite only artifact_id values from manifest.json. "
             "For trajectory evidence, inspect trajectory_summary.sampled_frames, readable_ranges, and state_transitions; "
             "a trajectory_range citation must use the exact start_time_s and end_time_s of one declared readable range."

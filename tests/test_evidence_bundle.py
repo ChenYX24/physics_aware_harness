@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness.agent.evidence_bundle import EvidenceBundleError, build_evidence_bundle
+from harness.agent.evidence_bundle import EvidenceBundleError, build_evidence_bundle, semantic_review_requirements
 from harness.agent.job_schema import stable_digest
 from harness.agent.review_schema import EvidenceBundleManifest
 from harness.core.artifact_schema import read_json, write_json
@@ -103,6 +103,27 @@ class EvidenceBundleTests(unittest.TestCase):
         self.assertIn("intent_amendments_snapshot", {row["artifact_id"] for row in manifest["artifacts"]})
         self.assertTrue(Path(result["manifest_path"]).is_file())
         self.assertEqual(result["stage_result"]["status"], "completed")
+
+    def test_ambiguity_decision_projects_to_stable_semantic_requirement(self) -> None:
+        ambiguity_id = "ambiguity_001_fixture"
+        requirements = semantic_review_requirements(
+            self.intent,
+            [
+                {
+                    "schema_version": "harness_intent_contract_amendment_v1",
+                    "ambiguity_resolutions": [
+                        {"ambiguity_id": ambiguity_id, "decision": "the cue ball moves first"}
+                    ],
+                }
+            ],
+        )
+
+        self.assertEqual(
+            [row["id"] for row in requirements],
+            ["original_user_request", f"ambiguity_decision_{stable_digest(ambiguity_id)[:16]}"],
+        )
+        self.assertEqual(requirements[1]["decision"], "the cue ball moves first")
+        self.assertTrue(requirements[1]["frozen"])
 
     def test_reuse_fails_closed_when_a_bundle_hash_changes(self) -> None:
         result = build_evidence_bundle(

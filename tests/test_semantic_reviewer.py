@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from harness.agent.semantic_reviewer import CodexAppServerReviewer
+from harness.agent.semantic_reviewer import CodexAppServerReviewer, SemanticReviewerError
 from harness.agent.review_schema import ReviewerInvocationReceipt, SemanticReview
 
 
@@ -232,6 +232,16 @@ class SemanticReviewerAdapterTests(unittest.TestCase):
                         raise SystemExit(0)
                     if os.environ.get("HOST_SECRET_FOR_REVIEWER_TEST"):
                         raise SystemExit("host environment leaked into app-server")
+                    profile_prefix = "permissions."
+                    profile_suffix = ".filesystem="
+                    profile_args = [value for value in sys.argv if value.startswith(profile_prefix) and profile_suffix in value]
+                    if len(profile_args) != 1:
+                        raise SystemExit("permission profile was not configured before app-server startup")
+                    profile_id = profile_args[0].split(profile_suffix, 1)[0][len(profile_prefix):]
+                    network_args = [value for value in sys.argv if value.startswith(f"permissions.{profile_id}.network=")]
+                    if len(network_args) != 1:
+                        raise SystemExit("permission profile network policy was not configured before app-server startup")
+                    profile_listed = False
 
                     review = {
                         "overall_status": "pass",
@@ -282,7 +292,16 @@ class SemanticReviewerAdapterTests(unittest.TestCase):
                                     "origins": {}
                                 }
                             }), flush=True)
+                        elif method == "permissionProfile/list":
+                            profile_listed = True
+                            print(json.dumps({
+                                "id": message["id"],
+                                "result": {"data": [{"id": profile_id, "allowed": True}], "nextCursor": None}
+                            }), flush=True)
                         elif method == "thread/start":
+                            if not profile_listed:
+                                print(json.dumps({"id": message["id"], "error": {"code": 13, "message": "profile was not listed"}}), flush=True)
+                                continue
                             if message["params"].get("model") is not None:
                                 print(json.dumps({"id": message["id"], "error": {"code": 1, "message": "model must be omitted"}}), flush=True)
                                 continue
@@ -367,6 +386,64 @@ class SemanticReviewerAdapterTests(unittest.TestCase):
             self.assertTrue(receipt["ephemeral"])
             self.assertEqual(receipt["shell_environment_policy"]["inherit"], "none")
             self.assertFalse(receipt["network_access"])
+
+    def test_managed_requirements_denial_is_blocked_before_thread_start(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = root / "bundle"
+            bundle.mkdir()
+            executable = root / "fake-codex"
+            executable.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env python3
+                    import json
+                    import sys
+
+                    if "--version" in sys.argv:
+                        print("codex-cli fixture")
+                        raise SystemExit(0)
+                    prefix = "permissions."
+                    suffix = ".filesystem="
+                    profile_arg = next(value for value in sys.argv if value.startswith(prefix) and suffix in value)
+                    profile_id = profile_arg.split(suffix, 1)[0][len(prefix):]
+                    for line in sys.stdin:
+                        message = json.loads(line)
+                        method = message.get("method")
+                        if method == "initialize":
+                            print(json.dumps({"id": message["id"], "result": {"userAgent": "fixture"}}), flush=True)
+                        elif method == "config/read":
+                            print(json.dumps({"id": message["id"], "result": {"config": {"mcp_servers": {}}, "origins": {}}}), flush=True)
+                        elif method == "permissionProfile/list":
+                            print(json.dumps({
+                                "id": message["id"],
+                                "result": {"data": [{"id": profile_id, "allowed": False}], "nextCursor": None}
+                            }), flush=True)
+                        elif method == "thread/start":
+                            raise SystemExit("thread/start must not run for a forbidden profile")
+                    """
+                ),
+                encoding="utf-8",
+            )
+            executable.chmod(0o755)
+            reviewer = CodexAppServerReviewer(
+                executable=executable,
+                timeout_seconds=10,
+                schema_probe=lambda _executable: True,
+            )
+
+            with self.assertRaises(SemanticReviewerError) as caught:
+                reviewer.review(
+                    job_id="job_reviewer_profile_denied",
+                    attempt_id="attempt_001",
+                    bundle_dir=bundle,
+                    bundle_manifest={"artifacts": []},
+                    invocation_count=1,
+                    include_original_images=False,
+                )
+
+            self.assertEqual(caught.exception.code, "reviewer_permission_profile_forbidden")
+            self.assertFalse(caught.exception.retryable)
 
 
 if __name__ == "__main__":

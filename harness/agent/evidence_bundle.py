@@ -132,6 +132,7 @@ def build_evidence_bundle(
         {
             "schema_version": "harness_evidence_summary_v2",
             "hard_requirements": list(intent_contract.get("hard_requirements") or []),
+            "semantic_requirements": semantic_review_requirements(intent_contract, intent_amendments),
             "event_selection": selection,
             "trajectory": trajectory_summary,
             "contacts": timeline,
@@ -385,6 +386,30 @@ def _validate_current_evidence_bundle(
                 artifact = artifacts.get(f"original_{_safe_id(str(row.get('input_id') or 'input'))}")
                 if artifact is None or artifact["kind"] != "original_input_snapshot" or artifact["sha256"] != str(row.get("sha256") or ""):
                     raise EvidenceBundleError("evidence_input_snapshot_mismatch", "Evidence Bundle original image snapshot is stale")
+        intent = expected_snapshots.get("intent_contract")
+        amendments_snapshot = expected_snapshots.get("intent_amendments")
+        amendment_items = (
+            amendments_snapshot.get("items")
+            if isinstance(amendments_snapshot, Mapping)
+            else None
+        )
+        summary_artifact = artifacts.get("evidence_summary")
+        if (
+            not isinstance(intent, Mapping)
+            or not isinstance(amendment_items, list)
+            or summary_artifact is None
+            or summary_artifact["kind"] != "structured_summary"
+        ):
+            raise EvidenceBundleError(
+                "evidence_semantic_requirements_mismatch",
+                "Evidence Bundle cannot establish its effective Semantic Review requirements",
+            )
+        summary = read_json(bundle_dir / summary_artifact["path"])
+        if summary.get("semantic_requirements") != semantic_review_requirements(intent, amendment_items):
+            raise EvidenceBundleError(
+                "evidence_semantic_requirements_mismatch",
+                "Evidence Bundle Semantic Review requirements are stale",
+            )
     return manifest
 
 
@@ -404,6 +429,47 @@ def current_evidence_snapshots(
         },
         "case_spec": read_json(attempt_dir / "case_spec.json"),
     }
+
+
+def semantic_review_requirements(
+    intent_contract: Mapping[str, Any],
+    intent_amendments: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Project immutable hard requirements and ambiguity decisions for review."""
+    requirements = [dict(value) for value in intent_contract.get("hard_requirements") or []]
+    seen = {str(value.get("id") or "") for value in requirements}
+    if "" in seen or len(seen) != len(requirements):
+        raise ValueError("Intent Contract hard requirement identities must be non-empty and unique")
+    resolved_ambiguities: set[str] = set()
+    for amendment in intent_amendments:
+        if amendment.get("schema_version") != "harness_intent_contract_amendment_v1":
+            continue
+        resolutions = amendment.get("ambiguity_resolutions")
+        if not isinstance(resolutions, list):
+            raise ValueError("Intent ambiguity amendment resolutions must be a list")
+        for resolution in resolutions:
+            if not isinstance(resolution, Mapping):
+                raise ValueError("Intent ambiguity decisions must be objects")
+            ambiguity_id = str(resolution.get("ambiguity_id") or "").strip()
+            decision = str(resolution.get("decision") or "").strip()
+            if not ambiguity_id or not decision or ambiguity_id in resolved_ambiguities:
+                raise ValueError("Intent ambiguity decisions must have unique identities and non-empty decisions")
+            resolved_ambiguities.add(ambiguity_id)
+            requirement_id = f"ambiguity_decision_{stable_digest(ambiguity_id)[:16]}"
+            if requirement_id in seen:
+                raise ValueError("Semantic Review requirement identities must be unique")
+            seen.add(requirement_id)
+            requirements.append(
+                {
+                    "id": requirement_id,
+                    "text": f"Follow the resolved ambiguity decision for {ambiguity_id}: {decision}",
+                    "frozen": True,
+                    "source": "intent_ambiguity_decision",
+                    "ambiguity_id": ambiguity_id,
+                    "decision": decision,
+                }
+            )
+    return requirements
 
 
 def _technical_gates(attempt_dir: Path, run_dir: Path) -> dict[str, Any]:

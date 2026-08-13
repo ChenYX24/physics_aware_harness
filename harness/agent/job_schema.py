@@ -10,7 +10,8 @@ from typing import Any, Mapping
 
 
 JOB_MANIFEST_SCHEMA_VERSION = "harness_agent_job_manifest_v1"
-INTENT_CONTRACT_SCHEMA_VERSION = "harness_intent_contract_v1"
+LEGACY_INTENT_CONTRACT_SCHEMA_VERSION = "harness_intent_contract_v1"
+INTENT_CONTRACT_SCHEMA_VERSION = "harness_intent_contract_v2"
 ATTEMPT_MANIFEST_SCHEMA_VERSION = "harness_agent_attempt_manifest_v1"
 CHECKPOINT_SCHEMA_VERSION = "harness_agent_checkpoint_v1"
 SMOKE_GATE_SCHEMA_VERSION = "harness_smoke_gate_v1"
@@ -204,7 +205,10 @@ class IntentContract:
             "created_at",
         }
         _exact_fields(data, required, "intent contract")
-        if data["schema_version"] != INTENT_CONTRACT_SCHEMA_VERSION:
+        if data["schema_version"] not in {
+            LEGACY_INTENT_CONTRACT_SCHEMA_VERSION,
+            INTENT_CONTRACT_SCHEMA_VERSION,
+        }:
             raise ValueError(f"unsupported intent contract schema: {data['schema_version']!r}")
         validate_job_id(data["job_id"])
         _sha256(data["request_digest"], "request_digest")
@@ -216,7 +220,10 @@ class IntentContract:
                 raise ValueError(f"{field} must be a list of objects")
         for field in ("asset_policy", "execution", "authorizations", "verification", "allowed_adjustments", "frozen_digests"):
             _mapping(data[field], field)
-        _validate_allowed_adjustments(data["allowed_adjustments"])
+        if data["schema_version"] == LEGACY_INTENT_CONTRACT_SCHEMA_VERSION:
+            _validate_legacy_allowed_adjustments(data["allowed_adjustments"])
+        else:
+            _validate_allowed_adjustments(data["allowed_adjustments"])
         for label, digest in data["frozen_digests"].items():
             _sha256(digest, f"frozen_digests.{label}")
         _timestamp(data["created_at"], "created_at")
@@ -284,6 +291,37 @@ def _validate_allowed_adjustments(value: Mapping[str, Any]) -> None:
                 raise ValueError(f"allowed_adjustments enum range for {path} is invalid")
         else:
             raise ValueError(f"allowed_adjustments range kind for {path} is invalid")
+
+
+def _validate_legacy_allowed_adjustments(value: Mapping[str, Any]) -> None:
+    """Read historical v1 Contracts without restoring their broad permissions.
+
+    M2/M3 v1 artifacts allowed canonical paths without corresponding ranges.
+    They remain readable and digest-stable, while revision validation continues
+    to reject every path that lacks an explicit valid range.
+    """
+    if set(value) != {"paths", "ranges"}:
+        raise ValueError("allowed_adjustments must contain only paths and ranges")
+    paths = value.get("paths")
+    ranges = value.get("ranges")
+    if not isinstance(paths, list) or any(
+        not isinstance(path, str)
+        or not re.fullmatch(r"\$\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", path)
+        for path in paths
+    ):
+        raise ValueError("allowed_adjustments.paths must contain canonical object paths")
+    if len(paths) != len(set(paths)):
+        raise ValueError("allowed_adjustments.paths must be unique")
+    if not isinstance(ranges, Mapping) or not set(ranges).issubset(set(paths)):
+        raise ValueError("legacy allowed_adjustments.ranges must constrain only allowed paths")
+    if ranges:
+        constrained_paths = sorted(ranges)
+        _validate_allowed_adjustments(
+            {
+                "paths": constrained_paths,
+                "ranges": {path: ranges[path] for path in constrained_paths},
+            }
+        )
 
 
 @dataclass(frozen=True)

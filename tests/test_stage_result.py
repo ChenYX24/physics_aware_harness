@@ -103,10 +103,15 @@ class StageResultContractTests(unittest.TestCase):
         self.assertFalse(capability["retryable"])
 
     def test_permission_profile_unsupported_is_a_stable_configuration_blocker(self) -> None:
-        current = classify_failure("semantic_review", "reviewer_permission_profile_unsupported")
-
-        self.assertEqual(current["failure_class"], "blocked_configuration")
-        self.assertEqual(current["status"], "blocked")
+        for code in (
+            "reviewer_permission_profile_unsupported",
+            "reviewer_permission_profile_forbidden",
+        ):
+            with self.subTest(code=code):
+                current = classify_failure("semantic_review", code)
+                self.assertEqual(current["failure_class"], "blocked_configuration")
+                self.assertEqual(current["status"], "blocked")
+                self.assertFalse(current["retryable"])
 
     def test_invalid_success_failure_mix_is_rejected(self) -> None:
         result = build_stage_result(stage="compile", status="completed")

@@ -34,6 +34,7 @@ from harness.agent.evidence_bundle import (
     EvidenceBundleError,
     build_evidence_bundle,
     current_evidence_snapshots,
+    semantic_review_requirements,
     validate_current_evidence_bundle,
 )
 from harness.agent.review_schema import (
@@ -403,6 +404,7 @@ class AgentJobController:
             manifest = self.store.load_manifest(job_id)
             if manifest["state"] not in {"awaiting_semantic_review", "running"} or manifest["current_stage"] != "semantic_review":
                 raise JobStoreError("semantic review requires awaiting_semantic_review at the explicit review boundary")
+            manifest = self._reconcile_reviewer_usage(manifest)
             budget_result = self._budget_gate(manifest)
             if budget_result is not None:
                 self._write_controller_stage_result(manifest, budget_result)
@@ -486,6 +488,7 @@ class AgentJobController:
                 bundle_digest=bundle_digest,
                 input_digest=expected_input_digest,
             )
+            manifest = self._reconcile_reviewer_usage(manifest)
             while True:
                 reservation = self._next_reviewer_reservation(
                     manifest,
@@ -507,22 +510,16 @@ class AgentJobController:
                     usage["stage_retries"]["semantic_review"] = recorded_technical_retries + 1
                     usage["total_retries"] += 1
                     manifest = self._update_manifest(manifest, usage=usage)
-                if not reservation["usage_counted"]:
-                    usage = copy.deepcopy(manifest["usage"])
-                    usage["reviewer_invocations"] += 1
-                    manifest = self._update_manifest(manifest, state="running", usage=usage, allowed_next_actions=["cancel"])
-                    reservation = self._update_reviewer_reservation(
-                        attempt_dir,
-                        reservation,
-                        state="launching",
-                        usage_counted=True,
-                    )
-                else:
-                    manifest = self._update_manifest(manifest, state="running", allowed_next_actions=["cancel"])
+                manifest = self._update_manifest(manifest, state="running", allowed_next_actions=["cancel"])
 
                 def lifecycle(state: str) -> None:
-                    nonlocal reservation
-                    reservation = self._update_reviewer_reservation(attempt_dir, reservation, state=state)
+                    nonlocal manifest, reservation
+                    changes: dict[str, Any] = {"state": state}
+                    if state == "started":
+                        changes["usage_counted"] = True
+                    reservation = self._update_reviewer_reservation(attempt_dir, reservation, **changes)
+                    if state == "started":
+                        manifest = self._reconcile_reviewer_usage(manifest)
 
                 reviewer_started = self.hooks.monotonic()
                 reviewer_elapsed_recorded = False
@@ -538,6 +535,14 @@ class AgentJobController:
                             lifecycle_callback=lifecycle,
                         )
                     )
+                    if not reservation["usage_counted"]:
+                        reservation = self._update_reviewer_reservation(
+                            attempt_dir,
+                            reservation,
+                            state="output_received",
+                            usage_counted=True,
+                        )
+                        manifest = self._reconcile_reviewer_usage(manifest)
                     elapsed = max(0.0, self.hooks.monotonic() - reviewer_started)
                     manifest = self._add_active_elapsed(manifest, elapsed)
                     reviewer_elapsed_recorded = True
@@ -577,6 +582,7 @@ class AgentJobController:
                         manifest,
                         expected_manifest_digest=bundle_digest,
                     )
+                    expected_requirements = self._semantic_review_requirements(job_id, intent)
                     review = SemanticReview.from_dict(
                         {
                             "schema_version": SEMANTIC_REVIEW_SCHEMA_VERSION,
@@ -587,7 +593,7 @@ class AgentJobController:
                             **raw_review,
                             "created_at": utc_now(),
                         },
-                        expected_requirement_ids={str(row["id"]) for row in intent["hard_requirements"]},
+                        expected_requirement_ids={str(row["id"]) for row in expected_requirements},
                         evidence_artifact_ids={str(row["artifact_id"]) for row in current_bundle["artifacts"]},
                         evidence_manifest=current_bundle,
                     ).to_dict()
@@ -720,8 +726,16 @@ class AgentJobController:
                     self._stage_event(manifest, "stage_blocked", "semantic_review", result=result)
                     return self.inspect(job_id)
                 retry_budget_result = self._budget_gate(manifest) if result["retryable"] else None
+                launched_count = sum(bool(row["usage_counted"]) for row in reservations)
+                primary_limit = min(1, int(manifest["budget"]["max_reviewer_invocations"]))
+                launch_limit = (
+                    primary_limit + int(manifest["budget"]["max_reviewer_technical_retries"])
+                    if primary_limit
+                    else 0
+                )
                 can_retry = (
                     result["retryable"]
+                    and launched_count < launch_limit
                     and sum(row["role"] == "technical_retry" for row in reservations)
                     < int(manifest["budget"]["max_reviewer_technical_retries"])
                     and manifest["usage"]["total_retries"] < manifest["budget"]["max_total_retries"]
@@ -1596,7 +1610,7 @@ class AgentJobController:
         changes = self._json_diff(parent_spec, case_spec.data)
         if not changes:
             raise JobStoreError("revision proposal does not change the source CaseSpec")
-        allowed = intent["allowed_adjustments"]
+        allowed = self._effective_allowed_adjustments(intent)
         self._validate_revision_changes(changes, allowed, repair_layer=repair_layer)
         proposal_core = {
             "job_id": manifest["job_id"],
@@ -2218,6 +2232,7 @@ class AgentJobController:
     def _intent_recovery_identity(contract: Mapping[str, Any]) -> dict[str, Any]:
         identity = copy.deepcopy(dict(contract))
         identity.pop("created_at", None)
+        identity.pop("schema_version", None)
         # These controller-policy fields were tightened after the first M2
         # release. They do not change the generated CaseSpec or frozen request
         # identity, so an already committed valid Contract remains recoverable.
@@ -2427,6 +2442,19 @@ class AgentJobController:
                         receipt_path=receipt_path.name,
                         error_code=error_code,
                     )
+                if (
+                    reservation["usage_counted"]
+                    and receipt["status"] == "failed"
+                    and receipt.get("error_code")
+                    in {"reviewer_app_server_unavailable", "reviewer_permission_profile_unsupported"}
+                ):
+                    # Older Controllers counted these deterministic pre-launch
+                    # probes before Codex app-server could actually be started.
+                    reservation = self._update_reviewer_reservation(
+                        attempt_dir,
+                        reservation,
+                        usage_counted=False,
+                    )
             elif reservation["state"] in {"launching", "started", "output_received"}:
                 reservation = self._update_reviewer_reservation(
                     attempt_dir,
@@ -2458,16 +2486,21 @@ class AgentJobController:
     ) -> dict[str, Any] | None:
         primary_limit = min(1, int(manifest["budget"]["max_reviewer_invocations"]))
         technical_limit = int(manifest["budget"]["max_reviewer_technical_retries"])
+        launched = sum(bool(row["usage_counted"]) for row in reservations)
+        launch_limit = primary_limit + technical_limit if primary_limit else 0
         role: str | None = None
         if reservations:
             latest = reservations[-1]
             if latest["state"] == "reserved":
                 return latest
             if latest["outcome"] in {"interrupted", "blocked_configuration"}:
-                role = "resume"
+                if launched < launch_limit:
+                    role = "primary" if launched < primary_limit else "resume"
             elif latest["outcome"] in {"technical_failed", "completion_unknown"} and latest["retryable"] is True:
                 if (
-                    sum(row["role"] == "technical_retry" for row in reservations) < technical_limit
+                    launched < launch_limit
+                    and sum(row["role"] == "technical_retry" and row["usage_counted"] for row in reservations)
+                    < technical_limit
                     and int(manifest["usage"]["total_retries"]) < int(manifest["budget"]["max_total_retries"])
                     and self._budget_gate(manifest) is None
                 ):
@@ -2506,6 +2539,31 @@ class AgentJobController:
         write_json(attempt_dir / f"reviewer_reservation_{invocation_count:03d}.json", reservation)
         reservations.append(reservation)
         return reservation
+
+    def _reconcile_reviewer_usage(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
+        """Rebuild the Job audit count from durable actual-launch markers."""
+        job_id = str(manifest["job_id"])
+        launched = 0
+        attempts_root = self.store.job_dir(job_id) / "attempts"
+        for attempt_dir in sorted(path for path in attempts_root.glob("attempt_*") if path.is_dir()):
+            expected_attempt_id = attempt_dir.name
+            for expected_count, path in enumerate(
+                sorted(attempt_dir.glob("reviewer_reservation_*.json")),
+                start=1,
+            ):
+                reservation = ReviewerInvocationReservation.from_dict(read_json(path)).to_dict()
+                if (
+                    reservation["job_id"] != job_id
+                    or reservation["attempt_id"] != expected_attempt_id
+                    or reservation["invocation_count"] != expected_count
+                ):
+                    raise JobStoreError("Reviewer reservation sequence cannot rebuild Job usage")
+                launched += int(reservation["usage_counted"])
+        if int(manifest["usage"]["reviewer_invocations"]) == launched:
+            return dict(manifest)
+        usage = copy.deepcopy(manifest["usage"])
+        usage["reviewer_invocations"] = launched
+        return self._update_manifest(manifest, usage=usage)
 
     @staticmethod
     def _update_reviewer_reservation(
@@ -2591,9 +2649,10 @@ class AgentJobController:
         intent = IntentContract.from_dict(
             read_json(self.store.job_dir(manifest["job_id"]) / "request" / "intent_contract.json")
         ).to_dict()
+        expected_requirements = self._semantic_review_requirements(str(manifest["job_id"]), intent)
         review = SemanticReview.from_dict(
             read_json(attempt_dir / "semantic_review.json"),
-            expected_requirement_ids={str(row["id"]) for row in intent["hard_requirements"]},
+            expected_requirement_ids={str(row["id"]) for row in expected_requirements},
             evidence_artifact_ids={str(row["artifact_id"]) for row in bundle["artifacts"]},
             evidence_manifest=bundle,
         ).to_dict()
@@ -2639,6 +2698,18 @@ class AgentJobController:
             raise JobStoreError("Semantic Review does not identify exactly one valid Reviewer receipt")
         return review
 
+    def _semantic_review_requirements(
+        self,
+        job_id: str,
+        intent: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        request_root = self.store.job_dir(job_id) / "request"
+        amendments = [
+            read_json(path)
+            for path in sorted(request_root.glob("intent_amendment_*.json"), key=lambda value: value.name)
+        ]
+        return semantic_review_requirements(intent, amendments)
+
     @staticmethod
     def _semantic_repair_allowed(intent: Mapping[str, Any], review: Mapping[str, Any]) -> bool:
         if review.get("repair_layer") not in {"observation", "camera", "case_spec_source"}:
@@ -2646,12 +2717,22 @@ class AgentJobController:
         suggestions = review.get("suggested_adjustments") or []
         if not suggestions:
             return False
-        allowed_paths = [str(value) for value in (intent.get("allowed_adjustments") or {}).get("paths") or []]
+        allowed_paths = [
+            str(value)
+            for value in AgentJobController._effective_allowed_adjustments(intent).get("paths") or []
+        ]
         return all(
             isinstance(suggestion, Mapping)
             and str(suggestion.get("path") or "") in allowed_paths
             for suggestion in suggestions
         )
+
+    @staticmethod
+    def _effective_allowed_adjustments(intent: Mapping[str, Any]) -> dict[str, Any]:
+        if intent.get("schema_version") != INTENT_CONTRACT_SCHEMA_VERSION:
+            return {"paths": [], "ranges": {}}
+        allowed = intent.get("allowed_adjustments")
+        return dict(allowed) if isinstance(allowed, Mapping) else {"paths": [], "ranges": {}}
 
     @staticmethod
     def _smoke_mode(attempt_dir: Path) -> str:
