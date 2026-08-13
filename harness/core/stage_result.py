@@ -117,7 +117,7 @@ _CONFIGURATION_CODES = {
     "request_digest_mismatch",
     "request_input_identity_mismatch",
     "reviewer_app_server_unavailable",
-    "reviewer_restricted_read_unsupported",
+    "reviewer_permission_profile_unsupported",
     "reviewer_isolation_unproven",
     "reviewer_unrelated_instruction_source",
 }

@@ -54,7 +54,7 @@ class SemanticReviewerAdapterTests(unittest.TestCase):
 
     def test_semantic_review_rejects_nonexistent_or_out_of_range_locators(self) -> None:
         manifest = {
-            "schema_version": "harness_evidence_bundle_v1",
+            "schema_version": "harness_evidence_bundle_v2",
             "job_id": "job_locator_validation",
             "attempt_id": "attempt_001",
             "case_spec_digest": "a" * 64,
@@ -80,6 +80,43 @@ class SemanticReviewerAdapterTests(unittest.TestCase):
                 "start_time_s": 0.0,
                 "end_time_s": 1.0,
                 "objects": ["ball"],
+                "sampling": {
+                    "strategy": "uniform_event_state_v1",
+                    "max_sample_frames": 24,
+                    "selected_frame_count": 3,
+                    "omitted_frame_count": 0,
+                    "state_transition_count": 0,
+                    "state_transitions_included": 0,
+                },
+                "sampled_frames": [
+                    {
+                        "frame_index": index,
+                        "time_s": time_s,
+                        "reasons": ["fixture"],
+                        "objects": [{
+                            "object_id": "ball",
+                            "transform": {
+                                "position": {"field": "position_m", "values": [time_s, 0.0, 0.0]},
+                                "rotation": None,
+                                "scale": None,
+                            },
+                            "linear_velocity": None,
+                            "angular_velocity": None,
+                            "state": [],
+                        }],
+                    }
+                    for index, time_s in enumerate((0.0, 0.5, 1.0))
+                ],
+                "readable_ranges": [{
+                    "range_id": "trajectory_full",
+                    "start_frame_index": 0,
+                    "end_frame_index": 2,
+                    "start_time_s": 0.0,
+                    "end_time_s": 1.0,
+                    "sample_frame_indices": [0, 1, 2],
+                    "event_refs": ["contact_000"],
+                }],
+                "state_transitions": [],
             },
             "contact_timeline": [
                 {"event_id": "contact_000", "frame_index": 1, "time_s": 0.5, "objects": ["ball", "floor"], "kind": "impact"}
@@ -158,6 +195,7 @@ class SemanticReviewerAdapterTests(unittest.TestCase):
             ("time_s", -999.0),
             ("view_id", "missing_view"),
             ("trajectory_range", "not-a-range"),
+            ("trajectory_range", "0.1-0.9s"),
             ("contact_event_id", "contact_missing"),
         ):
             changed = copy.deepcopy(payload)
@@ -175,7 +213,7 @@ class SemanticReviewerAdapterTests(unittest.TestCase):
                     evidence_manifest=manifest,
                 )
 
-    def test_app_server_default_model_new_thread_and_restricted_readonly_turn(self) -> None:
+    def test_app_server_default_model_new_thread_and_named_permission_profile(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             bundle = root / "bundle"

@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import time
@@ -37,9 +38,11 @@ from harness.agent.evidence_bundle import (
 )
 from harness.agent.review_schema import (
     REVISION_PROPOSAL_SCHEMA_VERSION,
+    REVIEWER_INVOCATION_SCHEMA_VERSION,
     SEMANTIC_REVIEW_SCHEMA_VERSION,
     EvidenceBundleManifest,
     ReviewerInvocationReceipt,
+    ReviewerInvocationReservation,
     RevisionProposal,
     SemanticReview,
 )
@@ -63,6 +66,7 @@ from harness.core.case_spec_v2 import (
 from harness.core.stage_result import (
     StageResult,
     build_stage_result,
+    classify_failure,
     failure_stage_result,
     write_stage_result,
 )
@@ -397,8 +401,14 @@ class AgentJobController:
     def run_semantic_review(self, job_id: str) -> dict[str, Any]:
         with self.store.lock(job_id):
             manifest = self.store.load_manifest(job_id)
-            if manifest["state"] != "awaiting_semantic_review" or manifest["current_stage"] != "semantic_review":
+            if manifest["state"] not in {"awaiting_semantic_review", "running"} or manifest["current_stage"] != "semantic_review":
                 raise JobStoreError("semantic review requires awaiting_semantic_review at the explicit review boundary")
+            budget_result = self._budget_gate(manifest)
+            if budget_result is not None:
+                self._write_controller_stage_result(manifest, budget_result)
+                manifest = self._apply_stage_result(manifest, budget_result)
+                self._stage_event(manifest, "stage_blocked", "semantic_review", result=budget_result)
+                return self.inspect(job_id)
             self._stage_event(manifest, "stage_started", "semantic_review")
             attempt_id = str(manifest["current_attempt_id"])
             attempt_dir = self.store.attempt_dir(job_id, attempt_id)
@@ -464,27 +474,58 @@ class AgentJobController:
                 self._emit(job_id, "job_terminal", stage="semantic_review", state=manifest["state"])
                 return self.inspect(job_id)
 
-            primary_call_limit = min(1, int(manifest["budget"]["max_reviewer_invocations"]))
-            maximum_calls = (
-                primary_call_limit + int(manifest["budget"]["max_reviewer_technical_retries"])
-                if primary_call_limit
-                else 0
+            expected_input_digest = semantic_reviewer_input_digest(
+                bundle_dir=attempt_dir / "evidence_bundle",
+                bundle_manifest=bundle,
+                include_original_images=has_images,
             )
-            attempt_invocations = len(list(attempt_dir.glob("reviewer_invocation_*.json")))
-            technical_retries = attempt_invocations
-            while attempt_invocations < maximum_calls:
-                attempt_invocations += 1
-                usage = copy.deepcopy(manifest["usage"])
-                usage["reviewer_invocations"] += 1
-                invocation_count = attempt_invocations
-                manifest = self._update_manifest(manifest, state="running", usage=usage, allowed_next_actions=["cancel"])
-                expected_input_digest = semantic_reviewer_input_digest(
-                    bundle_dir=attempt_dir / "evidence_bundle",
-                    bundle_manifest=bundle,
-                    include_original_images=has_images,
+            reservations = self._reviewer_reservations(
+                attempt_dir,
+                job_id=job_id,
+                attempt_id=attempt_id,
+                bundle_digest=bundle_digest,
+                input_digest=expected_input_digest,
+            )
+            while True:
+                reservation = self._next_reviewer_reservation(
+                    manifest,
+                    attempt_dir=attempt_dir,
+                    attempt_id=attempt_id,
+                    bundle_digest=bundle_digest,
+                    input_digest=expected_input_digest,
+                    reservations=reservations,
                 )
+                if reservation is None:
+                    break
+                invocation_count = int(reservation["invocation_count"])
                 receipt_path = attempt_dir / f"reviewer_invocation_{invocation_count:03d}.json"
                 written_review = False
+                technical_reservations = sum(row["role"] == "technical_retry" for row in reservations)
+                recorded_technical_retries = int(manifest["usage"]["stage_retries"].get("semantic_review", 0))
+                if reservation["role"] == "technical_retry" and technical_reservations > recorded_technical_retries:
+                    usage = copy.deepcopy(manifest["usage"])
+                    usage["stage_retries"]["semantic_review"] = recorded_technical_retries + 1
+                    usage["total_retries"] += 1
+                    manifest = self._update_manifest(manifest, usage=usage)
+                if not reservation["usage_counted"]:
+                    usage = copy.deepcopy(manifest["usage"])
+                    usage["reviewer_invocations"] += 1
+                    manifest = self._update_manifest(manifest, state="running", usage=usage, allowed_next_actions=["cancel"])
+                    reservation = self._update_reviewer_reservation(
+                        attempt_dir,
+                        reservation,
+                        state="launching",
+                        usage_counted=True,
+                    )
+                else:
+                    manifest = self._update_manifest(manifest, state="running", allowed_next_actions=["cancel"])
+
+                def lifecycle(state: str) -> None:
+                    nonlocal reservation
+                    reservation = self._update_reviewer_reservation(attempt_dir, reservation, state=state)
+
+                reviewer_started = self.hooks.monotonic()
+                reviewer_elapsed_recorded = False
                 try:
                     invocation = dict(
                         self.hooks.semantic_review(
@@ -494,8 +535,12 @@ class AgentJobController:
                             bundle_manifest=bundle,
                             invocation_count=invocation_count,
                             include_original_images=has_images,
+                            lifecycle_callback=lifecycle,
                         )
                     )
+                    elapsed = max(0.0, self.hooks.monotonic() - reviewer_started)
+                    manifest = self._add_active_elapsed(manifest, elapsed)
+                    reviewer_elapsed_recorded = True
                     raw_review = dict(invocation["review"])
                     if set(raw_review) != {
                         "overall_status",
@@ -516,6 +561,15 @@ class AgentJobController:
                         require_completed=True,
                     )
                     write_json(receipt_path, receipt)
+                    reservation = self._update_reviewer_reservation(
+                        attempt_dir,
+                        reservation,
+                        state="receipt_recorded",
+                        outcome="completed",
+                        retryable=False,
+                        receipt_path=receipt_path.name,
+                        error_code=None,
+                    )
                     intent = IntentContract.from_dict(
                         read_json(self.store.job_dir(job_id) / "request" / "intent_contract.json")
                     ).to_dict()
@@ -600,6 +654,7 @@ class AgentJobController:
                             failure_code=exc.code,
                             message=str(exc),
                             retryable=exc.retryable,
+                            source_status="interrupted" if exc.code == "reviewer_interrupted" else None,
                             job_id=job_id,
                             attempt_id=attempt_id,
                             invocation_count=invocation_count,
@@ -635,16 +690,44 @@ class AgentJobController:
                         attempt_id=attempt_id,
                         invocation_count=invocation_count,
                     )
+                finally:
+                    if not reviewer_elapsed_recorded:
+                        elapsed = max(0.0, self.hooks.monotonic() - reviewer_started)
+                        manifest = self._add_active_elapsed(manifest, elapsed)
                 if written_review:
                     review_path.unlink(missing_ok=True)
                 write_stage_result(attempt_dir, result)
+                outcome = (
+                    "interrupted"
+                    if result["failure_class"] == "interrupted"
+                    else "blocked_configuration"
+                    if result["failure_class"] == "blocked_configuration"
+                    else "technical_failed"
+                )
+                reservation = self._update_reviewer_reservation(
+                    attempt_dir,
+                    reservation,
+                    state="receipt_recorded" if receipt_path.is_file() else reservation["state"],
+                    outcome=outcome,
+                    retryable=bool(result["retryable"]),
+                    receipt_path=receipt_path.name if receipt_path.is_file() else None,
+                    error_code=result["failure_code"],
+                )
+                reservations[-1] = reservation
+                if result["failure_class"] == "interrupted":
+                    self._checkpoint(manifest, "semantic_review", "interrupted", stable_digest(bundle), [str(bundle_path), str(receipt_path)])
+                    manifest = self._apply_stage_result(manifest, result)
+                    self._stage_event(manifest, "stage_blocked", "semantic_review", result=result)
+                    return self.inspect(job_id)
+                retry_budget_result = self._budget_gate(manifest) if result["retryable"] else None
                 can_retry = (
                     result["retryable"]
-                    and technical_retries < int(manifest["budget"]["max_reviewer_technical_retries"])
-                    and attempt_invocations < maximum_calls
+                    and sum(row["role"] == "technical_retry" for row in reservations)
+                    < int(manifest["budget"]["max_reviewer_technical_retries"])
+                    and manifest["usage"]["total_retries"] < manifest["budget"]["max_total_retries"]
+                    and retry_budget_result is None
                 )
                 if can_retry:
-                    technical_retries += 1
                     usage = copy.deepcopy(manifest["usage"])
                     usage["stage_retries"]["semantic_review"] = int(
                         usage["stage_retries"].get("semantic_review", 0)
@@ -652,6 +735,11 @@ class AgentJobController:
                     usage["total_retries"] += 1
                     manifest = self._update_manifest(manifest, usage=usage)
                     continue
+                if retry_budget_result is not None:
+                    self._write_controller_stage_result(manifest, retry_budget_result)
+                    manifest = self._apply_stage_result(manifest, retry_budget_result)
+                    self._stage_event(manifest, "stage_blocked", "semantic_review", result=retry_budget_result)
+                    return self.inspect(job_id)
                 self._checkpoint(manifest, "semantic_review", "failed", stable_digest(bundle), [str(bundle_path)])
                 exhausted = dict(result)
                 exhausted["retryable"] = False
@@ -860,7 +948,13 @@ class AgentJobController:
                 read_json(seed_path),
                 available_input_ids=[str(row.get("input_id")) for row in request.get("inputs") or []],
             )
-            expansion = {"schema_version": "harness_expansion_v1", "ambiguities": [], "assumptions": []}
+            seed_provenance = case_spec.data.get("provenance") or {}
+            expansion = {
+                "schema_version": "harness_expansion_v1",
+                "ambiguities": [],
+                "assumptions": [],
+                "parameter_analysis": copy.deepcopy(seed_provenance.get("intent_parameter_analysis") or []),
+            }
             stage_result = build_stage_result(
                 stage="generation",
                 status="completed",
@@ -1374,6 +1468,7 @@ class AgentJobController:
             "duration_s": (case_spec.get("scene") or {}).get("duration_s"),
             "resolution": [1920, 1080],
         }
+        allowed_adjustments = self._project_allowed_adjustments(expansion, case_spec)
         contract = {
             "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
             "job_id": manifest["job_id"],
@@ -1389,10 +1484,7 @@ class AgentJobController:
             "execution": execution,
             "authorizations": copy.deepcopy(manifest["authorizations"]),
             "verification": {"assertions": copy.deepcopy(assertions or []), "frozen": True},
-            "allowed_adjustments": {
-                "paths": ["$.scene.duration_s", "$.observation_requirements", "$.scene.camera"],
-                "ranges": {},
-            },
+            "allowed_adjustments": allowed_adjustments,
             "frozen_digests": {
                 "original_request": stable_digest({"text": request.get("text") or "", "inputs": input_identities}),
                 "verification_assertions": stable_digest(assertions or []),
@@ -1402,6 +1494,76 @@ class AgentJobController:
             "created_at": utc_now(),
         }
         return IntentContract.from_dict(contract).to_dict()
+
+    @classmethod
+    def _project_allowed_adjustments(
+        cls,
+        expansion: Mapping[str, Any],
+        case_spec: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        constraints: dict[str, Any] = {}
+        for row in expansion.get("parameter_analysis") or []:
+            if not isinstance(row, Mapping) or row.get("requirement_level") not in {"soft", "inferred"}:
+                continue
+            path = str(row.get("path") or "")
+            constraint = row.get("constraint")
+            try:
+                current = cls._case_spec_path_value(case_spec, path)
+            except (KeyError, ValueError):
+                continue
+            if isinstance(current, Mapping) or not isinstance(constraint, Mapping):
+                continue
+            kind = constraint.get("kind")
+            if kind == "numeric":
+                minimum, maximum = constraint.get("min"), constraint.get("max")
+                if (
+                    set(constraint) != {"kind", "min", "max"}
+                    or
+                    not isinstance(current, (int, float))
+                    or isinstance(current, bool)
+                    or not isinstance(minimum, (int, float))
+                    or isinstance(minimum, bool)
+                    or not isinstance(maximum, (int, float))
+                    or isinstance(maximum, bool)
+                    or minimum > maximum
+                    or not minimum <= current <= maximum
+                ):
+                    continue
+            elif kind == "list":
+                minimum, maximum = constraint.get("min_items"), constraint.get("max_items")
+                if (
+                    set(constraint) != {"kind", "min_items", "max_items"}
+                    or
+                    not isinstance(current, list)
+                    or not isinstance(minimum, int)
+                    or isinstance(minimum, bool)
+                    or not isinstance(maximum, int)
+                    or isinstance(maximum, bool)
+                    or minimum < 0
+                    or minimum > maximum
+                    or not minimum <= len(current) <= maximum
+                ):
+                    continue
+            elif kind == "enum":
+                values = constraint.get("values")
+                if set(constraint) != {"kind", "values"} or not isinstance(values, list) or not values or current not in values:
+                    continue
+            else:
+                continue
+            constraints[path] = copy.deepcopy(dict(constraint))
+        paths = sorted(constraints)
+        return {"paths": paths, "ranges": {path: constraints[path] for path in paths}}
+
+    @staticmethod
+    def _case_spec_path_value(case_spec: Mapping[str, Any], path: str) -> Any:
+        if not re.fullmatch(r"\$\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", path):
+            raise ValueError("CaseSpec path is not a canonical object path")
+        value: Any = case_spec
+        for component in path[2:].split("."):
+            if not isinstance(value, Mapping) or component not in value:
+                raise KeyError(path)
+            value = value[component]
+        return value
 
     def _create_revision(
         self,
@@ -1655,7 +1817,7 @@ class AgentJobController:
                 job_id=manifest["job_id"],
                 attempt_id=manifest.get("current_attempt_id"),
             )
-        if elapsed >= soft and manifest["current_stage"] in {"compile", "smoke", "candidate"}:
+        if elapsed >= soft and manifest["current_stage"] in {"compile", "smoke", "candidate", "semantic_review"}:
             return failure_stage_result(
                 stage="budget",
                 failure_code="soft_deadline_reached",
@@ -2090,30 +2252,34 @@ class AgentJobController:
         repair_layer: str,
     ) -> None:
         allowed_paths = [str(path) for path in allowed.get("paths") or [] if str(path).startswith("$.")]
-        disallowed = []
-        for change in changes:
-            path = str(change.get("path") or "")
-            if not any(path == root or path.startswith(f"{root}.") for root in allowed_paths):
-                disallowed.append(path)
+        disallowed = [
+            str(change.get("path") or "")
+            for change in changes
+            if str(change.get("path") or "") not in allowed_paths
+        ]
         if disallowed:
             raise JobStoreError(f"revision changes paths outside Intent Contract allowed_adjustments: {disallowed}")
         ranges = allowed.get("ranges") if isinstance(allowed.get("ranges"), Mapping) else {}
         for change in changes:
             path = str(change["path"])
             constraint = ranges.get(path)
-            if constraint is None:
-                continue
-            if isinstance(constraint, Mapping):
-                minimum, maximum = constraint.get("min"), constraint.get("max")
-            elif isinstance(constraint, list) and len(constraint) == 2:
-                minimum, maximum = constraint
+            if not isinstance(constraint, Mapping):
+                raise JobStoreError(f"Intent Contract range for {path} is missing or invalid")
+            value = change.get("after")
+            kind = constraint.get("kind")
+            if kind == "numeric":
+                if not isinstance(value, (int, float)) or isinstance(value, bool):
+                    raise JobStoreError(f"revision value at {path} is outside its numeric adjustment contract")
+                if value < constraint["min"] or value > constraint["max"]:
+                    raise JobStoreError(f"revision value at {path} exceeds Intent Contract allowed range")
+            elif kind == "list":
+                if not isinstance(value, list) or not constraint["min_items"] <= len(value) <= constraint["max_items"]:
+                    raise JobStoreError(f"revision value at {path} exceeds Intent Contract list range")
+            elif kind == "enum":
+                if value not in constraint["values"]:
+                    raise JobStoreError(f"revision value at {path} is outside Intent Contract enum values")
             else:
                 raise JobStoreError(f"Intent Contract range for {path} is invalid")
-            value = change.get("after")
-            if not isinstance(value, (int, float)) or isinstance(value, bool):
-                raise JobStoreError(f"revision value at {path} is outside its numeric adjustment contract")
-            if minimum is not None and value < minimum or maximum is not None and value > maximum:
-                raise JobStoreError(f"revision value at {path} exceeds Intent Contract allowed range")
         if repair_layer == "observation" and any(
             not str(change["path"]).startswith("$.observation_requirements") for change in changes
         ):
@@ -2195,6 +2361,162 @@ class AgentJobController:
             expected_snapshots=snapshots,
             expected_manifest_digest=expected_manifest_digest,
         )
+
+    def _reviewer_reservations(
+        self,
+        attempt_dir: Path,
+        *,
+        job_id: str,
+        attempt_id: str,
+        bundle_digest: str,
+        input_digest: str,
+    ) -> list[dict[str, Any]]:
+        reservations: list[dict[str, Any]] = []
+        for expected_count, path in enumerate(sorted(attempt_dir.glob("reviewer_reservation_*.json")), start=1):
+            reservation = ReviewerInvocationReservation.from_dict(read_json(path)).to_dict()
+            identity_core = {
+                "job_id": reservation["job_id"],
+                "attempt_id": reservation["attempt_id"],
+                "invocation_count": reservation["invocation_count"],
+                "role": reservation["role"],
+                "bundle_digest": reservation["bundle_digest"],
+                "input_digest": reservation["input_digest"],
+            }
+            if (
+                reservation["job_id"] != job_id
+                or reservation["attempt_id"] != attempt_id
+                or reservation["invocation_count"] != expected_count
+                or reservation["bundle_digest"] != bundle_digest
+                or reservation["input_digest"] != input_digest
+                or reservation["invocation_id"] != f"reviewer_{stable_digest(identity_core)[:16]}"
+            ):
+                raise JobStoreError("Reviewer invocation reservation identity does not match the current attempt")
+            receipt_path = attempt_dir / f"reviewer_invocation_{expected_count:03d}.json"
+            if reservation["state"] == "receipt_recorded" and not receipt_path.is_file():
+                raise JobStoreError("Reviewer reservation records a receipt that is missing")
+            if reservation["state"] == "receipt_recorded" and reservation["receipt_path"] != receipt_path.name:
+                raise JobStoreError("Reviewer reservation receipt path is inconsistent")
+            if receipt_path.is_file():
+                receipt = ReviewerInvocationReceipt.from_dict(read_json(receipt_path)).to_dict()
+                if (
+                    receipt["job_id"] != job_id
+                    or receipt["attempt_id"] != attempt_id
+                    or receipt["invocation_count"] != expected_count
+                    or receipt["input_digest"] != input_digest
+                ):
+                    raise JobStoreError("Reviewer receipt identity does not match its reservation")
+                if reservation["state"] != "receipt_recorded":
+                    if receipt["status"] == "interrupted":
+                        outcome, retryable, error_code = "interrupted", False, "reviewer_interrupted"
+                    elif receipt["status"] == "failed" and classify_failure(
+                        "semantic_review", str(receipt.get("error_code") or "reviewer_failed")
+                    )["failure_class"] == "blocked_configuration":
+                        outcome, retryable, error_code = "blocked_configuration", False, str(receipt["error_code"])
+                    else:
+                        outcome, retryable, error_code = (
+                            "technical_failed",
+                            True,
+                            str(receipt.get("error_code") or "reviewer_completed_output_uncommitted"),
+                        )
+                    reservation = self._update_reviewer_reservation(
+                        attempt_dir,
+                        reservation,
+                        state="receipt_recorded",
+                        outcome=outcome,
+                        retryable=retryable,
+                        receipt_path=receipt_path.name,
+                        error_code=error_code,
+                    )
+            elif reservation["state"] in {"launching", "started", "output_received"}:
+                reservation = self._update_reviewer_reservation(
+                    attempt_dir,
+                    reservation,
+                    state="completion_unknown",
+                    outcome="completion_unknown",
+                    retryable=True,
+                    error_code="reviewer_completion_unknown",
+                )
+            reservations.append(reservation)
+        receipt_counts = {
+            int(path.stem.rsplit("_", 1)[1])
+            for path in attempt_dir.glob("reviewer_invocation_*.json")
+            if path.stem.rsplit("_", 1)[-1].isdigit()
+        }
+        if any(count > len(reservations) for count in receipt_counts):
+            raise JobStoreError("Reviewer receipt exists without a durable invocation reservation")
+        return reservations
+
+    def _next_reviewer_reservation(
+        self,
+        manifest: Mapping[str, Any],
+        *,
+        attempt_dir: Path,
+        attempt_id: str,
+        bundle_digest: str,
+        input_digest: str,
+        reservations: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        primary_limit = min(1, int(manifest["budget"]["max_reviewer_invocations"]))
+        technical_limit = int(manifest["budget"]["max_reviewer_technical_retries"])
+        role: str | None = None
+        if reservations:
+            latest = reservations[-1]
+            if latest["state"] == "reserved":
+                return latest
+            if latest["outcome"] in {"interrupted", "blocked_configuration"}:
+                role = "resume"
+            elif latest["outcome"] in {"technical_failed", "completion_unknown"} and latest["retryable"] is True:
+                if (
+                    sum(row["role"] == "technical_retry" for row in reservations) < technical_limit
+                    and int(manifest["usage"]["total_retries"]) < int(manifest["budget"]["max_total_retries"])
+                    and self._budget_gate(manifest) is None
+                ):
+                    role = "technical_retry"
+            else:
+                return None
+        elif primary_limit:
+            role = "primary"
+        if role is None:
+            return None
+        invocation_count = len(reservations) + 1
+        core = {
+            "job_id": manifest["job_id"],
+            "attempt_id": attempt_id,
+            "invocation_count": invocation_count,
+            "role": role,
+            "bundle_digest": bundle_digest,
+            "input_digest": input_digest,
+        }
+        now = utc_now()
+        reservation = ReviewerInvocationReservation.from_dict(
+            {
+                "schema_version": REVIEWER_INVOCATION_SCHEMA_VERSION,
+                **core,
+                "invocation_id": f"reviewer_{stable_digest(core)[:16]}",
+                "state": "reserved",
+                "outcome": "pending",
+                "usage_counted": False,
+                "retryable": None,
+                "receipt_path": None,
+                "error_code": None,
+                "created_at": now,
+                "updated_at": now,
+            }
+        ).to_dict()
+        write_json(attempt_dir / f"reviewer_reservation_{invocation_count:03d}.json", reservation)
+        reservations.append(reservation)
+        return reservation
+
+    @staticmethod
+    def _update_reviewer_reservation(
+        attempt_dir: Path,
+        reservation: Mapping[str, Any],
+        **changes: Any,
+    ) -> dict[str, Any]:
+        updated = {**dict(reservation), **changes, "updated_at": utc_now()}
+        value = ReviewerInvocationReservation.from_dict(updated).to_dict()
+        write_json(attempt_dir / f"reviewer_reservation_{value['invocation_count']:03d}.json", value)
+        return value
 
     @staticmethod
     def _validate_reviewer_receipt(
@@ -2326,13 +2648,9 @@ class AgentJobController:
             return False
         allowed_paths = [str(value) for value in (intent.get("allowed_adjustments") or {}).get("paths") or []]
         return all(
-            any(
-                str(suggestion.get("path") or "") == path
-                or str(suggestion.get("path") or "").startswith(f"{path}.")
-                for path in allowed_paths
-            )
+            isinstance(suggestion, Mapping)
+            and str(suggestion.get("path") or "") in allowed_paths
             for suggestion in suggestions
-            if isinstance(suggestion, Mapping)
         )
 
     @staticmethod

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -38,6 +39,9 @@ DEFAULT_BUDGET = {
     "candidate_reserve_seconds": 12 * 60,
     "post_candidate_reserve_seconds": 3 * 60,
     "max_paid_submissions": 0,
+    # Reviewer limits are per CaseSpec attempt. usage.reviewer_invocations is
+    # the whole-Job audit count of launches; it is not a Job-level call cap.
+    # The primary limit is additionally hard-capped to one by the Controller.
     "max_reviewer_invocations": 1,
     "max_reviewer_technical_retries": 1,
     "min_free_disk_bytes": 1024 * 1024 * 1024,
@@ -212,6 +216,7 @@ class IntentContract:
                 raise ValueError(f"{field} must be a list of objects")
         for field in ("asset_policy", "execution", "authorizations", "verification", "allowed_adjustments", "frozen_digests"):
             _mapping(data[field], field)
+        _validate_allowed_adjustments(data["allowed_adjustments"])
         for label, digest in data["frozen_digests"].items():
             _sha256(digest, f"frozen_digests.{label}")
         _timestamp(data["created_at"], "created_at")
@@ -219,6 +224,66 @@ class IntentContract:
 
     def to_dict(self) -> dict[str, Any]:
         return dict(self.data)
+
+
+def _validate_allowed_adjustments(value: Mapping[str, Any]) -> None:
+    if set(value) != {"paths", "ranges"}:
+        raise ValueError("allowed_adjustments must contain only paths and ranges")
+    paths = value.get("paths")
+    ranges = value.get("ranges")
+    if not isinstance(paths, list) or any(
+        not isinstance(path, str)
+        or not re.fullmatch(r"\$\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", path)
+        for path in paths
+    ):
+        raise ValueError("allowed_adjustments.paths must contain canonical object leaf paths")
+    if len(paths) != len(set(paths)):
+        raise ValueError("allowed_adjustments.paths must be unique")
+    if not isinstance(ranges, Mapping) or set(ranges) != set(paths):
+        raise ValueError("allowed_adjustments.ranges must constrain every allowed path exactly")
+    for path in paths:
+        constraint = ranges[path]
+        if not isinstance(constraint, Mapping):
+            raise ValueError(f"allowed_adjustments range for {path} must be an object")
+        kind = constraint.get("kind")
+        if kind == "numeric":
+            if set(constraint) != {"kind", "min", "max"}:
+                raise ValueError(f"allowed_adjustments numeric range for {path} is invalid")
+            minimum, maximum = constraint.get("min"), constraint.get("max")
+            if (
+                not isinstance(minimum, (int, float))
+                or isinstance(minimum, bool)
+                or not isinstance(maximum, (int, float))
+                or isinstance(maximum, bool)
+                or not math.isfinite(float(minimum))
+                or not math.isfinite(float(maximum))
+                or minimum > maximum
+            ):
+                raise ValueError(f"allowed_adjustments numeric range for {path} is invalid")
+        elif kind == "list":
+            if set(constraint) != {"kind", "min_items", "max_items"}:
+                raise ValueError(f"allowed_adjustments list range for {path} is invalid")
+            minimum, maximum = constraint.get("min_items"), constraint.get("max_items")
+            if (
+                not isinstance(minimum, int)
+                or isinstance(minimum, bool)
+                or not isinstance(maximum, int)
+                or isinstance(maximum, bool)
+                or minimum < 0
+                or minimum > maximum
+            ):
+                raise ValueError(f"allowed_adjustments list range for {path} is invalid")
+        elif kind == "enum":
+            values = constraint.get("values")
+            if (
+                set(constraint) != {"kind", "values"}
+                or not isinstance(values, list)
+                or not values
+                or any(isinstance(item, (dict, list)) for item in values)
+            ):
+                raise ValueError(f"allowed_adjustments enum range for {path} is invalid")
+        else:
+            raise ValueError(f"allowed_adjustments range kind for {path} is invalid")
 
 
 @dataclass(frozen=True)

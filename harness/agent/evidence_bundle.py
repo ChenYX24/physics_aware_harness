@@ -15,6 +15,9 @@ from harness.core.stage_result import StageResult, artifact_ref, build_stage_res
 
 
 CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
+_MAX_TRAJECTORY_SAMPLE_FRAMES = 24
+_MAX_STATE_TRANSITIONS = 100
+_MAX_EVENT_WINDOWS = 8
 
 
 class EvidenceBundleError(RuntimeError):
@@ -122,12 +125,12 @@ def build_evidence_bundle(
             )
         )
 
-    trajectory_summary = _trajectory_summary(attempt_dir, trajectory_path, frames)
+    trajectory_summary = _trajectory_summary(attempt_dir, trajectory_path, frames, timeline, selection)
     summary_path = bundle_dir / "evidence_summary.json"
     write_json(
         summary_path,
         {
-            "schema_version": "harness_evidence_summary_v1",
+            "schema_version": "harness_evidence_summary_v2",
             "hard_requirements": list(intent_contract.get("hard_requirements") or []),
             "event_selection": selection,
             "trajectory": trajectory_summary,
@@ -456,11 +459,16 @@ def _contact_timeline(run_dir: Path, frames: list[dict[str, Any]]) -> list[dict[
             for contact in frame.get("contacts") or []:
                 if isinstance(contact, Mapping):
                     raw.append({**dict(contact), "frame": contact.get("frame", frame.get("frame", frame_index))})
+    frame_id_to_index = {
+        _integer(frame.get("frame"), default=index): index
+        for index, frame in enumerate(frames)
+    }
     timeline = []
     for index, event in enumerate(raw[:200]):
         if not isinstance(event, Mapping):
             continue
-        frame_index = _integer(event.get("frame"), default=-1)
+        raw_frame = _integer(event.get("frame"), default=-1)
+        frame_index = frame_id_to_index.get(raw_frame, raw_frame)
         if frame_index < 0 or frame_index >= len(frames):
             continue
         event_time = _number_or_none(event.get("time_s", event.get("time")))
@@ -514,12 +522,97 @@ def _canonical_views(run_dir: Path) -> list[str]:
     return [view for view in candidates if (run_dir / "views" / view / "rgb.mp4").is_file()]
 
 
-def _trajectory_summary(attempt_dir: Path, path: Path, frames: list[dict[str, Any]]) -> dict[str, Any]:
+def _trajectory_summary(
+    attempt_dir: Path,
+    path: Path,
+    frames: list[dict[str, Any]],
+    timeline: list[dict[str, Any]],
+    selection: Mapping[str, Any],
+) -> dict[str, Any]:
     object_ids: set[str] = set()
     for frame in frames:
         objects = frame.get("objects")
         if isinstance(objects, Mapping):
             object_ids.update(str(value) for value in objects)
+    transitions = _state_transitions(frames)
+    reasons: dict[int, set[str]] = {}
+
+    def select(index: int, reason: str) -> None:
+        if 0 <= index < len(frames):
+            reasons.setdefault(index, set()).add(reason)
+
+    select(0, "trajectory_start")
+    select((len(frames) - 1) // 2, "trajectory_midpoint")
+    select(len(frames) - 1, "trajectory_end")
+    for point in selection.get("points") or []:
+        if isinstance(point, Mapping):
+            select(_integer(point.get("frame_index"), default=-1), f"event_selection_{point.get('label')}")
+    for event in timeline[:_MAX_EVENT_WINDOWS]:
+        event_index = _integer(event.get("frame_index"), default=-1)
+        for offset, label in ((-1, "before"), (0, "during"), (1, "after")):
+            select(event_index + offset, f"{event.get('event_id')}_{label}")
+    for transition in transitions:
+        select(int(transition["frame_index"]), "discrete_state_transition")
+    if len(frames) > 1:
+        uniform_slots = min(_MAX_TRAJECTORY_SAMPLE_FRAMES, len(frames))
+        for slot in range(uniform_slots):
+            index = round(slot * (len(frames) - 1) / max(1, uniform_slots - 1))
+            select(index, "uniform_sample")
+
+    required_indices = {
+        _integer(point.get("frame_index"), default=-1)
+        for point in selection.get("points") or []
+        if isinstance(point, Mapping)
+    } | {0, (len(frames) - 1) // 2, len(frames) - 1}
+    ordered = sorted(reasons)
+    if len(ordered) > _MAX_TRAJECTORY_SAMPLE_FRAMES:
+        retained = sorted(index for index in required_indices if index in reasons)
+        for index in ordered:
+            if len(retained) >= _MAX_TRAJECTORY_SAMPLE_FRAMES:
+                break
+            if index not in retained:
+                retained.append(index)
+        ordered = sorted(retained)
+    samples = [
+        {
+            "frame_index": index,
+            "time_s": float(_frame_time(frames[index]) or 0.0),
+            "reasons": sorted(reasons[index]),
+            "objects": _sampled_object_states(frames[index]),
+        }
+        for index in ordered
+    ]
+    readable_ranges = [
+        {
+            "range_id": "trajectory_full",
+            "start_frame_index": ordered[0],
+            "end_frame_index": ordered[-1],
+            "start_time_s": float(_frame_time(frames[ordered[0]]) or 0.0),
+            "end_time_s": float(_frame_time(frames[ordered[-1]]) or 0.0),
+            "sample_frame_indices": ordered,
+            "event_refs": [],
+        }
+    ]
+    selected_indices = set(ordered)
+    for event in timeline[:_MAX_EVENT_WINDOWS]:
+        event_index = _integer(event.get("frame_index"), default=-1)
+        window_indices = sorted(
+            index for index in {max(0, event_index - 1), event_index, min(len(frames) - 1, event_index + 1)}
+            if index in selected_indices
+        )
+        if event_index not in selected_indices or not window_indices:
+            continue
+        readable_ranges.append(
+            {
+                "range_id": f"event_window_{_safe_id(str(event['event_id']))}",
+                "start_frame_index": window_indices[0],
+                "end_frame_index": window_indices[-1],
+                "start_time_s": float(_frame_time(frames[window_indices[0]]) or 0.0),
+                "end_time_s": float(_frame_time(frames[window_indices[-1]]) or 0.0),
+                "sample_frame_indices": window_indices,
+                "event_refs": [str(event["event_id"])],
+            }
+        )
     return {
         "source_path": path.relative_to(attempt_dir).as_posix(),
         "source_sha256": _sha256_file(path),
@@ -527,7 +620,128 @@ def _trajectory_summary(attempt_dir: Path, path: Path, frames: list[dict[str, An
         "start_time_s": float(_frame_time(frames[0]) or 0.0),
         "end_time_s": float(_frame_time(frames[-1]) or 0.0),
         "objects": sorted(object_ids),
+        "sampling": {
+            "strategy": "uniform_event_state_v1",
+            "max_sample_frames": _MAX_TRAJECTORY_SAMPLE_FRAMES,
+            "selected_frame_count": len(samples),
+            "omitted_frame_count": len(frames) - len(samples),
+            "state_transition_count": len(transitions),
+            "state_transitions_included": min(len(transitions), _MAX_STATE_TRANSITIONS),
+        },
+        "sampled_frames": samples,
+        "readable_ranges": readable_ranges,
+        "state_transitions": transitions[:_MAX_STATE_TRANSITIONS],
     }
+
+
+def _sampled_object_states(frame: Mapping[str, Any]) -> list[dict[str, Any]]:
+    objects = frame.get("objects")
+    if not isinstance(objects, Mapping):
+        return []
+    result = []
+    for object_id in sorted(str(value) for value in objects):
+        raw = objects.get(object_id)
+        state = raw if isinstance(raw, Mapping) else {}
+        transform = state.get("transform") if isinstance(state.get("transform"), Mapping) else {}
+        consumed: set[str] = {"transform"}
+
+        def vector(*fields: str, nested: bool = False) -> dict[str, Any] | None:
+            source = transform if nested else state
+            for field in fields:
+                value = source.get(field)
+                if isinstance(value, (list, tuple)) and 1 <= len(value) <= 4:
+                    values = [_number_or_none(item) for item in value]
+                    if all(item is not None for item in values):
+                        if not nested:
+                            consumed.add(field)
+                        return {"field": f"transform.{field}" if nested else field, "values": [float(item) for item in values]}
+            return None
+
+        position = vector("position_m", "position_cm", "position") or vector(
+            "position_m", "position_cm", "position", nested=True
+        )
+        rotation = vector("rotation_deg", "rotation_degrees", "rotation", "quaternion") or vector(
+            "rotation_deg", "rotation_degrees", "rotation", "quaternion", nested=True
+        )
+        scale = vector("scale", "scale_xyz") or vector("scale", "scale_xyz", nested=True)
+        linear_velocity = vector(
+            "linear_velocity_m_s", "velocity_m_s", "velocity_cm_s", "velocity"
+        )
+        angular_velocity = vector(
+            "angular_velocity_rad_s", "angular_velocity_deg_s", "angular_velocity"
+        )
+        discrete = _discrete_state_fields(state, excluded=consumed)
+        result.append(
+            {
+                "object_id": object_id,
+                "transform": {"position": position, "rotation": rotation, "scale": scale},
+                "linear_velocity": linear_velocity,
+                "angular_velocity": angular_velocity,
+                "state": discrete,
+            }
+        )
+    return result
+
+
+def _discrete_state_fields(state: Mapping[str, Any], *, excluded: set[str] | None = None) -> list[dict[str, Any]]:
+    ignored = set(excluded or ())
+    candidates: dict[str, Any] = {}
+    nested = state.get("state")
+    if isinstance(nested, Mapping):
+        for field, value in nested.items():
+            if _is_json_scalar(value):
+                candidates[f"state.{field}"] = value
+    names = {
+        "active",
+        "awake",
+        "body_state",
+        "enabled",
+        "fractured",
+        "kinematic",
+        "motion_state",
+        "sleeping",
+        "source",
+        "state",
+        "status",
+        "visible",
+    }
+    for field, value in state.items():
+        name = str(field)
+        if name in ignored or isinstance(value, Mapping):
+            continue
+        if (name in names or name.endswith("_state") or name.endswith("_status")) and _is_json_scalar(value):
+            candidates[name] = value
+    return [{"field": field, "value": candidates[field]} for field in sorted(candidates)]
+
+
+def _state_transitions(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    prior: dict[str, list[dict[str, Any]]] = {}
+    transitions: list[dict[str, Any]] = []
+    for frame_index, frame in enumerate(frames):
+        objects = frame.get("objects")
+        if not isinstance(objects, Mapping):
+            continue
+        for object_id in sorted(str(value) for value in objects):
+            raw = objects.get(object_id)
+            current = _discrete_state_fields(raw if isinstance(raw, Mapping) else {})
+            if object_id in prior and prior[object_id] != current:
+                transitions.append(
+                    {
+                        "object_id": object_id,
+                        "frame_index": frame_index,
+                        "time_s": float(_frame_time(frame) or 0.0),
+                        "before": prior[object_id],
+                        "after": current,
+                    }
+                )
+            prior[object_id] = current
+    return transitions
+
+
+def _is_json_scalar(value: Any) -> bool:
+    return value is None or isinstance(value, (str, bool, int)) or (
+        isinstance(value, float) and math.isfinite(value)
+    )
 
 
 def _extract_frame(ffmpeg: str, video: Path, time_s: float, destination: Path, runner: CommandRunner) -> None:

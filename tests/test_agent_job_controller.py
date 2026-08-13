@@ -26,7 +26,73 @@ from harness.core.case_spec_v2 import case_spec_v2_from_dict, compile_case_spec_
 from harness.core.stage_result import build_stage_result, failure_stage_result, write_stage_result
 from harness.planning.case_generation import CaseGenerationError, build_case_request
 from harness.planning.runtime_compiler import RuntimeCompilation
-from tests.case_spec_v2_fixture import case_spec_v2_fixture
+from tests.case_spec_v2_fixture import case_spec_v2_fixture as base_case_spec_v2_fixture
+
+
+def case_spec_v2_fixture() -> dict:
+    value = base_case_spec_v2_fixture()
+    value["provenance"]["intent_parameter_analysis"] = [
+        {
+            "path": "$.scene.duration_s",
+            "requirement_level": "inferred",
+            "reason": "fixture duration is an inferred execution window",
+            "constraint": {"kind": "numeric", "min": 1.0, "max": 3.0},
+        },
+        {
+            "path": "$.observation_requirements.cameras",
+            "requirement_level": "inferred",
+            "reason": "fixture camera coverage is planner-selected",
+            "constraint": {"kind": "list", "min_items": 1, "max_items": 5},
+        },
+    ]
+    return value
+
+
+def failed_reviewer_receipt(kwargs: dict, code: str, *, status: str = "failed") -> dict:
+    bundle_dir = Path(kwargs["bundle_dir"])
+    profile = reviewer_permission_profile(
+        job_id=kwargs["job_id"],
+        attempt_id=kwargs["attempt_id"],
+        invocation_count=kwargs["invocation_count"],
+        bundle_dir=bundle_dir,
+    )
+    now = utc_now()
+    return {
+        "schema_version": REVIEWER_RECEIPT_SCHEMA_VERSION,
+        "job_id": kwargs["job_id"],
+        "attempt_id": kwargs["attempt_id"],
+        "invocation_count": kwargs["invocation_count"],
+        "transport": "stdio_jsonl",
+        "executable": "/usr/bin/fake-codex",
+        "codex_version": "fixture",
+        "thread_id": None,
+        "turn_id": None,
+        "model": None,
+        "model_provider": None,
+        "requested_new_thread": True,
+        "requested_permission_profile": profile,
+        "requested_permission_profile_digest": stable_digest(profile),
+        "active_permission_profile_id": None,
+        "runtime_workspace_roots": [str(bundle_dir)],
+        "ephemeral": True,
+        "shell_environment_policy": {
+            "inherit": "none",
+            "set": {"PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"},
+            "use_profile": False,
+        },
+        "instruction_sources": [],
+        "network_access": False,
+        "input_digest": semantic_reviewer_input_digest(
+            bundle_dir=bundle_dir,
+            bundle_manifest=kwargs["bundle_manifest"],
+            include_original_images=bool(kwargs.get("include_original_images")),
+        ),
+        "output_digest": None,
+        "status": status,
+        "error_code": code,
+        "started_at": now,
+        "completed_at": now,
+    }
 
 
 class SuccessfulHarness:
@@ -43,7 +109,25 @@ class SuccessfulHarness:
     def generate(self, request: dict, *, artifact_dir: Path, job_id: str, attempt_id: str):
         self.generation_calls += 1
         case = case_spec_v2_from_dict(case_spec_v2_fixture())
-        expansion = {"schema_version": "harness_expansion_v1", "ambiguities": [], "assumptions": []}
+        expansion = {
+            "schema_version": "harness_expansion_v1",
+            "ambiguities": [],
+            "assumptions": [],
+            "parameter_analysis": [
+                {
+                    "path": "$.scene.duration_s",
+                    "requirement_level": "inferred",
+                    "reason": "fixture duration is an inferred execution window",
+                    "constraint": {"kind": "numeric", "min": 1.0, "max": 3.0},
+                },
+                {
+                    "path": "$.observation_requirements.cameras",
+                    "requirement_level": "inferred",
+                    "reason": "fixture camera coverage is planner-selected",
+                    "constraint": {"kind": "list", "min_items": 1, "max_items": 5},
+                },
+            ],
+        }
         result = build_stage_result(
             stage="generation",
             status="completed",
@@ -182,7 +266,7 @@ class SuccessfulHarness:
     def evidence(*, job_id: str, attempt: dict, attempt_dir: Path, candidate_run_dir: Path, **kwargs):
         bundle_dir = attempt_dir / "evidence_bundle"
         summary = bundle_dir / "evidence_summary.json"
-        write_json(summary, {"schema_version": "harness_evidence_summary_v1", "summary": "fixture"})
+        write_json(summary, {"schema_version": "harness_evidence_summary_v2", "summary": "fixture"})
 
         def digest(path: Path) -> str:
             import hashlib
@@ -276,6 +360,25 @@ class SuccessfulHarness:
                 "start_time_s": 0.0,
                 "end_time_s": 0.0,
                 "objects": [],
+                "sampling": {
+                    "strategy": "uniform_event_state_v1",
+                    "max_sample_frames": 24,
+                    "selected_frame_count": 1,
+                    "omitted_frame_count": 0,
+                    "state_transition_count": 0,
+                    "state_transitions_included": 0,
+                },
+                "sampled_frames": [{"frame_index": 0, "time_s": 0.0, "reasons": ["fixture"], "objects": []}],
+                "readable_ranges": [{
+                    "range_id": "trajectory_full",
+                    "start_frame_index": 0,
+                    "end_frame_index": 0,
+                    "start_time_s": 0.0,
+                    "end_time_s": 0.0,
+                    "sample_frame_indices": [0],
+                    "event_refs": [],
+                }],
+                "state_transitions": [],
             },
             "contact_timeline": [],
             "artifacts": artifacts,
@@ -313,7 +416,7 @@ class SuccessfulHarness:
             "repair_layer": repair_layer,
             "summary": "fixture semantic verdict",
             "suggested_adjustments": (
-                [{"path": "$.observation_requirements", "desired_outcome": "improve view", "evidence_refs": ["evidence_summary"]}]
+                [{"path": "$.observation_requirements.cameras", "desired_outcome": "improve view", "evidence_refs": ["evidence_summary"]}]
                 if self.semantic_status == "fail"
                 else []
             ),
@@ -763,6 +866,161 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertEqual(inspection["job"]["usage"]["reviewer_invocations"], 2)
         self.assertEqual(inspection["job"]["usage"]["stage_retries"]["semantic_review"], 1)
         self.assertEqual([row["attempt_id"] for row in inspection["attempts"]], ["attempt_001"])
+
+    def test_reviewer_crash_after_launch_before_receipt_uses_only_technical_retry(self) -> None:
+        class SimulatedProcessCrash(BaseException):
+            pass
+
+        fake = SuccessfulHarness()
+        hooks = fake.hooks()
+
+        def crash_after_launch(**kwargs):
+            kwargs["lifecycle_callback"]("started")
+            raise SimulatedProcessCrash("process died before receipt persistence")
+
+        hooks.semantic_review = crash_after_launch
+        controller = AgentJobController(self.workspace, hooks=hooks)
+        controller.create(
+            self.request,
+            job_id="job_m4_reviewer_crash_window",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        boundary = controller.advance_until_blocked("job_m4_reviewer_crash_window")
+        attempt = Path(boundary["paths"]["job_root"]) / "attempts" / "attempt_001"
+
+        with self.assertRaises(SimulatedProcessCrash):
+            controller.run_semantic_review("job_m4_reviewer_crash_window")
+
+        first = read_json(attempt / "reviewer_reservation_001.json")
+        self.assertEqual(first["state"], "started")
+        self.assertFalse((attempt / "reviewer_invocation_001.json").exists())
+        recovered_hooks = fake.hooks()
+        recovered = AgentJobController(self.workspace, hooks=recovered_hooks)
+        inspection = recovered.run_semantic_review("job_m4_reviewer_crash_window")
+
+        self.assertEqual(inspection["job"]["state"], "completed")
+        self.assertEqual(inspection["job"]["usage"]["reviewer_invocations"], 2)
+        self.assertEqual(inspection["job"]["usage"]["stage_retries"]["semantic_review"], 1)
+        self.assertEqual(read_json(attempt / "reviewer_reservation_001.json")["outcome"], "completion_unknown")
+        self.assertEqual(read_json(attempt / "reviewer_reservation_002.json")["role"], "technical_retry")
+        self.assertFalse((attempt / "reviewer_invocation_001.json").exists())
+        self.assertTrue((attempt / "reviewer_invocation_002.json").is_file())
+
+    def test_reviewer_interruption_pauses_and_resumes_without_technical_retry(self) -> None:
+        fake = SuccessfulHarness()
+        hooks = fake.hooks()
+
+        def interrupted(**kwargs):
+            raise SemanticReviewerError(
+                "reviewer_interrupted",
+                "user interrupted review",
+                retryable=False,
+                receipt=failed_reviewer_receipt(kwargs, "reviewer_interrupted", status="interrupted"),
+            )
+
+        hooks.semantic_review = interrupted
+        controller = AgentJobController(self.workspace, hooks=hooks)
+        controller.create(
+            self.request,
+            job_id="job_m4_reviewer_interrupted",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        controller.advance_until_blocked("job_m4_reviewer_interrupted")
+        paused = controller.run_semantic_review("job_m4_reviewer_interrupted")
+
+        self.assertEqual(paused["job"]["state"], "paused_interrupted")
+        self.assertEqual(paused["job"]["usage"]["total_retries"], 0)
+        attempt = Path(paused["paths"]["job_root"]) / "attempts" / "attempt_001"
+        self.assertEqual(read_json(attempt / "stage_results" / "semantic_review.json")["status"], "interrupted")
+        controller.hooks.semantic_review = fake.semantic_review
+        boundary = controller.resume("job_m4_reviewer_interrupted")
+        self.assertEqual(boundary["job"]["state"], "awaiting_semantic_review")
+        completed = controller.run_semantic_review("job_m4_reviewer_interrupted")
+        self.assertEqual(completed["job"]["state"], "completed")
+        self.assertEqual(completed["job"]["usage"]["total_retries"], 0)
+        self.assertEqual(read_json(attempt / "reviewer_reservation_002.json")["role"], "resume")
+
+    def test_permission_profile_block_is_stable_and_resumes_same_attempt(self) -> None:
+        fake = SuccessfulHarness()
+        hooks = fake.hooks()
+
+        def unsupported(**kwargs):
+            raise SemanticReviewerError(
+                "reviewer_permission_profile_unsupported",
+                "upgrade Codex permission profile support",
+                retryable=False,
+                receipt=failed_reviewer_receipt(kwargs, "reviewer_permission_profile_unsupported"),
+            )
+
+        hooks.semantic_review = unsupported
+        controller = AgentJobController(self.workspace, hooks=hooks)
+        controller.create(
+            self.request,
+            job_id="job_m4_permission_profile",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        controller.advance_until_blocked("job_m4_permission_profile")
+        blocked = controller.run_semantic_review("job_m4_permission_profile")
+        self.assertEqual(blocked["job"]["state"], "blocked")
+        self.assertEqual(blocked["job"]["blocker"]["code"], "reviewer_permission_profile_unsupported")
+        self.assertEqual(blocked["job"]["usage"]["total_retries"], 0)
+        controller.hooks.semantic_review = fake.semantic_review
+        controller.resume("job_m4_permission_profile")
+        completed = controller.run_semantic_review("job_m4_permission_profile")
+        self.assertEqual(completed["job"]["state"], "completed")
+        self.assertEqual([row["attempt_id"] for row in completed["attempts"]], ["attempt_001"])
+
+    def test_semantic_review_checks_deadline_counts_runtime_and_obeys_total_retry_budget(self) -> None:
+        fake = SuccessfulHarness()
+        controller, _ = self.controller(fake)
+        controller.create(
+            self.request,
+            job_id="job_m4_review_budget",
+            budget={"max_total_retries": 0},
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        boundary = controller.advance_until_blocked("job_m4_review_budget")
+        before = boundary["job"]["usage"]["active_elapsed_seconds"]
+        successful = controller.hooks.semantic_review
+        calls = 0
+
+        def technical_failure(**kwargs):
+            nonlocal calls
+            calls += 1
+            raise SemanticReviewerError(
+                "reviewer_app_server_failure",
+                "temporary failure",
+                retryable=True,
+                receipt=failed_reviewer_receipt(kwargs, "reviewer_app_server_failure"),
+            )
+
+        clock = iter((100.0, 107.5))
+        controller.hooks.monotonic = lambda: next(clock)
+        controller.hooks.semantic_review = technical_failure
+        failed = controller.run_semantic_review("job_m4_review_budget")
+        self.assertEqual(calls, 1)
+        self.assertAlmostEqual(failed["job"]["usage"]["active_elapsed_seconds"] - before, 7.5, places=5)
+        self.assertNotIn("semantic_review", failed["job"]["usage"]["stage_retries"])
+
+        controller2, fake2 = self.controller(SuccessfulHarness())
+        controller2.create(
+            self.request,
+            job_id="job_m4_review_deadline",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        deadline = controller2.advance_until_blocked("job_m4_review_deadline")
+        manifest = deadline["job"]
+        manifest["usage"]["active_elapsed_seconds"] = manifest["budget"]["soft_deadline_seconds"]
+        controller2.store.write_manifest(manifest)
+        blocked = controller2.run_semantic_review("job_m4_review_deadline")
+        self.assertEqual(blocked["job"]["state"], "needs_user_decision")
+        self.assertEqual(blocked["job"]["blocker"]["code"], "soft_deadline_reached")
+        self.assertEqual(fake2.semantic_calls, 0)
 
     def test_zero_reviewer_invocation_budget_never_calls_reviewer(self) -> None:
         controller, fake = self.controller()
@@ -1292,6 +1550,68 @@ class AgentJobControllerTests(unittest.TestCase):
         unlisted["objects"][0]["physics"]["mass_kg"] = 0.2
         with self.assertRaisesRegex(ValueError, "allowed_adjustments"):
             controller.resume("job_frozen_policy", revised_case_spec=unlisted, revision_reason="change mass")
+
+    def test_intent_projection_opens_only_constrained_non_hard_leaf_paths(self) -> None:
+        fake = SuccessfulHarness(fail_verifier=True)
+        controller, _ = self.controller(fake)
+        seed = case_spec_v2_fixture()
+        seed["provenance"]["intent_parameter_analysis"] = [
+            {
+                "path": "$.scene.duration_s",
+                "requirement_level": "hard",
+                "reason": "the user explicitly fixed duration",
+                "constraint": None,
+            },
+            {
+                "path": "$.observation_requirements",
+                "requirement_level": "inferred",
+                "reason": "invalid subtree authorization must fail closed",
+                "constraint": {"kind": "list", "min_items": 1, "max_items": 5},
+            },
+        ]
+        controller.create(
+            self.request,
+            job_id="job_intent_leaf_scope",
+            publication_tier="local_preview",
+            seed_case_spec=seed,
+        )
+        blocked = controller.advance_until_blocked("job_intent_leaf_scope")
+        intent = read_json(blocked["paths"]["intent_contract"])
+        self.assertEqual(intent["allowed_adjustments"], {"paths": [], "ranges": {}})
+        revised = copy.deepcopy(seed)
+        revised["scene"]["duration_s"] = 2.2
+        with self.assertRaisesRegex(ValueError, "allowed_adjustments"):
+            controller.resume(
+                "job_intent_leaf_scope",
+                revised_case_spec=revised,
+                revision_reason="hard duration cannot be auto-adjusted",
+            )
+
+    def test_numeric_adjustment_without_room_in_explicit_range_fails_closed(self) -> None:
+        fake = SuccessfulHarness(fail_verifier=True)
+        controller, _ = self.controller(fake)
+        seed = case_spec_v2_fixture()
+        seed["provenance"]["intent_parameter_analysis"] = [{
+            "path": "$.scene.duration_s",
+            "requirement_level": "inferred",
+            "reason": "bounded inferred duration",
+            "constraint": {"kind": "numeric", "min": 1.5, "max": 2.5},
+        }]
+        controller.create(
+            self.request,
+            job_id="job_intent_numeric_range",
+            publication_tier="local_preview",
+            seed_case_spec=seed,
+        )
+        controller.advance_until_blocked("job_intent_numeric_range")
+        revised = copy.deepcopy(seed)
+        revised["scene"]["duration_s"] = 2.6
+        with self.assertRaisesRegex(ValueError, "allowed range"):
+            controller.resume(
+                "job_intent_numeric_range",
+                revised_case_spec=revised,
+                revision_reason="out-of-range duration",
+            )
 
     def test_ambiguity_amendment_requires_exact_identity_and_decision(self) -> None:
         fake = SuccessfulHarness()

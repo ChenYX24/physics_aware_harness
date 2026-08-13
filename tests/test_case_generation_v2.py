@@ -88,6 +88,7 @@ def expansion_fixture() -> dict[str, Any]:
         "expected_behavior_analysis": {},
         "observation_analysis": {},
         "backend_constraints": {},
+        "parameter_analysis": [],
         "ambiguities": [],
         "assumptions": [],
     }

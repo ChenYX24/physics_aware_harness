@@ -25,9 +25,9 @@ class EvidenceBundleTests(unittest.TestCase):
         write_json(
             self.run_dir / "trajectory.json",
             [
-                {"frame": 0, "time_s": 0.0, "objects": {"ball": {"position": [0, 0, 1]}}},
-                {"frame": 1, "time_s": 0.5, "objects": {"ball": {"position": [0, 0, 0.5]}}},
-                {"frame": 2, "time_s": 1.0, "objects": {"ball": {"position": [0, 0, 0]}}},
+                {"frame": 0, "time_s": 0.0, "objects": {"ball": {"position": [0, 0, 1], "velocity_m_s": [0, 0, -1], "status": "falling"}}},
+                {"frame": 1, "time_s": 0.5, "objects": {"ball": {"position": [0, 0, 0.5], "velocity_m_s": [0, 0, -2], "status": "impact"}}},
+                {"frame": 2, "time_s": 1.0, "objects": {"ball": {"position": [0, 0, 0], "velocity_m_s": [0, 0, 0], "status": "resting"}}},
             ],
         )
         write_json(
@@ -92,6 +92,14 @@ class EvidenceBundleTests(unittest.TestCase):
             "front", "side", "front", "side", "front", "side"
         ])
         self.assertEqual(len([row for row in manifest["artifacts"] if row["kind"] == "multi_view_montage"]), 3)
+        trajectory = manifest["trajectory_summary"]
+        self.assertEqual(len(trajectory["sampled_frames"]), 3)
+        ball = trajectory["sampled_frames"][1]["objects"][0]
+        self.assertEqual(ball["transform"]["position"]["values"], [0.0, 0.0, 0.5])
+        self.assertEqual(ball["linear_velocity"]["values"], [0.0, 0.0, -2.0])
+        self.assertEqual(ball["state"], [{"field": "status", "value": "impact"}])
+        self.assertEqual([row["after"][0]["value"] for row in trajectory["state_transitions"]], ["impact", "resting"])
+        self.assertEqual(trajectory["readable_ranges"][1]["event_refs"], ["contact_000"])
         self.assertIn("intent_amendments_snapshot", {row["artifact_id"] for row in manifest["artifacts"]})
         self.assertTrue(Path(result["manifest_path"]).is_file())
         self.assertEqual(result["stage_result"]["status"], "completed")

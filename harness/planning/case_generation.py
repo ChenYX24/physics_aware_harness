@@ -4,6 +4,7 @@ import base64
 import copy
 import hashlib
 import json
+import math
 import mimetypes
 import os
 import re
@@ -52,6 +53,7 @@ EXPANSION_FIELDS = (
     "observation_analysis",
     "backend_constraints",
     "asset_source_constraints",
+    "parameter_analysis",
     "ambiguities",
     "assumptions",
 )
@@ -59,6 +61,7 @@ EXPANSION_ANALYSIS_LIST_FIELDS = (
     "object_analysis",
     "event_and_relation_analysis",
     "asset_analysis",
+    "parameter_analysis",
     "ambiguities",
     "assumptions",
 )
@@ -598,7 +601,77 @@ def _normalize_expansion(payload: Mapping[str, Any]) -> dict[str, Any]:
             # the stricter no-fallback meaning used by CaseSpec generation.
             constraint["fallback_order"] = []
     _validate_asset_source_constraints(expansion)
+    _validate_parameter_analysis(expansion)
     return expansion
+
+
+def _validate_parameter_analysis(expansion: Mapping[str, Any]) -> None:
+    rows = expansion.get("parameter_analysis")
+    if not isinstance(rows, list):
+        raise ValueError("expansion.parameter_analysis must be a list")
+    seen: set[str] = set()
+    for index, row in enumerate(rows):
+        path = f"expansion.parameter_analysis[{index}]"
+        if not isinstance(row, Mapping) or set(row) != {
+            "path",
+            "requirement_level",
+            "reason",
+            "constraint",
+        }:
+            raise ValueError(f"{path} must contain path, requirement_level, reason, and constraint")
+        case_path = row.get("path")
+        if not isinstance(case_path, str) or not re.fullmatch(r"\$\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", case_path):
+            raise ValueError(f"{path}.path must be a canonical CaseSpec object path")
+        if case_path in seen:
+            raise ValueError(f"{path}.path must be unique")
+        seen.add(case_path)
+        level = row.get("requirement_level")
+        if level not in {"hard", "soft", "inferred"}:
+            raise ValueError(f"{path}.requirement_level is invalid")
+        if not isinstance(row.get("reason"), str) or not row["reason"].strip():
+            raise ValueError(f"{path}.reason must be non-empty")
+        constraint = row.get("constraint")
+        if level == "hard":
+            if constraint is not None:
+                raise ValueError(f"{path}.constraint must be null for a hard requirement")
+            continue
+        if not isinstance(constraint, Mapping):
+            raise ValueError(f"{path}.constraint is required for an automatically adjustable parameter")
+        kind = constraint.get("kind")
+        if kind == "numeric":
+            if set(constraint) != {"kind", "min", "max"}:
+                raise ValueError(f"{path}.constraint numeric fields are invalid")
+            minimum, maximum = constraint.get("min"), constraint.get("max")
+            if (
+                not isinstance(minimum, (int, float))
+                or isinstance(minimum, bool)
+                or not isinstance(maximum, (int, float))
+                or isinstance(maximum, bool)
+                or not math.isfinite(float(minimum))
+                or not math.isfinite(float(maximum))
+                or minimum > maximum
+            ):
+                raise ValueError(f"{path}.constraint numeric range is invalid")
+        elif kind == "list":
+            if set(constraint) != {"kind", "min_items", "max_items"}:
+                raise ValueError(f"{path}.constraint list fields are invalid")
+            minimum, maximum = constraint.get("min_items"), constraint.get("max_items")
+            if (
+                not isinstance(minimum, int)
+                or isinstance(minimum, bool)
+                or not isinstance(maximum, int)
+                or isinstance(maximum, bool)
+                or minimum < 0
+                or minimum > maximum
+            ):
+                raise ValueError(f"{path}.constraint list range is invalid")
+        elif kind == "enum":
+            if set(constraint) != {"kind", "values"} or not isinstance(constraint.get("values"), list) or not constraint["values"]:
+                raise ValueError(f"{path}.constraint enum values are invalid")
+            if any(isinstance(value, (dict, list)) for value in constraint["values"]):
+                raise ValueError(f"{path}.constraint enum values must be JSON scalars")
+        else:
+            raise ValueError(f"{path}.constraint kind is invalid")
 
 
 def _validate_asset_source_constraints(expansion: Mapping[str, Any]) -> None:
@@ -971,8 +1044,14 @@ FIELD-BY-FIELD INSTRUCTIONS
    solver signals, and what evidence is needed. Do not emit exact camera transforms.
 10. backend_constraints: an object describing required solver capabilities and the explicit requested
    backend, if any. Never contradict request.execution_constraints.requested_backend.
-11. ambiguities: an array of unresolved questions that could materially change the case.
-12. assumptions: an array of conservative assumptions used to make the case executable. Assumptions
+11. parameter_analysis: an array mapping only concrete CaseSpec leaf paths to hard, soft, or inferred
+    requirements. Use canonical object paths such as $.scene.duration_s or
+    $.observation_requirements.cameras; never name an entire object subtree. A hard user requirement
+    has constraint null and can never be auto-adjusted. Every soft/inferred numeric leaf requires an
+    explicit numeric min/max constraint; list leaves require min_items/max_items; scalar alternatives
+    require an enum values constraint. Do not classify an explicit user requirement as soft/inferred.
+12. ambiguities: an array of unresolved questions that could materially change the case.
+13. assumptions: an array of conservative assumptions used to make the case executable. Assumptions
     must not grant permissions, licenses, or evidence.
 
 TEXT, IMAGE, AND ASSET RULES
@@ -1004,6 +1083,7 @@ def _expansion_contract() -> dict[str, Any]:
             "event_and_relation_analysis": "array",
             "asset_analysis": "array",
             "asset_source_constraints": "array",
+            "parameter_analysis": "array",
             "expected_behavior_analysis": "object",
             "observation_analysis": "object",
             "backend_constraints": "object",
@@ -1017,6 +1097,12 @@ def _expansion_contract() -> dict[str, Any]:
             "requirement": "preferred or required",
             "fallback_order": ["zero or more allowed Provider IDs in priority order"],
             "allow_proxy": "boolean",
+        },
+        "parameter_analysis_shape": {
+            "path": "specific canonical CaseSpec leaf path",
+            "requirement_level": "hard, soft, or inferred",
+            "reason": "non-empty provenance explanation",
+            "constraint": "null for hard; otherwise numeric {kind,min,max}, list {kind,min_items,max_items}, or enum {kind,values}",
         },
         "output": "one JSON object only; no markdown or prose outside JSON",
     }

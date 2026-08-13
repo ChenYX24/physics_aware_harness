@@ -116,6 +116,7 @@ class CodexAppServerReviewer:
         bundle_manifest: Mapping[str, Any],
         invocation_count: int,
         include_original_images: bool,
+        lifecycle_callback: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         started_at = utc_now()
         bundle_dir = Path(bundle_dir).resolve(strict=True)
@@ -182,6 +183,8 @@ class CodexAppServerReviewer:
                 bufsize=1,
                 env=self._app_server_environment(executable),
             )
+            if lifecycle_callback is not None:
+                lifecycle_callback("started")
             if process.stdin is None or process.stdout is None:
                 self._raise("reviewer_app_server_start_failed", "codex app-server stdio is unavailable", retryable=True, receipt=receipt)
             messages: queue.Queue[dict[str, Any] | BaseException | None] = queue.Queue()
@@ -326,6 +329,8 @@ class CodexAppServerReviewer:
                 self._raise("reviewer_protocol_error", "turn/start returned no turn id", retryable=True, receipt=receipt)
             receipt["turn_id"] = turn_id
             raw_output = self._wait_turn(messages, thread_id, turn_id)
+            if lifecycle_callback is not None:
+                lifecycle_callback("output_received")
             try:
                 decoded = json.loads(raw_output)
             except json.JSONDecodeError as exc:
@@ -462,7 +467,9 @@ class CodexAppServerReviewer:
             "including decisions in inputs/intent_amendments.json directly against manifest.json, "
             "evidence_summary.json, and the supplied visual evidence. "
             "Return pass/fail/uncertain for every recorded requirement. A technically valid CaseSpec may still "
-            "misunderstand the user. Do not treat missing evidence as pass. Cite only artifact_id values from manifest.json."
+            "misunderstand the user. Do not treat missing evidence as pass. Cite only artifact_id values from manifest.json. "
+            "For trajectory evidence, inspect trajectory_summary.sampled_frames, readable_ranges, and state_transitions; "
+            "a trajectory_range citation must use the exact start_time_s and end_time_s of one declared readable range."
         )
         items: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
         allowed_kinds = {"keyframe", "multi_view_montage"}

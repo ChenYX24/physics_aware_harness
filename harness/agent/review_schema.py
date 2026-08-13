@@ -11,8 +11,9 @@ from harness.agent.job_schema import stable_digest, validate_attempt_id, validat
 
 
 REVISION_PROPOSAL_SCHEMA_VERSION = "harness_case_spec_revision_proposal_v1"
-EVIDENCE_BUNDLE_SCHEMA_VERSION = "harness_evidence_bundle_v1"
+EVIDENCE_BUNDLE_SCHEMA_VERSION = "harness_evidence_bundle_v2"
 REVIEWER_RECEIPT_SCHEMA_VERSION = "harness_semantic_reviewer_receipt_v2"
+REVIEWER_INVOCATION_SCHEMA_VERSION = "harness_semantic_reviewer_invocation_v1"
 SEMANTIC_REVIEW_SCHEMA_VERSION = "harness_semantic_review_v1"
 
 REPAIR_LAYERS = {
@@ -143,7 +144,22 @@ class EvidenceBundleManifest:
                 raise ValueError("event selection frame_index must be non-negative")
             _string_list(value["event_refs"], "event_refs")
         trajectory = _mapping(data["trajectory_summary"], "trajectory_summary")
-        _exact(trajectory, {"source_path", "source_sha256", "frame_count", "start_time_s", "end_time_s", "objects"}, "trajectory_summary")
+        _exact(
+            trajectory,
+            {
+                "source_path",
+                "source_sha256",
+                "frame_count",
+                "start_time_s",
+                "end_time_s",
+                "objects",
+                "sampling",
+                "sampled_frames",
+                "readable_ranges",
+                "state_transitions",
+            },
+            "trajectory_summary",
+        )
         _safe_relative(trajectory["source_path"], "trajectory_summary.source_path")
         _sha256(trajectory["source_sha256"], "trajectory_summary.source_sha256")
         if not isinstance(trajectory["frame_count"], int) or trajectory["frame_count"] < 1:
@@ -152,8 +168,149 @@ class EvidenceBundleManifest:
         _number(trajectory["end_time_s"], "trajectory_summary.end_time_s")
         if trajectory["start_time_s"] > trajectory["end_time_s"]:
             raise ValueError("trajectory_summary time range is invalid")
-        if not isinstance(trajectory["objects"], list):
-            raise ValueError("trajectory_summary.objects must be a list")
+        _string_list(trajectory["objects"], "trajectory_summary.objects")
+        if len(trajectory["objects"]) != len(set(trajectory["objects"])):
+            raise ValueError("trajectory_summary.objects must be unique")
+        sampling = _mapping(trajectory["sampling"], "trajectory_summary.sampling")
+        _exact(
+            sampling,
+            {
+                "strategy",
+                "max_sample_frames",
+                "selected_frame_count",
+                "omitted_frame_count",
+                "state_transition_count",
+                "state_transitions_included",
+            },
+            "trajectory_summary.sampling",
+        )
+        if sampling["strategy"] != "uniform_event_state_v1":
+            raise ValueError("trajectory sampling strategy is invalid")
+        for field in (
+            "max_sample_frames",
+            "selected_frame_count",
+            "omitted_frame_count",
+            "state_transition_count",
+            "state_transitions_included",
+        ):
+            if not isinstance(sampling[field], int) or isinstance(sampling[field], bool) or sampling[field] < 0:
+                raise ValueError(f"trajectory_summary.sampling.{field} must be a non-negative integer")
+        samples = trajectory["sampled_frames"]
+        if not isinstance(samples, list) or not samples:
+            raise ValueError("trajectory_summary.sampled_frames must be a non-empty list")
+        sample_by_index: dict[int, Mapping[str, Any]] = {}
+        prior_frame_index = -1
+        for index, sample in enumerate(samples):
+            value = _mapping(sample, f"trajectory_summary.sampled_frames[{index}]")
+            _exact(value, {"frame_index", "time_s", "reasons", "objects"}, f"trajectory_summary.sampled_frames[{index}]")
+            frame_index = value["frame_index"]
+            if (
+                not isinstance(frame_index, int)
+                or isinstance(frame_index, bool)
+                or not 0 <= frame_index < trajectory["frame_count"]
+                or frame_index <= prior_frame_index
+            ):
+                raise ValueError("trajectory sampled frame indices must be unique, ordered, and in range")
+            prior_frame_index = frame_index
+            _number(value["time_s"], "trajectory sample time_s")
+            if not trajectory["start_time_s"] <= value["time_s"] <= trajectory["end_time_s"]:
+                raise ValueError("trajectory sampled frame time_s is outside the trajectory")
+            _string_list(value["reasons"], "trajectory sample reasons")
+            if not isinstance(value["objects"], list):
+                raise ValueError("trajectory sample objects must be a list")
+            object_ids: set[str] = set()
+            for object_index, object_state in enumerate(value["objects"]):
+                state = _mapping(object_state, f"trajectory sample objects[{object_index}]")
+                _exact(
+                    state,
+                    {"object_id", "transform", "linear_velocity", "angular_velocity", "state"},
+                    f"trajectory sample objects[{object_index}]",
+                )
+                _nonempty(state["object_id"], "trajectory sample object_id")
+                if state["object_id"] in object_ids or state["object_id"] not in trajectory["objects"]:
+                    raise ValueError("trajectory sample object IDs must be unique and declared")
+                object_ids.add(state["object_id"])
+                transform = _mapping(state["transform"], "trajectory sample transform")
+                _exact(transform, {"position", "rotation", "scale"}, "trajectory sample transform")
+                for field in ("position", "rotation", "scale"):
+                    _state_vector(transform[field], f"trajectory sample transform.{field}")
+                _state_vector(state["linear_velocity"], "trajectory sample linear_velocity")
+                _state_vector(state["angular_velocity"], "trajectory sample angular_velocity")
+                _state_fields(state["state"], "trajectory sample state")
+            sample_by_index[frame_index] = value
+        if sampling["selected_frame_count"] != len(samples):
+            raise ValueError("trajectory selected_frame_count does not match sampled_frames")
+        if sampling["omitted_frame_count"] != trajectory["frame_count"] - len(samples):
+            raise ValueError("trajectory omitted_frame_count does not match frame_count")
+        ranges = trajectory["readable_ranges"]
+        if not isinstance(ranges, list) or not ranges:
+            raise ValueError("trajectory_summary.readable_ranges must be a non-empty list")
+        range_ids: set[str] = set()
+        for index, readable in enumerate(ranges):
+            value = _mapping(readable, f"trajectory_summary.readable_ranges[{index}]")
+            _exact(
+                value,
+                {
+                    "range_id",
+                    "start_frame_index",
+                    "end_frame_index",
+                    "start_time_s",
+                    "end_time_s",
+                    "sample_frame_indices",
+                    "event_refs",
+                },
+                f"trajectory_summary.readable_ranges[{index}]",
+            )
+            _nonempty(value["range_id"], "trajectory readable range_id")
+            if value["range_id"] in range_ids:
+                raise ValueError("trajectory readable range IDs must be unique")
+            range_ids.add(value["range_id"])
+            start_index, end_index = value["start_frame_index"], value["end_frame_index"]
+            if (
+                not isinstance(start_index, int)
+                or isinstance(start_index, bool)
+                or not isinstance(end_index, int)
+                or isinstance(end_index, bool)
+                or start_index > end_index
+                or start_index not in sample_by_index
+                or end_index not in sample_by_index
+            ):
+                raise ValueError("trajectory readable range endpoints must be sampled frames")
+            _number(value["start_time_s"], "trajectory readable range start_time_s")
+            _number(value["end_time_s"], "trajectory readable range end_time_s")
+            if (
+                not math.isclose(float(value["start_time_s"]), float(sample_by_index[start_index]["time_s"]), abs_tol=1e-9)
+                or not math.isclose(float(value["end_time_s"]), float(sample_by_index[end_index]["time_s"]), abs_tol=1e-9)
+            ):
+                raise ValueError("trajectory readable range times must match sampled endpoints")
+            indices = value["sample_frame_indices"]
+            if (
+                not isinstance(indices, list)
+                or not indices
+                or indices != sorted(set(indices))
+                or indices[0] != start_index
+                or indices[-1] != end_index
+                or any(frame_index not in sample_by_index for frame_index in indices)
+            ):
+                raise ValueError("trajectory readable range must list its ordered sampled frames")
+            _string_list(value["event_refs"], "trajectory readable range event_refs")
+        transitions = trajectory["state_transitions"]
+        if not isinstance(transitions, list):
+            raise ValueError("trajectory_summary.state_transitions must be a list")
+        for index, transition in enumerate(transitions):
+            value = _mapping(transition, f"trajectory_summary.state_transitions[{index}]")
+            _exact(value, {"object_id", "frame_index", "time_s", "before", "after"}, f"trajectory_summary.state_transitions[{index}]")
+            if value["object_id"] not in trajectory["objects"]:
+                raise ValueError("trajectory state transition object is not declared")
+            if not isinstance(value["frame_index"], int) or not 0 <= value["frame_index"] < trajectory["frame_count"]:
+                raise ValueError("trajectory state transition frame is outside the trajectory")
+            _number(value["time_s"], "trajectory state transition time_s")
+            _state_fields(value["before"], "trajectory state transition before")
+            _state_fields(value["after"], "trajectory state transition after")
+        if sampling["state_transitions_included"] != len(transitions):
+            raise ValueError("trajectory state_transitions_included does not match state_transitions")
+        if sampling["state_transition_count"] < len(transitions):
+            raise ValueError("trajectory state_transition_count cannot be smaller than included transitions")
         if not isinstance(data["contact_timeline"], list) or any(not isinstance(row, Mapping) for row in data["contact_timeline"]):
             raise ValueError("contact_timeline must be a list of objects")
         contact_ids: set[str] = set()
@@ -172,6 +329,9 @@ class EvidenceBundleManifest:
             if not isinstance(value["objects"], list) or any(not isinstance(item, str) or not item for item in value["objects"]):
                 raise ValueError("contact.objects must be a string list")
             _nonempty(value["kind"], "contact.kind")
+        for readable in ranges:
+            if any(event_id not in contact_ids for event_id in readable["event_refs"]):
+                raise ValueError("trajectory readable range references an unknown contact event")
         for point in points:
             if point["frame_index"] >= trajectory["frame_count"]:
                 raise ValueError("event selection frame_index is outside the trajectory")
@@ -316,6 +476,81 @@ class ReviewerInvocationReceipt:
             raise ValueError("failed Reviewer receipt requires error_code")
         _timestamp(data["started_at"], "started_at")
         _timestamp(data["completed_at"], "completed_at")
+        return cls(data)
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self.data)
+
+
+@dataclass(frozen=True)
+class ReviewerInvocationReservation:
+    data: dict[str, Any]
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> ReviewerInvocationReservation:
+        data = dict(raw)
+        _exact(
+            data,
+            {
+                "schema_version",
+                "job_id",
+                "attempt_id",
+                "invocation_count",
+                "invocation_id",
+                "role",
+                "state",
+                "outcome",
+                "bundle_digest",
+                "input_digest",
+                "usage_counted",
+                "retryable",
+                "receipt_path",
+                "error_code",
+                "created_at",
+                "updated_at",
+            },
+            "reviewer invocation reservation",
+        )
+        if data["schema_version"] != REVIEWER_INVOCATION_SCHEMA_VERSION:
+            raise ValueError("unsupported Reviewer invocation reservation schema")
+        validate_job_id(data["job_id"])
+        validate_attempt_id(data["attempt_id"])
+        if not isinstance(data["invocation_count"], int) or isinstance(data["invocation_count"], bool) or data["invocation_count"] < 1:
+            raise ValueError("Reviewer invocation_count must be positive")
+        if not re.fullmatch(r"reviewer_[0-9a-f]{16}", str(data["invocation_id"])):
+            raise ValueError("Reviewer invocation_id is invalid")
+        if data["role"] not in {"primary", "resume", "technical_retry"}:
+            raise ValueError("Reviewer invocation role is invalid")
+        if data["state"] not in {
+            "reserved",
+            "launching",
+            "started",
+            "output_received",
+            "completion_unknown",
+            "receipt_recorded",
+        }:
+            raise ValueError("Reviewer invocation state is invalid")
+        if data["outcome"] not in {
+            "pending",
+            "completed",
+            "technical_failed",
+            "interrupted",
+            "blocked_configuration",
+            "completion_unknown",
+        }:
+            raise ValueError("Reviewer invocation outcome is invalid")
+        _sha256(data["bundle_digest"], "bundle_digest")
+        _sha256(data["input_digest"], "input_digest")
+        if not isinstance(data["usage_counted"], bool):
+            raise ValueError("Reviewer invocation usage_counted must be boolean")
+        if data["retryable"] is not None and not isinstance(data["retryable"], bool):
+            raise ValueError("Reviewer invocation retryable must be null or boolean")
+        if data["receipt_path"] is not None:
+            _safe_relative(data["receipt_path"], "receipt_path")
+        if data["error_code"] is not None:
+            _nonempty(data["error_code"], "error_code")
+        _timestamp(data["created_at"], "created_at")
+        _timestamp(data["updated_at"], "updated_at")
         return cls(data)
 
     def to_dict(self) -> dict[str, Any]:
@@ -568,6 +803,13 @@ def _validate_evidence_locators(review: Mapping[str, Any], manifest: Mapping[str
                 range_start, range_end = bounds
                 if range_start > range_end or range_start < start_time or range_end > end_time:
                     raise ValueError("semantic evidence trajectory_range is outside the trajectory")
+                readable_ranges = trajectory["readable_ranges"]
+                if not any(
+                    math.isclose(range_start, float(readable["start_time_s"]), rel_tol=0.0, abs_tol=1e-6)
+                    and math.isclose(range_end, float(readable["end_time_s"]), rel_tol=0.0, abs_tol=1e-6)
+                    for readable in readable_ranges
+                ):
+                    raise ValueError("semantic evidence trajectory_range does not identify a readable sampled range")
             contact_event_id = ref["contact_event_id"]
             if contact_event_id is not None:
                 if contact_event_id not in contacts:
@@ -602,3 +844,34 @@ def _parse_trajectory_range(value: str) -> tuple[float, float] | None:
     if not math.isfinite(start) or not math.isfinite(end):
         return None
     return start, end
+
+
+def _state_vector(value: Any, label: str) -> None:
+    if value is None:
+        return
+    data = _mapping(value, label)
+    _exact(data, {"field", "values"}, label)
+    _nonempty(data["field"], f"{label}.field")
+    values = data["values"]
+    if not isinstance(values, list) or not 1 <= len(values) <= 4:
+        raise ValueError(f"{label}.values must contain one to four numbers")
+    for index, item in enumerate(values):
+        _number(item, f"{label}.values[{index}]")
+
+
+def _state_fields(value: Any, label: str) -> None:
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be a list")
+    prior = ""
+    for index, item in enumerate(value):
+        data = _mapping(item, f"{label}[{index}]")
+        _exact(data, {"field", "value"}, f"{label}[{index}]")
+        _nonempty(data["field"], f"{label}[{index}].field")
+        if data["field"] <= prior:
+            raise ValueError(f"{label} fields must be unique and sorted")
+        prior = data["field"]
+        scalar = data["value"]
+        if isinstance(scalar, float) and not math.isfinite(scalar):
+            raise ValueError(f"{label}[{index}].value must be finite")
+        if not isinstance(scalar, (str, int, float, bool)) and scalar is not None:
+            raise ValueError(f"{label}[{index}].value must be a JSON scalar")
