@@ -1,17 +1,18 @@
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any, Mapping
 
-from harness.agent.job_schema import validate_attempt_id, validate_job_id
+from harness.agent.job_schema import stable_digest, validate_attempt_id, validate_job_id
 
 
 REVISION_PROPOSAL_SCHEMA_VERSION = "harness_case_spec_revision_proposal_v1"
 EVIDENCE_BUNDLE_SCHEMA_VERSION = "harness_evidence_bundle_v1"
-REVIEWER_RECEIPT_SCHEMA_VERSION = "harness_semantic_reviewer_receipt_v1"
+REVIEWER_RECEIPT_SCHEMA_VERSION = "harness_semantic_reviewer_receipt_v2"
 SEMANTIC_REVIEW_SCHEMA_VERSION = "harness_semantic_review_v1"
 
 REPAIR_LAYERS = {
@@ -149,10 +150,35 @@ class EvidenceBundleManifest:
             raise ValueError("trajectory_summary.frame_count must be positive")
         _number(trajectory["start_time_s"], "trajectory_summary.start_time_s")
         _number(trajectory["end_time_s"], "trajectory_summary.end_time_s")
+        if trajectory["start_time_s"] > trajectory["end_time_s"]:
+            raise ValueError("trajectory_summary time range is invalid")
         if not isinstance(trajectory["objects"], list):
             raise ValueError("trajectory_summary.objects must be a list")
         if not isinstance(data["contact_timeline"], list) or any(not isinstance(row, Mapping) for row in data["contact_timeline"]):
             raise ValueError("contact_timeline must be a list of objects")
+        contact_ids: set[str] = set()
+        for index, contact in enumerate(data["contact_timeline"]):
+            value = _mapping(contact, f"contact_timeline[{index}]")
+            _exact(value, {"event_id", "frame_index", "time_s", "objects", "kind"}, f"contact_timeline[{index}]")
+            _nonempty(value["event_id"], "contact.event_id")
+            if value["event_id"] in contact_ids:
+                raise ValueError("contact event IDs must be unique")
+            contact_ids.add(value["event_id"])
+            if not isinstance(value["frame_index"], int) or isinstance(value["frame_index"], bool) or not 0 <= value["frame_index"] < trajectory["frame_count"]:
+                raise ValueError("contact frame_index is outside the trajectory")
+            _number(value["time_s"], "contact.time_s")
+            if not trajectory["start_time_s"] <= value["time_s"] <= trajectory["end_time_s"]:
+                raise ValueError("contact time_s is outside the trajectory")
+            if not isinstance(value["objects"], list) or any(not isinstance(item, str) or not item for item in value["objects"]):
+                raise ValueError("contact.objects must be a string list")
+            _nonempty(value["kind"], "contact.kind")
+        for point in points:
+            if point["frame_index"] >= trajectory["frame_count"]:
+                raise ValueError("event selection frame_index is outside the trajectory")
+            if not trajectory["start_time_s"] <= point["time_s"] <= trajectory["end_time_s"]:
+                raise ValueError("event selection time_s is outside the trajectory")
+            if any(event_id not in contact_ids for event_id in point["event_refs"]):
+                raise ValueError("event selection references an unknown contact event")
         artifacts = data["artifacts"]
         if not isinstance(artifacts, list) or not artifacts:
             raise ValueError("Evidence Bundle requires artifacts")
@@ -170,6 +196,8 @@ class EvidenceBundleManifest:
             _nonempty(value["mime_type"], "artifact.mime_type")
             if value["time_s"] is not None:
                 _number(value["time_s"], "artifact.time_s")
+                if not trajectory["start_time_s"] <= value["time_s"] <= trajectory["end_time_s"]:
+                    raise ValueError("artifact time_s is outside the trajectory")
             if value["view_id"] is not None:
                 _nonempty(value["view_id"], "artifact.view_id")
             if value["source_ref"] is not None:
@@ -203,9 +231,12 @@ class ReviewerInvocationReceipt:
                 "model",
                 "model_provider",
                 "requested_new_thread",
-                "sandbox_requested",
-                "sandbox_effective",
-                "readable_roots",
+                "requested_permission_profile",
+                "requested_permission_profile_digest",
+                "active_permission_profile_id",
+                "runtime_workspace_roots",
+                "ephemeral",
+                "shell_environment_policy",
                 "instruction_sources",
                 "network_access",
                 "input_digest",
@@ -232,19 +263,36 @@ class ReviewerInvocationReceipt:
                 _nonempty(data[field], field)
         if data["requested_new_thread"] is not True:
             raise ValueError("Reviewer receipt must prove a new thread was requested")
-        requested = _mapping(data["sandbox_requested"], "sandbox_requested")
-        effective = _mapping(data["sandbox_effective"], "sandbox_effective")
-        if requested.get("type") != "readOnly" or requested.get("networkAccess") is not False:
-            raise ValueError("Reviewer must request readOnly sandbox with network disabled")
-        if data["status"] == "completed" and effective != requested:
-            raise ValueError("completed Reviewer receipt must prove the requested sandbox became effective")
-        roots = data["readable_roots"]
+        requested = _mapping(data["requested_permission_profile"], "requested_permission_profile")
+        _exact(requested, {"id", "filesystem", "network"}, "requested_permission_profile")
+        if not re.fullmatch(r"harness_reviewer_[0-9a-f]{16}", str(requested["id"])):
+            raise ValueError("Reviewer permission profile id is invalid")
+        filesystem = _mapping(requested["filesystem"], "requested_permission_profile.filesystem")
+        if len(filesystem) != 1 or set(filesystem.values()) != {"read"}:
+            raise ValueError("Reviewer permission profile must grant one read-only filesystem root")
+        roots = data["runtime_workspace_roots"]
         if not isinstance(roots, list) or len(roots) != 1:
-            raise ValueError("Reviewer must have exactly one readable root")
-        _nonempty(roots[0], "readable_roots[0]")
-        access = requested.get("access") if isinstance(requested.get("access"), Mapping) else {}
-        if access.get("type") != "restricted" or access.get("readableRoots") != roots:
-            raise ValueError("Reviewer requested sandbox must restrict reads to the recorded root")
+            raise ValueError("Reviewer must have exactly one runtime workspace root")
+        _nonempty(roots[0], "runtime_workspace_roots[0]")
+        if not PurePosixPath(roots[0]).is_absolute():
+            raise ValueError("Reviewer runtime workspace root must be absolute")
+        if list(filesystem) != roots:
+            raise ValueError("Reviewer permission profile filesystem must match its runtime workspace root")
+        network = _mapping(requested["network"], "requested_permission_profile.network")
+        if network != {"enabled": False}:
+            raise ValueError("Reviewer permission profile must disable network access")
+        _sha256(data["requested_permission_profile_digest"], "requested_permission_profile_digest")
+        if data["requested_permission_profile_digest"] != stable_digest(requested):
+            raise ValueError("Reviewer permission profile digest is invalid")
+        if data["ephemeral"] is not True:
+            raise ValueError("Reviewer thread must be ephemeral")
+        shell_policy = _mapping(data["shell_environment_policy"], "shell_environment_policy")
+        _exact(shell_policy, {"inherit", "set", "use_profile"}, "shell_environment_policy")
+        if shell_policy["inherit"] != "none" or shell_policy["use_profile"] is not False:
+            raise ValueError("Reviewer shell must not inherit the host environment or shell profile")
+        shell_set = _mapping(shell_policy["set"], "shell_environment_policy.set")
+        if set(shell_set) != {"PATH"} or not isinstance(shell_set["PATH"], str) or not shell_set["PATH"]:
+            raise ValueError("Reviewer shell environment may only receive a controlled PATH")
         _string_list(data["instruction_sources"], "instruction_sources")
         if data["network_access"] is not False:
             raise ValueError("Reviewer network access must be disabled")
@@ -253,7 +301,16 @@ class ReviewerInvocationReceipt:
             _sha256(data["output_digest"], "output_digest")
         if data["status"] not in {"completed", "failed", "interrupted"}:
             raise ValueError("Reviewer receipt status is invalid")
-        if data["status"] == "completed" and (not data["thread_id"] or not data["turn_id"] or not data["model"] or not data["output_digest"] or data["error_code"] is not None):
+        if data["active_permission_profile_id"] is not None:
+            _nonempty(data["active_permission_profile_id"], "active_permission_profile_id")
+        if data["status"] == "completed" and (
+            not data["thread_id"]
+            or not data["turn_id"]
+            or not data["model"]
+            or not data["output_digest"]
+            or data["error_code"] is not None
+            or data["active_permission_profile_id"] != requested["id"]
+        ):
             raise ValueError("completed Reviewer receipt is incomplete")
         if data["status"] != "completed" and data["error_code"] is None:
             raise ValueError("failed Reviewer receipt requires error_code")
@@ -276,6 +333,7 @@ class SemanticReview:
         *,
         expected_requirement_ids: set[str] | None = None,
         evidence_artifact_ids: set[str] | None = None,
+        evidence_manifest: Mapping[str, Any] | None = None,
     ) -> SemanticReview:
         data = dict(raw)
         _exact(
@@ -363,6 +421,8 @@ class SemanticReview:
             ):
                 raise ValueError("suggested adjustment references an unknown Evidence Bundle artifact")
         _timestamp(data["created_at"], "created_at")
+        if evidence_manifest is not None:
+            _validate_evidence_locators(data, EvidenceBundleManifest.from_dict(evidence_manifest).to_dict())
         return cls(data)
 
     def to_dict(self) -> dict[str, Any]:
@@ -463,10 +523,82 @@ def _safe_relative(value: Any, label: str) -> None:
 
 
 def _number(value: Any, label: str) -> None:
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)):
         raise ValueError(f"{label} must be numeric")
 
 
 def _string_list(value: Any, label: str) -> None:
     if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
         raise ValueError(f"{label} must be a string list")
+
+
+def _validate_evidence_locators(review: Mapping[str, Any], manifest: Mapping[str, Any]) -> None:
+    artifacts = {str(row["artifact_id"]): row for row in manifest["artifacts"]}
+    trajectory = manifest["trajectory_summary"]
+    start_time = float(trajectory["start_time_s"])
+    end_time = float(trajectory["end_time_s"])
+    contacts = {str(row["event_id"]): row for row in manifest["contact_timeline"]}
+    result_kinds = {"structured_summary", "keyframe", "multi_view_montage"}
+    for row in review["requirements"]:
+        has_result_evidence = False
+        for ref in row["evidence_refs"]:
+            artifact = artifacts[str(ref["artifact_id"])]
+            artifact_kind = artifact["kind"]
+            if artifact_kind in result_kinds:
+                has_result_evidence = True
+            time_s = ref["time_s"]
+            if time_s is not None:
+                _number(time_s, "evidence_ref.time_s")
+                if not start_time <= float(time_s) <= end_time:
+                    raise ValueError("semantic evidence time_s is outside the trajectory")
+                if artifact["time_s"] is not None and not math.isclose(
+                    float(time_s), float(artifact["time_s"]), rel_tol=0.0, abs_tol=1e-6
+                ):
+                    raise ValueError("semantic evidence time_s does not locate the referenced artifact")
+            view_id = ref["view_id"]
+            if view_id is not None and artifact["view_id"] != view_id:
+                raise ValueError("semantic evidence view_id does not locate the referenced artifact")
+            trajectory_range = ref["trajectory_range"]
+            if trajectory_range is not None:
+                if artifact_kind != "structured_summary":
+                    raise ValueError("semantic evidence trajectory_range is incompatible with the referenced artifact")
+                bounds = _parse_trajectory_range(trajectory_range)
+                if bounds is None:
+                    raise ValueError("semantic evidence trajectory_range is invalid")
+                range_start, range_end = bounds
+                if range_start > range_end or range_start < start_time or range_end > end_time:
+                    raise ValueError("semantic evidence trajectory_range is outside the trajectory")
+            contact_event_id = ref["contact_event_id"]
+            if contact_event_id is not None:
+                if contact_event_id not in contacts:
+                    raise ValueError("semantic evidence contact_event_id does not exist")
+                if artifact_kind not in result_kinds:
+                    raise ValueError("semantic evidence contact_event_id is incompatible with the referenced artifact")
+                if time_s is not None and not math.isclose(
+                    float(time_s), float(contacts[contact_event_id]["time_s"]), rel_tol=0.0, abs_tol=1e-6
+                ):
+                    raise ValueError("semantic evidence contact_event_id does not match its time_s")
+            if artifact_kind not in result_kinds and any(
+                ref[field] is not None for field in ("time_s", "view_id", "trajectory_range", "contact_event_id")
+            ):
+                raise ValueError("semantic evidence locator is incompatible with the referenced artifact")
+            if artifact_kind == "keyframe" and (time_s is None or view_id is None):
+                raise ValueError("keyframe evidence requires its exact time_s and view_id")
+            if artifact_kind == "multi_view_montage" and time_s is None:
+                raise ValueError("multi-view montage evidence requires its exact time_s")
+        if row["status"] == "pass" and not has_result_evidence:
+            raise ValueError("semantic pass requires result evidence, not only request/input snapshots")
+
+
+def _parse_trajectory_range(value: str) -> tuple[float, float] | None:
+    match = re.fullmatch(
+        r"\s*(\d+(?:\.\d+)?)\s*s?\s*-\s*(\d+(?:\.\d+)?)\s*s?\s*",
+        value,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    start, end = float(match.group(1)), float(match.group(2))
+    if not math.isfinite(start) or not math.isfinite(end):
+        return None
+    return start, end

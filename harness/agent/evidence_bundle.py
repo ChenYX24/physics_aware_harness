@@ -50,9 +50,22 @@ def build_evidence_bundle(
     raw_bundle_dir.mkdir(parents=True, exist_ok=True)
     bundle_dir = raw_bundle_dir.resolve(strict=True)
     manifest_path = bundle_dir / "manifest.json"
+    snapshots = current_evidence_snapshots(
+        attempt_dir=attempt_dir,
+        request=request,
+        intent_contract=intent_contract,
+        intent_amendments=intent_amendments,
+    )
     if manifest_path.is_file():
-        manifest = EvidenceBundleManifest.from_dict(read_json(manifest_path)).to_dict()
-        _validate_materialized_bundle(bundle_dir, manifest)
+        manifest = validate_current_evidence_bundle(
+            manifest_path=manifest_path,
+            job_id=job_id,
+            attempt=attempt,
+            attempt_dir=attempt_dir,
+            expected_candidate_run_dir=run_dir,
+            expected_intent_contract_digest=str(attempt["intent_contract_digest"]),
+            expected_snapshots=snapshots,
+        )
         return {
             "manifest": manifest,
             "manifest_path": str(manifest_path),
@@ -82,15 +95,6 @@ def build_evidence_bundle(
     montages_dir.mkdir(parents=True, exist_ok=True)
 
     artifacts: list[dict[str, Any]] = []
-    snapshots = {
-        "user_request": request,
-        "intent_contract": intent_contract,
-        "intent_amendments": {
-            "schema_version": "harness_effective_intent_amendments_v1",
-            "items": [dict(value) for value in intent_amendments],
-        },
-        "case_spec": read_json(attempt_dir / "case_spec.json"),
-    }
     for name, value in snapshots.items():
         destination = inputs_dir / f"{name}.json"
         write_json(destination, value)
@@ -197,7 +201,16 @@ def build_evidence_bundle(
         }
     ).to_dict()
     write_json(manifest_path, manifest)
-    _validate_materialized_bundle(bundle_dir, manifest)
+    manifest = validate_current_evidence_bundle(
+        manifest_path=manifest_path,
+        job_id=job_id,
+        attempt=attempt,
+        attempt_dir=attempt_dir,
+        expected_candidate_run_dir=run_dir,
+        expected_intent_contract_digest=str(attempt["intent_contract_digest"]),
+        expected_snapshots=snapshots,
+        expected_manifest_digest=stable_digest(manifest),
+    )
     return {
         "manifest": manifest,
         "manifest_path": str(manifest_path),
@@ -208,6 +221,185 @@ def build_evidence_bundle(
             attempt_id=str(attempt["attempt_id"]),
             artifact_refs=[artifact_ref("evidence_bundle", manifest_path, EVIDENCE_BUNDLE_SCHEMA_VERSION)],
         ),
+    }
+
+
+def validate_current_evidence_bundle(
+    *,
+    manifest_path: str | Path,
+    job_id: str,
+    attempt: Mapping[str, Any],
+    attempt_dir: str | Path,
+    expected_candidate_run_dir: str | Path | None = None,
+    expected_intent_contract_digest: str | None = None,
+    expected_snapshots: Mapping[str, Any] | None = None,
+    expected_manifest_digest: str | None = None,
+) -> dict[str, Any]:
+    """Validate that a materialized bundle is the current attempt's exact evidence."""
+
+    try:
+        return _validate_current_evidence_bundle(
+            manifest_path=manifest_path,
+            job_id=job_id,
+            attempt=attempt,
+            attempt_dir=attempt_dir,
+            expected_candidate_run_dir=expected_candidate_run_dir,
+            expected_intent_contract_digest=expected_intent_contract_digest,
+            expected_snapshots=expected_snapshots,
+            expected_manifest_digest=expected_manifest_digest,
+        )
+    except EvidenceBundleError:
+        raise
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise EvidenceBundleError(
+            "evidence_bundle_validation_failed",
+            "Evidence Bundle identity or materialized content cannot be validated",
+        ) from exc
+
+
+def _validate_current_evidence_bundle(
+    *,
+    manifest_path: str | Path,
+    job_id: str,
+    attempt: Mapping[str, Any],
+    attempt_dir: str | Path,
+    expected_candidate_run_dir: str | Path | None,
+    expected_intent_contract_digest: str | None,
+    expected_snapshots: Mapping[str, Any] | None,
+    expected_manifest_digest: str | None,
+) -> dict[str, Any]:
+    raw_attempt_dir = Path(attempt_dir).absolute()
+    resolved_attempt_dir = raw_attempt_dir.resolve(strict=True)
+    raw_manifest_path = Path(manifest_path).absolute()
+    canonical_manifest_path = resolved_attempt_dir / "evidence_bundle" / "manifest.json"
+    try:
+        manifest_file = raw_manifest_path.resolve(strict=True)
+    except OSError as exc:
+        raise EvidenceBundleError("evidence_manifest_missing", "Evidence Bundle manifest is missing") from exc
+    if (
+        manifest_file != canonical_manifest_path
+        or _path_chain_has_symlink(raw_manifest_path, resolved_attempt_dir)
+        or not manifest_file.is_file()
+    ):
+        raise EvidenceBundleError("evidence_manifest_path_invalid", "Evidence Bundle manifest path is not canonical")
+
+    manifest = EvidenceBundleManifest.from_dict(read_json(manifest_file)).to_dict()
+    manifest_digest = stable_digest(manifest)
+    if expected_manifest_digest is not None and manifest_digest != expected_manifest_digest:
+        raise EvidenceBundleError("evidence_manifest_identity_mismatch", "Evidence Bundle manifest changed")
+
+    attempt_id = str(attempt.get("attempt_id") or "")
+    current_intent_digest = str(expected_intent_contract_digest or attempt.get("intent_contract_digest") or "")
+    case_spec_path = resolved_attempt_dir / "case_spec.json"
+    try:
+        case_spec_digest = stable_digest(read_json(case_spec_path))
+    except (OSError, ValueError, TypeError) as exc:
+        raise EvidenceBundleError("evidence_case_spec_identity_mismatch", "Current CaseSpec cannot be validated") from exc
+    if (
+        manifest["job_id"] != job_id
+        or manifest["attempt_id"] != attempt_id
+        or str(attempt.get("job_id") or job_id) != job_id
+        or manifest["case_spec_digest"] != str(attempt.get("case_spec_digest") or "")
+        or manifest["case_spec_digest"] != case_spec_digest
+        or manifest["intent_contract_digest"] != str(attempt.get("intent_contract_digest") or "")
+        or manifest["intent_contract_digest"] != current_intent_digest
+    ):
+        raise EvidenceBundleError(
+            "evidence_bundle_identity_mismatch",
+            "Evidence Bundle does not belong to the current Job, attempt, CaseSpec, and Intent Contract",
+        )
+
+    candidate_path = resolved_attempt_dir / "candidate_run.json"
+    try:
+        candidate = read_json(candidate_path)
+        raw_run_dir = Path(str(candidate["run_dir"])).absolute()
+        run_dir = raw_run_dir.resolve(strict=True)
+        candidate_root = (resolved_attempt_dir / "runs" / "candidate").resolve(strict=True)
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise EvidenceBundleError("evidence_candidate_identity_mismatch", "Current Candidate identity cannot be validated") from exc
+    manifest_run_dir = (resolved_attempt_dir / manifest["candidate_run"]["path"]).resolve(strict=True)
+    expected_manifest_run_path = run_dir.relative_to(resolved_attempt_dir).as_posix()
+    if (
+        not run_dir.is_relative_to(candidate_root)
+        or _path_chain_has_symlink(raw_run_dir, resolved_attempt_dir / "runs" / "candidate")
+        or manifest["candidate_run"]["path"] != expected_manifest_run_path
+        or manifest_run_dir != run_dir
+        or manifest["candidate_run"]["fingerprint"] != stable_digest(candidate)
+    ):
+        raise EvidenceBundleError("evidence_candidate_identity_mismatch", "Evidence Bundle Candidate identity changed")
+    if expected_candidate_run_dir is not None and run_dir != Path(expected_candidate_run_dir).resolve(strict=True):
+        raise EvidenceBundleError("evidence_candidate_identity_mismatch", "Evidence Bundle uses a different Candidate run")
+
+    expected_reports = {
+        "verifier": {"harness_verifier.json", "verifier_report.json"},
+        "render_sync": {"render_sync_report.json"},
+        "quality_gate": {"quality_report.json"},
+    }
+    for name, gate in manifest["technical_gates"].items():
+        raw_gate_path = resolved_attempt_dir / gate["path"]
+        gate_path = raw_gate_path.resolve(strict=True)
+        sidecar = run_dir / "stage_results" / f"{'quality_gate' if name == 'quality_gate' else name}.json"
+        if (
+            gate_path.parent != run_dir
+            or gate_path.name not in expected_reports[name]
+            or _path_chain_has_symlink(raw_gate_path, resolved_attempt_dir)
+            or _sha256_file(gate_path) != gate["sha256"]
+            or StageResult.from_dict(read_json(sidecar)).data["status"] != "completed"
+        ):
+            raise EvidenceBundleError("evidence_technical_gate_identity_mismatch", f"Current {name} gate identity changed")
+        report = read_json(gate_path)
+        passed = report.get("hard_gate_passed") is True if name == "quality_gate" else report.get("status") == "pass"
+        if not passed:
+            raise EvidenceBundleError("evidence_technical_gate_identity_mismatch", f"Current {name} gate no longer passes")
+
+    trajectory = manifest["trajectory_summary"]
+    raw_trajectory_path = resolved_attempt_dir / trajectory["source_path"]
+    trajectory_path = raw_trajectory_path.resolve(strict=True)
+    if (
+        not trajectory_path.is_relative_to(run_dir)
+        or _path_chain_has_symlink(raw_trajectory_path, resolved_attempt_dir)
+        or _sha256_file(trajectory_path) != trajectory["source_sha256"]
+    ):
+        raise EvidenceBundleError("evidence_trajectory_identity_mismatch", "Current trajectory identity changed")
+
+    bundle_dir = manifest_file.parent
+    _validate_materialized_bundle(bundle_dir, manifest)
+    artifacts = {str(row["artifact_id"]): row for row in manifest["artifacts"]}
+    if expected_snapshots is not None:
+        for name, expected in expected_snapshots.items():
+            artifact_id = f"{name}_snapshot"
+            artifact = artifacts.get(artifact_id)
+            expected_path = f"inputs/{name}.json"
+            if artifact is None or artifact["kind"] != "input_snapshot" or artifact["path"] != expected_path:
+                raise EvidenceBundleError("evidence_input_snapshot_mismatch", f"Evidence Bundle lacks current {name} snapshot")
+            if stable_digest(read_json(bundle_dir / expected_path)) != stable_digest(expected):
+                raise EvidenceBundleError("evidence_input_snapshot_mismatch", f"Evidence Bundle {name} snapshot is stale")
+        request = expected_snapshots.get("user_request")
+        if isinstance(request, Mapping):
+            for row in request.get("inputs") or []:
+                if not isinstance(row, Mapping) or row.get("kind") != "image":
+                    continue
+                artifact = artifacts.get(f"original_{_safe_id(str(row.get('input_id') or 'input'))}")
+                if artifact is None or artifact["kind"] != "original_input_snapshot" or artifact["sha256"] != str(row.get("sha256") or ""):
+                    raise EvidenceBundleError("evidence_input_snapshot_mismatch", "Evidence Bundle original image snapshot is stale")
+    return manifest
+
+
+def current_evidence_snapshots(
+    *,
+    attempt_dir: Path,
+    request: Mapping[str, Any],
+    intent_contract: Mapping[str, Any],
+    intent_amendments: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "user_request": dict(request),
+        "intent_contract": dict(intent_contract),
+        "intent_amendments": {
+            "schema_version": "harness_effective_intent_amendments_v1",
+            "items": [dict(value) for value in intent_amendments],
+        },
+        "case_spec": read_json(attempt_dir / "case_spec.json"),
     }
 
 
@@ -467,12 +659,23 @@ def _safe_id(value: str) -> str:
 def _path_chain_has_symlink(path: Path, root: Path) -> bool:
     candidate = path if path.is_absolute() else path.absolute()
     raw_root = root if root.is_absolute() else root.absolute()
+    resolved_root = raw_root.resolve(strict=True)
     try:
         relative = candidate.relative_to(raw_root)
     except ValueError:
-        return True
-    root = raw_root.resolve(strict=True)
-    current = root
+        matching_root = next(
+            (
+                parent
+                for parent in candidate.parents
+                if parent.exists() and parent.resolve(strict=True) == resolved_root
+            ),
+            None,
+        )
+        if matching_root is None:
+            return True
+        relative = candidate.relative_to(matching_root)
+        raw_root = matching_root
+    current = raw_root
     for part in relative.parts:
         current = current / part
         if current.is_symlink():

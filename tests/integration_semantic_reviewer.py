@@ -77,7 +77,17 @@ class RealCodexSemanticReviewerIntegrationTests(unittest.TestCase):
             receipt = ReviewerInvocationReceipt.from_dict(result["receipt"]).to_dict()
             self.assertEqual(receipt["status"], "completed")
             self.assertTrue(receipt["requested_new_thread"])
-            self.assertEqual(receipt["sandbox_effective"]["type"], "readOnly")
+            self.assertTrue(receipt["ephemeral"])
+            self.assertEqual(
+                receipt["active_permission_profile_id"],
+                receipt["requested_permission_profile"]["id"],
+            )
+            self.assertEqual(receipt["runtime_workspace_roots"], [str(bundle.resolve())])
+            self.assertEqual(
+                receipt["requested_permission_profile"]["filesystem"],
+                {str(bundle.resolve()): "read"},
+            )
+            self.assertEqual(receipt["shell_environment_policy"]["inherit"], "none")
             self.assertFalse(receipt["network_access"])
             self.assertEqual(inside_canary.read_text(encoding="utf-8"), "unchanged\n")
             self.assertEqual(outside_canary.read_text(encoding="utf-8"), "unchanged\n")

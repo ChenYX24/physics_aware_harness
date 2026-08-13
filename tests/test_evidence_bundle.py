@@ -153,6 +153,89 @@ class EvidenceBundleTests(unittest.TestCase):
                 command_runner=self.fake_ffmpeg,
             )
 
+    def test_reuse_rejects_foreign_or_stale_bundle_identity(self) -> None:
+        for field, value, code in (
+            ("job_id", "job_foreign_bundle", "identity"),
+            ("attempt_id", "attempt_999", "identity"),
+            ("case_spec_digest", "c" * 64, "identity"),
+            ("intent_contract_digest", "d" * 64, "identity"),
+        ):
+            with self.subTest(field=field):
+                bundle_dir = self.attempt_dir / "evidence_bundle"
+                if bundle_dir.exists():
+                    for path in sorted(bundle_dir.rglob("*"), reverse=True):
+                        if path.is_file():
+                            path.unlink()
+                        elif path.is_dir():
+                            path.rmdir()
+                    bundle_dir.rmdir()
+                result = build_evidence_bundle(
+                    job_id="job_evidence_identity",
+                    attempt=self.attempt,
+                    attempt_dir=self.attempt_dir,
+                    candidate_run_dir=self.run_dir,
+                    request=self.request,
+                    intent_contract=self.intent,
+                    ffmpeg="/usr/bin/true",
+                    command_runner=self.fake_ffmpeg,
+                )
+                manifest = read_json(result["manifest_path"])
+                manifest[field] = value
+                write_json(result["manifest_path"], manifest)
+                with self.assertRaises(EvidenceBundleError) as raised:
+                    build_evidence_bundle(
+                        job_id="job_evidence_identity",
+                        attempt=self.attempt,
+                        attempt_dir=self.attempt_dir,
+                        candidate_run_dir=self.run_dir,
+                        request=self.request,
+                        intent_contract=self.intent,
+                        ffmpeg="/usr/bin/true",
+                        command_runner=self.fake_ffmpeg,
+                    )
+                self.assertEqual(raised.exception.code, f"evidence_bundle_{code}_mismatch")
+
+    def test_reuse_rejects_changed_candidate_or_input_snapshot(self) -> None:
+        result = build_evidence_bundle(
+            job_id="job_evidence_current_inputs",
+            attempt=self.attempt,
+            attempt_dir=self.attempt_dir,
+            candidate_run_dir=self.run_dir,
+            request=self.request,
+            intent_contract=self.intent,
+            ffmpeg="/usr/bin/true",
+            command_runner=self.fake_ffmpeg,
+        )
+        candidate = read_json(self.attempt_dir / "candidate_run.json")
+        candidate["fingerprint"] = "a" * 64
+        write_json(self.attempt_dir / "candidate_run.json", candidate)
+        with self.assertRaisesRegex(EvidenceBundleError, "Candidate identity"):
+            build_evidence_bundle(
+                job_id="job_evidence_current_inputs",
+                attempt=self.attempt,
+                attempt_dir=self.attempt_dir,
+                candidate_run_dir=self.run_dir,
+                request=self.request,
+                intent_contract=self.intent,
+                ffmpeg="/usr/bin/true",
+                command_runner=self.fake_ffmpeg,
+            )
+
+        candidate["fingerprint"] = "f" * 64
+        write_json(self.attempt_dir / "candidate_run.json", candidate)
+        changed_request = {**self.request, "text": "a different immutable request"}
+        with self.assertRaisesRegex(EvidenceBundleError, "snapshot is stale"):
+            build_evidence_bundle(
+                job_id="job_evidence_current_inputs",
+                attempt=self.attempt,
+                attempt_dir=self.attempt_dir,
+                candidate_run_dir=self.run_dir,
+                request=changed_request,
+                intent_contract=self.intent,
+                ffmpeg="/usr/bin/true",
+                command_runner=self.fake_ffmpeg,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
