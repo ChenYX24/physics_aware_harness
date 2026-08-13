@@ -410,8 +410,8 @@ class CodexAppServerReviewer:
         profile_id = str(requested_profile["id"])
         root = next(iter(requested_profile["filesystem"]))
         config = {
-            f"permissions.{profile_id}.filesystem.{json.dumps(root, ensure_ascii=False)}": "read",
-            f"permissions.{profile_id}.network.enabled": False,
+            f"permissions.{profile_id}.filesystem": {root: "read"},
+            f"permissions.{profile_id}.network": {"enabled": False},
             "shell_environment_policy.inherit": shell_environment_policy["inherit"],
             "shell_environment_policy.set.PATH": shell_environment_policy["set"]["PATH"],
             "shell_environment_policy.experimental_use_profile": shell_environment_policy["use_profile"],

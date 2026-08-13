@@ -254,8 +254,9 @@ class SemanticReviewerAdapterTests(unittest.TestCase):
                             params = message["params"]
                             profile_id = params.get("permissions")
                             config = params.get("config") or {}
-                            filesystem_keys = [key for key, value in config.items() if key.startswith(f"permissions.{profile_id}.filesystem.") and value == "read"]
-                            if not profile_id or len(filesystem_keys) != 1 or config.get(f"permissions.{profile_id}.network.enabled") is not False:
+                            filesystem = config.get(f"permissions.{profile_id}.filesystem")
+                            network = config.get(f"permissions.{profile_id}.network")
+                            if not profile_id or filesystem != {params["cwd"]: "read"} or network != {"enabled": False}:
                                 print(json.dumps({"id": message["id"], "error": {"code": 5, "message": "permission profile missing"}}), flush=True)
                                 continue
                             if params.get("ephemeral") is not True or params.get("environments") != [] or "sandbox" in params:
