@@ -29,6 +29,8 @@ class RunPhysicsVideoSkillTests(unittest.TestCase):
         text = SKILL.read_text(encoding="utf-8")
         for required in (
             "scripts/harness_agent_job.py",
+            "scripts/harness_config.py inspect",
+            "effective_config_digest",
             "job_id",
             "advance-until-blocked",
             "allowed_next_actions",

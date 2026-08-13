@@ -1,0 +1,186 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from harness.agent.job_controller import AgentJobController
+from harness.core.harness_config import HarnessConfigError, load_harness_config
+from harness.planning.case_generation import build_case_request
+
+
+def config_document(**overrides: object) -> dict[str, object]:
+    value: dict[str, object] = {
+        "schema_version": "harness_config_v1",
+        "planning_llm": {
+            "base_url": "https://planner.example/v1",
+            "model": "planner-model",
+            "image_capability": "unknown",
+            "api_key_env": "PLANNER_TEST_KEY",
+        },
+        "meshy": {"api_key_env": "MESHY_TEST_KEY"},
+        "codex_reviewer": {"executable": None},
+        "paths": {
+            "workspace": "external/workspace",
+            "catalog": None,
+            "ue_project": None,
+            "ue_executable": "tools/UnrealEditor-Cmd",
+        },
+        "safety": {
+            "default_publication_tier": "reference",
+            "external_calls_default_allow": False,
+        },
+    }
+    value.update(overrides)
+    return value
+
+
+class HarnessConfigTests(unittest.TestCase):
+    def write_config(self, root: Path, value: dict[str, object]) -> Path:
+        path = root / "config" / "harness.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value), encoding="utf-8")
+        return path
+
+    def test_schema_and_every_nested_level_reject_unknown_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            invalid_root = config_document(unexpected=True)
+            path = self.write_config(root, invalid_root)
+            with self.assertRaisesRegex(HarnessConfigError, "unknown Harness config fields"):
+                load_harness_config(config_path=path, repo_root=root, env={})
+
+            invalid_nested = config_document()
+            invalid_nested["planning_llm"]["token"] = "must-not-be-accepted"  # type: ignore[index]
+            path.write_text(json.dumps(invalid_nested), encoding="utf-8")
+            with self.assertRaisesRegex(HarnessConfigError, "unknown planning_llm fields"):
+                load_harness_config(config_path=path, repo_root=root, env={})
+
+    def test_safety_config_cannot_grant_external_calls_or_lower_publication_tier(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for safety in (
+                {"default_publication_tier": "local_preview", "external_calls_default_allow": False},
+                {"default_publication_tier": "reference", "external_calls_default_allow": True},
+            ):
+                document = config_document()
+                document["safety"] = safety
+                path = self.write_config(root, document)
+                with self.assertRaisesRegex(HarnessConfigError, "safety defaults are fixed"):
+                    load_harness_config(config_path=path, repo_root=root, env={})
+
+    def test_relative_paths_use_repo_root_while_catalog_defaults_from_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            path = self.write_config(root, config_document())
+            config = load_harness_config(config_path=path, repo_root=root, env={})
+
+        self.assertEqual(config.workspace, root / "external" / "workspace")
+        self.assertEqual(config.catalog, config.workspace / "catalog" / "assets" / "catalog.sqlite")
+        self.assertNotEqual(config.catalog, root / "catalog" / "assets" / "catalog.sqlite")
+        self.assertEqual(config.ue_executable, root / "tools" / "UnrealEditor-Cmd")
+
+    def test_cli_environment_config_default_precedence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            document = config_document()
+            document["planning_llm"]["model"] = "from-config"  # type: ignore[index]
+            path = self.write_config(root, document)
+            config = load_harness_config(
+                config_path=path,
+                repo_root=root,
+                env={"SIM_HARNESS_LLM_MODEL": "from-env"},
+                cli_overrides={"planning_llm.model": "from-cli"},
+            )
+            env_config = load_harness_config(
+                config_path=path,
+                repo_root=root,
+                env={"SIM_HARNESS_LLM_MODEL": "from-env"},
+            )
+            file_config = load_harness_config(config_path=path, repo_root=root, env={})
+            default_document = config_document()
+            del default_document["planning_llm"]["model"]  # type: ignore[index]
+            default_path = self.write_config(root / "defaults", default_document)
+            default_config = load_harness_config(config_path=default_path, repo_root=root, env={})
+
+        self.assertEqual(config.planning_model, "from-cli")
+        self.assertEqual(config.sources["planning_llm.model"]["layer"], "cli")
+        self.assertEqual(env_config.planning_model, "from-env")
+        self.assertEqual(env_config.sources["planning_llm.model"]["key"], "SIM_HARNESS_LLM_MODEL")
+        self.assertEqual(file_config.planning_model, "from-config")
+        self.assertEqual(default_config.planning_model, "")
+        self.assertEqual(default_config.sources["planning_llm.model"]["layer"], "default")
+
+    def test_legacy_openai_fallbacks_remain_available(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            document = config_document()
+            document["planning_llm"]["api_key_env"] = "SIM_HARNESS_LLM_API_KEY"  # type: ignore[index]
+            path = self.write_config(root, document)
+            env = {
+                "OPENAI_BASE_URL": "https://compat.example/v1",
+                "OPENAI_MODEL": "compat-model",
+                "OPENAI_API_KEY": "compat-secret",
+            }
+            config = load_harness_config(config_path=path, repo_root=root, env=env)
+
+        self.assertEqual(config.planning_base_url, "https://compat.example/v1")
+        self.assertEqual(config.planning_model, "compat-model")
+        self.assertEqual(config.planning_secret_env_name(env), "OPENAI_API_KEY")
+        self.assertEqual(config.planning_api_key(env), "compat-secret")
+
+    def test_endpoint_rejects_secret_carrying_url_components_without_echoing_values(self) -> None:
+        secret = "do-not-echo-this-token"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            document = config_document()
+            document["planning_llm"]["base_url"] = f"https://user:{secret}@planner.example/v1?token={secret}#x"  # type: ignore[index]
+            path = self.write_config(root, document)
+            with self.assertRaises(HarnessConfigError) as captured:
+                load_harness_config(config_path=path, repo_root=root, env={})
+
+        self.assertNotIn(secret, str(captured.exception))
+
+    def test_secret_values_do_not_affect_or_appear_in_inspection_or_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            path = self.write_config(root, config_document())
+            first_env = {"PLANNER_TEST_KEY": "alpha-secret", "MESHY_TEST_KEY": "meshy-secret"}
+            second_env = {"PLANNER_TEST_KEY": "beta-secret", "MESHY_TEST_KEY": "other-secret"}
+            first = load_harness_config(config_path=path, repo_root=root, env=first_env)
+            second = load_harness_config(config_path=path, repo_root=root, env=second_env)
+            rendered = json.dumps(first.inspect(first_env), sort_keys=True)
+
+        self.assertEqual(first.digest, second.digest)
+        for secret in (*first_env.values(), *second_env.values()):
+            self.assertNotIn(secret, rendered)
+            self.assertNotIn(secret, json.dumps(first.identity(), sort_keys=True))
+
+    def test_controller_and_agent_inspection_share_digest_without_granting_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            document = config_document()
+            document["paths"] = {
+                "workspace": str(root / "workspace"),
+                "catalog": None,
+                "ue_project": None,
+                "ue_executable": None,
+            }
+            path = self.write_config(root, document)
+            config = load_harness_config(config_path=path, repo_root=root, env={})
+            controller = AgentJobController(config=config)
+            created = controller.create(
+                build_case_request(case_id="config_digest", text="drop a ball"),
+                job_id="job_config_digest",
+            )
+
+        self.assertEqual(created["effective_config_digest"], config.inspect({})["effective_config_digest"])
+        self.assertEqual(created["job"]["target"]["publication_tier"], "reference")
+        self.assertFalse(created["job"]["authorizations"]["external_provider"])
+        self.assertFalse(created["job"]["authorizations"]["paid_provider_submission"])
+        self.assertFalse(created["job"]["authorizations"]["planning_llm_upload"])
+
+
+if __name__ == "__main__":
+    unittest.main()

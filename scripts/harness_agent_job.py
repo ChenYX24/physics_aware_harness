@@ -15,13 +15,23 @@ if str(ROOT) not in sys.path:
 from harness.agent.job_controller import AgentJobController
 from harness.assets.providers.input_manifest import build_provider_input_manifest
 from harness.core.artifact_schema import read_json
-from harness.core.workspace import workspace_root
+from harness.core.harness_config import load_harness_config
 from harness.planning.case_generation import build_case_request
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Persistent single-task Harness Agent Job Controller")
+    parser.add_argument("--config", help="Strict Harness config document; defaults to config/harness.json.")
     parser.add_argument("--workspace", help="External Harness workspace; defaults to SIM_HARNESS_WORKSPACE.")
+    parser.add_argument("--catalog")
+    parser.add_argument("--ue-project")
+    parser.add_argument("--ue-executable")
+    parser.add_argument("--codex-executable")
+    parser.add_argument("--planning-base-url")
+    parser.add_argument("--planning-model")
+    parser.add_argument("--planning-image-capability", choices=["supported", "unsupported", "unknown"])
+    parser.add_argument("--planning-api-key-env")
+    parser.add_argument("--meshy-api-key-env")
     parser.add_argument("--jsonl", action="store_true", help="Stream versioned controller events as JSON Lines.")
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -71,7 +81,22 @@ def main() -> int:
     args = parse_args()
     signal.signal(signal.SIGTERM, _interrupt)
     sink = (lambda event: print(json.dumps(event, ensure_ascii=False), flush=True)) if args.jsonl else None
-    controller = AgentJobController(args.workspace, event_sink=sink)
+    config = load_harness_config(
+        config_path=args.config,
+        cli_overrides={
+            "paths.workspace": args.workspace,
+            "paths.catalog": args.catalog,
+            "paths.ue_project": args.ue_project,
+            "paths.ue_executable": args.ue_executable,
+            "codex_reviewer.executable": args.codex_executable,
+            "planning_llm.base_url": args.planning_base_url,
+            "planning_llm.model": args.planning_model,
+            "planning_llm.image_capability": args.planning_image_capability,
+            "planning_llm.api_key_env": args.planning_api_key_env,
+            "meshy.api_key_env": args.meshy_api_key_env,
+        },
+    )
+    controller = AgentJobController(event_sink=sink, config=config)
     if args.command == "create":
         if args.request:
             request = read_json(args.request)
@@ -86,7 +111,7 @@ def main() -> int:
             )
         provider_manifest = build_provider_input_manifest(
             request.get("inputs") or [],
-            workspace=workspace_root(args.workspace),
+            workspace=config.workspace,
             meshy_upload_authorized=args.allow_meshy_upload,
         )
         budget = _json_object(args.budget) if args.budget else {}

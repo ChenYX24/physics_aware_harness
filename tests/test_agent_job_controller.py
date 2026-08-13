@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -23,6 +24,7 @@ from harness.assets.providers.input_manifest import build_provider_input_manifes
 from harness.assets.sqlite_catalog import initialize_catalog
 from harness.core.artifact_schema import read_json, write_json
 from harness.core.case_spec_v2 import case_spec_v2_from_dict, compile_case_spec_v2_runtime
+from harness.core.harness_config import load_harness_config
 from harness.core.stage_result import build_stage_result, failure_stage_result, write_stage_result
 from harness.planning.case_generation import CaseGenerationError, build_case_request
 from harness.planning.runtime_compiler import RuntimeCompilation
@@ -570,6 +572,32 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertEqual(inspection["job"]["state"], "awaiting_semantic_review")
         sent = fake.generation_requests[0]["inputs"][0]
         self.assertTrue(sent["external_upload_authorized"])
+
+    def test_configured_unsupported_required_image_blocks_with_zero_generation_calls(self) -> None:
+        fake = SuccessfulHarness()
+        config = replace(
+            load_harness_config(cli_overrides={"paths.workspace": str(self.workspace)}),
+            planning_image_capability="unsupported",
+        )
+        controller = AgentJobController(config=config, hooks=fake.hooks())
+        request = self._image_request(text=None, allow_upload=True)
+        controller.create(
+            request,
+            job_id="job_planning_image_unsupported",
+            publication_tier="local_preview",
+            authorizations={"planning_llm_upload": True},
+        )
+
+        blocked = controller.advance_until_blocked("job_planning_image_unsupported")
+
+        self.assertEqual(blocked["job"]["state"], "blocked")
+        self.assertEqual(blocked["job"]["blocker"]["code"], "planning_image_input_unsupported")
+        stage_result = read_json(
+            Path(blocked["paths"]["job_root"]) / "stage_results" / "generation.json"
+        )
+        self.assertEqual(stage_result["failure_class"], "blocked_configuration")
+        self.assertEqual(blocked["job"]["usage"]["generation_invocations"], 0)
+        self.assertEqual(fake.generation_calls, 0)
 
     def test_optional_planning_image_without_authorization_uses_metadata_only_generation(self) -> None:
         controller, fake = self.controller()

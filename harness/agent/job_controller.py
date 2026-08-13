@@ -56,8 +56,9 @@ from harness.agent.semantic_reviewer import (
 from harness.assets.asset_registry import AssetRegistry
 from harness.assets.providers.orchestrator import AssetProviderOrchestrator
 from harness.assets.providers.input_manifest import PROVIDER_INPUT_MANIFEST_SCHEMA, build_provider_input_manifest
-from harness.assets.providers.remote import MESHY_API_KEY_ENV
+from harness.assets.providers.remote import MeshyModelGenerationAdapter, PolyHavenExternalSiteAdapter
 from harness.core.artifact_schema import read_json, write_json
+from harness.core.harness_config import EffectiveHarnessConfig, load_harness_config
 from harness.core.case_spec_v2 import (
     CaseSpecV2,
     asset_requests,
@@ -76,6 +77,7 @@ from harness.planning.case_generation import (
     REQUEST_SCHEMA_VERSION,
     generate_case_spec_v2,
     normalize_planning_image_requirement,
+    planning_image_decision,
 )
 from harness.planning.runtime_compiler import RuntimeCompilation, compile_runtime_case
 from harness.runtime.execution_profile import execution_profile, verified_run_status, write_execution_reports
@@ -113,9 +115,20 @@ class AgentJobController:
         *,
         hooks: ControllerHooks | None = None,
         event_sink: EventSink | None = None,
+        config: EffectiveHarnessConfig | None = None,
     ) -> None:
-        self.store = JobStore(workspace)
-        self.hooks = hooks or ControllerHooks()
+        self.config = config or load_harness_config(
+            cli_overrides={"paths.workspace": str(workspace)} if workspace is not None else None
+        )
+        if workspace is not None and Path(workspace).expanduser().resolve(strict=False) != self.config.workspace:
+            raise ValueError("Controller workspace must match the effective Harness configuration")
+        self.store = JobStore(self.config.workspace)
+        if hooks is None:
+            reviewer_executable = str(self.config.codex_executable) if self.config.codex_executable is not None else None
+            hooks = ControllerHooks(
+                semantic_review=lambda **kwargs: CodexAppServerReviewer(executable=reviewer_executable).review(**kwargs)
+            )
+        self.hooks = hooks
         self.event_sink = event_sink
         self._compilations: dict[tuple[str, str, str], RuntimeCompilation] = {}
 
@@ -209,6 +222,7 @@ class AgentJobController:
             attempts.append(AttemptManifest.from_dict(read_json(path)).to_dict())
         return {
             "schema_version": "harness_agent_job_inspection_v1",
+            "effective_config_digest": self.config.digest,
             "job": manifest,
             "attempts": attempts,
             "paths": {
@@ -239,7 +253,8 @@ class AgentJobController:
                 stage_result_snapshot = self._stage_result_snapshot(manifest)
                 self._stage_event(manifest, "stage_started", stage)
                 try:
-                    manifest = self._advance_one(manifest)
+                    with self._effective_environment():
+                        manifest = self._advance_one(manifest)
                 except (KeyboardInterrupt, SystemExit) as exc:
                     if stage == "compile":
                         manifest = self._reconcile_provider_usage(manifest)
@@ -947,7 +962,7 @@ class AgentJobController:
                     "authorize upload of the required image inputs to the planning model",
                 )
             )
-        catalog_path = self.store.workspace / "catalog" / "assets" / "catalog.sqlite"
+        catalog_path = self.config.catalog
         if not catalog_path.is_file():
             failures.append(("catalog_missing", f"Asset Catalog is not initialized: {catalog_path}"))
         elif not AssetRegistry(catalog_path).writable:
@@ -972,12 +987,16 @@ class AgentJobController:
         job_id = manifest["job_id"]
         root = self.store.job_dir(job_id)
         request = read_json(root / "request" / "user_request.json")
-        image_requirement = normalize_planning_image_requirement(request)
-        if image_requirement["mode"] == "required" and manifest["authorizations"]["planning_llm_upload"] is not True:
+        decision = planning_image_decision(
+            request,
+            upload_authorized=manifest["authorizations"]["planning_llm_upload"] is True,
+            image_capability=self.config.planning_image_capability,
+        )
+        if decision["status"] != "ready":
             result = failure_stage_result(
                 stage="generation",
-                failure_code="planning_image_upload_authorization_missing",
-                message="authorize upload of the required image inputs to the planning model",
+                failure_code=str(decision["failure_code"]),
+                message=str(decision["message"]),
                 source_status="blocked",
                 job_id=job_id,
             )
@@ -1025,12 +1044,14 @@ class AgentJobController:
                     if not cached_uploaded:
                         sequence = len(list((root / "request").glob("generation_metadata_only_*"))) + 1
                         generation_dir.replace(root / "request" / f"generation_metadata_only_{sequence:03d}")
-            generated = self.hooks.generate(
-                generation_request,
-                artifact_dir=generation_dir,
-                job_id=job_id,
-                attempt_id="attempt_001",
-            )
+            generation_kwargs = {
+                "artifact_dir": generation_dir,
+                "job_id": job_id,
+                "attempt_id": "attempt_001",
+            }
+            if self.hooks.generate is generate_case_spec_v2:
+                generation_kwargs["effective_config"] = self.config
+            generated = self.hooks.generate(generation_request, **generation_kwargs)
             case_spec = generated.case_spec
             expansion = generated.expansion
             stage_result = generated.stage_result or read_json(generation_dir / "stage_results" / "generation.json")
@@ -1144,8 +1165,8 @@ class AgentJobController:
             and manifest["usage"]["paid_submissions"] >= manifest["budget"]["max_paid_submissions"]
         ):
             blocker = ("paid_provider_budget_exhausted", "paid Provider submission budget is already exhausted")
-        elif "model_generation" in routes and not os.environ.get(MESHY_API_KEY_ENV, "").strip():
-            blocker = ("provider_credentials_missing", f"configure {MESHY_API_KEY_ENV}")
+        elif "model_generation" in routes and self.config.meshy_api_key() is None:
+            blocker = ("provider_credentials_missing", f"configure {self.config.meshy_api_key_env}")
         elif meshy_references and provider_manifest is None:
             blocker = ("provider_input_manifest_missing", "materialize a Provider input manifest for Meshy references")
         elif meshy_references and not auth["meshy_upload"]:
@@ -2129,7 +2150,7 @@ class AgentJobController:
         return stable_digest({"stage": stage, "request_digest": manifest["request_digest"]})
 
     def _registry(self) -> AssetRegistry:
-        return AssetRegistry(self.store.workspace / "catalog" / "assets" / "catalog.sqlite")
+        return AssetRegistry(self.config.catalog)
 
     def _effective_provider_input_manifest(self, job_id: str) -> dict[str, Any] | None:
         request_root = self.store.job_dir(job_id) / "request"
@@ -2142,6 +2163,10 @@ class AgentJobController:
     def _provider_orchestrator(self, manifest: Mapping[str, Any]) -> AssetProviderOrchestrator:
         return AssetProviderOrchestrator(
             workspace=self.store.workspace,
+            remote_providers={
+                "model_generation": MeshyModelGenerationAdapter(api_key=self.config.meshy_api_key()),
+                "external_site": PolyHavenExternalSiteAdapter(),
+            },
             max_paid_submissions=int(manifest["budget"]["max_paid_submissions"]),
             paid_submission_ledger_path=(
                 self.store.job_dir(manifest["job_id"]) / "receipts" / "provider_usage.json"
@@ -2292,6 +2317,20 @@ class AgentJobController:
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = value
+
+    @contextmanager
+    def _effective_environment(self):
+        values = {
+            "SIM_HARNESS_WORKSPACE": str(self.config.workspace),
+            "SIM_HARNESS_ASSET_CATALOG": str(self.config.catalog),
+            "SIM_STUDIO_UE_PROJECT": str(self.config.ue_project),
+        }
+        if self.config.ue_executable is not None:
+            values["SIM_STUDIO_UE_EXECUTABLE"] = str(self.config.ue_executable)
+        if self.config.codex_executable is not None:
+            values["SIM_HARNESS_CODEX_EXECUTABLE"] = str(self.config.codex_executable)
+        with self._profile_environment(values):
+            yield
 
     @staticmethod
     def _intent_recovery_identity(contract: Mapping[str, Any]) -> dict[str, Any]:

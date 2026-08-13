@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
+import io
 import tempfile
 import unittest
+import urllib.error
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
 from unittest.mock import patch
 
 from harness.core.case_spec_v2 import CaseSpecV2ValidationError, case_spec_v2_from_dict
+from harness.core.harness_config import load_harness_config
 from harness.planning.case_generation import (
     CaseGenerationError,
     LLMJSONResponse,
@@ -122,6 +126,31 @@ def source_constraint_expansion() -> dict[str, Any]:
 
 
 class CaseGenerationV2Tests(unittest.TestCase):
+    def test_http_error_does_not_echo_secret_response_or_configured_key(self) -> None:
+        secret = "planning-secret-must-not-escape"
+        client = OpenAICompatibleJSONClient(
+            base_url="https://planner.example/v1",
+            model="test-model",
+            api_key=secret,
+        )
+        response = urllib.error.HTTPError(
+            "https://planner.example/v1/chat/completions",
+            401,
+            "Unauthorized",
+            {},
+            io.BytesIO(f'{{"error":"{secret}"}}'.encode()),
+        )
+        with patch("urllib.request.urlopen", side_effect=response):
+            with self.assertRaises(CaseGenerationError) as captured:
+                client.complete_json(
+                    system_prompt="system",
+                    user_payload={"request": "test"},
+                    purpose="secret_test",
+                )
+        response.close()
+
+        self.assertNotIn(secret, str(captured.exception))
+
     def test_malformed_http_response_retains_external_request_identity(self) -> None:
         request = build_case_request(case_id="malformed_response", text="Make one ball hit another.")
         client = OpenAICompatibleJSONClient(base_url="https://llm.example/v1", model="test-model")
@@ -682,6 +711,96 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertEqual(client.calls[1]["images"], [])
         reference = result.case_spec.data["objects"][0]["asset"]["acquisition"]["reference_inputs"][0]
         self.assertFalse(reference["allow_similarity_search"])
+
+    def test_optional_authorized_image_remains_metadata_only_even_when_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            image = Path(temporary) / "reference.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\nfixture")
+            request = build_case_request(
+                case_id="optional_authorized",
+                text="the image is optional context",
+                image_paths=[image],
+                allow_image_upload=True,
+            )
+            config = replace(load_harness_config(), planning_image_capability="supported")
+            client = FakeJSONClient([expansion_fixture(), case_spec_v2_fixture()])
+            result = generate_case_spec_v2(request, client=client, effective_config=config)
+
+        self.assertEqual(client.calls[0]["images"], [])
+        self.assertEqual(result.llm_trace["planning_image_usage"]["mode"], "metadata_only")
+
+    def test_required_unsupported_image_is_blocked_before_any_model_call(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            image = Path(temporary) / "reference.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\nfixture")
+            request = build_case_request(case_id="unsupported_image", image_paths=[image], allow_image_upload=True)
+            config = replace(load_harness_config(), planning_image_capability="unsupported")
+            client = FakeJSONClient([expansion_fixture(), case_spec_v2_fixture()])
+            with self.assertRaisesRegex(CaseGenerationError, "does not support required image"):
+                generate_case_spec_v2(request, client=client, effective_config=config)
+
+        self.assertEqual(client.calls, [])
+
+    def test_required_unknown_image_reservation_survives_failure_and_prevents_second_call(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            image = root / "reference.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\nfixture")
+            request = build_case_request(case_id="unknown_image", image_paths=[image], allow_image_upload=True)
+            config = replace(load_harness_config(), planning_image_capability="unknown")
+            first = FailingJSONClient()
+            with self.assertRaises(CaseGenerationError):
+                generate_case_spec_v2(
+                    request,
+                    client=first,
+                    artifact_dir=root / "generation",
+                    job_id="job_unknown_image",
+                    effective_config=config,
+                )
+            second = FakeJSONClient([expansion_fixture(), case_spec_v2_fixture()])
+            with self.assertRaisesRegex(CaseGenerationError, "already reserved"):
+                generate_case_spec_v2(
+                    request,
+                    client=second,
+                    artifact_dir=root / "generation",
+                    job_id="job_unknown_image",
+                    effective_config=config,
+                )
+            reservation = json.loads(
+                (root / "generation" / "planning_image_reservation.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(second.calls, [])
+        self.assertEqual(reservation["attempt_count"], 1)
+        self.assertEqual(reservation["state"], "unknown")
+
+    def test_legacy_uploaded_cache_cannot_be_reused_as_metadata_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            image = root / "reference.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\nfixture")
+            request = build_case_request(
+                case_id="legacy_cache_mode",
+                text="image is optional",
+                image_paths=[image],
+                allow_image_upload=True,
+            )
+            destination = root / "generation"
+            destination.mkdir()
+            (destination / "request.json").write_text(json.dumps(request), encoding="utf-8")
+            (destination / "expansion.json").write_text(json.dumps(expansion_fixture()), encoding="utf-8")
+            (destination / "expansion_call_receipt.json").write_text("{}", encoding="utf-8")
+            config = replace(load_harness_config(), planning_image_capability="supported")
+            client = FakeJSONClient([case_spec_v2_fixture()])
+            with self.assertRaisesRegex(CaseGenerationError, "image mode differs"):
+                generate_case_spec_v2(
+                    request,
+                    client=client,
+                    artifact_dir=destination,
+                    effective_config=config,
+                )
+
+        self.assertEqual(client.calls, [])
 
     def test_a_failed_repair_is_not_repaired_again(self) -> None:
         invalid = case_spec_v2_fixture()

@@ -11,6 +11,14 @@ Operate one durable Physics-Aware Harness job from the normal Codex TUI. Use the
 
 Work from the repository root containing `harness/` and `scripts/harness_agent_job.py`. Keep the Catalog, jobs, runs, media, caches, and imported assets in the external Harness workspace. Never create runtime output in the Git worktree.
 
+Before creating or resuming a job, display the secret-free effective control-plane configuration:
+
+```bash
+python3 scripts/harness_config.py inspect
+```
+
+Pass the same explicit configuration flags to this display command and `harness_agent_job.py` when overrides are needed. The display is advisory input for the Agent only; never feed its JSON back into the Controller. The Controller independently loads the same strict config contract, and its job inspection must report the same `effective_config_digest`. If the digests differ, stop as a configuration problem instead of choosing one as truth.
+
 For an existing `job_id`, inspect it before doing anything else, including in a new Codex session:
 
 ```bash

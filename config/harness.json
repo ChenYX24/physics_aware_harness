@@ -1,0 +1,25 @@
+{
+  "schema_version": "harness_config_v1",
+  "planning_llm": {
+    "base_url": "https://api.openai.com/v1",
+    "model": "",
+    "image_capability": "unknown",
+    "api_key_env": "SIM_HARNESS_LLM_API_KEY"
+  },
+  "meshy": {
+    "api_key_env": "SIM_HARNESS_MESHY_API_KEY"
+  },
+  "codex_reviewer": {
+    "executable": null
+  },
+  "paths": {
+    "workspace": "/Volumes/TiPlus7100s/SimulatorWorkspace/physics_aware_harness",
+    "catalog": null,
+    "ue_project": null,
+    "ue_executable": "/Volumes/TiPlus7100s/UnrealEngine/UE_5.7/Engine/Binaries/Mac/UnrealEditor-Cmd"
+  },
+  "safety": {
+    "default_publication_tier": "reference",
+    "external_calls_default_allow": false
+  }
+}

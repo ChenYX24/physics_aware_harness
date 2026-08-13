@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from harness.core.artifact_schema import read_json, write_json
+from harness.core.harness_config import EffectiveHarnessConfig, endpoint_identity, load_harness_config
 from harness.core.stage_result import artifact_ref, build_stage_result, failure_stage_result, write_stage_result
 from harness.core.case_spec_v2 import (
     ACQUISITION_ROUTES,
@@ -74,6 +75,8 @@ EXPANSION_OBJECT_FIELDS = (
     "backend_constraints",
 )
 REQUESTED_BACKENDS = {"fallback", "genesis_fem", "genesis_sph", "taichi_cloth", "ue"}
+GENERATION_CONTEXT_SCHEMA_VERSION = "harness_generation_context_v1"
+PLANNING_IMAGE_RESERVATION_SCHEMA_VERSION = "harness_planning_image_reservation_v1"
 
 
 @dataclass(frozen=True)
@@ -151,15 +154,20 @@ class OpenAICompatibleJSONClient:
         api_key: str | None = None,
         model: str | None = None,
         timeout_seconds: int = 180,
+        effective_config: EffectiveHarnessConfig | None = None,
     ) -> None:
+        config = effective_config
         self.base_url = str(
             base_url
+            or (config.planning_base_url if config is not None else None)
             or os.environ.get("SIM_HARNESS_LLM_BASE_URL")
             or os.environ.get("OPENAI_BASE_URL")
             or "https://api.openai.com/v1"
         ).rstrip("/")
-        self.api_key = api_key or os.environ.get("SIM_HARNESS_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
-        self.model = str(model or os.environ.get("SIM_HARNESS_LLM_MODEL") or os.environ.get("OPENAI_MODEL") or "").strip()
+        self.api_key = api_key or (config.planning_api_key() if config is not None else None) or os.environ.get("SIM_HARNESS_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        self.model = str(model or (config.planning_model if config is not None else None) or os.environ.get("SIM_HARNESS_LLM_MODEL") or os.environ.get("OPENAI_MODEL") or "").strip()
+        self.effective_config_digest = config.digest if config is not None else None
+        self.planning_target_digest = config.planning_target_digest if config is not None else None
         self.timeout_seconds = int(timeout_seconds)
 
     def complete_json(
@@ -210,11 +218,11 @@ class OpenAICompatibleJSONClient:
             with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
                 raw = response.read()
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:2000]
+            exc.read()
             retryable = exc.code in {408, 409, 425, 429} or exc.code >= 500
             raise CaseGenerationError(
                 "llm_http_retriable" if retryable else "llm_http_error",
-                f"LLM {purpose} request failed with HTTP {exc.code}: {detail}",
+                f"LLM {purpose} request failed with HTTP {exc.code}",
                 retryable=retryable,
                 request_identity=request_identity,
             ) from exc
@@ -242,6 +250,10 @@ class OpenAICompatibleJSONClient:
             "request_sha256": request_identity,
             "response_sha256": hashlib.sha256(raw).hexdigest(),
             "endpoint_kind": "openai_compatible_chat_completions",
+            "endpoint_identity": endpoint_identity(self.base_url),
+            "configured_model": self.model,
+            "effective_config_digest": self.effective_config_digest,
+            "planning_target_digest": self.planning_target_digest,
         }
         return LLMJSONResponse(payload=payload, receipt=receipt)
 
@@ -303,12 +315,20 @@ def generate_case_spec_v2(
     artifact_dir: str | Path | None = None,
     job_id: str | None = None,
     attempt_id: str | None = None,
+    effective_config: EffectiveHarnessConfig | None = None,
 ) -> CaseGenerationResult:
     started = time.perf_counter()
     destination = Path(artifact_dir) if artifact_dir is not None else None
-    audited_client = _AuditedJSONClient(client or OpenAICompatibleJSONClient())
+    config = effective_config or load_harness_config()
+    audited_client = _AuditedJSONClient(client or OpenAICompatibleJSONClient(effective_config=config))
     try:
-        result = _generate_case_spec_v2_impl(request, client=audited_client, artifact_dir=artifact_dir)
+        result = _generate_case_spec_v2_impl(
+            request,
+            client=audited_client,
+            artifact_dir=artifact_dir,
+            job_id=job_id,
+            effective_config=config,
+        )
     except BaseException as exc:
         if isinstance(exc, CaseSpecV2ValidationError) and exc.issues:
             failure_code = exc.issues[0].code
@@ -351,6 +371,7 @@ def generate_case_spec_v2(
             artifact_ref("expansion", "expansion.json", EXPANSION_SCHEMA_VERSION),
             artifact_ref("case_spec", "case_spec_v2.json", CASE_SPEC_V2_SCHEMA_VERSION),
             artifact_ref("generation_trace", "case_generation_trace.json", "harness_case_generation_trace_v1"),
+            artifact_ref("generation_context", "generation_context.json", GENERATION_CONTEXT_SCHEMA_VERSION),
         ],
         elapsed_seconds=time.perf_counter() - started,
         invocation_count=len(calls),
@@ -366,15 +387,40 @@ def _generate_case_spec_v2_impl(
     *,
     client: JSONCompletionClient | None = None,
     artifact_dir: str | Path | None = None,
+    job_id: str | None = None,
+    effective_config: EffectiveHarnessConfig | None = None,
 ) -> CaseGenerationResult:
     validated_request = _validate_request(request)
-    client = client or OpenAICompatibleJSONClient()
+    config = effective_config or load_harness_config()
+    client = client or OpenAICompatibleJSONClient(effective_config=config)
     destination = Path(artifact_dir) if artifact_dir is not None else None
+    image_decision = planning_image_decision(
+        validated_request,
+        upload_authorized=all(
+            item.get("external_upload_authorized") is True
+            for item in validated_request.get("inputs") or []
+            if item.get("kind") == "image"
+        ),
+        image_capability=config.planning_image_capability,
+    )
+    if image_decision["status"] != "ready":
+        raise CaseGenerationError(
+            str(image_decision["failure_code"]),
+            str(image_decision["message"]),
+        )
+    generation_context = _generation_context(
+        validated_request,
+        config=config,
+        image_decision=image_decision,
+        job_id=job_id,
+    )
     if destination is not None:
+        destination.mkdir(parents=True, exist_ok=True)
         request_path = destination / "request.json"
         if request_path.is_file() and read_json(request_path) != validated_request:
             raise ValueError("generation checkpoint request differs from the immutable job request")
         write_json(request_path, validated_request)
+        _validate_or_write_generation_context(destination, generation_context, validated_request)
         completed_paths = (
             destination / "expansion.json",
             destination / "case_spec_v2.json",
@@ -396,39 +442,66 @@ def _generate_case_spec_v2_impl(
     images = [
         dict(item)
         for item in validated_request.get("inputs") or []
-        if item.get("kind") == "image" and item.get("external_upload_authorized") is True
+        if item.get("kind") == "image" and image_decision["mode"] == "uploaded"
     ]
     image_usage = {
-        "mode": "uploaded" if images else "metadata_only" if validated_request["planning_image_requirement"]["input_ids"] else "none",
+        "mode": image_decision["mode"],
         "input_ids": [str(item["input_id"]) for item in images]
         if images
         else list(validated_request["planning_image_requirement"]["input_ids"]),
     }
     expansion_cached = bool(
         destination is not None
-        and (destination / "expansion.json").is_file()
         and (destination / "expansion_call_receipt.json").is_file()
+        and (
+            (destination / "expansion.json").is_file()
+            or (destination / "expansion_raw.json").is_file()
+        )
     )
     if expansion_cached:
-        expansion = _normalize_expansion(read_json(destination / "expansion.json"))
-        expansion_receipt = read_json(destination / "expansion_call_receipt.json")
-    else:
-        expansion_response = client.complete_json(
-            system_prompt=_expansion_system_prompt(),
-            user_payload={
-                "request": _request_for_model(validated_request),
-                "planning_contract": {
-                    "executable_primary_capabilities": _executable_primary_capabilities(),
-                },
-                "expansion_contract": _expansion_contract(),
-            },
-            images=images,
-            purpose="expansion",
+        expansion_source = (
+            destination / "expansion.json"
+            if (destination / "expansion.json").is_file()
+            else destination / "expansion_raw.json"
         )
-        expansion_receipt = expansion_response.receipt
+        expansion = _normalize_expansion(read_json(expansion_source))
+        expansion_receipt = read_json(destination / "expansion_call_receipt.json")
+        if not (destination / "expansion.json").is_file():
+            write_json(destination / "expansion.json", expansion)
+    else:
+        expansion_payload = {
+            "request": _request_for_model(validated_request),
+            "planning_contract": {
+                "executable_primary_capabilities": _executable_primary_capabilities(),
+            },
+            "expansion_contract": _expansion_contract(),
+        }
+        reservation = _reserve_unknown_image_call(
+            destination,
+            generation_context=generation_context,
+            required=image_decision["probe_required"] is True,
+        )
+        try:
+            expansion_response = client.complete_json(
+                system_prompt=_expansion_system_prompt(),
+                user_payload=expansion_payload,
+                images=images,
+                purpose="expansion",
+            )
+        except BaseException as exc:
+            _finish_unknown_image_reservation(destination, reservation, status="unknown", error_code=str(getattr(exc, "code", "call_failed")))
+            raise
+        expansion_receipt = _contextual_receipt(
+            expansion_response.receipt,
+            generation_context=generation_context,
+            purpose="expansion",
+            input_payload=expansion_payload,
+            output_payload=expansion_response.payload,
+        )
         if destination is not None:
             write_json(destination / "expansion_raw.json", expansion_response.payload)
             write_json(destination / "expansion_call_receipt.json", expansion_receipt)
+        _finish_unknown_image_reservation(destination, reservation, status="completed", output_digest=_stable_json_digest(expansion_response.payload))
         expansion = _normalize_expansion(expansion_response.payload)
         if destination is not None:
             write_json(destination / "expansion.json", expansion)
@@ -441,18 +514,25 @@ def _generate_case_spec_v2_impl(
         generation_payload = read_json(destination / "case_spec_generation_raw.json")
         generation_receipt = read_json(destination / "case_spec_generation_call_receipt.json")
     else:
+        case_generation_payload = {
+            "request": _request_for_model(validated_request),
+            "expansion": expansion,
+            "case_spec_contract": _case_spec_contract(),
+        }
         generation_response = client.complete_json(
             system_prompt=_case_spec_system_prompt(),
-            user_payload={
-                "request": _request_for_model(validated_request),
-                "expansion": expansion,
-                "case_spec_contract": _case_spec_contract(),
-            },
+            user_payload=case_generation_payload,
             images=None,
             purpose="case_spec_generation",
         )
         generation_payload = generation_response.payload
-        generation_receipt = generation_response.receipt
+        generation_receipt = _contextual_receipt(
+            generation_response.receipt,
+            generation_context=generation_context,
+            purpose="case_spec_generation",
+            input_payload=case_generation_payload,
+            output_payload=generation_payload,
+        )
         if destination is not None:
             write_json(destination / "case_spec_generation_raw.json", generation_payload)
             write_json(destination / "case_spec_generation_call_receipt.json", generation_receipt)
@@ -478,27 +558,34 @@ def _generate_case_spec_v2_impl(
             repair_payload = read_json(destination / "case_spec_repair_raw.json")
             repair_receipt = read_json(destination / "case_spec_repair_call_receipt.json")
         else:
+            repair_input = {
+                "invalid_case_spec": normalize_case_spec_v2(raw_case_spec),
+                "validation_errors": validation_error.to_dict(),
+                "repair_constraints": {
+                    "maximum_repairs": 1,
+                    "preserve_user_intent": True,
+                    "do_not_change_valid_fields_unless_required_by_an_error": True,
+                    "requested_backend": str(
+                        (validated_request.get("execution_constraints") or {}).get("requested_backend") or ""
+                    ) or None,
+                    "asset_source_constraints": copy.deepcopy(expansion.get("asset_source_constraints") or []),
+                },
+                "case_spec_contract": _case_spec_contract(),
+            }
             repair_response = client.complete_json(
                 system_prompt=_repair_system_prompt(),
-                user_payload={
-                    "invalid_case_spec": normalize_case_spec_v2(raw_case_spec),
-                    "validation_errors": validation_error.to_dict(),
-                    "repair_constraints": {
-                        "maximum_repairs": 1,
-                        "preserve_user_intent": True,
-                        "do_not_change_valid_fields_unless_required_by_an_error": True,
-                        "requested_backend": str(
-                            (validated_request.get("execution_constraints") or {}).get("requested_backend") or ""
-                        ) or None,
-                        "asset_source_constraints": copy.deepcopy(expansion.get("asset_source_constraints") or []),
-                    },
-                    "case_spec_contract": _case_spec_contract(),
-                },
+                user_payload=repair_input,
                 images=None,
                 purpose="case_spec_validation_repair",
             )
             repair_payload = repair_response.payload
-            repair_receipt = repair_response.receipt
+            repair_receipt = _contextual_receipt(
+                repair_response.receipt,
+                generation_context=generation_context,
+                purpose="case_spec_validation_repair",
+                input_payload=repair_input,
+                output_payload=repair_payload,
+            )
             if destination is not None:
                 write_json(destination / "case_spec_repair_raw.json", repair_payload)
                 write_json(destination / "case_spec_repair_call_receipt.json", repair_receipt)
@@ -524,6 +611,7 @@ def _generate_case_spec_v2_impl(
         "execution_constraints": copy.deepcopy(validated_request.get("execution_constraints") or {}),
         "asset_source_constraints": copy.deepcopy(expansion.get("asset_source_constraints") or []),
         "planning_image_usage": image_usage,
+        "generation_context": generation_context,
     }
     if destination is not None:
         write_json(destination / "case_spec_v2.json", case_spec.data)
@@ -535,6 +623,7 @@ def _generate_case_spec_v2_impl(
                 "repair_count": repair_count,
                 "calls": receipts,
                 "planning_image_usage": image_usage,
+                "generation_context": generation_context,
             },
         )
     return CaseGenerationResult(
@@ -547,8 +636,240 @@ def _generate_case_spec_v2_impl(
             "repair_count": repair_count,
             "calls": receipts,
             "planning_image_usage": image_usage,
+            "generation_context": generation_context,
         },
     )
+
+
+def planning_image_decision(
+    request: Mapping[str, Any],
+    *,
+    upload_authorized: bool,
+    image_capability: str,
+) -> dict[str, Any]:
+    requirement = normalize_planning_image_requirement(request)
+    input_ids = list(requirement["input_ids"])
+    mode = "none" if not input_ids else requirement["mode"]
+    if image_capability not in {"supported", "unsupported", "unknown"}:
+        raise ValueError("planning image capability is invalid")
+    if mode == "none":
+        return {"status": "ready", "mode": "none", "probe_required": False, "requirement": "none"}
+    if mode == "optional":
+        return {"status": "ready", "mode": "metadata_only", "probe_required": False, "requirement": "optional"}
+    if not upload_authorized:
+        return {
+            "status": "blocked_user_action",
+            "failure_code": "planning_image_upload_authorization_missing",
+            "message": "authorize upload of the required image inputs to the planning model",
+            "mode": None,
+            "probe_required": False,
+            "requirement": "required",
+        }
+    if image_capability == "unsupported":
+        return {
+            "status": "blocked_configuration",
+            "failure_code": "planning_image_input_unsupported",
+            "message": "the configured planning target does not support required image input",
+            "mode": None,
+            "probe_required": False,
+            "requirement": "required",
+        }
+    return {
+        "status": "ready",
+        "mode": "uploaded",
+        "probe_required": image_capability == "unknown",
+        "requirement": "required",
+    }
+
+
+def _generation_context(
+    request: Mapping[str, Any],
+    *,
+    config: EffectiveHarnessConfig,
+    image_decision: Mapping[str, Any],
+    job_id: str | None,
+) -> dict[str, Any]:
+    images = [
+        {
+            "input_id": item.get("input_id"),
+            "sha256": item.get("sha256"),
+            "mime_type": item.get("mime_type"),
+            "byte_size": item.get("byte_size"),
+        }
+        for item in request.get("inputs") or []
+        if item.get("kind") == "image"
+    ]
+    requirement = normalize_planning_image_requirement(request)
+    authorization = all(
+        item.get("external_upload_authorized") is True
+        for item in request.get("inputs") or []
+        if item.get("kind") == "image"
+    )
+    return {
+        "schema_version": GENERATION_CONTEXT_SCHEMA_VERSION,
+        "job_id": job_id,
+        "effective_config_digest": config.digest,
+        "planning_target_digest": config.planning_target_digest,
+        "planning_endpoint_identity": endpoint_identity(config.planning_base_url),
+        "planning_model": config.planning_model,
+        "planning_image_requirement": "none" if not requirement["input_ids"] else requirement["mode"],
+        "planning_image_capability": config.planning_image_capability,
+        "planning_image_authorization": authorization,
+        "planning_image_usage_mode": image_decision["mode"],
+        "input_image_digest": _stable_json_digest(images),
+        "input_images": images,
+    }
+
+
+def _validate_or_write_generation_context(
+    destination: Path,
+    desired: Mapping[str, Any],
+    request: Mapping[str, Any],
+) -> None:
+    path = destination / "generation_context.json"
+    if path.is_file():
+        existing = read_json(path)
+        if existing != desired:
+            raise CaseGenerationError(
+                "generation_cache_context_mismatch",
+                "generation cache identity differs from the current effective configuration or image usage mode",
+            )
+        return
+    cached = any(
+        (destination / name).is_file()
+        for name in (
+            "expansion.json",
+            "expansion_call_receipt.json",
+            "case_spec_generation_raw.json",
+            "case_generation_trace.json",
+        )
+    )
+    if cached:
+        recovered_mode = _recover_legacy_image_usage(destination, request)
+        if recovered_mode is None:
+            raise CaseGenerationError(
+                "legacy_generation_cache_image_mode_unknown",
+                "legacy generation cache does not uniquely identify whether images were uploaded",
+            )
+        if recovered_mode != desired.get("planning_image_usage_mode"):
+            raise CaseGenerationError(
+                "generation_cache_context_mismatch",
+                "legacy generation cache image mode differs from the current image decision",
+            )
+    write_json(path, dict(desired))
+
+
+def _recover_legacy_image_usage(destination: Path, request: Mapping[str, Any]) -> str | None:
+    trace_path = destination / "case_generation_trace.json"
+    if trace_path.is_file():
+        usage = read_json(trace_path).get("planning_image_usage")
+        if isinstance(usage, Mapping) and usage.get("mode") in {"none", "metadata_only", "uploaded"}:
+            return str(usage["mode"])
+        return None
+    cached_request_path = destination / "request.json"
+    if not cached_request_path.is_file():
+        return None
+    cached_request = read_json(cached_request_path)
+    if cached_request != request:
+        return None
+    images = [item for item in request.get("inputs") or [] if item.get("kind") == "image"]
+    if not images:
+        return "none"
+    # Before generation_context_v1 the implementation deterministically sent
+    # every image whose immutable request record carried upload authorization.
+    return "uploaded" if all(item.get("external_upload_authorized") is True for item in images) else "metadata_only"
+
+
+def _reserve_unknown_image_call(
+    destination: Path | None,
+    *,
+    generation_context: Mapping[str, Any],
+    required: bool,
+) -> dict[str, Any] | None:
+    if not required:
+        return None
+    identity = {
+        "job_id": generation_context.get("job_id"),
+        "planning_target_digest": generation_context["planning_target_digest"],
+        "input_image_digest": generation_context["input_image_digest"],
+        "generation_context_digest": _stable_json_digest(generation_context),
+    }
+    if destination is None:
+        return {
+            "schema_version": PLANNING_IMAGE_RESERVATION_SCHEMA_VERSION,
+            **identity,
+            "state": "started",
+            "attempt_count": 1,
+        }
+    path = destination / "planning_image_reservation.json"
+    if path.exists():
+        existing = read_json(path)
+        if any(existing.get(key) != value for key, value in identity.items()):
+            raise CaseGenerationError(
+                "planning_image_probe_reservation_mismatch",
+                "existing planning image reservation has a different immutable identity",
+            )
+        raise CaseGenerationError(
+            "planning_image_probe_already_consumed",
+            "the unknown-capability image probe was already reserved; refusing a second image call",
+        )
+    reservation = {
+        "schema_version": PLANNING_IMAGE_RESERVATION_SCHEMA_VERSION,
+        **identity,
+        "state": "reserved",
+        "attempt_count": 1,
+        "output_digest": None,
+        "error_code": None,
+    }
+    write_json(path, reservation)
+    reservation["state"] = "started"
+    write_json(path, reservation)
+    return reservation
+
+
+def _finish_unknown_image_reservation(
+    destination: Path | None,
+    reservation: Mapping[str, Any] | None,
+    *,
+    status: str,
+    output_digest: str | None = None,
+    error_code: str | None = None,
+) -> None:
+    if reservation is None:
+        return
+    updated = dict(reservation)
+    updated.update({"state": status, "output_digest": output_digest, "error_code": error_code})
+    if destination is not None:
+        write_json(destination / "planning_image_reservation.json", updated)
+
+
+def _contextual_receipt(
+    receipt: Mapping[str, Any],
+    *,
+    generation_context: Mapping[str, Any],
+    purpose: str,
+    input_payload: Mapping[str, Any],
+    output_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    value = copy.deepcopy(dict(receipt))
+    value.update(
+        {
+            "purpose": purpose,
+            "effective_config_digest": generation_context["effective_config_digest"],
+            "planning_target_digest": generation_context["planning_target_digest"],
+            "endpoint_identity": generation_context["planning_endpoint_identity"],
+            "configured_model": generation_context["planning_model"],
+            "planning_image_usage_mode": generation_context["planning_image_usage_mode"],
+            "input_digest": _stable_json_digest(input_payload),
+            "output_digest": _stable_json_digest(output_payload),
+        }
+    )
+    return value
+
+
+def _stable_json_digest(value: Any) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _validate_request(request: Mapping[str, Any]) -> dict[str, Any]:
