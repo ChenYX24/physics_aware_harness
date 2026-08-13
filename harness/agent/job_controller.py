@@ -72,7 +72,11 @@ from harness.core.stage_result import (
     write_stage_result,
 )
 from harness.planning.backend_planner import plan_backend
-from harness.planning.case_generation import REQUEST_SCHEMA_VERSION, generate_case_spec_v2
+from harness.planning.case_generation import (
+    REQUEST_SCHEMA_VERSION,
+    generate_case_spec_v2,
+    normalize_planning_image_requirement,
+)
 from harness.planning.runtime_compiler import RuntimeCompilation, compile_runtime_case
 from harness.runtime.execution_profile import execution_profile, verified_run_status, write_execution_reports
 from harness.runtime.stage_executor import execute_runtime_plan
@@ -82,7 +86,6 @@ from harness.verification.run_quality import evaluate_run
 
 
 EventSink = Callable[[dict[str, Any]], None]
-
 
 @dataclass
 class ControllerHooks:
@@ -129,9 +132,10 @@ class AgentJobController:
     ) -> dict[str, Any]:
         request_data = self._validate_request(request)
         identity = validate_job_id(job_id or self._new_job_id())
+        image_inputs = [row for row in request_data.get("inputs") or [] if row.get("kind") == "image"]
         auth = {
-            "planning_llm_upload": bool(request_data.get("inputs")) and all(
-                row.get("external_upload_authorized") is True for row in request_data.get("inputs") or []
+            "planning_llm_upload": bool(image_inputs) and all(
+                row.get("external_upload_authorized") is True for row in image_inputs
             ),
             "meshy_upload": False,
             "external_provider": False,
@@ -142,8 +146,8 @@ class AgentJobController:
             if key not in auth or not isinstance(value, bool):
                 raise ValueError(f"unsupported or invalid authorization: {key}")
             auth[key] = value
-        if request_data.get("inputs") and auth["planning_llm_upload"] != all(
-            row.get("external_upload_authorized") is True for row in request_data["inputs"]
+        if image_inputs and auth["planning_llm_upload"] != all(
+            row.get("external_upload_authorized") is True for row in image_inputs
         ):
             raise ValueError("planning_llm_upload authorization must match every immutable request input record")
         normalized = normalized_budget(budget)
@@ -797,6 +801,7 @@ class AgentJobController:
                 revised_case_spec,
                 reason,
                 repair_layer=review["repair_layer"],
+                suggested_paths=[str(row["path"]) for row in review["suggested_adjustments"]],
                 trigger_stage="semantic_review",
                 trigger_failure_code="semantic_intent_mismatch",
                 evidence_refs=sorted(
@@ -926,10 +931,22 @@ class AgentJobController:
             failures.append(("request_digest_mismatch", "immutable request digest changed"))
         if not str(request.get("text") or "").strip() and not request.get("inputs"):
             failures.append(("request_input_missing", "request requires text, an image, or both"))
+        image_requirement = normalize_planning_image_requirement(request)
         for row in request.get("inputs") or []:
             path = Path(str(row.get("local_path") or ""))
             if not path.is_file() or self._sha256_file(path) != str(row.get("sha256") or ""):
                 failures.append(("request_input_identity_mismatch", f"input identity changed: {row.get('input_id')}"))
+        if (
+            image_requirement["mode"] == "required"
+            and not str(request.get("text") or "").strip()
+            and manifest["authorizations"]["planning_llm_upload"] is not True
+        ):
+            failures.append(
+                (
+                    "planning_image_upload_authorization_missing",
+                    "authorize upload of the required image inputs to the planning model",
+                )
+            )
         catalog_path = self.store.workspace / "catalog" / "assets" / "catalog.sqlite"
         if not catalog_path.is_file():
             failures.append(("catalog_missing", f"Asset Catalog is not initialized: {catalog_path}"))
@@ -955,6 +972,17 @@ class AgentJobController:
         job_id = manifest["job_id"]
         root = self.store.job_dir(job_id)
         request = read_json(root / "request" / "user_request.json")
+        image_requirement = normalize_planning_image_requirement(request)
+        if image_requirement["mode"] == "required" and manifest["authorizations"]["planning_llm_upload"] is not True:
+            result = failure_stage_result(
+                stage="generation",
+                failure_code="planning_image_upload_authorization_missing",
+                message="authorize upload of the required image inputs to the planning model",
+                source_status="blocked",
+                job_id=job_id,
+            )
+            self._write_controller_stage_result(manifest, result)
+            return self._apply_stage_result(manifest, result)
         generation_dir = root / "request" / "generation"
         seed_path = root / "request" / "seed_case_spec.json"
         if seed_path.is_file():
@@ -981,8 +1009,24 @@ class AgentJobController:
             write_json(generation_dir / "expansion.json", expansion)
             write_stage_result(generation_dir, stage_result)
         else:
+            generation_request = copy.deepcopy(request)
+            if manifest["authorizations"]["planning_llm_upload"] is True:
+                for row in generation_request.get("inputs") or []:
+                    if row.get("kind") == "image":
+                        row["external_upload_authorized"] = True
+                if generation_dir.is_dir():
+                    cached_request_path = generation_dir / "request.json"
+                    cached_request = read_json(cached_request_path) if cached_request_path.is_file() else {}
+                    cached_uploaded = any(
+                        row.get("kind") == "image" and row.get("external_upload_authorized") is True
+                        for row in cached_request.get("inputs") or []
+                        if isinstance(row, Mapping)
+                    )
+                    if not cached_uploaded:
+                        sequence = len(list((root / "request").glob("generation_metadata_only_*"))) + 1
+                        generation_dir.replace(root / "request" / f"generation_metadata_only_{sequence:03d}")
             generated = self.hooks.generate(
-                request,
+                generation_request,
                 artifact_dir=generation_dir,
                 job_id=job_id,
                 attempt_id="attempt_001",
@@ -996,12 +1040,22 @@ class AgentJobController:
             intent = IntentContract.from_dict(read_json(intent_path)).to_dict()
             existing_identity = self._intent_recovery_identity(intent)
             projected_identity = self._intent_recovery_identity(projected_intent)
+            if intent["schema_version"] != INTENT_CONTRACT_SCHEMA_VERSION:
+                projected_identity.pop("planning_image_requirement", None)
             if existing_identity != projected_identity:
                 raise JobStoreError("immutable Intent Contract differs from the recovered generation projection")
         else:
             intent = projected_intent
             intent_path = self.store.write_intent_contract(intent)
-        intent_digest = stable_digest(intent)
+        amendment_paths = [
+            *root.joinpath("request").glob("intent_amendment_*.json"),
+            *root.joinpath("request").glob("authorization_amendment_*.json"),
+        ]
+        intent_digest = (
+            self._effective_intent_digest(job_id, intent)
+            if amendment_paths
+            else stable_digest(intent)
+        )
         attempt_id = "attempt_001"
         now = utc_now()
         attempt = AttemptManifest.from_dict(
@@ -1490,6 +1544,7 @@ class AgentJobController:
             "source": "expansion_case_spec_projection_v1",
             "original_request": {"text": request.get("text") or "", "case_id": request.get("case_id")},
             "input_identities": input_identities,
+            "planning_image_requirement": copy.deepcopy(request["planning_image_requirement"]),
             "hard_requirements": hard,
             "soft_preferences": assumptions,
             "prohibitions": [],
@@ -1589,6 +1644,7 @@ class AgentJobController:
         trigger_stage: str,
         trigger_failure_code: str,
         evidence_refs: list[str] | None = None,
+        suggested_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         if manifest["usage"]["case_spec_revisions"] >= manifest["budget"]["max_case_spec_revisions"]:
             raise JobStoreError("CaseSpec revision budget is exhausted")
@@ -1611,7 +1667,12 @@ class AgentJobController:
         if not changes:
             raise JobStoreError("revision proposal does not change the source CaseSpec")
         allowed = self._effective_allowed_adjustments(intent)
-        self._validate_revision_changes(changes, allowed, repair_layer=repair_layer)
+        self._validate_revision_changes(
+            changes,
+            allowed,
+            repair_layer=repair_layer,
+            suggested_paths=suggested_paths,
+        )
         proposal_core = {
             "job_id": manifest["job_id"],
             "base_attempt_id": parent_id,
@@ -1794,8 +1855,11 @@ class AgentJobController:
             f"authorization_amendment_{sequence:03d}.json",
             payload,
         )
-        base = IntentContract.from_dict(read_json(root / "intent_contract.json")).to_dict()
-        effective_digest = self._effective_intent_digest(manifest["job_id"], base)
+        intent_path = root / "intent_contract.json"
+        effective_digest = manifest.get("intent_contract_digest")
+        if intent_path.is_file():
+            base = IntentContract.from_dict(read_json(intent_path)).to_dict()
+            effective_digest = self._effective_intent_digest(manifest["job_id"], base)
         if manifest.get("current_attempt_id"):
             attempt = self.store.load_attempt(manifest["job_id"], manifest["current_attempt_id"])
             attempt.update({"intent_contract_digest": effective_digest, "updated_at": utc_now()})
@@ -2191,6 +2255,7 @@ class AgentJobController:
             raise ValueError("request.inputs must be a list of objects")
         if not str(data.get("text") or "").strip() and not data["inputs"]:
             raise ValueError("request requires text, an image, or both")
+        data["planning_image_requirement"] = normalize_planning_image_requirement(data)
         return data
 
     @staticmethod
@@ -2265,6 +2330,7 @@ class AgentJobController:
         allowed: Mapping[str, Any],
         *,
         repair_layer: str,
+        suggested_paths: list[str] | None = None,
     ) -> None:
         allowed_paths = [str(path) for path in allowed.get("paths") or [] if str(path).startswith("$.")]
         disallowed = [
@@ -2307,6 +2373,19 @@ class AgentJobController:
             for change in changes
         ):
             raise JobStoreError("camera repair may only change camera/observation source intent")
+        if suggested_paths is not None:
+            suggested = set(suggested_paths)
+            if len(suggested) != len(suggested_paths):
+                raise JobStoreError("Reviewer suggested adjustment paths must be unique")
+            unsuggested = [
+                str(change.get("path") or "")
+                for change in changes
+                if str(change.get("path") or "") not in suggested
+            ]
+            if unsuggested:
+                raise JobStoreError(
+                    f"revision changes paths not suggested by the current Semantic Review: {unsuggested}"
+                )
 
     def _technical_completion_intact(
         self,
@@ -2441,19 +2520,6 @@ class AgentJobController:
                         retryable=retryable,
                         receipt_path=receipt_path.name,
                         error_code=error_code,
-                    )
-                if (
-                    reservation["usage_counted"]
-                    and receipt["status"] == "failed"
-                    and receipt.get("error_code")
-                    in {"reviewer_app_server_unavailable", "reviewer_permission_profile_unsupported"}
-                ):
-                    # Older Controllers counted these deterministic pre-launch
-                    # probes before Codex app-server could actually be started.
-                    reservation = self._update_reviewer_reservation(
-                        attempt_dir,
-                        reservation,
-                        usage_counted=False,
                     )
             elif reservation["state"] in {"launching", "started", "output_received"}:
                 reservation = self._update_reviewer_reservation(

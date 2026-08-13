@@ -190,6 +190,57 @@ class SemanticReviewerAdapterTests(unittest.TestCase):
             evidence_artifact_ids=artifact_ids,
             evidence_manifest=manifest,
         )
+        duplicate_suggestions = copy.deepcopy(payload)
+        suggestion = {
+            "path": "$.observation_requirements.cameras",
+            "desired_outcome": "improve coverage",
+            "evidence_refs": ["evidence_summary"],
+        }
+        duplicate_suggestions["suggested_adjustments"] = [suggestion, copy.deepcopy(suggestion)]
+        with self.assertRaisesRegex(ValueError, "must be unique"):
+            SemanticReview.from_dict(
+                duplicate_suggestions,
+                expected_requirement_ids={"original_user_request"},
+                evidence_artifact_ids=artifact_ids,
+                evidence_manifest=manifest,
+            )
+        sampled_time = copy.deepcopy(payload)
+        sampled_time["requirements"][0]["evidence_refs"][0].update(
+            {"time_s": 0.5, "trajectory_range": None}
+        )
+        SemanticReview.from_dict(
+            sampled_time,
+            expected_requirement_ids={"original_user_request"},
+            evidence_artifact_ids=artifact_ids,
+            evidence_manifest=manifest,
+        )
+        unsampled_time = copy.deepcopy(sampled_time)
+        unsampled_time["requirements"][0]["evidence_refs"][0]["time_s"] = 0.25
+        with self.assertRaisesRegex(ValueError, "readable sampled or event time"):
+            SemanticReview.from_dict(
+                unsampled_time,
+                expected_requirement_ids={"original_user_request"},
+                evidence_artifact_ids=artifact_ids,
+                evidence_manifest=manifest,
+            )
+        event_manifest = copy.deepcopy(manifest)
+        event_manifest["contact_timeline"].append(
+            {
+                "event_id": "contact_between_samples",
+                "frame_index": 1,
+                "time_s": 0.25,
+                "objects": ["ball", "floor"],
+                "kind": "contact",
+            }
+        )
+        event_time = copy.deepcopy(unsampled_time)
+        event_time["requirements"][0]["evidence_refs"][0]["contact_event_id"] = "contact_between_samples"
+        SemanticReview.from_dict(
+            event_time,
+            expected_requirement_ids={"original_user_request"},
+            evidence_artifact_ids=artifact_ids,
+            evidence_manifest=event_manifest,
+        )
         cases = []
         for field, value in (
             ("time_s", -999.0),
@@ -238,6 +289,9 @@ class SemanticReviewerAdapterTests(unittest.TestCase):
                     if len(profile_args) != 1:
                         raise SystemExit("permission profile was not configured before app-server startup")
                     profile_id = profile_args[0].split(profile_suffix, 1)[0][len(profile_prefix):]
+                    default_args = [value for value in sys.argv if value.startswith("default_permissions=")]
+                    if default_args != [f'default_permissions="{profile_id}"']:
+                        raise SystemExit("permission profile was not selected as the default")
                     network_args = [value for value in sys.argv if value.startswith(f"permissions.{profile_id}.network=")]
                     if len(network_args) != 1:
                         raise SystemExit("permission profile network policy was not configured before app-server startup")
@@ -313,7 +367,8 @@ class SemanticReviewerAdapterTests(unittest.TestCase):
                             config = params.get("config") or {}
                             filesystem = config.get(f"permissions.{profile_id}.filesystem")
                             network = config.get(f"permissions.{profile_id}.network")
-                            if not profile_id or filesystem != {params["cwd"]: "read"} or network != {"enabled": False}:
+                            expected_filesystem = {":root": "deny", ":minimal": "read", params["cwd"]: "read"}
+                            if not profile_id or filesystem != expected_filesystem or network != {"enabled": False}:
                                 print(json.dumps({"id": message["id"], "error": {"code": 5, "message": "permission profile missing"}}), flush=True)
                                 continue
                             if params.get("ephemeral") is not True or params.get("environments") != [] or "sandbox" in params:
@@ -365,6 +420,7 @@ class SemanticReviewerAdapterTests(unittest.TestCase):
                 timeout_seconds=10,
                 schema_probe=lambda _executable: True,
             )
+            lifecycle_events = []
 
             with patch.dict("os.environ", {"HOST_SECRET_FOR_REVIEWER_TEST": "must-not-leak"}):
                 result = reviewer.review(
@@ -374,6 +430,7 @@ class SemanticReviewerAdapterTests(unittest.TestCase):
                     bundle_manifest={"artifacts": []},
                     invocation_count=1,
                     include_original_images=False,
+                    lifecycle_callback=lifecycle_events.append,
                 )
 
             receipt = ReviewerInvocationReceipt.from_dict(result["receipt"]).to_dict()
@@ -386,6 +443,11 @@ class SemanticReviewerAdapterTests(unittest.TestCase):
             self.assertTrue(receipt["ephemeral"])
             self.assertEqual(receipt["shell_environment_policy"]["inherit"], "none")
             self.assertFalse(receipt["network_access"])
+            self.assertEqual(lifecycle_events, ["started", "output_received"])
+            legacy = copy.deepcopy(receipt)
+            legacy["requested_permission_profile"]["filesystem"] = {str(bundle.resolve()): "read"}
+            with self.assertRaisesRegex(ValueError, "deny the filesystem by default"):
+                ReviewerInvocationReceipt.from_dict(legacy)
 
     def test_managed_requirements_denial_is_blocked_before_thread_start(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -431,6 +493,7 @@ class SemanticReviewerAdapterTests(unittest.TestCase):
                 timeout_seconds=10,
                 schema_probe=lambda _executable: True,
             )
+            lifecycle_events = []
 
             with self.assertRaises(SemanticReviewerError) as caught:
                 reviewer.review(
@@ -440,10 +503,12 @@ class SemanticReviewerAdapterTests(unittest.TestCase):
                     bundle_manifest={"artifacts": []},
                     invocation_count=1,
                     include_original_images=False,
+                    lifecycle_callback=lifecycle_events.append,
                 )
 
             self.assertEqual(caught.exception.code, "reviewer_permission_profile_forbidden")
             self.assertFalse(caught.exception.retryable)
+            self.assertEqual(lifecycle_events, [])
 
 
 if __name__ == "__main__":

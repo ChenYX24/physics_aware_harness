@@ -84,6 +84,7 @@ _USER_ACTION_CODES = {
     "paid_provider_authorization_missing",
     "paid_provider_budget_missing",
     "paid_provider_budget_exhausted",
+    "planning_image_upload_authorization_missing",
     "publication_tier_not_satisfied",
     "provider_credentials_missing",
     "provider_input_manifest_missing",

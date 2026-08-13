@@ -252,6 +252,7 @@ def build_case_request(
     text: str | None = None,
     image_paths: list[str | Path] | None = None,
     allow_image_upload: bool = False,
+    planning_images_required: bool = False,
     requested_backend: str | None = None,
 ) -> dict[str, Any]:
     normalized_text = " ".join(str(text or "").split())
@@ -279,11 +280,18 @@ def build_case_request(
     backend = str(requested_backend or "").strip()
     if backend and backend not in REQUESTED_BACKENDS:
         raise ValueError(f"requested_backend must be one of {sorted(REQUESTED_BACKENDS)}")
+    image_ids = [str(row["input_id"]) for row in images]
+    if planning_images_required and not image_ids:
+        raise ValueError("planning_images_required requires at least one image input")
     return {
         "schema_version": REQUEST_SCHEMA_VERSION,
         "case_id": str(case_id),
         "text": normalized_text,
         "inputs": images,
+        "planning_image_requirement": {
+            "mode": "required" if image_ids and (not normalized_text or planning_images_required) else "optional",
+            "input_ids": image_ids,
+        },
         "execution_constraints": {"requested_backend": backend or None},
     }
 
@@ -390,6 +398,12 @@ def _generate_case_spec_v2_impl(
         for item in validated_request.get("inputs") or []
         if item.get("kind") == "image" and item.get("external_upload_authorized") is True
     ]
+    image_usage = {
+        "mode": "uploaded" if images else "metadata_only" if validated_request["planning_image_requirement"]["input_ids"] else "none",
+        "input_ids": [str(item["input_id"]) for item in images]
+        if images
+        else list(validated_request["planning_image_requirement"]["input_ids"]),
+    }
     expansion_cached = bool(
         destination is not None
         and (destination / "expansion.json").is_file()
@@ -509,6 +523,7 @@ def _generate_case_spec_v2_impl(
         "repair_count": repair_count,
         "execution_constraints": copy.deepcopy(validated_request.get("execution_constraints") or {}),
         "asset_source_constraints": copy.deepcopy(expansion.get("asset_source_constraints") or []),
+        "planning_image_usage": image_usage,
     }
     if destination is not None:
         write_json(destination / "case_spec_v2.json", case_spec.data)
@@ -519,6 +534,7 @@ def _generate_case_spec_v2_impl(
                 "normal_call_count": 2,
                 "repair_count": repair_count,
                 "calls": receipts,
+                "planning_image_usage": image_usage,
             },
         )
     return CaseGenerationResult(
@@ -530,6 +546,7 @@ def _generate_case_spec_v2_impl(
             "normal_call_count": 2,
             "repair_count": repair_count,
             "calls": receipts,
+            "planning_image_usage": image_usage,
         },
     )
 
@@ -548,6 +565,7 @@ def _validate_request(request: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("request input_id values must be non-empty and unique")
     if not str(data.get("text") or "").strip() and not inputs:
         raise ValueError("request requires text or inputs")
+    data["planning_image_requirement"] = normalize_planning_image_requirement(data)
     constraints = data.get("execution_constraints") or {}
     if not isinstance(constraints, Mapping):
         raise ValueError("request execution_constraints must be an object")
@@ -556,6 +574,41 @@ def _validate_request(request: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError(f"request requested_backend must be one of {sorted(REQUESTED_BACKENDS)}")
     data["execution_constraints"] = dict(constraints)
     return data
+
+
+def normalize_planning_image_requirement(request: Mapping[str, Any]) -> dict[str, Any]:
+    inputs = request.get("inputs") or []
+    if not isinstance(inputs, list):
+        raise ValueError("request inputs must be a list")
+    image_ids = [
+        str(item.get("input_id") or "")
+        for item in inputs
+        if isinstance(item, Mapping) and item.get("kind") == "image"
+    ]
+    raw = request.get("planning_image_requirement")
+    if raw is None:
+        return {
+            "mode": "required" if image_ids and not str(request.get("text") or "").strip() else "optional",
+            "input_ids": image_ids,
+        }
+    if not isinstance(raw, Mapping) or set(raw) != {"mode", "input_ids"}:
+        raise ValueError("planning_image_requirement must contain only mode and input_ids")
+    mode = raw.get("mode")
+    input_ids = raw.get("input_ids")
+    if mode not in {"required", "optional"}:
+        raise ValueError("planning_image_requirement.mode must be required or optional")
+    if (
+        not isinstance(input_ids, list)
+        or any(not isinstance(value, str) or not value for value in input_ids)
+        or len(input_ids) != len(set(input_ids))
+        or set(input_ids) != set(image_ids)
+    ):
+        raise ValueError("planning_image_requirement.input_ids must identify every image input exactly once")
+    if mode == "required" and not input_ids:
+        raise ValueError("required planning images must identify at least one image input")
+    if image_ids and not str(request.get("text") or "").strip() and mode != "required":
+        raise ValueError("image-only requests require every image for planning")
+    return {"mode": str(mode), "input_ids": list(input_ids)}
 
 
 def _request_for_model(request: Mapping[str, Any]) -> dict[str, Any]:
@@ -572,6 +625,7 @@ def _request_for_model(request: Mapping[str, Any]) -> dict[str, Any]:
             }
             for item in request.get("inputs") or []
         ],
+        "planning_image_requirement": copy.deepcopy(request["planning_image_requirement"]),
         "execution_constraints": dict(request.get("execution_constraints") or {}),
     }
 

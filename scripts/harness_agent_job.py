@@ -33,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     create.add_argument("--case-id", default="generated_case")
     create.add_argument("--backend", choices=["fallback", "genesis_fem", "genesis_sph", "taichi_cloth", "ue"])
     create.add_argument("--allow-planning-image-upload", action="store_true")
+    create.add_argument("--planning-images-required", action="store_true")
     create.add_argument("--allow-meshy-upload", action="store_true")
     create.add_argument("--allow-external-provider", action="store_true")
     create.add_argument("--allow-paid-provider", action="store_true")
@@ -55,6 +56,7 @@ def parse_args() -> argparse.Namespace:
     resume.add_argument("job_id")
     resume.add_argument("--budget-extension-seconds", type=int, default=0)
     resume.add_argument("--max-paid-submissions", type=int)
+    resume.add_argument("--allow-planning-image-upload", action="store_true")
     resume.add_argument("--allow-meshy-upload", action="store_true")
     resume.add_argument("--allow-external-provider", action="store_true")
     resume.add_argument("--allow-paid-provider", action="store_true")
@@ -79,6 +81,7 @@ def main() -> int:
                 text=args.prompt,
                 image_paths=args.image,
                 allow_image_upload=args.allow_planning_image_upload,
+                planning_images_required=args.planning_images_required,
                 requested_backend=args.backend,
             )
         provider_manifest = build_provider_input_manifest(
@@ -119,6 +122,7 @@ def main() -> int:
     elif args.command == "resume":
         authorizations = {}
         for field, enabled in (
+            ("planning_llm_upload", args.allow_planning_image_upload),
             ("meshy_upload", args.allow_meshy_upload),
             ("external_provider", args.allow_external_provider),
             ("paid_provider_submission", args.allow_paid_provider),

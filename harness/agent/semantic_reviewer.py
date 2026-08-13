@@ -65,7 +65,11 @@ def reviewer_permission_profile(
     )
     return {
         "id": f"harness_reviewer_{identity[:16]}",
-        "filesystem": {root: "read"},
+        "filesystem": {
+            ":root": "deny",
+            ":minimal": "read",
+            root: "read",
+        },
         "network": {"enabled": False},
     }
 
@@ -183,8 +187,6 @@ class CodexAppServerReviewer:
                 bufsize=1,
                 env=self._app_server_environment(executable),
             )
-            if lifecycle_callback is not None:
-                lifecycle_callback("started")
             if process.stdin is None or process.stdout is None:
                 self._raise("reviewer_app_server_start_failed", "codex app-server stdio is unavailable", retryable=True, receipt=receipt)
             messages: queue.Queue[dict[str, Any] | BaseException | None] = queue.Queue()
@@ -352,6 +354,11 @@ class CodexAppServerReviewer:
                     "instruction_sources": instruction_sources,
                 }
             )
+            # Persist the invocation immediately before the first model-work
+            # side effect. App-server and permission-profile probes are setup,
+            # not Reviewer invocations.
+            if lifecycle_callback is not None:
+                lifecycle_callback("started")
             self._send(
                 process,
                 {
@@ -430,17 +437,21 @@ class CodexAppServerReviewer:
     def _app_server_command(executable: str, requested_profile: Mapping[str, Any]) -> list[str]:
         profile_id = str(requested_profile["id"])
         filesystem = requested_profile["filesystem"]
-        root, access = next(iter(filesystem.items()))
         filesystem_toml = (
             "{ "
-            + json.dumps(str(root), ensure_ascii=False)
-            + " = "
-            + json.dumps(str(access), ensure_ascii=False)
+            + ", ".join(
+                json.dumps(str(root), ensure_ascii=False)
+                + " = "
+                + json.dumps(str(access), ensure_ascii=False)
+                for root, access in filesystem.items()
+            )
             + " }"
         )
         return [
             executable,
             "app-server",
+            "-c",
+            f"default_permissions={json.dumps(profile_id, ensure_ascii=False)}",
             "-c",
             f"permissions.{profile_id}.filesystem={filesystem_toml}",
             "-c",
@@ -489,9 +500,8 @@ class CodexAppServerReviewer:
         disabled_mcp_servers: Mapping[str, Mapping[str, Any]],
     ) -> dict[str, Any]:
         profile_id = str(requested_profile["id"])
-        root = next(iter(requested_profile["filesystem"]))
         config = {
-            f"permissions.{profile_id}.filesystem": {root: "read"},
+            f"permissions.{profile_id}.filesystem": dict(requested_profile["filesystem"]),
             f"permissions.{profile_id}.network": {"enabled": False},
             "shell_environment_policy.inherit": shell_environment_policy["inherit"],
             "shell_environment_policy.set.PATH": shell_environment_policy["set"]["PATH"],

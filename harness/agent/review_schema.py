@@ -428,16 +428,17 @@ class ReviewerInvocationReceipt:
         if not re.fullmatch(r"harness_reviewer_[0-9a-f]{16}", str(requested["id"])):
             raise ValueError("Reviewer permission profile id is invalid")
         filesystem = _mapping(requested["filesystem"], "requested_permission_profile.filesystem")
-        if len(filesystem) != 1 or set(filesystem.values()) != {"read"}:
-            raise ValueError("Reviewer permission profile must grant one read-only filesystem root")
         roots = data["runtime_workspace_roots"]
         if not isinstance(roots, list) or len(roots) != 1:
             raise ValueError("Reviewer must have exactly one runtime workspace root")
         _nonempty(roots[0], "runtime_workspace_roots[0]")
         if not PurePosixPath(roots[0]).is_absolute():
             raise ValueError("Reviewer runtime workspace root must be absolute")
-        if list(filesystem) != roots:
-            raise ValueError("Reviewer permission profile filesystem must match its runtime workspace root")
+        current_filesystem = {":root": "deny", ":minimal": "read", roots[0]: "read"}
+        if filesystem != current_filesystem:
+            raise ValueError(
+                "Reviewer permission profile must deny the filesystem by default and grant only minimal runtime and Bundle reads"
+            )
         network = _mapping(requested["network"], "requested_permission_profile.network")
         if network != {"enabled": False}:
             raise ValueError("Reviewer permission profile must disable network access")
@@ -644,11 +645,16 @@ class SemanticReview:
         suggestions = data["suggested_adjustments"]
         if not isinstance(suggestions, list):
             raise ValueError("suggested_adjustments must be a list")
+        suggested_paths: set[str] = set()
         for index, suggestion in enumerate(suggestions):
             value = _mapping(suggestion, f"suggested_adjustments[{index}]")
             _exact(value, {"path", "desired_outcome", "evidence_refs"}, f"suggested_adjustments[{index}]")
-            if not str(value["path"]).startswith("$."):
-                raise ValueError("suggested adjustment path must be a source CaseSpec JSON path")
+            path = str(value["path"])
+            if not re.fullmatch(r"\$\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", path):
+                raise ValueError("suggested adjustment path must be a canonical source CaseSpec object path")
+            if path in suggested_paths:
+                raise ValueError("suggested adjustment paths must be unique")
+            suggested_paths.add(path)
             _nonempty(value["desired_outcome"], "suggested_adjustment.desired_outcome")
             _string_list(value["evidence_refs"], "suggested_adjustment.evidence_refs")
             if evidence_artifact_ids is not None and any(
@@ -773,6 +779,13 @@ def _validate_evidence_locators(review: Mapping[str, Any], manifest: Mapping[str
     start_time = float(trajectory["start_time_s"])
     end_time = float(trajectory["end_time_s"])
     contacts = {str(row["event_id"]): row for row in manifest["contact_timeline"]}
+    readable_point_times = [
+        float(row["time_s"])
+        for row in trajectory["sampled_frames"]
+    ] + [
+        float(row["time_s"])
+        for row in trajectory["state_transitions"]
+    ] + [float(row["time_s"]) for row in contacts.values()]
     result_kinds = {"structured_summary", "keyframe", "multi_view_montage"}
     for row in review["requirements"]:
         has_result_evidence = False
@@ -790,6 +803,11 @@ def _validate_evidence_locators(review: Mapping[str, Any], manifest: Mapping[str
                     float(time_s), float(artifact["time_s"]), rel_tol=0.0, abs_tol=1e-6
                 ):
                     raise ValueError("semantic evidence time_s does not locate the referenced artifact")
+                if artifact_kind == "structured_summary" and not any(
+                    math.isclose(float(time_s), readable_time, rel_tol=0.0, abs_tol=1e-6)
+                    for readable_time in readable_point_times
+                ):
+                    raise ValueError("semantic evidence time_s does not identify a readable sampled or event time")
             view_id = ref["view_id"]
             if view_id is not None and artifact["view_id"] != view_id:
                 raise ValueError("semantic evidence view_id does not locate the referenced artifact")

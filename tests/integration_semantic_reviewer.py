@@ -218,7 +218,11 @@ class RealCodexSemanticReviewerIntegrationTests(unittest.TestCase):
             self.assertEqual(receipt["runtime_workspace_roots"], [str(bundle.resolve())])
             self.assertEqual(
                 receipt["requested_permission_profile"]["filesystem"],
-                {str(bundle.resolve()): "read"},
+                {
+                    ":root": "deny",
+                    ":minimal": "read",
+                    str(bundle.resolve()): "read",
+                },
             )
             self.assertEqual(receipt["shell_environment_policy"]["inherit"], "none")
             self.assertFalse(receipt["network_access"])

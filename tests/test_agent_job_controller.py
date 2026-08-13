@@ -44,6 +44,12 @@ def case_spec_v2_fixture() -> dict:
             "reason": "fixture camera coverage is planner-selected",
             "constraint": {"kind": "list", "min_items": 1, "max_items": 5},
         },
+        {
+            "path": "$.observation_requirements.modalities",
+            "requirement_level": "inferred",
+            "reason": "fixture modalities are planner-selected",
+            "constraint": {"kind": "list", "min_items": 1, "max_items": 3},
+        },
     ]
     return value
 
@@ -103,11 +109,13 @@ class SuccessfulHarness:
         self.execute_calls: list[str] = []
         self.provider_manifests: list[dict | None] = []
         self.generation_calls = 0
+        self.generation_requests: list[dict] = []
         self.semantic_status = semantic_status
         self.semantic_calls = 0
 
     def generate(self, request: dict, *, artifact_dir: Path, job_id: str, attempt_id: str):
         self.generation_calls += 1
+        self.generation_requests.append(copy.deepcopy(request))
         case = case_spec_v2_from_dict(case_spec_v2_fixture())
         expansion = {
             "schema_version": "harness_expansion_v1",
@@ -125,6 +133,12 @@ class SuccessfulHarness:
                     "requirement_level": "inferred",
                     "reason": "fixture camera coverage is planner-selected",
                     "constraint": {"kind": "list", "min_items": 1, "max_items": 5},
+                },
+                {
+                    "path": "$.observation_requirements.modalities",
+                    "requirement_level": "inferred",
+                    "reason": "fixture modalities are planner-selected",
+                    "constraint": {"kind": "list", "min_items": 1, "max_items": 3},
                 },
             ],
         }
@@ -506,6 +520,119 @@ class AgentJobControllerTests(unittest.TestCase):
         fake = harness or SuccessfulHarness()
         return AgentJobController(self.workspace, hooks=fake.hooks()), fake
 
+    def _image_request(
+        self,
+        *,
+        text: str | None,
+        allow_upload: bool = False,
+        required: bool = False,
+    ) -> dict:
+        image = self.workspace / f"planning-{len(list(self.workspace.glob('planning-*.png')))}.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\nplanning-fixture")
+        return build_case_request(
+            case_id="planning_image_case",
+            text=text,
+            image_paths=[image],
+            allow_image_upload=allow_upload,
+            planning_images_required=required,
+            requested_backend="fallback",
+        )
+
+    def test_image_only_without_planning_authorization_blocks_at_l0_without_generation(self) -> None:
+        controller, fake = self.controller()
+        request = self._image_request(text=None)
+        controller.create(
+            request,
+            job_id="job_planning_image_l0",
+            publication_tier="local_preview",
+        )
+
+        blocked = controller.advance_until_blocked("job_planning_image_l0")
+
+        self.assertEqual(request["planning_image_requirement"]["mode"], "required")
+        self.assertEqual(blocked["job"]["current_stage"], "intake_readiness")
+        self.assertEqual(blocked["job"]["blocker"]["code"], "planning_image_upload_authorization_missing")
+        self.assertEqual(blocked["job"]["usage"]["generation_invocations"], 0)
+        self.assertEqual(fake.generation_calls, 0)
+
+    def test_image_only_with_planning_authorization_uploads_pixels_to_expansion_input(self) -> None:
+        controller, fake = self.controller()
+        request = self._image_request(text=None, allow_upload=True)
+        controller.create(
+            request,
+            job_id="job_planning_image_authorized",
+            publication_tier="local_preview",
+            authorizations={"planning_llm_upload": True},
+        )
+
+        inspection = controller.advance_until_blocked("job_planning_image_authorized")
+
+        self.assertEqual(inspection["job"]["state"], "awaiting_semantic_review")
+        sent = fake.generation_requests[0]["inputs"][0]
+        self.assertTrue(sent["external_upload_authorized"])
+
+    def test_optional_planning_image_without_authorization_uses_metadata_only_generation(self) -> None:
+        controller, fake = self.controller()
+        request = self._image_request(text="drop the pictured object", allow_upload=False)
+        controller.create(
+            request,
+            job_id="job_planning_image_optional",
+            publication_tier="local_preview",
+        )
+
+        inspection = controller.advance_until_blocked("job_planning_image_optional")
+
+        self.assertEqual(inspection["job"]["state"], "awaiting_semantic_review")
+        self.assertEqual(request["planning_image_requirement"]["mode"], "optional")
+        self.assertFalse(fake.generation_requests[0]["inputs"][0]["external_upload_authorized"])
+        intent = read_json(Path(inspection["paths"]["intent_contract"]))
+        self.assertEqual(intent["planning_image_requirement"], request["planning_image_requirement"])
+        self.assertFalse(intent["authorizations"]["planning_llm_upload"])
+        missing_requirement = copy.deepcopy(intent)
+        missing_requirement.pop("planning_image_requirement")
+        with self.assertRaisesRegex(ValueError, "fields mismatch"):
+            IntentContract.from_dict(missing_requirement)
+
+    def test_required_text_image_blocks_before_generation_then_amendment_uploads_it(self) -> None:
+        controller, fake = self.controller()
+        request = self._image_request(
+            text="use the pictured geometry as the simulated object",
+            required=True,
+        )
+        controller.create(
+            request,
+            job_id="job_planning_image_resume",
+            publication_tier="local_preview",
+            authorizations={
+                "planning_llm_upload": False,
+                "meshy_upload": True,
+                "semantic_reviewer_image_upload": True,
+            },
+        )
+        blocked = controller.advance_until_blocked("job_planning_image_resume")
+        self.assertEqual(blocked["job"]["current_stage"], "generation")
+        self.assertEqual(blocked["job"]["blocker"]["code"], "planning_image_upload_authorization_missing")
+        self.assertEqual(fake.generation_calls, 0)
+        request_root = Path(blocked["paths"]["job_root"]) / "request"
+        metadata_cache = request_root / "generation"
+        write_json(metadata_cache / "request.json", request)
+
+        resumed = controller.resume(
+            "job_planning_image_resume",
+            authorizations={"planning_llm_upload": True},
+        )
+
+        self.assertEqual(resumed["job"]["state"], "awaiting_semantic_review")
+        self.assertEqual(fake.generation_calls, 1)
+        self.assertTrue(fake.generation_requests[0]["inputs"][0]["external_upload_authorized"])
+        root = Path(resumed["paths"]["job_root"])
+        self.assertTrue((root / "request" / "generation_metadata_only_001" / "request.json").is_file())
+        amendment = read_json(root / "request" / "authorization_amendment_001.json")
+        self.assertEqual(
+            amendment["authorization_changes"]["planning_llm_upload"],
+            {"before": False, "after": True},
+        )
+
     def test_full_technical_chain_stops_before_explicit_semantic_review(self) -> None:
         controller, fake = self.controller()
         controller.create(
@@ -591,6 +718,49 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertEqual(proposal["repair_layer"], "camera")
         self.assertTrue(read_json(Path(second["paths"]["job_root"]) / "attempts" / "attempt_002" / "case_spec_diff.json")["changes"])
         self.assertEqual(controller.run_semantic_review("job_m4_semantic_revision")["job"]["state"], "completed")
+
+    def test_semantic_revision_cannot_change_an_allowed_but_unsuggested_path(self) -> None:
+        controller, _ = self.controller(SuccessfulHarness(semantic_status="fail"))
+        controller.create(
+            self.request,
+            job_id="job_m4_suggestion_scope",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        controller.advance_until_blocked("job_m4_suggestion_scope")
+        controller.run_semantic_review("job_m4_suggestion_scope")
+        revised = case_spec_v2_fixture()
+        revised["observation_requirements"]["modalities"].append("depth")
+
+        with self.assertRaisesRegex(ValueError, "not suggested by the current Semantic Review"):
+            controller.apply_revision_proposal(
+                "job_m4_suggestion_scope",
+                revised,
+                reason="modalities are Intent-authorized but were not suggested",
+            )
+
+    def test_semantic_revision_rejects_suggested_path_outside_intent_range(self) -> None:
+        controller, _ = self.controller(SuccessfulHarness(semantic_status="fail"))
+        controller.create(
+            self.request,
+            job_id="job_m4_suggestion_range",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        controller.advance_until_blocked("job_m4_suggestion_range")
+        controller.run_semantic_review("job_m4_suggestion_range")
+        revised = case_spec_v2_fixture()
+        revised["observation_requirements"]["cameras"] = [
+            {"role": "front_static", "target_objects": ["cue_ball", "target_ball"]}
+            for _ in range(6)
+        ]
+
+        with self.assertRaisesRegex(ValueError, "exceeds Intent Contract list range"):
+            controller.apply_revision_proposal(
+                "job_m4_suggestion_range",
+                revised,
+                reason="suggested path still must respect its Intent range",
+            )
 
     def test_camera_repair_cannot_change_even_an_otherwise_allowed_non_camera_path(self) -> None:
         controller, _ = self.controller(SuccessfulHarness(semantic_status="fail"))
@@ -1022,19 +1192,52 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertEqual(blocked["job"]["usage"]["reviewer_invocations"], 0)
         self.assertEqual(blocked["job"]["usage"]["total_retries"], 0)
         attempt = Path(blocked["paths"]["job_root"]) / "attempts" / "attempt_001"
-        legacy_reservation = read_json(attempt / "reviewer_reservation_001.json")
-        legacy_reservation["usage_counted"] = True
-        write_json(attempt / "reviewer_reservation_001.json", legacy_reservation)
-        legacy_manifest = controller.store.load_manifest("job_m4_permission_profile")
-        legacy_manifest["usage"]["reviewer_invocations"] = 1
-        controller.store.write_manifest(legacy_manifest)
         controller.hooks.semantic_review = fake.semantic_review
         controller.resume("job_m4_permission_profile")
         completed = controller.run_semantic_review("job_m4_permission_profile")
         self.assertEqual(completed["job"]["state"], "completed")
         self.assertEqual(completed["job"]["usage"]["reviewer_invocations"], 1)
         self.assertFalse(read_json(attempt / "reviewer_reservation_001.json")["usage_counted"])
+        self.assertEqual(read_json(attempt / "reviewer_reservation_002.json")["role"], "primary")
         self.assertEqual([row["attempt_id"] for row in completed["attempts"]], ["attempt_001"])
+
+    def test_permission_profile_forbidden_does_not_consume_primary_invocation(self) -> None:
+        fake = SuccessfulHarness()
+        hooks = fake.hooks()
+
+        def forbidden(**kwargs):
+            raise SemanticReviewerError(
+                "reviewer_permission_profile_forbidden",
+                "managed requirements deny the Reviewer profile",
+                retryable=False,
+                receipt=failed_reviewer_receipt(kwargs, "reviewer_permission_profile_forbidden"),
+            )
+
+        hooks.semantic_review = forbidden
+        controller = AgentJobController(self.workspace, hooks=hooks)
+        controller.create(
+            self.request,
+            job_id="job_m4_permission_profile_forbidden",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        controller.advance_until_blocked("job_m4_permission_profile_forbidden")
+
+        blocked = controller.run_semantic_review("job_m4_permission_profile_forbidden")
+
+        self.assertEqual(blocked["job"]["state"], "blocked")
+        self.assertEqual(blocked["job"]["blocker"]["code"], "reviewer_permission_profile_forbidden")
+        self.assertEqual(blocked["job"]["usage"]["reviewer_invocations"], 0)
+        attempt = Path(blocked["paths"]["job_root"]) / "attempts" / "attempt_001"
+        self.assertFalse(read_json(attempt / "reviewer_reservation_001.json")["usage_counted"])
+
+        recovered = AgentJobController(self.workspace, hooks=fake.hooks())
+        recovered.resume("job_m4_permission_profile_forbidden")
+        completed = recovered.run_semantic_review("job_m4_permission_profile_forbidden")
+
+        self.assertEqual(completed["job"]["state"], "completed")
+        self.assertEqual(completed["job"]["usage"]["reviewer_invocations"], 1)
+        self.assertEqual(read_json(attempt / "reviewer_reservation_002.json")["role"], "primary")
 
     def test_reviewer_usage_rebuild_repairs_manifest_counted_reservation_not_launched(self) -> None:
         fake = SuccessfulHarness()
@@ -1286,6 +1489,7 @@ class AgentJobControllerTests(unittest.TestCase):
         intent_path = Path(paused["paths"]["intent_contract"])
         legacy = read_json(intent_path)
         legacy["schema_version"] = "harness_intent_contract_v1"
+        legacy.pop("planning_image_requirement")
         legacy["allowed_adjustments"] = {
             "paths": ["$.scene.duration_s", "$.observation_requirements", "$.scene.camera"],
             "ranges": {},
@@ -1956,6 +2160,7 @@ class AgentJobCliTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("--max-paid-submissions", completed.stdout)
+        self.assertIn("--allow-planning-image-upload", completed.stdout)
         self.assertIn("--allow-semantic-reviewer-image-upload", completed.stdout)
 
     def test_m4_cli_exposes_explicit_review_and_revision_actions(self) -> None:

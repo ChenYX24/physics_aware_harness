@@ -41,7 +41,7 @@ DEFAULT_BUDGET = {
     "post_candidate_reserve_seconds": 3 * 60,
     "max_paid_submissions": 0,
     # Reviewer limits are per CaseSpec attempt. usage.reviewer_invocations is
-    # the whole-Job audit count of launches; it is not a Job-level call cap.
+    # the whole-Job audit count of turn submissions; it is not a Job-level cap.
     # The primary limit is additionally hard-capped to one by the Controller.
     "max_reviewer_invocations": 1,
     "max_reviewer_technical_retries": 1,
@@ -204,7 +204,13 @@ class IntentContract:
             "frozen_digests",
             "created_at",
         }
-        _exact_fields(data, required, "intent contract")
+        expected = (
+            required
+            if data.get("schema_version") == LEGACY_INTENT_CONTRACT_SCHEMA_VERSION
+            else required | {"planning_image_requirement"}
+        )
+        if set(data) != expected:
+            raise ValueError("intent contract fields mismatch")
         if data["schema_version"] not in {
             LEGACY_INTENT_CONTRACT_SCHEMA_VERSION,
             INTENT_CONTRACT_SCHEMA_VERSION,
@@ -218,6 +224,24 @@ class IntentContract:
         for field in ("input_identities", "hard_requirements", "soft_preferences", "prohibitions", "ambiguities"):
             if not isinstance(data[field], list) or any(not isinstance(row, Mapping) for row in data[field]):
                 raise ValueError(f"{field} must be a list of objects")
+        if data["schema_version"] == INTENT_CONTRACT_SCHEMA_VERSION:
+            requirement = _mapping(data["planning_image_requirement"], "planning_image_requirement")
+            if set(requirement) != {"mode", "input_ids"} or requirement.get("mode") not in {"required", "optional"}:
+                raise ValueError("planning_image_requirement is invalid")
+            input_ids = requirement.get("input_ids")
+            known_image_ids = {
+                str(row.get("input_id"))
+                for row in data["input_identities"]
+                if row.get("kind") == "image"
+            }
+            if (
+                not isinstance(input_ids, list)
+                or any(not isinstance(value, str) for value in input_ids)
+                or len(input_ids) != len(set(input_ids))
+                or set(input_ids) != known_image_ids
+                or (requirement["mode"] == "required" and not input_ids)
+            ):
+                raise ValueError("planning_image_requirement input IDs are invalid")
         for field in ("asset_policy", "execution", "authorizations", "verification", "allowed_adjustments", "frozen_digests"):
             _mapping(data[field], field)
         if data["schema_version"] == LEGACY_INTENT_CONTRACT_SCHEMA_VERSION:

@@ -606,21 +606,47 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertEqual(local_request["inputs"][0]["input_id"], "request_image_0")
         self.assertFalse(local_request["inputs"][0]["external_upload_authorized"])
         self.assertTrue(upload_request["inputs"][0]["external_upload_authorized"])
+        self.assertEqual(local_request["planning_image_requirement"]["mode"], "required")
+        self.assertEqual(local_request["planning_image_requirement"]["input_ids"], ["request_image_0"])
+
+    def test_text_image_planning_requirement_is_structured_and_explicitly_overridable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            image = Path(temporary) / "reference.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\nfixture")
+            optional = build_case_request(
+                case_id="optional_planning_image",
+                text="drop a ball",
+                image_paths=[image],
+            )
+            required = build_case_request(
+                case_id="required_planning_image",
+                text="use this pictured object",
+                image_paths=[image],
+                planning_images_required=True,
+            )
+
+        self.assertEqual(optional["planning_image_requirement"]["mode"], "optional")
+        self.assertEqual(required["planning_image_requirement"]["mode"], "required")
 
     def test_reference_image_metadata_reaches_expansion_without_pixel_upload(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             image = Path(temporary) / "reference.png"
             image.write_bytes(b"\x89PNG\r\n\x1a\nfixture")
-            request = build_case_request(case_id="metadata_only_image", image_paths=[image])
+            request = build_case_request(
+                case_id="metadata_only_image",
+                text="drop a ball; the image is optional context",
+                image_paths=[image],
+            )
             client = FakeJSONClient([expansion_fixture(), case_spec_v2_fixture()])
 
-            generate_case_spec_v2(request, client=client)
+            result = generate_case_spec_v2(request, client=client)
 
         self.assertEqual(client.calls[0]["images"], [])
         model_inputs = client.calls[0]["payload"]["request"]["inputs"]
         self.assertEqual(model_inputs[0]["input_id"], "request_image_0")
         self.assertEqual(model_inputs[0]["kind"], "image")
         self.assertIn("sha256", model_inputs[0])
+        self.assertEqual(result.llm_trace["planning_image_usage"]["mode"], "metadata_only")
 
     def test_reference_image_is_seen_by_expansion_and_bound_by_id_in_case_spec(self) -> None:
         generated = case_spec_v2_fixture()
