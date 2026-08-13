@@ -227,7 +227,18 @@ class SemanticReviewerAdapterTests(unittest.TestCase):
                                 "result": {
                                     "config": {
                                         "mcp_servers": {
-                                            "host_secret_server": {"command": "/usr/bin/host-secret-mcp"}
+                                            "host_secret_server": {
+                                                "command": "/usr/bin/host-secret-mcp",
+                                                "args": ["--secret-host-argument"],
+                                                "env": None,
+                                                "tool_timeout_sec": None
+                                            },
+                                            "serena": {
+                                                "url": "http://127.0.0.1:9121/mcp",
+                                                "startup_timeout_sec": 30.0,
+                                                "tool_timeout_sec": None,
+                                                "http_headers": {"Authorization": "must-not-copy"}
+                                            }
                                         }
                                     },
                                     "origins": {}
@@ -256,11 +267,14 @@ class SemanticReviewerAdapterTests(unittest.TestCase):
                             if config.get("project_doc_max_bytes") != 0:
                                 print(json.dumps({"id": message["id"], "error": {"code": 8, "message": "instruction discovery is enabled"}}), flush=True)
                                 continue
-                            inherited_mcp = (config.get("mcp_servers") or {}).get("host_secret_server") or {}
-                            if inherited_mcp.get("command") != "/usr/bin/host-secret-mcp" or inherited_mcp.get("enabled") is not False:
+                            mcp_servers = config.get("mcp_servers") or {}
+                            if mcp_servers.get("host_secret_server") != {"command": "/usr/bin/host-secret-mcp", "enabled": False}:
                                 print(json.dumps({"id": message["id"], "error": {"code": 9, "message": "host MCP was inherited"}}), flush=True)
                                 continue
-                            if "codex_apps" in (config.get("mcp_servers") or {}):
+                            if mcp_servers.get("serena") != {"url": "http://127.0.0.1:9121/mcp", "enabled": False}:
+                                print(json.dumps({"id": message["id"], "error": {"code": 12, "message": "HTTP MCP was not minimized"}}), flush=True)
+                                continue
+                            if "codex_apps" in mcp_servers:
                                 print(json.dumps({"id": message["id"], "error": {"code": 11, "message": "synthetic MCP lacks transport"}}), flush=True)
                                 continue
                             if config.get("features.apps") is not False or config.get("skills.include_instructions") is not False:

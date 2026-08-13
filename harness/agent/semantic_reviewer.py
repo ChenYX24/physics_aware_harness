@@ -222,10 +222,21 @@ class CodexAppServerReviewer:
                     retryable=False,
                     receipt=receipt,
                 )
-            disabled_mcp_servers = {
-                str(name): {**dict(server_config), "enabled": False}
-                for name, server_config in configured_mcp.items()
-            }
+            disabled_mcp_servers = {}
+            for name, server_config in configured_mcp.items():
+                url = server_config.get("url")
+                command = server_config.get("command")
+                if isinstance(url, str) and url:
+                    disabled_mcp_servers[str(name)] = {"url": url, "enabled": False}
+                elif isinstance(command, str) and command:
+                    disabled_mcp_servers[str(name)] = {"command": command, "enabled": False}
+                else:
+                    self._raise(
+                        "reviewer_protocol_error",
+                        f"config/read returned no usable transport for MCP server {name!r}",
+                        retryable=False,
+                        receipt=receipt,
+                    )
             self._send(
                 process,
                 {
