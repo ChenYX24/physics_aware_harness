@@ -565,6 +565,7 @@ class AgentJobControllerTests(unittest.TestCase):
             job_id="job_planning_image_authorized",
             publication_tier="local_preview",
             authorizations={"planning_llm_upload": True},
+            generation_mode="legacy",
         )
 
         inspection = controller.advance_until_blocked("job_planning_image_authorized")
@@ -586,6 +587,7 @@ class AgentJobControllerTests(unittest.TestCase):
             job_id="job_planning_image_unsupported",
             publication_tier="local_preview",
             authorizations={"planning_llm_upload": True},
+            generation_mode="legacy",
         )
 
         blocked = controller.advance_until_blocked("job_planning_image_unsupported")
@@ -606,6 +608,7 @@ class AgentJobControllerTests(unittest.TestCase):
             request,
             job_id="job_planning_image_optional",
             publication_tier="local_preview",
+            generation_mode="legacy",
         )
 
         inspection = controller.advance_until_blocked("job_planning_image_optional")
@@ -636,6 +639,7 @@ class AgentJobControllerTests(unittest.TestCase):
                 "meshy_upload": True,
                 "semantic_reviewer_image_upload": True,
             },
+            generation_mode="legacy",
         )
         blocked = controller.advance_until_blocked("job_planning_image_resume")
         self.assertEqual(blocked["job"]["current_stage"], "generation")
@@ -1397,7 +1401,7 @@ class AgentJobControllerTests(unittest.TestCase):
         hooks = fake.hooks()
         hooks.generate = ambiguous
         controller = AgentJobController(self.workspace, hooks=hooks)
-        controller.create(self.request, job_id="job_ambiguous_intent", publication_tier="local_preview")
+        controller.create(self.request, job_id="job_ambiguous_intent", publication_tier="local_preview", generation_mode="legacy")
 
         inspection = controller.advance_until_blocked("job_ambiguous_intent")
 
@@ -1464,7 +1468,7 @@ class AgentJobControllerTests(unittest.TestCase):
         hooks = fake.hooks()
         hooks.generate = interrupted
         controller = AgentJobController(self.workspace, hooks=hooks)
-        controller.create(self.request, job_id="job_interrupt_resume", publication_tier="local_preview")
+        controller.create(self.request, job_id="job_interrupt_resume", publication_tier="local_preview", generation_mode="legacy")
 
         paused = controller.advance_until_blocked("job_interrupt_resume")
         self.assertEqual(paused["job"]["state"], "paused_interrupted")
@@ -1476,7 +1480,7 @@ class AgentJobControllerTests(unittest.TestCase):
 
     def test_generation_resume_after_intent_commit_reuses_immutable_contract(self) -> None:
         controller, fake = self.controller()
-        controller.create(self.request, job_id="job_intent_commit_crash", publication_tier="local_preview")
+        controller.create(self.request, job_id="job_intent_commit_crash", publication_tier="local_preview", generation_mode="legacy")
         original_create_attempt = controller.store.create_attempt
         calls = 0
 
@@ -1501,7 +1505,7 @@ class AgentJobControllerTests(unittest.TestCase):
 
     def test_generation_resume_reads_real_legacy_v1_contract_fail_closed(self) -> None:
         controller, _ = self.controller()
-        controller.create(self.request, job_id="job_legacy_v1_intent", publication_tier="local_preview")
+        controller.create(self.request, job_id="job_legacy_v1_intent", publication_tier="local_preview", generation_mode="legacy")
         original_create_attempt = controller.store.create_attempt
         calls = 0
 
@@ -1627,7 +1631,7 @@ class AgentJobControllerTests(unittest.TestCase):
         hooks = fake.hooks()
         hooks.generate = transient
         controller = AgentJobController(self.workspace, hooks=hooks)
-        controller.create(self.request, job_id="job_transient_retry", publication_tier="local_preview")
+        controller.create(self.request, job_id="job_transient_retry", publication_tier="local_preview", generation_mode="legacy")
 
         inspection = controller.advance_until_blocked("job_transient_retry")
 
@@ -1997,7 +2001,7 @@ class AgentJobControllerTests(unittest.TestCase):
         hooks = fake.hooks()
         hooks.generate = ambiguous
         controller = AgentJobController(self.workspace, hooks=hooks)
-        controller.create(self.request, job_id="job_ambiguity_identity", publication_tier="local_preview")
+        controller.create(self.request, job_id="job_ambiguity_identity", publication_tier="local_preview", generation_mode="legacy")
         blocked = controller.advance_until_blocked("job_ambiguity_identity")
         intent = read_json(blocked["paths"]["intent_contract"])
         ambiguity_id = intent["ambiguities"][0]["ambiguity_id"]
@@ -2053,6 +2057,7 @@ class AgentJobControllerTests(unittest.TestCase):
             job_id="job_ambiguity_review_coverage",
             budget={"max_reviewer_technical_retries": 0},
             publication_tier="local_preview",
+            generation_mode="legacy",
         )
         blocked = controller.advance_until_blocked("job_ambiguity_review_coverage")
         ambiguity_id = read_json(blocked["paths"]["intent_contract"])["ambiguities"][0]["ambiguity_id"]

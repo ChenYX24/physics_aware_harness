@@ -1286,7 +1286,7 @@ def _analysis_mapping_to_list(value: Mapping[str, Any]) -> list[Any]:
     return [data]
 
 
-def _apply_request_identity(case_spec: Mapping[str, Any], request: Mapping[str, Any]) -> dict[str, Any]:
+def apply_case_request_identity(case_spec: Mapping[str, Any], request: Mapping[str, Any]) -> dict[str, Any]:
     result = dict(case_spec)
     result["schema_version"] = CASE_SPEC_V2_SCHEMA_VERSION
     identity = dict(result.get("identity")) if isinstance(result.get("identity"), Mapping) else {}
@@ -1306,6 +1306,11 @@ def _apply_request_identity(case_spec: Mapping[str, Any], request: Mapping[str, 
         backend["allow_multi_backend"] = render_backend != requested_backend
         result["backend_constraints"] = backend
     return result
+
+
+def _apply_request_identity(case_spec: Mapping[str, Any], request: Mapping[str, Any]) -> dict[str, Any]:
+    """Compatibility alias for the legacy fixed-LLM generation path."""
+    return apply_case_request_identity(case_spec, request)
 
 
 def _unwrap_case_spec(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -1714,7 +1719,7 @@ def _executable_primary_capabilities() -> list[str]:
     return ["deformable_body_dynamics", "fluid_particle_dynamics", "rigid_body_dynamics"]
 
 
-def _case_spec_contract() -> dict[str, Any]:
+def case_spec_generation_contract() -> dict[str, Any]:
     return {
         "schema_version": CASE_SPEC_V2_SCHEMA_VERSION,
         "required_top_level_fields": [
@@ -1933,6 +1938,11 @@ def _case_spec_contract() -> dict[str, Any]:
         "valid_structure_example_do_not_copy_values": _valid_case_spec_structure_example(),
         "valid_rigid_sph_shape_example_do_not_copy_values": _valid_rigid_sph_shape_example(),
     }
+
+
+def _case_spec_contract() -> dict[str, Any]:
+    """Compatibility alias for the legacy fixed-LLM generation path."""
+    return case_spec_generation_contract()
 
 
 def _valid_case_spec_structure_example() -> dict[str, Any]:

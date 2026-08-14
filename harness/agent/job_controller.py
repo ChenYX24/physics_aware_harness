@@ -16,6 +16,7 @@ from typing import Any, Callable, Mapping
 from harness.agent.job_schema import (
     ATTEMPT_MANIFEST_SCHEMA_VERSION,
     INTENT_CONTRACT_SCHEMA_VERSION,
+    PROJECTED_INTENT_CONTRACT_SCHEMA_VERSION,
     JOB_MANIFEST_SCHEMA_VERSION,
     SMOKE_GATE_SCHEMA_VERSION,
     AttemptManifest,
@@ -28,6 +29,16 @@ from harness.agent.job_schema import (
     utc_now,
     validate_attempt_id,
     validate_job_id,
+)
+from harness.agent.native_generation import (
+    NATIVE_GENERATION_ACK_SCHEMA_VERSION,
+    build_native_generation_ack,
+    build_native_generation_context,
+    generation_policy,
+    validate_generation_policy,
+    validate_native_generation_ack,
+    validate_native_generation_context,
+    validate_native_generation_submission,
 )
 from harness.agent.job_store import JobStore, JobStoreError
 from harness.agent.evidence_bundle import (
@@ -67,6 +78,7 @@ from harness.core.case_spec_v2 import (
 )
 from harness.core.stage_result import (
     StageResult,
+    artifact_ref,
     build_stage_result,
     classify_failure,
     failure_stage_result,
@@ -75,6 +87,7 @@ from harness.core.stage_result import (
 from harness.planning.backend_planner import plan_backend
 from harness.planning.case_generation import (
     REQUEST_SCHEMA_VERSION,
+    apply_case_request_identity,
     generate_case_spec_v2,
     normalize_planning_image_requirement,
     planning_image_decision,
@@ -142,6 +155,7 @@ class AgentJobController:
         authorizations: Mapping[str, Any] | None = None,
         publication_tier: str = "reference",
         seed_case_spec: Mapping[str, Any] | None = None,
+        generation_mode: str = "native",
     ) -> dict[str, Any]:
         request_data = self._validate_request(request)
         identity = validate_job_id(job_id or self._new_job_id())
@@ -184,6 +198,10 @@ class AgentJobController:
         if seed_case_spec is not None:
             available = [str(row.get("input_id")) for row in request_data.get("inputs") or []]
             validated_seed = case_spec_v2_from_dict(seed_case_spec, available_input_ids=available)
+        mode = "seed" if validated_seed is not None else str(generation_mode).strip()
+        if validated_seed is not None and generation_mode not in {"native", "seed"}:
+            raise ValueError("seed_case_spec cannot be combined with legacy generation mode")
+        policy = generation_policy(mode)
         now = utc_now()
         manifest = JobManifest.from_dict(
             {
@@ -211,26 +229,70 @@ class AgentJobController:
             self.store.write_request_artifact(identity, "provider_input_manifest.json", provider_manifest)
         if validated_seed is not None:
             self.store.write_request_artifact(identity, "seed_case_spec.json", validated_seed.data)
+        self.store.write_request_artifact(identity, "generation_policy.json", policy)
         self._emit(identity, "job_created", stage="intake_readiness", artifact_refs=[str(root / "job_manifest.json")])
         return self.inspect(identity)
 
     def inspect(self, job_id: str) -> dict[str, Any]:
         manifest = self.store.load_manifest(job_id)
         root = self.store.job_dir(job_id)
+        context_path = root / "request" / "native_generation_context.json"
         attempts = []
         for path in sorted((root / "attempts").glob("attempt_*/attempt_manifest.json")):
             attempts.append(AttemptManifest.from_dict(read_json(path)).to_dict())
         return {
             "schema_version": "harness_agent_job_inspection_v1",
             "effective_config_digest": self.config.digest,
+            "generation_mode": self._generation_policy(job_id)["mode"],
+            "native_generation_context_digest": stable_digest(read_json(context_path)) if context_path.is_file() else None,
             "job": manifest,
             "attempts": attempts,
             "paths": {
                 "job_root": str(root),
                 "job_manifest": str(root / "job_manifest.json"),
                 "intent_contract": str(root / "request" / "intent_contract.json") if (root / "request" / "intent_contract.json").is_file() else None,
+                "native_generation_context": str(root / "request" / "native_generation_context.json") if (root / "request" / "native_generation_context.json").is_file() else None,
+                "native_generation_ack": str(root / "request" / "native_generation_ack.json") if (root / "request" / "native_generation_ack.json").is_file() else None,
             },
         }
+
+    def submit_native_generation(self, job_id: str, submission: Mapping[str, Any]) -> dict[str, Any]:
+        with self.store.lock(job_id):
+            manifest = self.store.load_manifest(job_id)
+            if manifest["current_stage"] != "generation":
+                raise JobStoreError("native generation submission requires the generation stage")
+            policy = self._generation_policy(job_id)
+            if policy["mode"] != "native":
+                raise JobStoreError("job is not configured for native generation")
+            root = self.store.job_dir(job_id) / "request"
+            context_path = root / "native_generation_context.json"
+            if not context_path.is_file():
+                raise JobStoreError("advance the job once to create the native generation context")
+            context = validate_native_generation_context(read_json(context_path))
+            request = read_json(root / "user_request.json")
+            self._validate_native_context_binding(manifest, context, request)
+            value = validate_native_generation_submission(submission, context=context)
+            case_spec = self._native_case_spec(request, value["case_spec"])
+            self._project_native_intent_contract(manifest, request, value["intent_draft"], case_spec.data)
+            submission_path = root / "native_generation_submission.json"
+            ack_path = root / "native_generation_ack.json"
+            if submission_path.is_file():
+                existing = read_json(submission_path)
+                if existing != value:
+                    raise JobStoreError("an immutable native generation submission already differs")
+            else:
+                write_json(submission_path, value)
+            if ack_path.is_file():
+                validate_native_generation_ack(read_json(ack_path), context=context, submission=value)
+            else:
+                write_json(ack_path, build_native_generation_ack(context=context, submission=value))
+            self._update_manifest(
+                manifest,
+                state="running",
+                blocker=None,
+                allowed_next_actions=["advance", "cancel"],
+            )
+        return self.inspect(job_id)
 
     def advance_until_blocked(self, job_id: str) -> dict[str, Any]:
         with self.store.lock(job_id):
@@ -987,6 +1049,9 @@ class AgentJobController:
         job_id = manifest["job_id"]
         root = self.store.job_dir(job_id)
         request = read_json(root / "request" / "user_request.json")
+        policy = self._generation_policy(job_id)
+        if policy["mode"] == "native":
+            return self._advance_native_generation(manifest, request=request)
         decision = planning_image_decision(
             request,
             upload_authorized=manifest["authorizations"]["planning_llm_upload"] is True,
@@ -1056,12 +1121,31 @@ class AgentJobController:
             expansion = generated.expansion
             stage_result = generated.stage_result or read_json(generation_dir / "stage_results" / "generation.json")
         projected_intent = self._project_intent_contract(manifest, request, expansion, case_spec.data)
+        return self._complete_initial_generation(
+            manifest,
+            request=request,
+            case_spec=case_spec,
+            stage_result=stage_result,
+            projected_intent=projected_intent,
+        )
+
+    def _complete_initial_generation(
+        self,
+        manifest: dict[str, Any],
+        *,
+        request: Mapping[str, Any],
+        case_spec: CaseSpecV2,
+        stage_result: Mapping[str, Any],
+        projected_intent: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        job_id = manifest["job_id"]
+        root = self.store.job_dir(job_id)
         intent_path = root / "request" / "intent_contract.json"
         if intent_path.is_file():
             intent = IntentContract.from_dict(read_json(intent_path)).to_dict()
             existing_identity = self._intent_recovery_identity(intent)
             projected_identity = self._intent_recovery_identity(projected_intent)
-            if intent["schema_version"] != INTENT_CONTRACT_SCHEMA_VERSION:
+            if intent["schema_version"] == "harness_intent_contract_v1":
                 projected_identity.pop("planning_image_requirement", None)
             if existing_identity != projected_identity:
                 raise JobStoreError("immutable Intent Contract differs from the recovered generation projection")
@@ -1132,6 +1216,160 @@ class AgentJobController:
             self._write_controller_stage_result(manifest, result)
             return self._apply_stage_result(manifest, result)
         return manifest
+
+    def _advance_native_generation(
+        self,
+        manifest: dict[str, Any],
+        *,
+        request: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        job_id = manifest["job_id"]
+        request_root = self.store.job_dir(job_id) / "request"
+        requirement = request["planning_image_requirement"]
+        if requirement["mode"] == "required" and manifest["authorizations"]["planning_llm_upload"] is not True:
+            result = failure_stage_result(
+                stage="generation",
+                failure_code="planning_image_upload_authorization_missing",
+                message="authorize use of the required image inputs by the native planning Agent",
+                source_status="blocked",
+                job_id=job_id,
+                invocation_count=0,
+            )
+            self._write_controller_stage_result(manifest, result)
+            return self._apply_stage_result(manifest, result)
+        context_path = request_root / "native_generation_context.json"
+        if context_path.is_file():
+            context = validate_native_generation_context(read_json(context_path))
+            self._validate_native_context_binding(manifest, context, request)
+        else:
+            context = build_native_generation_context(
+                job_id=job_id,
+                request_digest=manifest["request_digest"],
+                request=request,
+                target=manifest["target"],
+                authorizations=manifest["authorizations"],
+            )
+            write_json(context_path, context)
+        submission_path = request_root / "native_generation_submission.json"
+        ack_path = request_root / "native_generation_ack.json"
+        if not submission_path.is_file() or not ack_path.is_file():
+            result = failure_stage_result(
+                stage="generation",
+                failure_code="native_generation_submission_required",
+                message="submit an Agent-native Intent draft and CaseSpec using the immutable generation context",
+                source_status="blocked",
+                job_id=job_id,
+                invocation_count=0,
+                artifact_refs=[
+                    artifact_ref(
+                        "native_generation_context",
+                        str(context_path),
+                        str(context["schema_version"]),
+                    )
+                ],
+            )
+            self._write_controller_stage_result(manifest, result)
+            return self._apply_stage_result(manifest, result)
+        submission = validate_native_generation_submission(read_json(submission_path), context=context)
+        ack = validate_native_generation_ack(read_json(ack_path), context=context, submission=submission)
+        case_spec = self._native_case_spec(request, submission["case_spec"])
+        projected_intent = self._project_native_intent_contract(
+            manifest,
+            request,
+            submission["intent_draft"],
+            case_spec.data,
+        )
+        stage_result = build_stage_result(
+            stage="generation",
+            status="completed",
+            job_id=job_id,
+            attempt_id="attempt_001",
+            invocation_count=0,
+            request_identities=[str(ack["ack_identity"])],
+            artifact_refs=[
+                artifact_ref("native_generation_context", str(context_path), str(context["schema_version"])),
+                artifact_ref("native_generation_submission", str(submission_path), str(submission["schema_version"])),
+                artifact_ref("native_generation_ack", str(ack_path), NATIVE_GENERATION_ACK_SCHEMA_VERSION),
+            ],
+        )
+        return self._complete_initial_generation(
+            manifest,
+            request=request,
+            case_spec=case_spec,
+            stage_result=stage_result,
+            projected_intent=projected_intent,
+        )
+
+    def _native_case_spec(self, request: Mapping[str, Any], raw: Mapping[str, Any]) -> CaseSpecV2:
+        available = [str(row.get("input_id")) for row in request.get("inputs") or []]
+        initial = case_spec_v2_from_dict(
+            apply_case_request_identity(raw, request),
+            available_input_ids=available,
+        )
+        value = copy.deepcopy(initial.data)
+        provenance = value.setdefault("provenance", {})
+        provenance["case_generation"] = {
+            "workflow": "agent_native_submission_v1",
+            "controller_model_invocation_count": 0,
+        }
+        return case_spec_v2_from_dict(value, available_input_ids=available)
+
+    def _project_native_intent_contract(
+        self,
+        manifest: Mapping[str, Any],
+        request: Mapping[str, Any],
+        draft: Mapping[str, Any],
+        case_spec: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        for row in draft["parameter_analysis"]:
+            self._case_spec_path_value(case_spec, str(row["path"]))
+        expansion = {
+            "ambiguities": copy.deepcopy(draft["ambiguities"]),
+            "assumptions": copy.deepcopy(draft["soft_preferences"]),
+            "parameter_analysis": copy.deepcopy(draft["parameter_analysis"]),
+        }
+        contract = self._project_intent_contract(manifest, request, expansion, case_spec)
+        expected_adjustable = sorted(
+            str(row["path"])
+            for row in draft["parameter_analysis"]
+            if row["requirement_level"] in {"soft", "inferred"}
+        )
+        if contract["allowed_adjustments"]["paths"] != expected_adjustable:
+            raise ValueError("native parameter analysis does not match a bounded CaseSpec leaf")
+        contract["schema_version"] = INTENT_CONTRACT_SCHEMA_VERSION
+        contract["source"] = "agent_native_submission_v1"
+        contract["hard_requirements"].extend(
+            {"id": str(row["id"]), "text": str(row["text"]), "frozen": True}
+            for row in draft["hard_requirements"]
+        )
+        contract["soft_preferences"] = copy.deepcopy(draft["soft_preferences"])
+        contract["prohibitions"] = [
+            {"id": str(row["id"]), "text": str(row["text"]), "frozen": True}
+            for row in draft["prohibitions"]
+        ]
+        return IntentContract.from_dict(contract).to_dict()
+
+    def _generation_policy(self, job_id: str) -> dict[str, Any]:
+        path = self.store.job_dir(job_id) / "request" / "generation_policy.json"
+        if not path.is_file():
+            raise JobStoreError("generation policy is missing")
+        return validate_generation_policy(read_json(path))
+
+    @staticmethod
+    def _validate_native_context_binding(
+        manifest: Mapping[str, Any],
+        context: Mapping[str, Any],
+        request: Mapping[str, Any],
+    ) -> None:
+        if (
+            context["job_id"] != manifest["job_id"]
+            or context["request_digest"] != manifest["request_digest"]
+            or stable_digest(context["request"]) != manifest["request_digest"]
+            or context["request"] != request
+            or context["target"] != manifest["target"]
+            or context["authorizations"] != manifest["authorizations"]
+        ):
+            raise JobStoreError("native generation context identity mismatch")
 
     def _advance_l1(self, manifest: dict[str, Any]) -> dict[str, Any]:
         case_spec = self._load_current_case_spec(manifest)
@@ -1559,7 +1797,7 @@ class AgentJobController:
         }
         allowed_adjustments = self._project_allowed_adjustments(expansion, case_spec)
         contract = {
-            "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
+            "schema_version": PROJECTED_INTENT_CONTRACT_SCHEMA_VERSION,
             "job_id": manifest["job_id"],
             "request_digest": manifest["request_digest"],
             "source": "expansion_case_spec_projection_v1",
@@ -1942,6 +2180,13 @@ class AgentJobController:
         value = StageResult.from_dict(result).to_dict()
         if value["status"] == "completed":
             return manifest
+        if value["failure_code"] == "native_generation_submission_required":
+            return self._update_manifest(
+                manifest,
+                state="blocked",
+                blocker={"code": value["failure_code"], "message": value["message"], "stage": value["stage"]},
+                allowed_next_actions=["submit_native_generation", "cancel"],
+            )
         if value["failure_class"] == "interrupted":
             return self._update_manifest(
                 manifest,
@@ -2834,7 +3079,10 @@ class AgentJobController:
 
     @staticmethod
     def _effective_allowed_adjustments(intent: Mapping[str, Any]) -> dict[str, Any]:
-        if intent.get("schema_version") != INTENT_CONTRACT_SCHEMA_VERSION:
+        if intent.get("schema_version") not in {
+            PROJECTED_INTENT_CONTRACT_SCHEMA_VERSION,
+            INTENT_CONTRACT_SCHEMA_VERSION,
+        }:
             return {"paths": [], "ranges": {}}
         allowed = intent.get("allowed_adjustments")
         return dict(allowed) if isinstance(allowed, Mapping) else {"paths": [], "ranges": {}}

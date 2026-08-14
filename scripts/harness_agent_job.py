@@ -51,6 +51,7 @@ def parse_args() -> argparse.Namespace:
     create.add_argument("--publication-tier", choices=["diagnostic_only", "local_preview", "reference"], default="reference")
     create.add_argument("--budget", help="JSON object overriding Controller budget defaults.")
     create.add_argument("--seed-case-spec", help="Validated CaseSpec V2 fixture; skips LLM generation but remains audited.")
+    create.add_argument("--generation-mode", choices=["native", "legacy"], default="native")
     create.add_argument("--job-id")
 
     for name in ("inspect", "advance-until-blocked", "review", "cancel"):
@@ -61,6 +62,10 @@ def parse_args() -> argparse.Namespace:
     revise.add_argument("job_id")
     revise.add_argument("--revised-case-spec", required=True)
     revise.add_argument("--revision-reason", required=True)
+
+    submit = commands.add_parser("submit-generation", help="Submit an Agent-native Intent draft and CaseSpec.")
+    submit.add_argument("job_id")
+    submit.add_argument("--submission", required=True)
 
     resume = commands.add_parser("resume")
     resume.add_argument("job_id")
@@ -131,6 +136,7 @@ def main() -> int:
             },
             publication_tier=args.publication_tier,
             seed_case_spec=read_json(args.seed_case_spec) if args.seed_case_spec else None,
+            generation_mode=args.generation_mode,
         )
     elif args.command == "inspect":
         result = controller.inspect(args.job_id)
@@ -144,6 +150,8 @@ def main() -> int:
             read_json(args.revised_case_spec),
             reason=args.revision_reason,
         )
+    elif args.command == "submit-generation":
+        result = controller.submit_native_generation(args.job_id, read_json(args.submission))
     elif args.command == "resume":
         authorizations = {}
         for field, enabled in (

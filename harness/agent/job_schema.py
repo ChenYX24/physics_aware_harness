@@ -11,7 +11,8 @@ from typing import Any, Mapping
 
 JOB_MANIFEST_SCHEMA_VERSION = "harness_agent_job_manifest_v1"
 LEGACY_INTENT_CONTRACT_SCHEMA_VERSION = "harness_intent_contract_v1"
-INTENT_CONTRACT_SCHEMA_VERSION = "harness_intent_contract_v2"
+PROJECTED_INTENT_CONTRACT_SCHEMA_VERSION = "harness_intent_contract_v2"
+INTENT_CONTRACT_SCHEMA_VERSION = "harness_intent_contract_v3"
 ATTEMPT_MANIFEST_SCHEMA_VERSION = "harness_agent_attempt_manifest_v1"
 CHECKPOINT_SCHEMA_VERSION = "harness_agent_checkpoint_v1"
 SMOKE_GATE_SCHEMA_VERSION = "harness_smoke_gate_v1"
@@ -204,27 +205,29 @@ class IntentContract:
             "frozen_digests",
             "created_at",
         }
-        expected = (
-            required
-            if data.get("schema_version") == LEGACY_INTENT_CONTRACT_SCHEMA_VERSION
-            else required | {"planning_image_requirement"}
-        )
+        expected = required if data.get("schema_version") == LEGACY_INTENT_CONTRACT_SCHEMA_VERSION else required | {"planning_image_requirement"}
         if set(data) != expected:
             raise ValueError("intent contract fields mismatch")
         if data["schema_version"] not in {
             LEGACY_INTENT_CONTRACT_SCHEMA_VERSION,
+            PROJECTED_INTENT_CONTRACT_SCHEMA_VERSION,
             INTENT_CONTRACT_SCHEMA_VERSION,
         }:
             raise ValueError(f"unsupported intent contract schema: {data['schema_version']!r}")
         validate_job_id(data["job_id"])
         _sha256(data["request_digest"], "request_digest")
-        if data["source"] != "expansion_case_spec_projection_v1":
+        expected_source = {
+            LEGACY_INTENT_CONTRACT_SCHEMA_VERSION: "expansion_case_spec_projection_v1",
+            PROJECTED_INTENT_CONTRACT_SCHEMA_VERSION: "expansion_case_spec_projection_v1",
+            INTENT_CONTRACT_SCHEMA_VERSION: "agent_native_submission_v1",
+        }[data["schema_version"]]
+        if data["source"] != expected_source:
             raise ValueError("unsupported intent contract source")
         _mapping(data["original_request"], "original_request")
         for field in ("input_identities", "hard_requirements", "soft_preferences", "prohibitions", "ambiguities"):
             if not isinstance(data[field], list) or any(not isinstance(row, Mapping) for row in data[field]):
                 raise ValueError(f"{field} must be a list of objects")
-        if data["schema_version"] == INTENT_CONTRACT_SCHEMA_VERSION:
+        if data["schema_version"] != LEGACY_INTENT_CONTRACT_SCHEMA_VERSION:
             requirement = _mapping(data["planning_image_requirement"], "planning_image_requirement")
             if set(requirement) != {"mode", "input_ids"} or requirement.get("mode") not in {"required", "optional"}:
                 raise ValueError("planning_image_requirement is invalid")

@@ -81,6 +81,7 @@ _USER_ACTION_CODES = {
     "catalog_not_writable",
     "llm_credentials_missing",
     "meshy_upload_authorization_missing",
+    "native_generation_submission_required",
     "paid_provider_authorization_missing",
     "paid_provider_budget_missing",
     "paid_provider_budget_exhausted",
