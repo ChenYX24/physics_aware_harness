@@ -6,6 +6,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import time
 from contextlib import contextmanager
@@ -262,6 +263,7 @@ class AgentJobController:
             "job": manifest,
             "attempts": attempts,
             "current_leaf_stage_result": current_leaf_stage_result,
+            "interrupted_recovery": self._interrupted_recovery(manifest),
             "paths": {
                 "job_root": str(root),
                 "job_manifest": str(root / "job_manifest.json"),
@@ -271,6 +273,38 @@ class AgentJobController:
                 "native_generation_ack": str(root / "request" / "native_generation_ack.json") if (root / "request" / "native_generation_ack.json").is_file() else None,
             },
         }
+
+    def recover_interrupted(self, job_id: str) -> dict[str, Any]:
+        """Return a lock-orphaned running stage to the normal resumable boundary."""
+        with self.store.lock(job_id):
+            manifest = self.store.load_manifest(job_id)
+            recovery = self._interrupted_recovery(manifest)
+            if recovery["available"] is not True:
+                raise JobStoreError(str(recovery["message"]))
+            stage = str(recovery["stage"])
+            if stage == "compile":
+                manifest = self._reconcile_provider_usage(manifest)
+            checkpoint_path = self.store.job_dir(job_id) / "checkpoints" / f"{stage}.json"
+            self._checkpoint(
+                manifest,
+                stage,
+                "interrupted",
+                self._stage_input_digest(manifest, stage),
+            )
+            result = failure_stage_result(
+                stage=stage,
+                failure_code="interrupted",
+                message=f"{stage} was recovered after its Controller process ended without closing the stage",
+                source_status="interrupted",
+                job_id=job_id,
+                attempt_id=manifest.get("current_attempt_id"),
+                checkpoint_ref=str(checkpoint_path),
+            )
+            self._write_controller_stage_result(manifest, result)
+            manifest = self._apply_stage_result(manifest, result)
+            self._finish_in_flight(job_id, stage, "recovered_interrupted")
+            self._stage_event(manifest, "stage_blocked", stage, result=result)
+        return self.inspect(job_id)
 
     def submit_native_generation(self, job_id: str, submission: Mapping[str, Any]) -> dict[str, Any]:
         with self.store.lock(job_id):
@@ -397,10 +431,13 @@ class AgentJobController:
                 started = self.hooks.monotonic()
                 stage_result_snapshot = self._stage_result_snapshot(manifest)
                 self._stage_event(manifest, "stage_started", stage)
+                self._start_in_flight(manifest, stage)
+                in_flight_outcome = "returned"
                 try:
                     with self._effective_environment():
                         manifest = self._advance_one(manifest)
                 except (KeyboardInterrupt, SystemExit) as exc:
+                    in_flight_outcome = "interrupted"
                     if stage == "compile":
                         manifest = self._reconcile_provider_usage(manifest)
                     elapsed = max(0.0, self.hooks.monotonic() - started)
@@ -432,6 +469,7 @@ class AgentJobController:
                     self._stage_event(manifest, "stage_blocked", str(result["stage"]), result=result)
                     break
                 except BaseException as exc:
+                    in_flight_outcome = "failed"
                     if stage == "compile":
                         manifest = self._reconcile_provider_usage(manifest)
                     elapsed = max(0.0, self.hooks.monotonic() - started)
@@ -448,6 +486,8 @@ class AgentJobController:
                     if manifest["state"] == "running":
                         continue
                     break
+                finally:
+                    self._finish_in_flight(job_id, stage, in_flight_outcome)
                 elapsed = max(0.0, self.hooks.monotonic() - started)
                 manifest = self._add_active_elapsed(manifest, elapsed)
                 structured_failure = self._changed_noncompleted_stage_result(
@@ -2686,6 +2726,76 @@ class AgentJobController:
             payload["result"] = dict(result)
         self._emit(manifest["job_id"], event, **payload)
 
+    def _interrupted_recovery(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
+        if manifest["state"] != "running":
+            return {
+                "available": False,
+                "stage": None,
+                "reason": "job_not_running",
+                "message": f"job is not in running state: {manifest['state']}",
+            }
+        marker_path = self.store.job_dir(manifest["job_id"]) / "checkpoints" / "in_flight.json"
+        marker = read_json(marker_path) if marker_path.is_file() else None
+        if (
+            isinstance(marker, Mapping)
+            and marker.get("schema_version") == "harness_agent_in_flight_v1"
+            and marker.get("job_id") == manifest["job_id"]
+            and marker.get("status") == "active"
+            and marker.get("stage") == manifest["current_stage"]
+        ):
+            return {
+                "available": True,
+                "stage": str(marker["stage"]),
+                "reason": "active_in_flight_marker",
+                "message": "running stage has an unclosed durable in-flight marker",
+            }
+        events = sorted((self.store.job_dir(manifest["job_id"]) / "events").glob("*.json"))
+        latest = read_json(events[-1]) if events else None
+        if (
+            isinstance(latest, Mapping)
+            and latest.get("event") == "stage_started"
+            and latest.get("stage") == manifest["current_stage"]
+        ):
+            return {
+                "available": True,
+                "stage": str(latest["stage"]),
+                "reason": "unclosed_stage_started_event",
+                "message": "running stage has no matching completion or blocked event",
+            }
+        return {
+            "available": False,
+            "stage": None,
+            "reason": "no_unclosed_stage_evidence",
+            "message": "running job has no durable evidence of an interrupted stage",
+        }
+
+    def _start_in_flight(self, manifest: Mapping[str, Any], stage: str) -> None:
+        write_json(
+            self.store.job_dir(manifest["job_id"]) / "checkpoints" / "in_flight.json",
+            {
+                "schema_version": "harness_agent_in_flight_v1",
+                "job_id": manifest["job_id"],
+                "attempt_id": manifest.get("current_attempt_id"),
+                "stage": stage,
+                "status": "active",
+                "controller_pid": os.getpid(),
+                "started_at": utc_now(),
+                "finished_at": None,
+                "outcome": None,
+            },
+        )
+
+    def _finish_in_flight(self, job_id: str, stage: str, outcome: str) -> None:
+        path = self.store.job_dir(job_id) / "checkpoints" / "in_flight.json"
+        if not path.is_file():
+            return
+        marker = read_json(path)
+        if not isinstance(marker, Mapping) or marker.get("job_id") != job_id or marker.get("stage") != stage:
+            return
+        closed = dict(marker)
+        closed.update({"status": "closed", "finished_at": utc_now(), "outcome": outcome})
+        write_json(path, closed)
+
     def _emit_semantic_outcome_event(self, manifest: Mapping[str, Any]) -> None:
         leaf = self._current_leaf_stage_result(manifest)
         result = leaf["result"] if leaf is not None else None
@@ -2924,6 +3034,8 @@ class AgentJobController:
             values["SIM_STUDIO_UE_EXECUTABLE"] = str(self.config.ue_executable)
         if self.config.codex_executable is not None:
             values["SIM_HARNESS_CODEX_EXECUTABLE"] = str(self.config.codex_executable)
+        if self.config.ue_asset_importer_command:
+            values["SIM_HARNESS_UE_ASSET_IMPORTER_CMD"] = shlex.join(self.config.ue_asset_importer_command)
         with self._profile_environment(values):
             yield
 

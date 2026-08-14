@@ -49,6 +49,16 @@ python3 scripts/harness_agent_job.py --jsonl advance-until-blocked <job_id>
 
 Use JSONL for long operations. After the command stops or is interrupted, run `inspect` again. Read the manifest's `state`, `current_stage`, `blocker`, and `allowed_next_actions`, then use `current_leaf_stage_result`, which includes the authoritative leaf `harness_stage_result_v1` path and Controller-validated content. Do not search run directories or select a Stage Result by recency.
 
+Controller commands that can launch a Provider, importer, UE, a simulation backend, or the isolated Reviewer are long operations. When invoking `advance-until-blocked`, `resume`, `apply-revision`, or `review` through a Codex shell tool, set its host `timeout_ms` to at least `2100000` (35 minutes); do not rely on the host's default 20-second timeout. The Controller's own bounded subprocess and budget limits remain authoritative. A host timeout is not a structured Job result.
+
+If a host command ends or times out and `inspect` reports `state=running`, use the read-only `interrupted_recovery` field. When `interrupted_recovery.available=true`, recover only through the audited Controller action:
+
+```bash
+python3 scripts/harness_agent_job.py recover-interrupted <job_id>
+```
+
+This action acquires the Job lock, reconciles Provider usage, writes an interrupted checkpoint and Stage Result, and returns the same Job to `paused_interrupted`. If the lock is still held, treat the Controller as active and do not force recovery. Inspect again, then call the permitted `resume` action with the long host timeout. Never infer stale-running state from elapsed wall time alone and never edit a manifest or lock file.
+
 When generation stops with `native_generation_submission_required`, read only the `native_generation_context` path and copy the `native_generation_context_digest` returned by `inspect`. The context contains the immutable request, submission and Intent draft contracts, current CaseSpec contract, capability vocabulary, backend artifact I/O, and current examples. Generate one submission matching that context; do not invent a second schema or call the legacy planning LLM.
 
 The submission contains exactly `intent_draft`, `case_spec`, and `agent_reported` plus its schema, Job identity, and generation-context digest. Report TUI thread/model/provider/turn information only when known; use `null` when unknown. These fields are audit declarations and are not Controller-observed usage. Report image input IDs as used only when the context marks planning images required and the Job authorization permits their use; optional images remain metadata-only.

@@ -12,6 +12,12 @@
   "codex_reviewer": {
     "executable": null
   },
+  "ue_asset_importer": {
+    "command": [
+      "/Users/laplace/miniforge3/bin/python",
+      "/Users/laplace/phyawareharness/physics_aware_harness/scripts/harness_ue_asset_importer.py"
+    ]
+  },
   "paths": {
     "workspace": "/Volumes/TiPlus7100s/SimulatorWorkspace/physics_aware_harness",
     "catalog": null,

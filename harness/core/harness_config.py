@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import urllib.parse
 from dataclasses import dataclass
@@ -18,11 +19,14 @@ DEFAULT_WORKSPACE = Path.home() / "SimulatorWorkspace" / "physics_aware_harness"
 IMAGE_CAPABILITIES = frozenset({"supported", "unsupported", "unknown"})
 PUBLICATION_TIERS = frozenset({"reference"})
 
-_ROOT_FIELDS = frozenset({"schema_version", "planning_llm", "meshy", "codex_reviewer", "paths", "safety"})
+_ROOT_FIELDS = frozenset(
+    {"schema_version", "planning_llm", "meshy", "codex_reviewer", "ue_asset_importer", "paths", "safety"}
+)
 _NESTED_FIELDS = {
     "planning_llm": frozenset({"base_url", "model", "image_capability", "api_key_env"}),
     "meshy": frozenset({"api_key_env"}),
     "codex_reviewer": frozenset({"executable"}),
+    "ue_asset_importer": frozenset({"command"}),
     "paths": frozenset({"workspace", "catalog", "ue_project", "ue_executable"}),
     "safety": frozenset({"default_publication_tier", "external_calls_default_allow"}),
 }
@@ -41,6 +45,7 @@ class EffectiveHarnessConfig:
     planning_api_key_env: str
     meshy_api_key_env: str
     codex_executable: Path | None
+    ue_asset_importer_command: tuple[str, ...]
     workspace: Path
     catalog: Path
     ue_project: Path
@@ -68,6 +73,7 @@ class EffectiveHarnessConfig:
             "codex_reviewer": {
                 "executable": str(self.codex_executable) if self.codex_executable is not None else None,
             },
+            "ue_asset_importer": {"command": list(self.ue_asset_importer_command)},
             "paths": {
                 "workspace": str(self.workspace),
                 "catalog": str(self.catalog),
@@ -115,6 +121,7 @@ class EffectiveHarnessConfig:
         environ = os.environ if env is None else env
         planning_secret_name = self.planning_secret_env_name(environ)
         codex = self.codex_executable or _which_path("codex", environ)
+        importer_executable = _command_executable(self.ue_asset_importer_command, environ)
         paths = {
             "workspace": self.workspace,
             "catalog": self.catalog,
@@ -147,6 +154,14 @@ class EffectiveHarnessConfig:
                 },
                 "meshy": {"available": self.meshy_api_key(environ) is not None},
                 "codex_reviewer": {"available": bool(codex and codex.is_file() and os.access(codex, os.X_OK))},
+                "ue_asset_importer": {
+                    "available": bool(
+                        importer_executable
+                        and importer_executable.is_file()
+                        and os.access(importer_executable, os.X_OK)
+                    ),
+                    "command": list(self.ue_asset_importer_command),
+                },
             },
             "secrets": {
                 "planning_llm_api_key": {"environment_variable": planning_secret_name, "present": planning_key_present},
@@ -245,6 +260,7 @@ def load_harness_config(
         codex_executable = _which_path("codex", environ)
         if codex_executable is not None:
             sources["codex_reviewer.executable"] = {"layer": "derived_default", "key": "PATH"}
+    importer_command = _command(values["ue_asset_importer.command"], root, "ue_asset_importer.command")
 
     return EffectiveHarnessConfig(
         planning_base_url=base_url,
@@ -253,6 +269,7 @@ def load_harness_config(
         planning_api_key_env=planning_key_env,
         meshy_api_key_env=meshy_key_env,
         codex_executable=codex_executable,
+        ue_asset_importer_command=importer_command,
         workspace=workspace,
         catalog=catalog,
         ue_project=ue_project,
@@ -305,6 +322,7 @@ def _defaults() -> dict[str, Any]:
         "planning_llm.api_key_env": "SIM_HARNESS_LLM_API_KEY",
         "meshy.api_key_env": "SIM_HARNESS_MESHY_API_KEY",
         "codex_reviewer.executable": None,
+        "ue_asset_importer.command": None,
         "paths.workspace": str(DEFAULT_WORKSPACE),
         "paths.catalog": None,
         "paths.ue_project": None,
@@ -322,6 +340,7 @@ def _environment_keys() -> dict[str, tuple[str, ...]]:
         "planning_llm.api_key_env": ("SIM_HARNESS_LLM_API_KEY_ENV",),
         "meshy.api_key_env": ("SIM_HARNESS_MESHY_API_KEY_ENV",),
         "codex_reviewer.executable": ("SIM_HARNESS_CODEX_EXECUTABLE",),
+        "ue_asset_importer.command": ("SIM_HARNESS_UE_ASSET_IMPORTER_CMD",),
         "paths.workspace": ("SIM_HARNESS_WORKSPACE",),
         "paths.catalog": ("SIM_HARNESS_ASSET_CATALOG",),
         "paths.ue_project": ("SIM_STUDIO_UE_PROJECT",),
@@ -363,6 +382,38 @@ def _env_name(value: Any, field: str) -> str:
     if not _ENV_NAME.fullmatch(raw):
         raise HarnessConfigError(f"{field} must be an environment variable name")
     return raw
+
+
+def _command(value: Any, root: Path, field: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        try:
+            values = shlex.split(value)
+        except ValueError as exc:
+            raise HarnessConfigError(f"{field} must be a valid command string") from exc
+    elif isinstance(value, (list, tuple)) and not isinstance(value, (bytes, bytearray)):
+        values = list(value)
+    else:
+        raise HarnessConfigError(f"{field} must be a command string or argv array")
+    if not values or any(not isinstance(item, str) or not item.strip() for item in values):
+        raise HarnessConfigError(f"{field} must contain one or more non-empty strings")
+    command = [item.strip() for item in values]
+    executable = Path(command[0]).expanduser()
+    if "/" in command[0] and not executable.is_absolute():
+        command[0] = str((root / executable).resolve(strict=False))
+    elif executable.is_absolute():
+        command[0] = str(executable.resolve(strict=False))
+    return tuple(command)
+
+
+def _command_executable(command: tuple[str, ...], env: Mapping[str, str]) -> Path | None:
+    if not command:
+        return None
+    executable = Path(command[0]).expanduser()
+    if executable.is_absolute() or "/" in command[0]:
+        return executable.resolve(strict=False)
+    return _which_path(command[0], env)
 
 
 def _string(value: Any, field: str, *, allow_empty: bool = False) -> str:

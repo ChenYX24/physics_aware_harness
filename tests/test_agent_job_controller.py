@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from harness.agent.job_controller import AgentJobController, ControllerHooks
+from harness.agent.job_store import JobStoreError
 from harness.agent.evidence_bundle import current_evidence_snapshots, semantic_review_requirements
 from harness.agent.job_schema import DEFAULT_BUDGET, IntentContract, JobManifest, stable_digest, utc_now
 from harness.agent.review_schema import EVIDENCE_BUNDLE_SCHEMA_VERSION, REVIEWER_RECEIPT_SCHEMA_VERSION
@@ -1618,6 +1619,64 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertEqual(resumed["job"]["state"], "awaiting_semantic_review")
         self.assertEqual(resumed["job"]["current_attempt_id"], "attempt_001")
 
+    def test_unclosed_running_stage_is_explicitly_recovered_without_manual_manifest_edits(self) -> None:
+        controller, _ = self.controller()
+        controller.create(
+            self.request,
+            job_id="job_stale_running_recovery",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        inspection = controller.advance_until_blocked("job_stale_running_recovery")
+        manifest = inspection["job"]
+        controller._update_manifest(
+            manifest,
+            state="running",
+            current_stage="compile",
+            blocker=None,
+            allowed_next_actions=["cancel"],
+        )
+        manifest = controller.store.load_manifest("job_stale_running_recovery")
+        controller._stage_event(manifest, "stage_started", "compile")
+
+        stale = controller.inspect("job_stale_running_recovery")
+        self.assertTrue(stale["interrupted_recovery"]["available"])
+        self.assertEqual(stale["interrupted_recovery"]["reason"], "unclosed_stage_started_event")
+
+        recovered = controller.recover_interrupted("job_stale_running_recovery")
+
+        self.assertEqual(recovered["job"]["state"], "paused_interrupted")
+        self.assertEqual(recovered["job"]["current_stage"], "compile")
+        self.assertEqual(recovered["job"]["allowed_next_actions"], ["resume", "cancel"])
+        self.assertEqual(recovered["current_leaf_stage_result"]["result"]["failure_class"], "interrupted")
+        self.assertFalse(recovered["interrupted_recovery"]["available"])
+        with self.assertRaisesRegex(JobStoreError, "not in running state"):
+            controller.recover_interrupted("job_stale_running_recovery")
+
+    def test_active_in_flight_marker_is_recoverable_only_after_controller_lock_releases(self) -> None:
+        controller, _ = self.controller()
+        controller.create(self.request, job_id="job_stale_lock", publication_tier="local_preview")
+        manifest = controller.store.load_manifest("job_stale_lock")
+        manifest = controller._update_manifest(
+            manifest,
+            state="running",
+            blocker=None,
+            allowed_next_actions=["cancel"],
+        )
+        controller._start_in_flight(manifest, "intake_readiness")
+        self.assertEqual(
+            controller.inspect("job_stale_lock")["interrupted_recovery"]["reason"],
+            "active_in_flight_marker",
+        )
+        with controller.store.lock("job_stale_lock"):
+            with self.assertRaisesRegex(JobStoreError, "already being advanced"):
+                controller.recover_interrupted("job_stale_lock")
+
+        recovered = controller.recover_interrupted("job_stale_lock")
+        marker = read_json(Path(recovered["paths"]["job_root"]) / "checkpoints" / "in_flight.json")
+        self.assertEqual(marker["status"], "closed")
+        self.assertEqual(marker["outcome"], "recovered_interrupted")
+
     def test_generation_resume_after_intent_commit_reuses_immutable_contract(self) -> None:
         controller, fake = self.controller()
         controller.create(self.request, job_id="job_intent_commit_crash", publication_tier="local_preview", generation_mode="legacy")
@@ -2355,6 +2414,7 @@ class AgentJobCliTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("review", completed.stdout)
         self.assertIn("apply-revision", completed.stdout)
+        self.assertIn("recover-interrupted", completed.stdout)
 
     def test_create_and_inspect_emit_structured_json(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

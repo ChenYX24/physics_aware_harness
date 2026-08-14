@@ -76,8 +76,9 @@ default / local_catalog / external_site / procedural_generation / model_generati
 `sphere/ball` 使用 sphere，`cylinder/rod/pole/column/disc` 使用 cylinder。
 `geometry.approx_size_m` 始终是完整的 x/y/z 包围盒尺寸：sphere 三轴直径必须相等，cylinder
 的 x/y 直径必须相等且 z 为长度。不支持的形状或不一致的显式 hint 会结构化失败，不会静默
-变成长方体。UE importer 命令通过
-`SIM_HARNESS_UE_ASSET_IMPORTER_CMD` 显式配置；未配置时返回
+变成长方体。Controller 的 UE importer 命令优先在严格配置的
+`ue_asset_importer.command` argv 数组中持久设置；`SIM_HARNESS_UE_ASSET_IMPORTER_CMD`
+仅作为更高优先级的临时兼容覆盖。两者均未配置时返回
 `backend_importer_unavailable`，不会触发普通 UE runner。仓库提供的真实命令入口为
 `python3.13 scripts/harness_ue_asset_importer.py`；它启动 UE 内部
 `native_ue_asset_importer.py`，执行米→厘米单位转换、StaticMesh bounds、LOD0 section、简单碰撞、

@@ -27,6 +27,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ue-project")
     parser.add_argument("--ue-executable")
     parser.add_argument("--codex-executable")
+    parser.add_argument("--ue-asset-importer-command")
     parser.add_argument("--planning-base-url")
     parser.add_argument("--planning-model")
     parser.add_argument("--planning-image-capability", choices=["supported", "unsupported", "unknown"])
@@ -54,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     create.add_argument("--generation-mode", choices=["native", "legacy"], default="native")
     create.add_argument("--job-id")
 
-    for name in ("inspect", "advance-until-blocked", "review", "cancel"):
+    for name in ("inspect", "advance-until-blocked", "recover-interrupted", "review", "cancel"):
         command = commands.add_parser(name)
         command.add_argument("job_id")
 
@@ -94,6 +95,7 @@ def main() -> int:
             "paths.ue_project": args.ue_project,
             "paths.ue_executable": args.ue_executable,
             "codex_reviewer.executable": args.codex_executable,
+            "ue_asset_importer.command": args.ue_asset_importer_command,
             "planning_llm.base_url": args.planning_base_url,
             "planning_llm.model": args.planning_model,
             "planning_llm.image_capability": args.planning_image_capability,
@@ -142,6 +144,8 @@ def main() -> int:
         result = controller.inspect(args.job_id)
     elif args.command == "advance-until-blocked":
         result = controller.advance_until_blocked(args.job_id)
+    elif args.command == "recover-interrupted":
+        result = controller.recover_interrupted(args.job_id)
     elif args.command == "review":
         result = controller.run_semantic_review(args.job_id)
     elif args.command == "apply-revision":

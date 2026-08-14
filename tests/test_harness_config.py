@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,6 +23,7 @@ def config_document(**overrides: object) -> dict[str, object]:
         },
         "meshy": {"api_key_env": "MESHY_TEST_KEY"},
         "codex_reviewer": {"executable": None},
+        "ue_asset_importer": {"command": ["/bin/sh", "tools/importer.py"]},
         "paths": {
             "workspace": "external/workspace",
             "catalog": None,
@@ -112,6 +114,59 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertEqual(file_config.planning_model, "from-config")
         self.assertEqual(default_config.planning_model, "")
         self.assertEqual(default_config.sources["planning_llm.model"]["layer"], "default")
+
+    def test_ue_importer_command_is_strict_argv_with_environment_and_cli_precedence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            path = self.write_config(root, config_document())
+            file_config = load_harness_config(config_path=path, repo_root=root, env={})
+            env_config = load_harness_config(
+                config_path=path,
+                repo_root=root,
+                env={"SIM_HARNESS_UE_ASSET_IMPORTER_CMD": "/bin/echo from-env"},
+            )
+            cli_config = load_harness_config(
+                config_path=path,
+                repo_root=root,
+                env={"SIM_HARNESS_UE_ASSET_IMPORTER_CMD": "/bin/echo from-env"},
+                cli_overrides={"ue_asset_importer.command": "/bin/echo from-cli"},
+            )
+
+        self.assertEqual(file_config.ue_asset_importer_command, ("/bin/sh", "tools/importer.py"))
+        self.assertEqual(env_config.ue_asset_importer_command, ("/bin/echo", "from-env"))
+        self.assertEqual(cli_config.ue_asset_importer_command, ("/bin/echo", "from-cli"))
+        self.assertEqual(file_config.inspect({})["providers"]["ue_asset_importer"]["available"], True)
+        self.assertEqual(env_config.sources["ue_asset_importer.command"]["layer"], "environment")
+        self.assertEqual(cli_config.sources["ue_asset_importer.command"]["layer"], "cli")
+
+    def test_ue_importer_command_rejects_empty_or_non_string_argv(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            for command in ([], ["/bin/sh", 7]):
+                document = config_document()
+                document["ue_asset_importer"] = {"command": command}
+                path = self.write_config(root, document)
+                with self.assertRaisesRegex(HarnessConfigError, "ue_asset_importer.command"):
+                    load_harness_config(config_path=path, repo_root=root, env={})
+
+    def test_controller_projects_configured_ue_importer_command_without_shell_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            document = config_document()
+            document["paths"] = {
+                "workspace": str(root / "workspace"),
+                "catalog": None,
+                "ue_project": None,
+                "ue_executable": None,
+            }
+            path = self.write_config(root, document)
+            config = load_harness_config(config_path=path, repo_root=root, env={})
+            controller = AgentJobController(config=config)
+            with patch.dict(os.environ, {}, clear=True):
+                with controller._effective_environment():
+                    projected = os.environ["SIM_HARNESS_UE_ASSET_IMPORTER_CMD"]
+
+        self.assertEqual(projected, "/bin/sh tools/importer.py")
 
     def test_legacy_openai_fallbacks_remain_available(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
