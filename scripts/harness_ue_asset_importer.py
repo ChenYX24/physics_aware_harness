@@ -15,7 +15,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 UE_SCRIPT = ROOT / "scripts" / "native_ue_asset_importer.py"
-DEFAULT_TIMEOUT_S = 600.0
+DEFAULT_TIMEOUT_S = 300.0
 
 
 def parse_args() -> argparse.Namespace:

@@ -118,6 +118,9 @@ class HarnessConfigTests(unittest.TestCase):
     def test_ue_importer_command_is_strict_argv_with_environment_and_cli_precedence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
+            importer = root / "tools" / "importer.py"
+            importer.parent.mkdir(parents=True)
+            importer.write_text("# fixture importer\n", encoding="utf-8")
             path = self.write_config(root, config_document())
             file_config = load_harness_config(config_path=path, repo_root=root, env={})
             env_config = load_harness_config(
@@ -131,13 +134,24 @@ class HarnessConfigTests(unittest.TestCase):
                 env={"SIM_HARNESS_UE_ASSET_IMPORTER_CMD": "/bin/echo from-env"},
                 cli_overrides={"ue_asset_importer.command": "/bin/echo from-cli"},
             )
+            file_available = file_config.inspect({})["providers"]["ue_asset_importer"]["available"]
 
-        self.assertEqual(file_config.ue_asset_importer_command, ("/bin/sh", "tools/importer.py"))
+        self.assertEqual(file_config.ue_asset_importer_command, ("/bin/sh", str(importer)))
         self.assertEqual(env_config.ue_asset_importer_command, ("/bin/echo", "from-env"))
         self.assertEqual(cli_config.ue_asset_importer_command, ("/bin/echo", "from-cli"))
-        self.assertEqual(file_config.inspect({})["providers"]["ue_asset_importer"]["available"], True)
+        self.assertTrue(file_available)
         self.assertEqual(env_config.sources["ue_asset_importer.command"]["layer"], "environment")
         self.assertEqual(cli_config.sources["ue_asset_importer.command"]["layer"], "cli")
+
+    def test_ue_importer_command_is_unavailable_when_configured_script_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            path = self.write_config(root, config_document())
+            config = load_harness_config(config_path=path, repo_root=root, env={})
+
+            inspection = config.inspect({})
+
+        self.assertFalse(inspection["providers"]["ue_asset_importer"]["available"])
 
     def test_ue_importer_command_rejects_empty_or_non_string_argv(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -166,7 +180,7 @@ class HarnessConfigTests(unittest.TestCase):
                 with controller._effective_environment():
                     projected = os.environ["SIM_HARNESS_UE_ASSET_IMPORTER_CMD"]
 
-        self.assertEqual(projected, "/bin/sh tools/importer.py")
+        self.assertEqual(projected, f"/bin/sh {root / 'tools' / 'importer.py'}")
 
     def test_legacy_openai_fallbacks_remain_available(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

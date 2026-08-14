@@ -1677,6 +1677,100 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertEqual(marker["status"], "closed")
         self.assertEqual(marker["outcome"], "recovered_interrupted")
 
+    def test_completed_stage_transition_recovers_at_next_stage_without_overwriting_completion(self) -> None:
+        controller, _ = self.controller()
+        controller.create(self.request, job_id="job_transition_crash", publication_tier="local_preview")
+        manifest = controller.store.load_manifest("job_transition_crash")
+        manifest = controller._update_manifest(
+            manifest,
+            state="running",
+            blocker=None,
+            allowed_next_actions=["cancel"],
+        )
+        controller._start_in_flight(manifest, "intake_readiness")
+        completed = build_stage_result(
+            stage="intake_readiness",
+            status="completed",
+            job_id="job_transition_crash",
+        )
+        controller._write_controller_stage_result(manifest, completed)
+        controller._checkpoint(manifest, "intake_readiness", "completed", manifest["request_digest"])
+        controller._update_manifest(manifest, current_stage="generation")
+
+        stale = controller.inspect("job_transition_crash")
+        self.assertTrue(stale["interrupted_recovery"]["available"])
+        self.assertEqual(stale["interrupted_recovery"]["reason"], "completed_stage_transition")
+        recovered = controller.recover_interrupted("job_transition_crash")
+
+        self.assertEqual(recovered["job"]["state"], "paused_interrupted")
+        self.assertEqual(recovered["job"]["current_stage"], "generation")
+        prior = read_json(Path(recovered["paths"]["job_root"]) / "stage_results" / "intake_readiness.json")
+        self.assertEqual(prior["status"], "completed")
+        self.assertEqual(recovered["current_leaf_stage_result"]["result"]["stage"], "generation")
+
+    def test_interrupted_recovery_accounts_elapsed_once_and_reapplies_hard_deadline(self) -> None:
+        fake = SuccessfulHarness()
+        clock = [100.0]
+        hooks = fake.hooks()
+        hooks.monotonic = lambda: clock[0]
+        controller = AgentJobController(self.workspace, hooks=hooks)
+        controller.create(
+            self.request,
+            job_id="job_recovery_elapsed",
+            publication_tier="local_preview",
+            budget={"soft_deadline_seconds": 10, "hard_deadline_seconds": 10},
+        )
+        manifest = controller.store.load_manifest("job_recovery_elapsed")
+        manifest = controller._update_manifest(
+            manifest,
+            state="running",
+            blocker=None,
+            allowed_next_actions=["cancel"],
+        )
+        controller._start_in_flight(manifest, "intake_readiness", started_monotonic=clock[0])
+        clock[0] = 115.0
+
+        first = controller._reconcile_in_flight_elapsed(manifest)
+        second = controller._reconcile_in_flight_elapsed(first)
+        self.assertEqual(first["usage"]["active_elapsed_seconds"], 15.0)
+        self.assertEqual(second["usage"]["active_elapsed_seconds"], 15.0)
+
+        recovered = controller.recover_interrupted("job_recovery_elapsed")
+        marker = read_json(Path(recovered["paths"]["job_root"]) / "checkpoints" / "in_flight.json")
+        self.assertEqual(recovered["job"]["state"], "needs_user_decision")
+        self.assertEqual(recovered["job"]["blocker"]["code"], "budget_exhausted")
+        self.assertEqual(recovered["job"]["usage"]["active_elapsed_seconds"], 15.0)
+        self.assertEqual(marker["elapsed_accounted_seconds"], 15.0)
+
+    def test_semantic_reviewer_host_interruption_leaves_recoverable_in_flight_marker(self) -> None:
+        controller, _ = self.controller()
+        controller.create(
+            self.request,
+            job_id="job_reviewer_host_interrupt",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        ready = controller.advance_until_blocked("job_reviewer_host_interrupt")
+        self.assertEqual(ready["job"]["state"], "awaiting_semantic_review")
+
+        def interrupted_review(**kwargs):
+            raise KeyboardInterrupt()
+
+        controller.hooks.semantic_review = interrupted_review
+        with self.assertRaises(KeyboardInterrupt):
+            controller.run_semantic_review("job_reviewer_host_interrupt")
+
+        stale = controller.inspect("job_reviewer_host_interrupt")
+        marker = read_json(Path(stale["paths"]["job_root"]) / "checkpoints" / "in_flight.json")
+        self.assertEqual(stale["job"]["state"], "running")
+        self.assertTrue(stale["interrupted_recovery"]["available"])
+        self.assertEqual(stale["interrupted_recovery"]["stage"], "semantic_review")
+        self.assertEqual(marker["status"], "active")
+
+        recovered = controller.recover_interrupted("job_reviewer_host_interrupt")
+        self.assertEqual(recovered["job"]["state"], "paused_interrupted")
+        self.assertEqual(recovered["job"]["current_stage"], "semantic_review")
+
     def test_generation_resume_after_intent_commit_reuses_immutable_contract(self) -> None:
         controller, fake = self.controller()
         controller.create(self.request, job_id="job_intent_commit_crash", publication_tier="local_preview", generation_mode="legacy")
@@ -1838,6 +1932,116 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertEqual(inspection["job"]["usage"]["total_retries"], 1)
         self.assertEqual(inspection["job"]["usage"]["stage_retries"], {"generation": 1})
         self.assertEqual([row["attempt_id"] for row in inspection["attempts"]], ["attempt_001"])
+
+    def test_terminal_transient_failure_has_audited_same_attempt_retry(self) -> None:
+        fake = SuccessfulHarness()
+        original_execute = fake.execute
+        calls = 0
+
+        def transient_execute(case, output_root, *, compilation, profile, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls <= 2:
+                run_dir = Path(output_root) / f"{case.case_id}_{compilation.selected_backend}"
+                run_dir.mkdir(parents=True, exist_ok=True)
+                write_stage_result(
+                    run_dir,
+                    failure_stage_result(
+                        stage="execute",
+                        failure_code="backend_importer_timeout",
+                        message="transient external launch timeout",
+                        retryable=True,
+                    ),
+                )
+                raise RuntimeError("transient external launch timeout")
+            return original_execute(case, output_root, compilation=compilation, profile=profile, **kwargs)
+
+        hooks = fake.hooks()
+        hooks.execute = transient_execute
+        controller = AgentJobController(self.workspace, hooks=hooks)
+        controller.create(
+            self.request,
+            job_id="job_failed_stage_retry",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+
+        failed = controller.advance_until_blocked("job_failed_stage_retry")
+        transaction = Path(failed["paths"]["job_root"]) / "attempts" / "attempt_001" / "compilation" / "compilation_transaction.json"
+        transaction_digest = stable_digest(read_json(transaction))
+        usage_before = copy.deepcopy(failed["job"]["usage"])
+        self.assertEqual(failed["job"]["state"], "failed")
+        self.assertTrue(failed["failed_stage_retry"]["available"])
+        self.assertIn("retry_failed_stage", failed["job"]["allowed_next_actions"])
+
+        reopened = controller.retry_failed_stage(
+            "job_failed_stage_retry",
+            reason="external execution permission was corrected",
+        )
+
+        self.assertEqual(reopened["job"]["state"], "paused_interrupted")
+        self.assertEqual(reopened["job"]["current_attempt_id"], "attempt_001")
+        self.assertEqual(reopened["job"]["usage"], usage_before)
+        self.assertEqual(stable_digest(read_json(transaction)), transaction_digest)
+        receipt = Path(reopened["paths"]["job_root"]) / "amendments" / "failed_stage_retry_001.json"
+        self.assertEqual(read_json(receipt)["failure_code"], "backend_importer_timeout")
+
+        resumed = controller.resume("job_failed_stage_retry")
+        self.assertEqual(resumed["job"]["state"], "awaiting_semantic_review")
+        self.assertEqual(resumed["job"]["current_attempt_id"], "attempt_001")
+        self.assertEqual(calls, 4)
+        self.assertEqual(resumed["job"]["usage"]["total_retries"], 1)
+
+    def test_failed_importer_usage_migrates_before_same_job_retry(self) -> None:
+        controller, _ = self.controller()
+        controller.create(
+            self.request,
+            job_id="job_legacy_importer_usage",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        ready = controller.advance_until_blocked("job_legacy_importer_usage")
+        manifest = controller.store.load_manifest("job_legacy_importer_usage")
+        attempt_dir = Path(ready["paths"]["job_root"]) / "attempts" / "attempt_001"
+        (Path(ready["paths"]["job_root"]) / "receipts" / "ue_launch_usage.json").unlink(missing_ok=True)
+        write_json(
+            attempt_dir / "compilation" / "asset_provider_batch.json",
+            {
+                "schema_version": "harness_asset_provider_batch_v1",
+                "case_id": "fixture",
+                "requests": [],
+                "results": [],
+                "receipt_ids": [],
+                "import_summary": {"importer_invocation_count": 1},
+            },
+        )
+        provider_result = failure_stage_result(
+            stage="provider",
+            failure_code="backend_importer_timeout",
+            message="Unreal asset import exceeded its timeout",
+            retryable=True,
+            job_id="job_legacy_importer_usage",
+            attempt_id="attempt_001",
+            invocation_count=2,
+        )
+        write_stage_result(attempt_dir / "compilation", provider_result)
+        controller._update_manifest(
+            manifest,
+            state="failed",
+            current_stage="compile",
+            blocker={"code": "backend_importer_timeout", "message": "timeout", "stage": "provider"},
+            allowed_next_actions=["inspect_artifacts"],
+        )
+
+        reopened = controller.retry_failed_stage(
+            "job_legacy_importer_usage",
+            reason="UE will be relaunched outside the workspace sandbox",
+        )
+
+        self.assertEqual(reopened["job"]["usage"]["ue_launches"], 2)
+        ledger = read_json(Path(reopened["paths"]["job_root"]) / "receipts" / "ue_launch_usage.json")
+        self.assertEqual(ledger["baseline_launches"], 2)
+        self.assertEqual(ledger["legacy_importer_launches_reconciled"], 2)
 
     def test_resume_after_verifier_interrupt_reuses_completed_execution(self) -> None:
         fake = SuccessfulHarness()
@@ -2415,6 +2619,7 @@ class AgentJobCliTests(unittest.TestCase):
         self.assertIn("review", completed.stdout)
         self.assertIn("apply-revision", completed.stdout)
         self.assertIn("recover-interrupted", completed.stdout)
+        self.assertIn("retry-failed", completed.stdout)
 
     def test_create_and_inspect_emit_structured_json(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

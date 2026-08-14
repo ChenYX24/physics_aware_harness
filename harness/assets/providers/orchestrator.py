@@ -21,6 +21,7 @@ from harness.assets.providers.backend_importer import (
 )
 from harness.assets.providers.input_manifest import ProviderInputError, bind_provider_reference_inputs
 from harness.assets.providers.contracts import (
+    BACKEND_IMPORT_RESULT_SCHEMA,
     BACKEND_IMPORT_REQUEST_SCHEMA,
     PROVIDER_BATCH_SCHEMA,
     PROVIDER_RECEIPT_SCHEMA,
@@ -91,6 +92,10 @@ class AssetProviderOrchestrator:
         remote_providers: Mapping[str, RemoteProviderAdapter] | None = None,
         max_paid_submissions: int | None = None,
         paid_submission_ledger_path: str | Path | None = None,
+        ue_launch_ledger_path: str | Path | None = None,
+        usage_job_id: str | None = None,
+        usage_attempt_id: str | None = None,
+        max_ue_launches: int | None = None,
     ) -> None:
         self.workspace = Path(workspace or os.environ.get("SIM_HARNESS_WORKSPACE", DEFAULT_WORKSPACE)).resolve()
         self.importer = importer or UECommandImporterAdapter()
@@ -105,6 +110,16 @@ class AssetProviderOrchestrator:
         self.paid_submission_ledger_path = (
             Path(paid_submission_ledger_path) if paid_submission_ledger_path is not None else None
         )
+        self.ue_launch_ledger_path = Path(ue_launch_ledger_path) if ue_launch_ledger_path is not None else None
+        self.usage_job_id = str(usage_job_id or "")
+        self.usage_attempt_id = str(usage_attempt_id or "")
+        if self.ue_launch_ledger_path is not None and (not self.usage_job_id or not self.usage_attempt_id):
+            raise ValueError("UE launch accounting requires job and attempt identities")
+        if max_ue_launches is not None and (
+            not isinstance(max_ue_launches, int) or isinstance(max_ue_launches, bool) or max_ue_launches < 0
+        ):
+            raise ValueError("max_ue_launches must be a non-negative integer or null")
+        self.max_ue_launches = max_ue_launches
         self._paid_submission_reservations: dict[str, dict[str, Any]] = {}
         self.remote_providers = dict(
             remote_providers
@@ -665,12 +680,20 @@ class AssetProviderOrchestrator:
         if misses:
             inputs = [(item.import_request, item.request_dir) for item in misses]
             if batch_capable:
-                imported = self.importer.import_assets(inputs, workspace=self.workspace)
+                batch_requests = [item.import_request for item in misses]
+                imported = (
+                    self.importer.import_assets(inputs, workspace=self.workspace)
+                    if self._record_ue_importer_launch(batch_requests)
+                    else [self._ue_launch_budget_failure(request) for request in batch_requests]
+                )
             else:
-                imported = [
-                    self.importer.import_asset(request, work_dir=work_dir, workspace=self.workspace)
-                    for request, work_dir in inputs
-                ]
+                imported = []
+                for request, work_dir in inputs:
+                    imported.append(
+                        self.importer.import_asset(request, work_dir=work_dir, workspace=self.workspace)
+                        if self._record_ue_importer_launch([request])
+                        else self._ue_launch_budget_failure(request)
+                    )
             if len(imported) != len(misses):
                 raise RuntimeError("backend importer returned the wrong number of batch results")
             for prepared, result in zip(misses, imported):
@@ -688,6 +711,64 @@ class AssetProviderOrchestrator:
             "importer_invocation_count": (1 if batch_capable else len(misses)) if misses else 0,
             "batch_imported_count": len(misses),
         }
+
+    def _record_ue_importer_launch(self, requests: list[BackendImportRequest]) -> bool:
+        if self.ue_launch_ledger_path is None:
+            return True
+        path = self.ue_launch_ledger_path
+        ledger = read_json(path) if path.is_file() else {
+            "schema_version": "harness_agent_ue_launch_ledger_v1",
+            "job_id": self.usage_job_id,
+            "baseline_launches": 0,
+            "launches": [],
+        }
+        if (
+            not isinstance(ledger, Mapping)
+            or ledger.get("schema_version") != "harness_agent_ue_launch_ledger_v1"
+            or ledger.get("job_id") != self.usage_job_id
+            or not isinstance(ledger.get("baseline_launches"), int)
+            or isinstance(ledger.get("baseline_launches"), bool)
+            or int(ledger.get("baseline_launches")) < 0
+            or not isinstance(ledger.get("launches"), list)
+        ):
+            raise ValueError("UE launch ledger is invalid")
+        launches = [dict(row) for row in ledger["launches"] if isinstance(row, Mapping)]
+        if (
+            self.max_ue_launches is not None
+            and int(ledger["baseline_launches"]) + len(launches) >= self.max_ue_launches
+        ):
+            return False
+        launches.append(
+            {
+                "sequence": len(launches) + 1,
+                "kind": "asset_importer",
+                "attempt_id": self.usage_attempt_id,
+                "request_digests": sorted(request.data["request_digest"] for request in requests),
+                "recorded_at_epoch": time.time(),
+            }
+        )
+        write_json(path, {**dict(ledger), "launches": launches})
+        return True
+
+    @staticmethod
+    def _ue_launch_budget_failure(request: BackendImportRequest) -> BackendImportResult:
+        return BackendImportResult.from_dict(
+            {
+                "schema_version": BACKEND_IMPORT_RESULT_SCHEMA,
+                "request_id": request.data["request_id"],
+                "request_digest": request.data["request_digest"],
+                "asset_id": request.data["asset_id"],
+                "status": "blocked",
+                "failure": {
+                    "code": "ue_launch_budget_exhausted",
+                    "message": "UE launch budget is exhausted before backend import",
+                    "retriable": False,
+                },
+                "stdout": "",
+                "stderr": "",
+                "returncode": None,
+            }
+        )
 
     def _cached_import_result(
         self,

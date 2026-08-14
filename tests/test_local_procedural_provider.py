@@ -14,6 +14,7 @@ from unittest.mock import patch
 from harness.assets.asset_registry import AssetRegistry
 from harness.assets.asset_resolver import resolve_asset_intents
 from harness.assets.providers.backend_importer import DEFAULT_TIMEOUT_S, UECommandImporterAdapter
+from scripts.harness_ue_asset_importer import DEFAULT_TIMEOUT_S as UE_LAUNCHER_TIMEOUT_S
 from harness.assets.providers.contracts import BACKEND_IMPORT_REQUEST_SCHEMA, BackendImportRequest
 from harness.assets.providers.local_procedural_mesh import generate_box_obj, generate_procedural_obj
 from harness.assets.providers.orchestrator import AssetProviderOrchestrator
@@ -143,7 +144,8 @@ class LocalProceduralProviderTests(unittest.TestCase):
         return UECommandImporterAdapter([sys.executable, str(self.importer_script), "--mode", mode], timeout_s=10)
 
     def test_default_adapter_timeout_outlives_real_ue_launcher_timeout(self) -> None:
-        self.assertGreater(DEFAULT_TIMEOUT_S, 600.0)
+        self.assertEqual(UE_LAUNCHER_TIMEOUT_S, 300.0)
+        self.assertGreater(DEFAULT_TIMEOUT_S, UE_LAUNCHER_TIMEOUT_S)
         self.assertEqual(UECommandImporterAdapter([]).timeout_s, DEFAULT_TIMEOUT_S)
 
     def test_command_importer_batches_multiple_requests_into_one_command(self) -> None:
@@ -308,6 +310,52 @@ class LocalProceduralProviderTests(unittest.TestCase):
         self.assertEqual(first["path"].read_bytes(), second["path"].read_bytes())
         with self.assertRaises(ValueError):
             first["path"].resolve().relative_to(ROOT.resolve())
+
+    def test_controller_ue_launch_ledger_counts_real_importer_batches_and_enforces_budget(self) -> None:
+        ledger = self.workspace / "jobs" / "job_usage_fixture" / "receipts" / "ue_launch_usage.json"
+        ledger.parent.mkdir(parents=True)
+        ledger.write_text(
+            json.dumps(
+                {
+                    "schema_version": "harness_agent_ue_launch_ledger_v1",
+                    "job_id": "job_usage_fixture",
+                    "baseline_launches": 0,
+                    "launches": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        orchestrator = AssetProviderOrchestrator(
+            workspace=self.workspace,
+            importer=self.importer(),
+            ue_launch_ledger_path=ledger,
+            usage_job_id="job_usage_fixture",
+            usage_attempt_id="attempt_001",
+            max_ue_launches=1,
+        )
+
+        with patch.dict(os.environ, {"SIM_HARNESS_ALLOW_LOCAL_PREVIEW_ASSETS": "1"}):
+            first = compile_runtime_case(
+                self.provider_case(),
+                requested_backend="ue",
+                registry=self.registry,
+                provider_orchestrator=orchestrator,
+            )
+            second_case = self.provider_case(shape="sphere", size_m=[0.3, 0.3, 0.3], provider_hint="sphere_mesh_v1")
+            second = compile_runtime_case(
+                second_case,
+                requested_backend="ue",
+                registry=self.registry,
+                provider_orchestrator=orchestrator,
+            )
+
+        usage = json.loads(ledger.read_text(encoding="utf-8"))
+        self.assertEqual(len(usage["launches"]), 1)
+        self.assertEqual(usage["launches"][0]["kind"], "asset_importer")
+        self.assertEqual(first.artifacts["asset_provider_batch"]["results"][0]["status"], "fulfilled")
+        blocked = second.artifacts["asset_provider_batch"]["results"][0]
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["failure"]["code"], "ue_launch_budget_exhausted")
 
     def test_registered_primitive_recipes_are_deterministic_and_match_bounds(self) -> None:
         recipes = [

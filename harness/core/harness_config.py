@@ -122,6 +122,7 @@ class EffectiveHarnessConfig:
         planning_secret_name = self.planning_secret_env_name(environ)
         codex = self.codex_executable or _which_path("codex", environ)
         importer_executable = _command_executable(self.ue_asset_importer_command, environ)
+        importer_scripts = _command_scripts(self.ue_asset_importer_command)
         paths = {
             "workspace": self.workspace,
             "catalog": self.catalog,
@@ -159,6 +160,7 @@ class EffectiveHarnessConfig:
                         importer_executable
                         and importer_executable.is_file()
                         and os.access(importer_executable, os.X_OK)
+                        and all(path.is_file() for path in importer_scripts)
                     ),
                     "command": list(self.ue_asset_importer_command),
                 },
@@ -404,6 +406,13 @@ def _command(value: Any, root: Path, field: str) -> tuple[str, ...]:
         command[0] = str((root / executable).resolve(strict=False))
     elif executable.is_absolute():
         command[0] = str(executable.resolve(strict=False))
+    for index, item in enumerate(command[1:], start=1):
+        script = Path(item).expanduser()
+        if script.suffix.casefold() != ".py":
+            continue
+        if not script.is_absolute():
+            script = root / script
+        command[index] = str(script.resolve(strict=False))
     return tuple(command)
 
 
@@ -414,6 +423,10 @@ def _command_executable(command: tuple[str, ...], env: Mapping[str, str]) -> Pat
     if executable.is_absolute() or "/" in command[0]:
         return executable.resolve(strict=False)
     return _which_path(command[0], env)
+
+
+def _command_scripts(command: tuple[str, ...]) -> tuple[Path, ...]:
+    return tuple(Path(item) for item in command[1:] if Path(item).suffix.casefold() == ".py")
 
 
 def _string(value: Any, field: str, *, allow_empty: bool = False) -> str:

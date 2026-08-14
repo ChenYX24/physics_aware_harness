@@ -108,6 +108,17 @@ from harness.verification.run_quality import evaluate_run
 
 EventSink = Callable[[dict[str, Any]], None]
 
+_NEXT_CONTROLLER_STAGE = {
+    "intake_readiness": "generation",
+    "generation": "task_readiness",
+    "task_readiness": "compile",
+    "compile": "smoke",
+    "smoke": "candidate",
+    "candidate": "quality_gate",
+    "quality_gate": "evidence_bundle",
+    "evidence_bundle": "semantic_review",
+}
+
 @dataclass
 class ControllerHooks:
     generate: Callable[..., Any] = generate_case_spec_v2
@@ -263,6 +274,10 @@ class AgentJobController:
             "job": manifest,
             "attempts": attempts,
             "current_leaf_stage_result": current_leaf_stage_result,
+            "failed_stage_retry": self._failed_stage_retry_eligibility(
+                manifest,
+                current_leaf_stage_result=current_leaf_stage_result,
+            ),
             "interrupted_recovery": self._interrupted_recovery(manifest),
             "paths": {
                 "job_root": str(root),
@@ -282,8 +297,11 @@ class AgentJobController:
             if recovery["available"] is not True:
                 raise JobStoreError(str(recovery["message"]))
             stage = str(recovery["stage"])
-            if stage == "compile":
+            marker_stage = str(recovery.get("marker_stage") or stage)
+            manifest = self._reconcile_in_flight_elapsed(manifest)
+            if marker_stage == "compile" or stage == "compile":
                 manifest = self._reconcile_provider_usage(manifest)
+                manifest = self._reconcile_ue_launch_usage(manifest)
             checkpoint_path = self.store.job_dir(job_id) / "checkpoints" / f"{stage}.json"
             self._checkpoint(
                 manifest,
@@ -302,8 +320,80 @@ class AgentJobController:
             )
             self._write_controller_stage_result(manifest, result)
             manifest = self._apply_stage_result(manifest, result)
-            self._finish_in_flight(job_id, stage, "recovered_interrupted")
+            self._finish_in_flight(job_id, marker_stage, "recovered_interrupted")
             self._stage_event(manifest, "stage_blocked", stage, result=result)
+            deadline_result = self._hard_deadline_gate(manifest)
+            if deadline_result is not None:
+                self._write_controller_stage_result(manifest, deadline_result)
+                manifest = self._apply_stage_result(manifest, deadline_result)
+                self._stage_event(manifest, "stage_blocked", "budget", result=deadline_result)
+        return self.inspect(job_id)
+
+    def retry_failed_stage(self, job_id: str, *, reason: str) -> dict[str, Any]:
+        """Audit and reopen one terminal transient failure at its existing checkpoint."""
+        explanation = str(reason or "").strip()
+        if not explanation:
+            raise ValueError("failed-stage retry requires a non-empty correction reason")
+        with self.store.lock(job_id):
+            manifest = self.store.load_manifest(job_id)
+            leaf = self._current_leaf_stage_result(manifest)
+            eligibility = self._failed_stage_retry_eligibility(
+                manifest,
+                current_leaf_stage_result=leaf,
+            )
+            if eligibility["available"] is not True:
+                raise JobStoreError(str(eligibility["message"]))
+            self._ensure_ue_launch_ledger(manifest)
+            manifest = self._reconcile_ue_launch_usage(manifest)
+            result = dict(leaf["result"])
+            amendments_dir = self.store.job_dir(job_id) / "amendments"
+            sequence = len(list(amendments_dir.glob("failed_stage_retry_*.json"))) + 1
+            transaction_path = (
+                self.store.attempt_dir(job_id, str(manifest["current_attempt_id"]))
+                / "compilation"
+                / "compilation_transaction.json"
+            )
+            provider_usage_path = self.store.job_dir(job_id) / "receipts" / "provider_usage.json"
+            receipt_path = amendments_dir / f"failed_stage_retry_{sequence:03d}.json"
+            write_json(
+                receipt_path,
+                {
+                    "schema_version": "harness_agent_failed_stage_retry_v1",
+                    "job_id": job_id,
+                    "attempt_id": manifest.get("current_attempt_id"),
+                    "controller_stage": manifest["current_stage"],
+                    "failed_stage": result["stage"],
+                    "failure_code": result["failure_code"],
+                    "failure_result_digest": stable_digest(result),
+                    "correction_reason": explanation,
+                    "compilation_transaction": str(transaction_path) if transaction_path.is_file() else None,
+                    "compilation_transaction_digest": (
+                        stable_digest(read_json(transaction_path)) if transaction_path.is_file() else None
+                    ),
+                    "provider_usage": str(provider_usage_path) if provider_usage_path.is_file() else None,
+                    "provider_usage_digest": (
+                        stable_digest(read_json(provider_usage_path)) if provider_usage_path.is_file() else None
+                    ),
+                    "usage_before_retry": copy.deepcopy(manifest["usage"]),
+                    "created_at": utc_now(),
+                },
+            )
+            manifest = self._update_manifest(
+                manifest,
+                state="paused_interrupted",
+                blocker={
+                    "code": "failed_stage_retry_authorized",
+                    "message": "a corrected external condition has one audited retry from the existing checkpoint",
+                    "stage": str(manifest["current_stage"]),
+                },
+                allowed_next_actions=["resume", "cancel"],
+            )
+            self._emit(
+                job_id,
+                "failed_stage_retry_authorized",
+                stage=manifest["current_stage"],
+                artifact_refs=[str(receipt_path)],
+            )
         return self.inspect(job_id)
 
     def submit_native_generation(self, job_id: str, submission: Mapping[str, Any]) -> dict[str, Any]:
@@ -431,7 +521,7 @@ class AgentJobController:
                 started = self.hooks.monotonic()
                 stage_result_snapshot = self._stage_result_snapshot(manifest)
                 self._stage_event(manifest, "stage_started", stage)
-                self._start_in_flight(manifest, stage)
+                self._start_in_flight(manifest, stage, started_monotonic=started)
                 in_flight_outcome = "returned"
                 try:
                     with self._effective_environment():
@@ -440,6 +530,7 @@ class AgentJobController:
                     in_flight_outcome = "interrupted"
                     if stage == "compile":
                         manifest = self._reconcile_provider_usage(manifest)
+                        manifest = self._reconcile_ue_launch_usage(manifest)
                     elapsed = max(0.0, self.hooks.monotonic() - started)
                     manifest = self._add_active_elapsed(manifest, elapsed)
                     self._checkpoint(
@@ -472,6 +563,7 @@ class AgentJobController:
                     in_flight_outcome = "failed"
                     if stage == "compile":
                         manifest = self._reconcile_provider_usage(manifest)
+                        manifest = self._reconcile_ue_launch_usage(manifest)
                     elapsed = max(0.0, self.hooks.monotonic() - started)
                     manifest = self._add_active_elapsed(manifest, elapsed)
                     result = self._exception_stage_result(
@@ -748,8 +840,12 @@ class AgentJobController:
                         manifest = self._reconcile_reviewer_usage(manifest)
 
                 reviewer_started = self.hooks.monotonic()
+                reviewer_finished = reviewer_started
                 reviewer_elapsed_recorded = False
                 post_review_hard_gate: dict[str, Any] | None = None
+                close_in_flight = True
+                in_flight_outcome = "returned"
+                self._start_in_flight(manifest, "semantic_review", started_monotonic=reviewer_started)
                 try:
                     invocation = dict(
                         self.hooks.semantic_review(
@@ -770,7 +866,8 @@ class AgentJobController:
                             usage_counted=True,
                         )
                         manifest = self._reconcile_reviewer_usage(manifest)
-                    elapsed = max(0.0, self.hooks.monotonic() - reviewer_started)
+                    reviewer_finished = self.hooks.monotonic()
+                    elapsed = max(0.0, reviewer_finished - reviewer_started)
                     manifest = self._add_active_elapsed(manifest, elapsed)
                     reviewer_elapsed_recorded = True
                     post_review_hard_gate = self._hard_deadline_gate(manifest)
@@ -864,6 +961,7 @@ class AgentJobController:
                     self._emit_job_terminal_if_terminal(manifest)
                     return self.inspect(job_id)
                 except SemanticReviewerError as exc:
+                    in_flight_outcome = "interrupted" if exc.code == "reviewer_interrupted" else "failed"
                     try:
                         receipt = self._validate_reviewer_receipt(
                             exc.receipt,
@@ -902,6 +1000,7 @@ class AgentJobController:
                             artifact_refs=artifact_refs,
                         )
                 except EvidenceBundleError as exc:
+                    in_flight_outcome = "failed"
                     result = failure_stage_result(
                         stage="semantic_review",
                         failure_code=exc.code,
@@ -912,6 +1011,7 @@ class AgentJobController:
                         invocation_count=invocation_count,
                     )
                 except JobStoreError as exc:
+                    in_flight_outcome = "failed"
                     result = failure_stage_result(
                         stage="semantic_review",
                         failure_code="reviewer_invocation_identity_invalid",
@@ -922,6 +1022,7 @@ class AgentJobController:
                         invocation_count=invocation_count,
                     )
                 except (ValueError, KeyError, TypeError) as exc:
+                    in_flight_outcome = "failed"
                     result = failure_stage_result(
                         stage="semantic_review",
                         failure_code="reviewer_output_schema_invalid",
@@ -931,10 +1032,21 @@ class AgentJobController:
                         attempt_id=attempt_id,
                         invocation_count=invocation_count,
                     )
+                except BaseException:
+                    close_in_flight = False
+                    raise
                 finally:
                     if not reviewer_elapsed_recorded:
-                        elapsed = max(0.0, self.hooks.monotonic() - reviewer_started)
+                        reviewer_finished = self.hooks.monotonic()
+                        elapsed = max(0.0, reviewer_finished - reviewer_started)
                         manifest = self._add_active_elapsed(manifest, elapsed)
+                    if close_in_flight:
+                        self._finish_in_flight(
+                            job_id,
+                            "semantic_review",
+                            in_flight_outcome,
+                            finished_monotonic=reviewer_finished,
+                        )
                 if written_review:
                     review_path.unlink(missing_ok=True)
                 write_stage_result(attempt_dir, result)
@@ -1747,6 +1859,7 @@ class AgentJobController:
         )
         compilation.write(attempt_dir / "compilation")
         manifest = self._reconcile_provider_usage(manifest)
+        manifest = self._reconcile_ue_launch_usage(manifest)
         self._compilations[(manifest["job_id"], manifest["current_attempt_id"], "smoke")] = compilation
         if compilation.status != "pass":
             result = self._with_identity(compilation.stage_result or {}, manifest["job_id"], manifest["current_attempt_id"])
@@ -1805,6 +1918,7 @@ class AgentJobController:
             prior_execute = StageResult.from_dict(read_json(execute_result_path)).to_dict()
             execution_reusable = prior_execute["status"] == "completed"
         if ue_required and not execution_reusable:
+            manifest = self._reconcile_ue_launch_usage(manifest)
             usage = copy.deepcopy(manifest["usage"])
             if usage["ue_launches"] >= manifest["budget"]["max_ue_launches"]:
                 result = failure_stage_result(
@@ -1816,8 +1930,8 @@ class AgentJobController:
                 )
                 self._write_controller_stage_result(manifest, result)
                 return self._apply_stage_result(manifest, result)
-            usage["ue_launches"] += 1
-            manifest = self._update_manifest(manifest, usage=usage)
+            self._record_controller_ue_launch(manifest, kind="runtime", stage=profile_name)
+            manifest = self._reconcile_ue_launch_usage(manifest)
         compilation.write(expected_run)
         started = self.hooks.monotonic()
         if execution_reusable:
@@ -2504,11 +2618,19 @@ class AgentJobController:
                 blocker={"code": value["failure_code"], "message": value["message"], "stage": value["stage"]},
                 allowed_next_actions=["resume_with_revision", "cancel"],
             )
+        actions = ["inspect_artifacts"]
+        if (
+            manifest.get("current_attempt_id") is not None
+            and value["failure_class"] == "transient"
+            and value["retryable"]
+            and value["stage"] != "semantic_review"
+        ):
+            actions = ["retry_failed_stage", "inspect_artifacts", "cancel"]
         return self._update_manifest(
             manifest,
             state="failed",
             blocker={"code": value["failure_code"], "message": value["message"], "stage": value["stage"]},
-            allowed_next_actions=["inspect_artifacts"],
+            allowed_next_actions=actions,
         )
 
     def _exception_stage_result(
@@ -2672,6 +2794,41 @@ class AgentJobController:
         return {"path": str(path), "result": result}
 
     @staticmethod
+    def _failed_stage_retry_eligibility(
+        manifest: Mapping[str, Any],
+        *,
+        current_leaf_stage_result: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        unavailable = {
+            "available": False,
+            "stage": None,
+            "failure_code": None,
+            "message": "job has no terminal retryable transient failure",
+        }
+        if (
+            manifest.get("state") != "failed"
+            or manifest.get("current_attempt_id") is None
+            or not isinstance(current_leaf_stage_result, Mapping)
+        ):
+            return unavailable
+        result = current_leaf_stage_result.get("result")
+        if not isinstance(result, Mapping):
+            return unavailable
+        if (
+            result.get("status") != "failed"
+            or result.get("failure_class") != "transient"
+            or result.get("retryable") is not True
+            or result.get("stage") == "semantic_review"
+        ):
+            return unavailable
+        return {
+            "available": True,
+            "stage": str(result["stage"]),
+            "failure_code": str(result["failure_code"]),
+            "message": "correct the external cause, record an explicit reason, then reopen the same checkpoint",
+        }
+
+    @staticmethod
     def _attach_exception_stage_result(exc: BaseException, root: Path, stage: str) -> None:
         candidates = ("preflight", stage) if stage == "execute" else (stage,)
         for actual_stage in candidates:
@@ -2731,6 +2888,7 @@ class AgentJobController:
             return {
                 "available": False,
                 "stage": None,
+                "marker_stage": None,
                 "reason": "job_not_running",
                 "message": f"job is not in running state: {manifest['state']}",
             }
@@ -2746,8 +2904,28 @@ class AgentJobController:
             return {
                 "available": True,
                 "stage": str(marker["stage"]),
+                "marker_stage": str(marker["stage"]),
                 "reason": "active_in_flight_marker",
                 "message": "running stage has an unclosed durable in-flight marker",
+            }
+        if (
+            isinstance(marker, Mapping)
+            and marker.get("schema_version") == "harness_agent_in_flight_v1"
+            and marker.get("job_id") == manifest["job_id"]
+            and marker.get("status") in {"active", "closed"}
+            and marker.get("stage") != manifest["current_stage"]
+            and self._completed_stage_transition(
+                manifest,
+                previous_stage=str(marker.get("stage") or ""),
+                current_stage=str(manifest["current_stage"]),
+            )
+        ):
+            return {
+                "available": True,
+                "stage": str(manifest["current_stage"]),
+                "marker_stage": str(marker["stage"]),
+                "reason": "completed_stage_transition",
+                "message": "the prior stage completed durably before its in-flight lifecycle closed",
             }
         events = sorted((self.store.job_dir(manifest["job_id"]) / "events").glob("*.json"))
         latest = read_json(events[-1]) if events else None
@@ -2759,17 +2937,65 @@ class AgentJobController:
             return {
                 "available": True,
                 "stage": str(latest["stage"]),
+                "marker_stage": str(latest["stage"]),
                 "reason": "unclosed_stage_started_event",
                 "message": "running stage has no matching completion or blocked event",
             }
         return {
             "available": False,
             "stage": None,
+            "marker_stage": None,
             "reason": "no_unclosed_stage_evidence",
             "message": "running job has no durable evidence of an interrupted stage",
         }
 
-    def _start_in_flight(self, manifest: Mapping[str, Any], stage: str) -> None:
+    def _completed_stage_transition(
+        self,
+        manifest: Mapping[str, Any],
+        *,
+        previous_stage: str,
+        current_stage: str,
+    ) -> bool:
+        if _NEXT_CONTROLLER_STAGE.get(previous_stage) != current_stage:
+            return False
+        checkpoint_path = self.store.job_dir(manifest["job_id"]) / "checkpoints" / f"{previous_stage}.json"
+        if not checkpoint_path.is_file():
+            return False
+        try:
+            checkpoint = read_json(checkpoint_path)
+        except (OSError, ValueError, TypeError):
+            return False
+        if (
+            not isinstance(checkpoint, Mapping)
+            or checkpoint.get("job_id") != manifest["job_id"]
+            or checkpoint.get("stage") != previous_stage
+            or checkpoint.get("status") not in {"completed", "reused"}
+        ):
+            return False
+        if previous_stage in {"smoke", "candidate"}:
+            refs = checkpoint.get("artifact_refs") or []
+            run_paths = [Path(str(row.get("path") or "")) for row in refs if isinstance(row, Mapping)]
+            return any(self._run_technical_pass(path) for path in run_paths)
+        job_root = self.store.job_dir(manifest["job_id"])
+        for path in job_root.rglob(f"stage_results/{previous_stage}.json"):
+            try:
+                result = StageResult.from_dict(read_json(path)).to_dict()
+            except (OSError, ValueError, TypeError):
+                continue
+            if result["job_id"] != manifest["job_id"] or result["status"] != "completed":
+                continue
+            if result["attempt_id"] is not None and result["attempt_id"] != manifest.get("current_attempt_id"):
+                continue
+            return True
+        return False
+
+    def _start_in_flight(
+        self,
+        manifest: Mapping[str, Any],
+        stage: str,
+        *,
+        started_monotonic: float | None = None,
+    ) -> None:
         write_json(
             self.store.job_dir(manifest["job_id"]) / "checkpoints" / "in_flight.json",
             {
@@ -2780,12 +3006,68 @@ class AgentJobController:
                 "status": "active",
                 "controller_pid": os.getpid(),
                 "started_at": utc_now(),
+                "started_at_epoch": time.time(),
+                "started_monotonic": float(
+                    self.hooks.monotonic() if started_monotonic is None else started_monotonic
+                ),
+                "active_elapsed_baseline": float(manifest["usage"]["active_elapsed_seconds"]),
+                "elapsed_accounted_seconds": 0.0,
                 "finished_at": None,
                 "outcome": None,
             },
         )
 
-    def _finish_in_flight(self, job_id: str, stage: str, outcome: str) -> None:
+    def _reconcile_in_flight_elapsed(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
+        path = self.store.job_dir(manifest["job_id"]) / "checkpoints" / "in_flight.json"
+        if not path.is_file():
+            return dict(manifest)
+        marker = read_json(path)
+        if (
+            not isinstance(marker, Mapping)
+            or marker.get("schema_version") != "harness_agent_in_flight_v1"
+            or marker.get("job_id") != manifest["job_id"]
+        ):
+            return dict(manifest)
+        elapsed = max(0.0, float(marker.get("elapsed_accounted_seconds") or 0.0))
+        monotonic_start = marker.get("started_monotonic")
+        monotonic_now = (
+            marker.get("finished_monotonic")
+            if marker.get("status") == "closed"
+            else self.hooks.monotonic()
+        )
+        if (
+            isinstance(monotonic_start, (int, float))
+            and not isinstance(monotonic_start, bool)
+            and isinstance(monotonic_now, (int, float))
+            and not isinstance(monotonic_now, bool)
+            and monotonic_now >= monotonic_start
+        ):
+            elapsed = max(elapsed, float(monotonic_now) - float(monotonic_start))
+        else:
+            epoch_start = marker.get("started_at_epoch")
+            if isinstance(epoch_start, (int, float)) and not isinstance(epoch_start, bool):
+                elapsed = max(elapsed, time.time() - float(epoch_start))
+        updated_marker = dict(marker)
+        updated_marker["elapsed_accounted_seconds"] = round(elapsed, 6)
+        updated_marker["elapsed_accounted_at"] = utc_now()
+        write_json(path, updated_marker)
+        baseline = max(0.0, float(marker.get("active_elapsed_baseline") or 0.0))
+        target = round(baseline + elapsed, 6)
+        current = self.store.load_manifest(manifest["job_id"])
+        if float(current["usage"]["active_elapsed_seconds"]) >= target:
+            return current
+        usage = copy.deepcopy(current["usage"])
+        usage["active_elapsed_seconds"] = target
+        return self._update_manifest(current, usage=usage)
+
+    def _finish_in_flight(
+        self,
+        job_id: str,
+        stage: str,
+        outcome: str,
+        *,
+        finished_monotonic: float | None = None,
+    ) -> None:
         path = self.store.job_dir(job_id) / "checkpoints" / "in_flight.json"
         if not path.is_file():
             return
@@ -2793,7 +3075,21 @@ class AgentJobController:
         if not isinstance(marker, Mapping) or marker.get("job_id") != job_id or marker.get("stage") != stage:
             return
         closed = dict(marker)
-        closed.update({"status": "closed", "finished_at": utc_now(), "outcome": outcome})
+        finished = float(self.hooks.monotonic() if finished_monotonic is None else finished_monotonic)
+        started = marker.get("started_monotonic")
+        accounted = max(0.0, float(marker.get("elapsed_accounted_seconds") or 0.0))
+        if isinstance(started, (int, float)) and not isinstance(started, bool) and finished >= started:
+            accounted = max(accounted, finished - float(started))
+        closed.update(
+            {
+                "status": "closed",
+                "finished_at": utc_now(),
+                "finished_monotonic": finished,
+                "elapsed_accounted_seconds": round(accounted, 6),
+                "elapsed_accounted_at": utc_now(),
+                "outcome": outcome,
+            }
+        )
         write_json(path, closed)
 
     def _emit_semantic_outcome_event(self, manifest: Mapping[str, Any]) -> None:
@@ -2866,6 +3162,7 @@ class AgentJobController:
         return self._validate_provider_manifest(read_json(path))
 
     def _provider_orchestrator(self, manifest: Mapping[str, Any]) -> AssetProviderOrchestrator:
+        ue_launch_ledger_path = self._ensure_ue_launch_ledger(manifest)
         return AssetProviderOrchestrator(
             workspace=self.store.workspace,
             remote_providers={
@@ -2876,7 +3173,93 @@ class AgentJobController:
             paid_submission_ledger_path=(
                 self.store.job_dir(manifest["job_id"]) / "receipts" / "provider_usage.json"
             ),
+            ue_launch_ledger_path=ue_launch_ledger_path,
+            usage_job_id=str(manifest["job_id"]),
+            usage_attempt_id=str(manifest["current_attempt_id"]),
+            max_ue_launches=int(manifest["budget"]["max_ue_launches"]),
         )
+
+    def _ensure_ue_launch_ledger(self, manifest: Mapping[str, Any]) -> Path:
+        path = self.store.job_dir(manifest["job_id"]) / "receipts" / "ue_launch_usage.json"
+        if not path.is_file():
+            baseline = int(manifest["usage"]["ue_launches"])
+            migration = self._legacy_importer_launch_count(manifest) if baseline == 0 else 0
+            baseline = max(baseline, migration)
+            write_json(
+                path,
+                {
+                    "schema_version": "harness_agent_ue_launch_ledger_v1",
+                    "job_id": manifest["job_id"],
+                    "baseline_launches": baseline,
+                    "launches": [],
+                    "legacy_importer_launches_reconciled": migration,
+                },
+            )
+        return path
+
+    def _legacy_importer_launch_count(self, manifest: Mapping[str, Any]) -> int:
+        attempt_id = manifest.get("current_attempt_id")
+        if not attempt_id:
+            return 0
+        compilation_dir = self.store.attempt_dir(manifest["job_id"], str(attempt_id)) / "compilation"
+        provider_result_path = compilation_dir / "stage_results" / "provider.json"
+        batch_path = compilation_dir / "asset_provider_batch.json"
+        if not provider_result_path.is_file() or not batch_path.is_file():
+            return 0
+        try:
+            result = StageResult.from_dict(read_json(provider_result_path)).to_dict()
+            batch = read_json(batch_path)
+            per_invocation = int((batch.get("import_summary") or {}).get("importer_invocation_count") or 0)
+        except (OSError, TypeError, ValueError):
+            return 0
+        if (
+            result["stage"] != "provider"
+            or result["failure_code"] not in {"backend_importer_timeout", "backend_importer_execution_failed"}
+            or per_invocation < 1
+        ):
+            return 0
+        return int(result["invocation_count"]) * per_invocation
+
+    def _record_controller_ue_launch(self, manifest: Mapping[str, Any], *, kind: str, stage: str) -> None:
+        path = self._ensure_ue_launch_ledger(manifest)
+        ledger = read_json(path)
+        launches = [dict(row) for row in ledger.get("launches") or [] if isinstance(row, Mapping)]
+        launches.append(
+            {
+                "sequence": len(launches) + 1,
+                "kind": kind,
+                "attempt_id": manifest.get("current_attempt_id"),
+                "stage": stage,
+                "recorded_at_epoch": time.time(),
+            }
+        )
+        write_json(path, {**ledger, "launches": launches})
+
+    def _reconcile_ue_launch_usage(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
+        path = self.store.job_dir(manifest["job_id"]) / "receipts" / "ue_launch_usage.json"
+        if not path.is_file():
+            return dict(manifest)
+        ledger = read_json(path)
+        if (
+            not isinstance(ledger, Mapping)
+            or ledger.get("schema_version") != "harness_agent_ue_launch_ledger_v1"
+            or ledger.get("job_id") != manifest["job_id"]
+            or not isinstance(ledger.get("baseline_launches"), int)
+            or isinstance(ledger.get("baseline_launches"), bool)
+            or int(ledger.get("baseline_launches")) < 0
+            or not isinstance(ledger.get("launches"), list)
+            or any(not isinstance(row, Mapping) for row in ledger.get("launches") or [])
+        ):
+            raise JobStoreError("UE launch usage ledger is invalid")
+        current = self.store.load_manifest(manifest["job_id"])
+        target = int(ledger["baseline_launches"]) + len(ledger["launches"])
+        if int(current["usage"]["ue_launches"]) == target:
+            return current
+        if int(current["usage"]["ue_launches"]) > target:
+            raise JobStoreError("UE launch usage ledger would decrease recorded usage")
+        usage = copy.deepcopy(current["usage"])
+        usage["ue_launches"] = target
+        return self._update_manifest(current, usage=usage)
 
     def _reconcile_provider_usage(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
         attempt_id = manifest.get("current_attempt_id")

@@ -59,6 +59,10 @@ def parse_args() -> argparse.Namespace:
         command = commands.add_parser(name)
         command.add_argument("job_id")
 
+    retry_failed = commands.add_parser("retry-failed", help="Audit and reopen one terminal transient failure.")
+    retry_failed.add_argument("job_id")
+    retry_failed.add_argument("--reason", required=True, help="External correction made before retrying the same checkpoint.")
+
     revise = commands.add_parser("apply-revision", help="Materialize an Intent-authorized automatic revision proposal.")
     revise.add_argument("job_id")
     revise.add_argument("--revised-case-spec", required=True)
@@ -146,6 +150,8 @@ def main() -> int:
         result = controller.advance_until_blocked(args.job_id)
     elif args.command == "recover-interrupted":
         result = controller.recover_interrupted(args.job_id)
+    elif args.command == "retry-failed":
+        result = controller.retry_failed_stage(args.job_id, reason=args.reason)
     elif args.command == "review":
         result = controller.run_semantic_review(args.job_id)
     elif args.command == "apply-revision":
