@@ -435,11 +435,29 @@ def semantic_review_requirements(
     intent_contract: Mapping[str, Any],
     intent_amendments: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Project immutable hard requirements and ambiguity decisions for review."""
+    """Project positive requirements, prohibitions, and decisions for review."""
     requirements = [dict(value) for value in intent_contract.get("hard_requirements") or []]
     seen = {str(value.get("id") or "") for value in requirements}
     if "" in seen or len(seen) != len(requirements):
         raise ValueError("Intent Contract hard requirement identities must be non-empty and unique")
+    for prohibition in intent_contract.get("prohibitions") or []:
+        if not isinstance(prohibition, Mapping):
+            raise ValueError("Intent Contract prohibitions must be objects")
+        prohibition_id = str(prohibition.get("id") or "").strip()
+        prohibition_text = str(prohibition.get("text") or "").strip()
+        if not prohibition_id or not prohibition_text or prohibition_id in seen:
+            raise ValueError("Intent Contract prohibition identities must be non-empty and unique across requirements")
+        seen.add(prohibition_id)
+        requirements.append(
+            {
+                "id": prohibition_id,
+                "text": f"The result must not violate this prohibition: {prohibition_text}",
+                "frozen": True,
+                "source": "intent_prohibition",
+                "polarity": "prohibition",
+                "prohibition_text": prohibition_text,
+            }
+        )
     resolved_ambiguities: set[str] = set()
     for amendment in intent_amendments:
         if amendment.get("schema_version") != "harness_intent_contract_amendment_v1":

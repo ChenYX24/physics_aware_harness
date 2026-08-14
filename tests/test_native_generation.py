@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import copy
+import json
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from harness.agent.job_controller import AgentJobController
 from harness.agent.job_schema import stable_digest
-from harness.agent.job_store import JobStoreError
 from harness.agent.native_generation import NATIVE_GENERATION_SUBMISSION_SCHEMA_VERSION
 from harness.assets.sqlite_catalog import initialize_catalog
 from harness.core.artifact_schema import read_json, write_json
@@ -83,6 +84,10 @@ class NativeGenerationTests(unittest.TestCase):
         self.assertEqual(context["agent_reporting_contract"]["controller_observed_invocation_count"], 0)
         self.assertEqual(blocked["native_generation_context_digest"], stable_digest(context))
         self.assertEqual(context["submission_contract"]["schema_version"], NATIVE_GENERATION_SUBMISSION_SCHEMA_VERSION)
+        pause_result = read_json(Path(blocked["paths"]["job_root"]) / "stage_results" / "generation.json")
+        self.assertEqual(pause_result["allowed_next_actions"], ["submit_native_generation", "cancel"])
+        self.assertEqual(pause_result["failure_class"], "awaiting_agent_action")
+        self.assertIsNone(pause_result["required_user_action"])
         self.assertIn("backend_stage_io", context["case_spec_contract"])
         self.assertIn("valid_structure_example_do_not_copy_values", context["case_spec_contract"])
 
@@ -102,6 +107,39 @@ class NativeGenerationTests(unittest.TestCase):
         ).stdout
         self.assertIn("--generation-mode {native,legacy}", create_help)
         self.assertIn("--submission", submit_help)
+
+    def test_cli_invalid_submission_is_structured_jsonl_without_traceback(self) -> None:
+        blocked, context = self._create_context("job_native_cli_reject")
+        invalid = self.workspace / "invalid_submission.json"
+        invalid.write_text("{not-json", encoding="utf-8")
+        script = Path(__file__).resolve().parents[1] / "scripts" / "harness_agent_job.py"
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "--workspace",
+                str(self.workspace),
+                "--jsonl",
+                "submit-generation",
+                context["job_id"],
+                "--submission",
+                str(invalid),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        events = [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
+        self.assertTrue(events)
+        result = events[-1]["result"]
+        self.assertEqual(result["failure_code"], "native_generation_submission_schema_invalid")
+        self.assertEqual(result["allowed_next_actions"], ["submit_native_generation", "cancel"])
+        self.assertNotIn("Traceback", completed.stderr)
+        request_root = Path(blocked["paths"]["job_root"]) / "request"
+        self.assertFalse((request_root / "native_generation_submission.json").exists())
+        self.assertFalse((request_root / "native_generation_ack.json").exists())
 
     def test_valid_submission_is_acked_then_uses_existing_controller_chain(self) -> None:
         _, context = self._create_context()
@@ -133,13 +171,20 @@ class NativeGenerationTests(unittest.TestCase):
 
         changed = copy.deepcopy(submission)
         changed["agent_reported"]["model_turn_count"] = 3
-        with self.assertRaisesRegex(JobStoreError, "already differs"):
-            self.controller.submit_native_generation(context["job_id"], changed)
+        rejected = self.controller.submit_native_generation(context["job_id"], changed)
+        self.assertEqual(
+            rejected["submission_stage_result"]["failure_code"],
+            "native_generation_submission_immutable_conflict",
+        )
+        self.assertEqual(rejected["job"]["allowed_next_actions"], ["advance", "cancel"])
 
         wrong_job = copy.deepcopy(submission)
         wrong_job["job_id"] = "job_native_other"
-        with self.assertRaisesRegex(ValueError, "job identity mismatch"):
-            self.controller.submit_native_generation(context["job_id"], wrong_job)
+        rejected = self.controller.submit_native_generation(context["job_id"], wrong_job)
+        self.assertEqual(
+            rejected["submission_stage_result"]["failure_code"],
+            "native_generation_submission_context_mismatch",
+        )
 
     def test_tampered_context_cannot_be_rebound_by_recomputing_the_submission_digest(self) -> None:
         blocked, context = self._create_context("job_native_context_tamper")
@@ -147,8 +192,12 @@ class NativeGenerationTests(unittest.TestCase):
         write_json(blocked["paths"]["native_generation_context"], context)
         submission = self._submission(context)
 
-        with self.assertRaisesRegex(JobStoreError, "context identity mismatch"):
-            self.controller.submit_native_generation(context["job_id"], submission)
+        rejected = self.controller.submit_native_generation(context["job_id"], submission)
+        self.assertEqual(
+            rejected["submission_stage_result"]["failure_code"],
+            "native_generation_context_identity_mismatch",
+        )
+        self.assertEqual(rejected["submission_stage_result"]["failure_class"], "blocked_configuration")
 
     def test_optional_image_pixels_cannot_be_claimed_by_native_submission(self) -> None:
         image = self.workspace / "optional.png"
@@ -171,8 +220,11 @@ class NativeGenerationTests(unittest.TestCase):
         submission = self._submission(context)
         submission["agent_reported"]["image_input_ids_used"] = ["request_image_0"]
 
-        with self.assertRaisesRegex(ValueError, "metadata-only"):
-            self.controller.submit_native_generation(context["job_id"], submission)
+        rejected = self.controller.submit_native_generation(context["job_id"], submission)
+        self.assertEqual(
+            rejected["submission_stage_result"]["failure_code"],
+            "native_generation_image_use_declaration_invalid",
+        )
 
     def test_required_image_usage_requires_exact_authorized_agent_report(self) -> None:
         image = self.workspace / "required.png"
@@ -192,8 +244,11 @@ class NativeGenerationTests(unittest.TestCase):
         blocked = self.controller.advance_until_blocked("job_native_required_image")
         context = read_json(blocked["paths"]["native_generation_context"])
         missing = self._submission(context)
-        with self.assertRaisesRegex(ValueError, "must be reported as used"):
-            self.controller.submit_native_generation(context["job_id"], missing)
+        rejected = self.controller.submit_native_generation(context["job_id"], missing)
+        self.assertEqual(
+            rejected["submission_stage_result"]["failure_code"],
+            "native_generation_image_use_declaration_invalid",
+        )
 
         accepted = self._submission(context)
         accepted["agent_reported"]["image_input_ids_used"] = ["request_image_0"]
@@ -203,6 +258,151 @@ class NativeGenerationTests(unittest.TestCase):
         self.assertEqual(inspection["job"]["state"], "awaiting_semantic_review")
         intent = read_json(inspection["paths"]["intent_contract"])
         self.assertEqual(intent["hard_requirements"][0]["id"], "original_user_visual_inputs")
+
+    def test_invalid_submission_boundaries_are_structured_and_do_not_write_immutable_artifacts(self) -> None:
+        mutations = {
+            "native_generation_submission_schema_invalid": lambda value: value.pop("agent_reported"),
+            "native_generation_submission_context_mismatch": lambda value: value.__setitem__(
+                "generation_context_digest", "0" * 64
+            ),
+            "native_generation_intent_draft_invalid": lambda value: value["intent_draft"]["hard_requirements"].append(
+                {"id": "contact_required", "text": "duplicate ID"}
+            ),
+            "native_generation_case_spec_invalid": lambda value: value["case_spec"]["scene"].__setitem__(
+                "duration_s", -1.0
+            ),
+            "native_generation_parameter_constraint_invalid": lambda value: value["intent_draft"][
+                "parameter_analysis"
+            ][0].__setitem__("path", "$.scene.missing_leaf"),
+        }
+        for index, (expected_code, mutate) in enumerate(mutations.items(), start=1):
+            with self.subTest(expected_code=expected_code):
+                job_id = f"job_native_reject_{index:02d}"
+                blocked, context = self._create_context(job_id)
+                submission = self._submission(context)
+                mutate(submission)
+
+                rejected = self.controller.submit_native_generation(job_id, submission)
+
+                result = rejected["submission_stage_result"]
+                self.assertEqual(result["schema_version"], "harness_stage_result_v1")
+                self.assertEqual(result["failure_code"], expected_code)
+                self.assertEqual(result["failure_class"], "agent_submission_invalid")
+                self.assertEqual(result["allowed_next_actions"], ["submit_native_generation", "cancel"])
+                self.assertIsNone(result["required_user_action"])
+                self.assertTrue(result["artifact_refs"])
+                self.assertEqual(rejected["job"]["allowed_next_actions"], ["submit_native_generation", "cancel"])
+                request_root = Path(blocked["paths"]["job_root"]) / "request"
+                self.assertFalse((request_root / "native_generation_submission.json").exists())
+                self.assertFalse((request_root / "native_generation_ack.json").exists())
+                self.assertEqual(
+                    read_json(Path(blocked["paths"]["job_root"]) / "stage_results" / "generation.json")[
+                        "failure_code"
+                    ],
+                    expected_code,
+                )
+
+    def test_frozen_context_survives_current_contract_presentation_changes(self) -> None:
+        blocked, context = self._create_context("job_native_frozen_contract")
+        original_digest = blocked["native_generation_context_digest"]
+        # Simulate a waiting M5 Job created before the independent identity
+        # sidecar existed. Recovery must freeze this context, not regenerate it.
+        Path(blocked["paths"]["native_generation_context_identity"]).unlink()
+        changed_current_contract = {
+            "schema_version": "harness_case_spec_v2",
+            "enums": {"backend": ["description-only-change"]},
+            "valid_structure_example_do_not_copy_values": {"changed": True},
+            "description": "new current prose",
+        }
+
+        with patch(
+            "harness.agent.native_generation.case_spec_generation_contract",
+            return_value=changed_current_contract,
+        ):
+            accepted = self.controller.submit_native_generation(context["job_id"], self._submission(context))
+            inspection = self.controller.advance_until_blocked(context["job_id"])
+
+        self.assertEqual(accepted["native_generation_context_digest"], original_digest)
+        self.assertEqual(inspection["native_generation_context_digest"], original_digest)
+        self.assertTrue(Path(inspection["paths"]["native_generation_context_identity"]).is_file())
+        self.assertEqual(inspection["job"]["state"], "awaiting_semantic_review")
+
+    def test_unsupported_frozen_context_schema_is_a_structured_migration_blocker(self) -> None:
+        blocked, context = self._create_context("job_native_unsupported_context")
+        context["schema_version"] = "harness_native_generation_context_v0"
+        write_json(blocked["paths"]["native_generation_context"], context)
+
+        inspection = self.controller.advance_until_blocked(context["job_id"])
+        result = read_json(Path(inspection["paths"]["job_root"]) / "stage_results" / "generation.json")
+
+        self.assertEqual(inspection["job"]["state"], "blocked")
+        self.assertEqual(result["failure_code"], "native_generation_context_schema_unsupported")
+        self.assertEqual(result["failure_class"], "blocked_configuration")
+        self.assertEqual(inspection["job"]["allowed_next_actions"], ["resume", "cancel"])
+
+    def test_prohibition_is_reviewed_exactly_and_a_violation_cannot_complete(self) -> None:
+        fake = SuccessfulHarness()
+        hooks = fake.hooks()
+        passing_review = hooks.semantic_review
+
+        def prohibition_violation(**kwargs):
+            result = passing_review(**kwargs)
+            for row in result["review"]["requirements"]:
+                if row["requirement_id"] == "no_overlap":
+                    row["status"] = "fail"
+                    row["rationale"] = "the result visibly violates the frozen prohibition"
+            result["review"]["overall_status"] = "fail"
+            result["review"]["repair_layer"] = "user_decision"
+            result["review"]["summary"] = "a frozen prohibition was violated"
+            result["receipt"]["output_digest"] = stable_digest(result["review"])
+            return result
+
+        hooks.semantic_review = prohibition_violation
+        controller = AgentJobController(self.workspace, hooks=hooks)
+        controller.create(
+            self.request,
+            job_id="job_native_prohibition",
+            publication_tier="local_preview",
+        )
+        blocked = controller.advance_until_blocked("job_native_prohibition")
+        context = read_json(blocked["paths"]["native_generation_context"])
+        submission = self._submission(context)
+        submission["intent_draft"]["prohibitions"] = [
+            {"id": "no_overlap", "text": "The balls must never interpenetrate."}
+        ]
+        controller.submit_native_generation(context["job_id"], submission)
+        awaiting = controller.advance_until_blocked(context["job_id"])
+        intent = read_json(awaiting["paths"]["intent_contract"])
+        self.assertNotIn("no_overlap", {row["id"] for row in intent["hard_requirements"]})
+        self.assertEqual([row["id"] for row in intent["prohibitions"]], ["no_overlap"])
+        summary = read_json(
+            Path(awaiting["paths"]["job_root"])
+            / "attempts"
+            / "attempt_001"
+            / "evidence_bundle"
+            / "evidence_summary.json"
+        )
+        prohibition = next(row for row in summary["semantic_requirements"] if row["id"] == "no_overlap")
+        self.assertEqual(prohibition["source"], "intent_prohibition")
+        self.assertEqual(prohibition["polarity"], "prohibition")
+
+        reviewed = controller.run_semantic_review(context["job_id"])
+        self.assertNotEqual(reviewed["job"]["state"], "completed")
+        self.assertEqual(reviewed["job"]["blocker"]["code"], "semantic_intent_mismatch")
+        review = read_json(
+            Path(reviewed["paths"]["job_root"])
+            / "attempts"
+            / "attempt_001"
+            / "semantic_review.json"
+        )
+        self.assertEqual(
+            [row["requirement_id"] for row in review["requirements"]].count("no_overlap"),
+            1,
+        )
+        self.assertEqual(
+            next(row for row in review["requirements"] if row["requirement_id"] == "no_overlap")["status"],
+            "fail",
+        )
 
     def test_prompt_and_object_renaming_do_not_change_a_structurally_equivalent_runtime_route(self) -> None:
         first = case_spec_v2_fixture()

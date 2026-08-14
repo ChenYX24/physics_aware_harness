@@ -151,7 +151,15 @@ def main() -> int:
             reason=args.revision_reason,
         )
     elif args.command == "submit-generation":
-        result = controller.submit_native_generation(args.job_id, read_json(args.submission))
+        try:
+            submission = read_json(args.submission)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            result = controller.reject_native_generation_submission_input(
+                args.job_id,
+                str(exc) or type(exc).__name__,
+            )
+        else:
+            result = controller.submit_native_generation(args.job_id, submission)
     elif args.command == "resume":
         authorizations = {}
         for field, enabled in (

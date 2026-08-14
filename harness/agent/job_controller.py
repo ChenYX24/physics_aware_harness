@@ -32,12 +32,16 @@ from harness.agent.job_schema import (
 )
 from harness.agent.native_generation import (
     NATIVE_GENERATION_ACK_SCHEMA_VERSION,
+    NATIVE_GENERATION_CONTEXT_IDENTITY_SCHEMA_VERSION,
+    NativeGenerationValidationError,
     build_native_generation_ack,
     build_native_generation_context,
+    build_native_generation_context_identity,
     generation_policy,
     validate_generation_policy,
     validate_native_generation_ack,
     validate_native_generation_context,
+    validate_native_generation_context_identity,
     validate_native_generation_submission,
 )
 from harness.agent.job_store import JobStore, JobStoreError
@@ -237,6 +241,14 @@ class AgentJobController:
         manifest = self.store.load_manifest(job_id)
         root = self.store.job_dir(job_id)
         context_path = root / "request" / "native_generation_context.json"
+        context_identity_path = root / "request" / "native_generation_context_identity.json"
+        context_digest = None
+        if context_identity_path.is_file():
+            identity = read_json(context_identity_path)
+            if isinstance(identity, Mapping):
+                context_digest = identity.get("context_digest")
+        elif context_path.is_file():
+            context_digest = stable_digest(read_json(context_path))
         attempts = []
         for path in sorted((root / "attempts").glob("attempt_*/attempt_manifest.json")):
             attempts.append(AttemptManifest.from_dict(read_json(path)).to_dict())
@@ -244,7 +256,7 @@ class AgentJobController:
             "schema_version": "harness_agent_job_inspection_v1",
             "effective_config_digest": self.config.digest,
             "generation_mode": self._generation_policy(job_id)["mode"],
-            "native_generation_context_digest": stable_digest(read_json(context_path)) if context_path.is_file() else None,
+            "native_generation_context_digest": context_digest,
             "job": manifest,
             "attempts": attempts,
             "paths": {
@@ -252,6 +264,7 @@ class AgentJobController:
                 "job_manifest": str(root / "job_manifest.json"),
                 "intent_contract": str(root / "request" / "intent_contract.json") if (root / "request" / "intent_contract.json").is_file() else None,
                 "native_generation_context": str(root / "request" / "native_generation_context.json") if (root / "request" / "native_generation_context.json").is_file() else None,
+                "native_generation_context_identity": str(context_identity_path) if context_identity_path.is_file() else None,
                 "native_generation_ack": str(root / "request" / "native_generation_ack.json") if (root / "request" / "native_generation_ack.json").is_file() else None,
             },
         }
@@ -268,22 +281,74 @@ class AgentJobController:
             context_path = root / "native_generation_context.json"
             if not context_path.is_file():
                 raise JobStoreError("advance the job once to create the native generation context")
-            context = validate_native_generation_context(read_json(context_path))
             request = read_json(root / "user_request.json")
-            self._validate_native_context_binding(manifest, context, request)
-            value = validate_native_generation_submission(submission, context=context)
-            case_spec = self._native_case_spec(request, value["case_spec"])
-            self._project_native_intent_contract(manifest, request, value["intent_draft"], case_spec.data)
+            try:
+                context = self._load_frozen_native_context(manifest, request=request, create_identity_if_missing=True)
+                value = validate_native_generation_submission(submission, context=context)
+            except NativeGenerationValidationError as exc:
+                return self._record_native_generation_rejection(
+                    manifest,
+                    failure_code=exc.code,
+                    message=str(exc),
+                    context_path=context_path,
+                )
+            try:
+                case_spec = self._native_case_spec(request, value["case_spec"])
+            except (KeyError, TypeError, ValueError) as exc:
+                return self._record_native_generation_rejection(
+                    manifest,
+                    failure_code="native_generation_case_spec_invalid",
+                    message=str(exc) or type(exc).__name__,
+                    context_path=context_path,
+                )
+            try:
+                self._project_native_intent_contract(manifest, request, value["intent_draft"], case_spec.data)
+            except (KeyError, TypeError, ValueError) as exc:
+                return self._record_native_generation_rejection(
+                    manifest,
+                    failure_code="native_generation_parameter_constraint_invalid",
+                    message=str(exc) or type(exc).__name__,
+                    context_path=context_path,
+                )
             submission_path = root / "native_generation_submission.json"
             ack_path = root / "native_generation_ack.json"
             if submission_path.is_file():
                 existing = read_json(submission_path)
                 if existing != value:
-                    raise JobStoreError("an immutable native generation submission already differs")
+                    result = build_stage_result(
+                        stage="generation",
+                        status="failed",
+                        failure_class="agent_submission_invalid",
+                        failure_code="native_generation_submission_immutable_conflict",
+                        failure_codes=["native_generation_submission_immutable_conflict"],
+                        message="an immutable accepted native generation submission already differs",
+                        retryable=False,
+                        job_id=job_id,
+                        invocation_count=0,
+                        artifact_refs=[
+                            artifact_ref("native_generation_context", str(context_path), str(context["schema_version"])),
+                            artifact_ref(
+                                "native_generation_submission",
+                                str(submission_path),
+                                str(existing.get("schema_version") or ""),
+                            ),
+                        ],
+                        allowed_next_actions=["continue", "cancel"],
+                    )
+                    self._write_controller_stage_result(manifest, result)
+                    return self._inspection_with_submission_result(job_id, result)
             else:
                 write_json(submission_path, value)
             if ack_path.is_file():
-                validate_native_generation_ack(read_json(ack_path), context=context, submission=value)
+                try:
+                    validate_native_generation_ack(read_json(ack_path), context=context, submission=value)
+                except NativeGenerationValidationError as exc:
+                    return self._record_native_generation_rejection(
+                        manifest,
+                        failure_code=exc.code,
+                        message=str(exc),
+                        context_path=context_path,
+                    )
             else:
                 write_json(ack_path, build_native_generation_ack(context=context, submission=value))
             self._update_manifest(
@@ -293,6 +358,19 @@ class AgentJobController:
                 allowed_next_actions=["advance", "cancel"],
             )
         return self.inspect(job_id)
+
+    def reject_native_generation_submission_input(self, job_id: str, message: str) -> dict[str, Any]:
+        """Record an unreadable CLI submission without writing it as an immutable submission."""
+        with self.store.lock(job_id):
+            manifest = self.store.load_manifest(job_id)
+            if manifest["current_stage"] != "generation":
+                raise JobStoreError("native generation submission requires the generation stage")
+            return self._record_native_generation_rejection(
+                manifest,
+                failure_code="native_generation_submission_schema_invalid",
+                message=message,
+                context_path=self.store.job_dir(job_id) / "request" / "native_generation_context.json",
+            )
 
     def advance_until_blocked(self, job_id: str) -> dict[str, Any]:
         with self.store.lock(job_id):
@@ -1239,8 +1317,20 @@ class AgentJobController:
             return self._apply_stage_result(manifest, result)
         context_path = request_root / "native_generation_context.json"
         if context_path.is_file():
-            context = validate_native_generation_context(read_json(context_path))
-            self._validate_native_context_binding(manifest, context, request)
+            try:
+                context = self._load_frozen_native_context(manifest, request=request, create_identity_if_missing=True)
+            except NativeGenerationValidationError as exc:
+                result = failure_stage_result(
+                    stage="generation",
+                    failure_code=exc.code,
+                    message=str(exc),
+                    source_status="blocked",
+                    job_id=job_id,
+                    invocation_count=0,
+                    artifact_refs=[artifact_ref("native_generation_context", str(context_path))],
+                )
+                self._write_controller_stage_result(manifest, result)
+                return self._apply_stage_result(manifest, result)
         else:
             context = build_native_generation_context(
                 job_id=job_id,
@@ -1250,8 +1340,13 @@ class AgentJobController:
                 authorizations=manifest["authorizations"],
             )
             write_json(context_path, context)
+            write_json(
+                request_root / "native_generation_context_identity.json",
+                build_native_generation_context_identity(context),
+            )
         submission_path = request_root / "native_generation_submission.json"
         ack_path = request_root / "native_generation_ack.json"
+        context_identity_path = request_root / "native_generation_context_identity.json"
         if not submission_path.is_file() or not ack_path.is_file():
             result = failure_stage_result(
                 stage="generation",
@@ -1265,7 +1360,12 @@ class AgentJobController:
                         "native_generation_context",
                         str(context_path),
                         str(context["schema_version"]),
-                    )
+                    ),
+                    artifact_ref(
+                        "native_generation_context_identity",
+                        str(context_identity_path),
+                        NATIVE_GENERATION_CONTEXT_IDENTITY_SCHEMA_VERSION,
+                    ),
                 ],
             )
             self._write_controller_stage_result(manifest, result)
@@ -1288,6 +1388,11 @@ class AgentJobController:
             request_identities=[str(ack["ack_identity"])],
             artifact_refs=[
                 artifact_ref("native_generation_context", str(context_path), str(context["schema_version"])),
+                artifact_ref(
+                    "native_generation_context_identity",
+                    str(context_identity_path),
+                    NATIVE_GENERATION_CONTEXT_IDENTITY_SCHEMA_VERSION,
+                ),
                 artifact_ref("native_generation_submission", str(submission_path), str(submission["schema_version"])),
                 artifact_ref("native_generation_ack", str(ack_path), NATIVE_GENERATION_ACK_SCHEMA_VERSION),
             ],
@@ -1355,6 +1460,88 @@ class AgentJobController:
             raise JobStoreError("generation policy is missing")
         return validate_generation_policy(read_json(path))
 
+    def _load_frozen_native_context(
+        self,
+        manifest: Mapping[str, Any],
+        *,
+        request: Mapping[str, Any],
+        create_identity_if_missing: bool,
+    ) -> dict[str, Any]:
+        request_root = self.store.job_dir(manifest["job_id"]) / "request"
+        context_path = request_root / "native_generation_context.json"
+        try:
+            context = validate_native_generation_context(read_json(context_path))
+        except NativeGenerationValidationError:
+            raise
+        except (OSError, TypeError, ValueError) as exc:
+            raise NativeGenerationValidationError(
+                "native_generation_context_invalid",
+                str(exc) or type(exc).__name__,
+            ) from exc
+        self._validate_native_context_binding(manifest, context, request)
+        identity_path = request_root / "native_generation_context_identity.json"
+        if identity_path.is_file():
+            try:
+                validate_native_generation_context_identity(read_json(identity_path), context=context)
+            except NativeGenerationValidationError:
+                raise
+            except (OSError, TypeError, ValueError) as exc:
+                raise NativeGenerationValidationError(
+                    "native_generation_context_identity_invalid",
+                    str(exc) or type(exc).__name__,
+                ) from exc
+        elif create_identity_if_missing:
+            # M5 contexts predate the independent identity sidecar. Freeze the
+            # already stored, binding-valid context in place; never regenerate it.
+            write_json(identity_path, build_native_generation_context_identity(context))
+        else:
+            raise NativeGenerationValidationError(
+                "native_generation_context_identity_invalid",
+                "native generation context identity is missing",
+            )
+        return context
+
+    def _record_native_generation_rejection(
+        self,
+        manifest: Mapping[str, Any],
+        *,
+        failure_code: str,
+        message: str,
+        context_path: Path,
+    ) -> dict[str, Any]:
+        refs = [artifact_ref("native_generation_context", str(context_path))] if context_path.is_file() else []
+        identity_path = context_path.with_name("native_generation_context_identity.json")
+        if identity_path.is_file():
+            refs.append(
+                artifact_ref(
+                    "native_generation_context_identity",
+                    str(identity_path),
+                    NATIVE_GENERATION_CONTEXT_IDENTITY_SCHEMA_VERSION,
+                )
+            )
+        result = failure_stage_result(
+            stage="generation",
+            failure_code=failure_code,
+            message=message,
+            source_status="blocked",
+            job_id=manifest["job_id"],
+            invocation_count=0,
+            artifact_refs=refs,
+        )
+        self._write_controller_stage_result(manifest, result)
+        updated = self._apply_stage_result(dict(manifest), result)
+        self._stage_event(updated, "stage_blocked", "generation", result=result)
+        return self._inspection_with_submission_result(str(manifest["job_id"]), result)
+
+    def _inspection_with_submission_result(
+        self,
+        job_id: str,
+        result: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        inspection = self.inspect(job_id)
+        inspection["submission_stage_result"] = StageResult.from_dict(result).to_dict()
+        return inspection
+
     @staticmethod
     def _validate_native_context_binding(
         manifest: Mapping[str, Any],
@@ -1369,7 +1556,10 @@ class AgentJobController:
             or context["target"] != manifest["target"]
             or context["authorizations"] != manifest["authorizations"]
         ):
-            raise JobStoreError("native generation context identity mismatch")
+            raise NativeGenerationValidationError(
+                "native_generation_context_identity_mismatch",
+                "native generation context identity mismatch",
+            )
 
     def _advance_l1(self, manifest: dict[str, Any]) -> dict[str, Any]:
         case_spec = self._load_current_case_spec(manifest)
@@ -2180,12 +2370,12 @@ class AgentJobController:
         value = StageResult.from_dict(result).to_dict()
         if value["status"] == "completed":
             return manifest
-        if value["failure_code"] == "native_generation_submission_required":
+        if "submit_native_generation" in value["allowed_next_actions"]:
             return self._update_manifest(
                 manifest,
                 state="blocked",
                 blocker={"code": value["failure_code"], "message": value["message"], "stage": value["stage"]},
-                allowed_next_actions=["submit_native_generation", "cancel"],
+                allowed_next_actions=value["allowed_next_actions"],
             )
         if value["failure_class"] == "interrupted":
             return self._update_manifest(

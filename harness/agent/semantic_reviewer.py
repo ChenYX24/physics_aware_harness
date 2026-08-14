@@ -550,8 +550,9 @@ class CodexAppServerReviewer:
     def _input_items(bundle_dir: Path, manifest: Mapping[str, Any], *, include_original_images: bool) -> list[dict[str, Any]]:
         prompt = (
             "Compare every requirement listed in evidence_summary.json semantic_requirements, including each "
-            "stable ambiguity_decision requirement, directly against manifest.json, "
+            "stable ambiguity_decision requirement and each source=intent_prohibition requirement, directly against manifest.json, "
             "evidence_summary.json, and the supplied visual evidence. "
+            "For a prohibition, pass means the result does not violate it; fail means the result violates it. "
             "Return pass/fail/uncertain exactly once for every listed requirement_id. A technically valid CaseSpec may still "
             "misunderstand the user. Do not treat missing evidence as pass. Cite only artifact_id values from manifest.json. "
             "For trajectory evidence, inspect trajectory_summary.sampled_frames, readable_ranges, and state_transitions; "

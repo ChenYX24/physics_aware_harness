@@ -11,7 +11,9 @@ from harness.core.artifact_schema import write_json
 STAGE_RESULT_SCHEMA_VERSION = "harness_stage_result_v1"
 STAGE_RESULT_STATUSES = {"completed", "failed", "blocked", "interrupted"}
 FAILURE_CLASSES = {
+    "agent_submission_invalid",
     "artifact_incomplete",
+    "awaiting_agent_action",
     "blocked_configuration",
     "blocked_user_action",
     "capability_missing",
@@ -37,6 +39,7 @@ ALLOWED_NEXT_ACTIONS = {
     "retry_stage",
     "revise_case_spec",
     "run_semantic_review",
+    "submit_native_generation",
 }
 _COST_FIELDS = {"amount", "currency", "estimated", "provider"}
 _REQUIRED_FIELDS = {
@@ -81,7 +84,6 @@ _USER_ACTION_CODES = {
     "catalog_not_writable",
     "llm_credentials_missing",
     "meshy_upload_authorization_missing",
-    "native_generation_submission_required",
     "paid_provider_authorization_missing",
     "paid_provider_budget_missing",
     "paid_provider_budget_exhausted",
@@ -128,6 +130,23 @@ _CONFIGURATION_CODES = {
     "reviewer_permission_profile_unsupported",
     "reviewer_isolation_unproven",
     "reviewer_unrelated_instruction_source",
+    "native_generation_case_spec_contract_schema_unsupported",
+    "native_generation_ack_identity_mismatch",
+    "native_generation_ack_invalid",
+    "native_generation_context_identity_invalid",
+    "native_generation_context_identity_mismatch",
+    "native_generation_context_identity_schema_unsupported",
+    "native_generation_context_invalid",
+    "native_generation_context_schema_unsupported",
+}
+_NATIVE_SUBMISSION_INVALID_CODES = {
+    "native_generation_agent_report_invalid",
+    "native_generation_case_spec_invalid",
+    "native_generation_image_use_declaration_invalid",
+    "native_generation_intent_draft_invalid",
+    "native_generation_parameter_constraint_invalid",
+    "native_generation_submission_context_mismatch",
+    "native_generation_submission_schema_invalid",
 }
 _TRANSIENT_CODES = {
     "backend_importer_timeout",
@@ -371,6 +390,10 @@ def classify_failure(
     normalized_stage = str(stage or "").strip().casefold()
     if source_status == "interrupted" or code in {"interrupted", "keyboardinterrupt"}:
         return _classification("interrupted", "interrupted", False, ["resume_checkpoint", "cancel"])
+    if code == "native_generation_submission_required":
+        return _classification("blocked", "awaiting_agent_action", False, ["submit_native_generation", "cancel"])
+    if code in _NATIVE_SUBMISSION_INVALID_CODES:
+        return _classification("blocked", "agent_submission_invalid", False, ["submit_native_generation", "cancel"])
     if code in _CAPABILITY_CODES or "capability" in code or "handoff_contract_unavailable" in code:
         return _classification("blocked", "capability_missing", False, ["open_development_issue", "cancel"])
     if code in _USER_ACTION_CODES or code.startswith("provider_input_") or "authorization" in code or "credits" in code:
@@ -717,6 +740,8 @@ def _classification(status: str, failure_class: str, retryable: bool, actions: l
 def _failure_priority(classification: Mapping[str, Any]) -> int:
     return {
         "blocked_user_action": 0,
+        "awaiting_agent_action": 0,
+        "agent_submission_invalid": 0,
         "blocked_configuration": 1,
         "capability_missing": 2,
         "interrupted": 3,

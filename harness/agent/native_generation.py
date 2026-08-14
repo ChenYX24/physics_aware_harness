@@ -13,8 +13,18 @@ from harness.planning.case_generation import case_spec_generation_contract
 NATIVE_GENERATION_CONTEXT_SCHEMA_VERSION = "harness_native_generation_context_v1"
 NATIVE_GENERATION_SUBMISSION_SCHEMA_VERSION = "harness_native_generation_submission_v1"
 NATIVE_GENERATION_ACK_SCHEMA_VERSION = "harness_native_generation_ack_v1"
+NATIVE_GENERATION_CONTEXT_IDENTITY_SCHEMA_VERSION = "harness_native_generation_context_identity_v1"
 GENERATION_POLICY_SCHEMA_VERSION = "harness_generation_policy_v1"
 GENERATION_MODES = {"native", "legacy", "seed"}
+SUPPORTED_CASE_SPEC_CONTRACT_SCHEMA_VERSIONS = {"harness_case_spec_v2"}
+
+
+class NativeGenerationValidationError(ValueError):
+    """Stable native-generation validation failure for Controller decisions."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def generation_policy(mode: str) -> dict[str, Any]:
@@ -103,7 +113,13 @@ def build_native_generation_context(
 
 
 def validate_native_generation_context(raw: Mapping[str, Any]) -> dict[str, Any]:
-    value = copy.deepcopy(dict(raw))
+    try:
+        value = copy.deepcopy(dict(raw))
+    except (TypeError, ValueError) as exc:
+        raise NativeGenerationValidationError(
+            "native_generation_context_invalid",
+            "native generation context must be an object",
+        ) from exc
     expected = {
         "schema_version",
         "job_id",
@@ -119,19 +135,29 @@ def validate_native_generation_context(raw: Mapping[str, Any]) -> dict[str, Any]
         "created_at",
     }
     if set(value) != expected:
-        raise ValueError("native generation context fields mismatch")
+        raise NativeGenerationValidationError("native_generation_context_invalid", "native generation context fields mismatch")
     if value["schema_version"] != NATIVE_GENERATION_CONTEXT_SCHEMA_VERSION:
-        raise ValueError("unsupported native generation context schema")
-    validate_job_id(value["job_id"])
+        raise NativeGenerationValidationError(
+            "native_generation_context_schema_unsupported",
+            "unsupported native generation context schema",
+        )
+    try:
+        validate_job_id(value["job_id"])
+    except ValueError as exc:
+        raise NativeGenerationValidationError("native_generation_context_invalid", str(exc)) from exc
     if not re.fullmatch(r"[0-9a-f]{64}", str(value["request_digest"])):
-        raise ValueError("native generation request_digest must be SHA-256")
+        raise NativeGenerationValidationError("native_generation_context_invalid", "native generation request_digest must be SHA-256")
     if not re.fullmatch(r"[0-9a-f]{32}", str(value["submission_nonce"])):
-        raise ValueError("native generation submission_nonce is invalid")
+        raise NativeGenerationValidationError("native_generation_context_invalid", "native generation submission_nonce is invalid")
     for field in ("request", "target", "authorizations", "intent_draft_contract", "submission_contract", "case_spec_contract", "agent_reporting_contract"):
         if not isinstance(value[field], Mapping):
-            raise ValueError(f"native generation context {field} must be an object")
-    if value["case_spec_contract"] != case_spec_generation_contract():
-        raise ValueError("native generation CaseSpec contract is not current")
+            raise NativeGenerationValidationError("native_generation_context_invalid", f"native generation context {field} must be an object")
+    case_spec_contract_version = value["case_spec_contract"].get("schema_version")
+    if case_spec_contract_version not in SUPPORTED_CASE_SPEC_CONTRACT_SCHEMA_VERSIONS:
+        raise NativeGenerationValidationError(
+            "native_generation_case_spec_contract_schema_unsupported",
+            "native generation context references an unsupported CaseSpec contract schema",
+        )
     if value["submission_contract"] != {
         "schema_version": NATIVE_GENERATION_SUBMISSION_SCHEMA_VERSION,
         "required_fields": [
@@ -143,11 +169,57 @@ def validate_native_generation_context(raw: Mapping[str, Any]) -> dict[str, Any]
             "agent_reported",
         ],
     }:
-        raise ValueError("native generation submission contract is invalid")
+        raise NativeGenerationValidationError("native_generation_context_invalid", "native generation submission contract is invalid")
     if value["agent_reporting_contract"].get("trust") != "agent_reported_not_controller_observed" or value[
         "agent_reporting_contract"
     ].get("controller_observed_invocation_count") != 0:
-        raise ValueError("native generation agent reporting trust boundary is invalid")
+        raise NativeGenerationValidationError("native_generation_context_invalid", "native generation agent reporting trust boundary is invalid")
+    return value
+
+
+def build_native_generation_context_identity(context: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": NATIVE_GENERATION_CONTEXT_IDENTITY_SCHEMA_VERSION,
+        "job_id": context["job_id"],
+        "request_digest": context["request_digest"],
+        "context_schema_version": context["schema_version"],
+        "context_digest": stable_digest(context),
+        "submission_nonce": context["submission_nonce"],
+        "created_at": context["created_at"],
+    }
+
+
+def validate_native_generation_context_identity(
+    raw: Mapping[str, Any],
+    *,
+    context: Mapping[str, Any],
+) -> dict[str, Any]:
+    value = copy.deepcopy(dict(raw))
+    expected_fields = {
+        "schema_version",
+        "job_id",
+        "request_digest",
+        "context_schema_version",
+        "context_digest",
+        "submission_nonce",
+        "created_at",
+    }
+    if set(value) != expected_fields:
+        raise NativeGenerationValidationError(
+            "native_generation_context_identity_invalid",
+            "native generation context identity fields mismatch",
+        )
+    if value["schema_version"] != NATIVE_GENERATION_CONTEXT_IDENTITY_SCHEMA_VERSION:
+        raise NativeGenerationValidationError(
+            "native_generation_context_identity_schema_unsupported",
+            "unsupported native generation context identity schema",
+        )
+    expected = build_native_generation_context_identity(context)
+    if value != expected:
+        raise NativeGenerationValidationError(
+            "native_generation_context_identity_mismatch",
+            "native generation context no longer matches its frozen identity",
+        )
     return value
 
 
@@ -156,7 +228,13 @@ def validate_native_generation_submission(
     *,
     context: Mapping[str, Any],
 ) -> dict[str, Any]:
-    value = copy.deepcopy(dict(raw))
+    try:
+        value = copy.deepcopy(dict(raw))
+    except (TypeError, ValueError) as exc:
+        raise NativeGenerationValidationError(
+            "native_generation_submission_schema_invalid",
+            "native generation submission must be an object",
+        ) from exc
     expected = {
         "schema_version",
         "job_id",
@@ -166,17 +244,42 @@ def validate_native_generation_submission(
         "agent_reported",
     }
     if set(value) != expected:
-        raise ValueError("native generation submission fields mismatch")
+        raise NativeGenerationValidationError(
+            "native_generation_submission_schema_invalid",
+            "native generation submission fields mismatch",
+        )
     if value["schema_version"] != NATIVE_GENERATION_SUBMISSION_SCHEMA_VERSION:
-        raise ValueError("unsupported native generation submission schema")
+        raise NativeGenerationValidationError(
+            "native_generation_submission_schema_invalid",
+            "unsupported native generation submission schema",
+        )
     if value["job_id"] != context["job_id"]:
-        raise ValueError("native generation submission job identity mismatch")
+        raise NativeGenerationValidationError(
+            "native_generation_submission_context_mismatch",
+            "native generation submission job identity mismatch",
+        )
     if value["generation_context_digest"] != stable_digest(context):
-        raise ValueError("native generation context digest mismatch")
-    _validate_intent_draft(value["intent_draft"])
+        raise NativeGenerationValidationError(
+            "native_generation_submission_context_mismatch",
+            "native generation context digest mismatch",
+        )
+    try:
+        _validate_intent_draft(value["intent_draft"])
+    except NativeGenerationValidationError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise NativeGenerationValidationError("native_generation_intent_draft_invalid", str(exc)) from exc
     if not isinstance(value["case_spec"], Mapping):
-        raise ValueError("native generation case_spec must be an object")
-    _validate_agent_reported(value["agent_reported"], context=context)
+        raise NativeGenerationValidationError(
+            "native_generation_case_spec_invalid",
+            "native generation case_spec must be an object",
+        )
+    try:
+        _validate_agent_reported(value["agent_reported"], context=context)
+    except NativeGenerationValidationError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise NativeGenerationValidationError("native_generation_agent_report_invalid", str(exc)) from exc
     return value
 
 
@@ -214,7 +317,13 @@ def validate_native_generation_ack(
     context: Mapping[str, Any],
     submission: Mapping[str, Any],
 ) -> dict[str, Any]:
-    value = copy.deepcopy(dict(raw))
+    try:
+        value = copy.deepcopy(dict(raw))
+    except (TypeError, ValueError) as exc:
+        raise NativeGenerationValidationError(
+            "native_generation_ack_invalid",
+            "native generation ack must be an object",
+        ) from exc
     expected = {
         "schema_version",
         "job_id",
@@ -225,11 +334,14 @@ def validate_native_generation_ack(
         "agent_reported",
     }
     if set(value) != expected or value["schema_version"] != NATIVE_GENERATION_ACK_SCHEMA_VERSION:
-        raise ValueError("native generation ack is invalid")
+        raise NativeGenerationValidationError("native_generation_ack_invalid", "native generation ack is invalid")
     expected_value = build_native_generation_ack(context=context, submission=submission)
     expected_value["controller_observed"]["received_at"] = value.get("controller_observed", {}).get("received_at")
     if value != expected_value:
-        raise ValueError("native generation ack identity mismatch")
+        raise NativeGenerationValidationError(
+            "native_generation_ack_identity_mismatch",
+            "native generation ack identity mismatch",
+        )
     return value
 
 
@@ -258,26 +370,29 @@ def _validate_intent_draft(raw: Any) -> None:
     for row in ambiguities:
         if not isinstance(row, Mapping) or set(row) != {"question"} or not str(row.get("question") or "").strip():
             raise ValueError("native Intent ambiguities must contain only a non-empty question")
-    analysis = raw["parameter_analysis"]
-    if not isinstance(analysis, list):
-        raise ValueError("intent_draft.parameter_analysis must be a list")
-    paths: set[str] = set()
-    for row in analysis:
-        if not isinstance(row, Mapping) or set(row) != {"path", "requirement_level", "reason", "constraint"}:
-            raise ValueError("native parameter analysis fields mismatch")
-        path = str(row.get("path") or "")
-        if not re.fullmatch(r"\$\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", path) or path in paths:
-            raise ValueError("native parameter analysis paths must be unique canonical object paths")
-        paths.add(path)
-        level = row.get("requirement_level")
-        if level not in {"hard", "soft", "inferred"} or not str(row.get("reason") or "").strip():
-            raise ValueError("native parameter analysis level or reason is invalid")
-        constraint = row.get("constraint")
-        if level == "hard":
-            if constraint is not None:
-                raise ValueError("hard native parameters cannot authorize an adjustment range")
-        else:
-            _validate_constraint(constraint)
+    try:
+        analysis = raw["parameter_analysis"]
+        if not isinstance(analysis, list):
+            raise ValueError("intent_draft.parameter_analysis must be a list")
+        paths: set[str] = set()
+        for row in analysis:
+            if not isinstance(row, Mapping) or set(row) != {"path", "requirement_level", "reason", "constraint"}:
+                raise ValueError("native parameter analysis fields mismatch")
+            path = str(row.get("path") or "")
+            if not re.fullmatch(r"\$\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", path) or path in paths:
+                raise ValueError("native parameter analysis paths must be unique canonical object paths")
+            paths.add(path)
+            level = row.get("requirement_level")
+            if level not in {"hard", "soft", "inferred"} or not str(row.get("reason") or "").strip():
+                raise ValueError("native parameter analysis level or reason is invalid")
+            constraint = row.get("constraint")
+            if level == "hard":
+                if constraint is not None:
+                    raise ValueError("hard native parameters cannot authorize an adjustment range")
+            else:
+                _validate_constraint(constraint)
+    except (TypeError, ValueError) as exc:
+        raise NativeGenerationValidationError("native_generation_parameter_constraint_invalid", str(exc)) from exc
 
 
 def _validate_constraint(raw: Any) -> None:
@@ -322,12 +437,24 @@ def _validate_agent_reported(raw: Any, *, context: Mapping[str, Any]) -> None:
     request = context["request"]
     known = {str(row["input_id"]) for row in request.get("inputs") or [] if row.get("kind") == "image"}
     if not set(used).issubset(known):
-        raise ValueError("agent_reported image usage references an unknown input")
+        raise NativeGenerationValidationError(
+            "native_generation_image_use_declaration_invalid",
+            "agent_reported image usage references an unknown input",
+        )
     requirement = request["planning_image_requirement"]
     if requirement["mode"] == "required":
         if context["authorizations"].get("planning_llm_upload") is not True:
-            raise ValueError("required native planning image use is not authorized")
+            raise NativeGenerationValidationError(
+                "native_generation_image_use_declaration_invalid",
+                "required native planning image use is not authorized",
+            )
         if set(used) != set(requirement["input_ids"]):
-            raise ValueError("required native planning images must be reported as used")
+            raise NativeGenerationValidationError(
+                "native_generation_image_use_declaration_invalid",
+                "required native planning images must be reported as used",
+            )
     elif used:
-        raise ValueError("optional planning images must remain metadata-only")
+        raise NativeGenerationValidationError(
+            "native_generation_image_use_declaration_invalid",
+            "optional planning images must remain metadata-only",
+        )
