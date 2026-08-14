@@ -19,6 +19,7 @@ from harness.agent.job_schema import (
     PROJECTED_INTENT_CONTRACT_SCHEMA_VERSION,
     JOB_MANIFEST_SCHEMA_VERSION,
     SMOKE_GATE_SCHEMA_VERSION,
+    TERMINAL_JOB_STATES,
     AttemptManifest,
     IntentContract,
     JobManifest,
@@ -252,6 +253,7 @@ class AgentJobController:
         attempts = []
         for path in sorted((root / "attempts").glob("attempt_*/attempt_manifest.json")):
             attempts.append(AttemptManifest.from_dict(read_json(path)).to_dict())
+        current_leaf_stage_result = self._current_leaf_stage_result(manifest)
         return {
             "schema_version": "harness_agent_job_inspection_v1",
             "effective_config_digest": self.config.digest,
@@ -259,6 +261,7 @@ class AgentJobController:
             "native_generation_context_digest": context_digest,
             "job": manifest,
             "attempts": attempts,
+            "current_leaf_stage_result": current_leaf_stage_result,
             "paths": {
                 "job_root": str(root),
                 "job_manifest": str(root / "job_manifest.json"),
@@ -386,7 +389,9 @@ class AgentJobController:
             while manifest["state"] == "running":
                 budget_result = self._budget_gate(manifest)
                 if budget_result is not None:
+                    self._write_controller_stage_result(manifest, budget_result)
                     manifest = self._apply_stage_result(manifest, budget_result)
+                    self._stage_event(manifest, "stage_blocked", "budget", result=budget_result)
                     break
                 stage = str(manifest["current_stage"])
                 started = self.hooks.monotonic()
@@ -424,7 +429,7 @@ class AgentJobController:
                         )
                     self._write_controller_stage_result(manifest, result)
                     manifest = self._apply_stage_result(manifest, result)
-                    self._stage_event(manifest, "stage_blocked", stage, result=result)
+                    self._stage_event(manifest, "stage_blocked", str(result["stage"]), result=result)
                     break
                 except BaseException as exc:
                     if stage == "compile":
@@ -439,16 +444,31 @@ class AgentJobController:
                     )
                     self._write_controller_stage_result(manifest, result)
                     manifest = self._apply_stage_result(manifest, result)
-                    self._stage_event(manifest, "stage_blocked", stage, result=result)
+                    self._stage_event(manifest, "stage_blocked", str(result["stage"]), result=result)
                     if manifest["state"] == "running":
                         continue
                     break
                 elapsed = max(0.0, self.hooks.monotonic() - started)
                 manifest = self._add_active_elapsed(manifest, elapsed)
-                self._stage_event(manifest, "stage_completed", stage)
-                manifest = self.store.load_manifest(job_id)
-            if manifest["state"] in {"failed", "cancelled", "completed", "awaiting_semantic_review"}:
-                self._emit(job_id, "job_terminal", stage=manifest["current_stage"], state=manifest["state"])
+                structured_failure = self._changed_noncompleted_stage_result(
+                    manifest,
+                    stage_result_snapshot=stage_result_snapshot,
+                )
+                if structured_failure is not None:
+                    self._stage_event(
+                        manifest,
+                        "stage_blocked",
+                        str(structured_failure["stage"]),
+                        result=structured_failure,
+                    )
+                elif manifest["state"] in {"running", "awaiting_semantic_review"}:
+                    self._stage_event(manifest, "stage_completed", stage)
+                else:
+                    leaf = self._current_leaf_stage_result(manifest)
+                    result = leaf["result"] if leaf is not None else None
+                    blocked_stage = str(result["stage"]) if result is not None else stage
+                    self._stage_event(manifest, "stage_blocked", blocked_stage, result=result)
+            self._emit_job_terminal_if_terminal(manifest)
             return self.inspect(job_id)
 
     def resume(
@@ -525,8 +545,6 @@ class AgentJobController:
             if manifest["current_stage"] == "semantic_review" and revised_case_spec is None:
                 attempt_dir = self.store.attempt_dir(job_id, manifest["current_attempt_id"])
                 review_path = attempt_dir / "semantic_review.json"
-                if review_path.exists():
-                    raise JobStoreError("a completed semantic judgment cannot be resampled in the same attempt")
                 bundle_dir = attempt_dir / "evidence_bundle"
                 bundle_manifest_path = bundle_dir / "manifest.json"
                 bundle_intent_digest = (
@@ -568,7 +586,7 @@ class AgentJobController:
             if budget_result is not None:
                 self._write_controller_stage_result(manifest, budget_result)
                 manifest = self._apply_stage_result(manifest, budget_result)
-                self._stage_event(manifest, "stage_blocked", "semantic_review", result=budget_result)
+                self._stage_event(manifest, "stage_blocked", "budget", result=budget_result)
                 return self.inspect(job_id)
             self._stage_event(manifest, "stage_started", "semantic_review")
             attempt_id = str(manifest["current_attempt_id"])
@@ -578,8 +596,6 @@ class AgentJobController:
             if not bundle_path.is_file():
                 raise JobStoreError("formal semantic review requires a completed Evidence Bundle")
             review_path = attempt_dir / "semantic_review.json"
-            if review_path.exists():
-                raise JobStoreError("the current attempt already has a formal semantic judgment")
             try:
                 bundle = self._validated_current_bundle(manifest)
             except EvidenceBundleError as exc:
@@ -598,6 +614,7 @@ class AgentJobController:
                 self._write_controller_stage_result(manifest, result)
                 manifest = self._apply_stage_result(manifest, result)
                 self._stage_event(manifest, "stage_blocked", "semantic_review", result=result)
+                self._emit_job_terminal_if_terminal(manifest)
                 return self.inspect(job_id)
             bundle_digest = stable_digest(bundle)
             if not self._technical_completion_intact(manifest, bundle):
@@ -612,7 +629,7 @@ class AgentJobController:
                 self._checkpoint(manifest, "semantic_review", "failed", stable_digest(bundle), [str(bundle_path)])
                 manifest = self._apply_stage_result(manifest, result)
                 self._stage_event(manifest, "stage_blocked", "semantic_review", result=result)
-                self._emit(job_id, "job_terminal", stage="semantic_review", state=manifest["state"])
+                self._emit_job_terminal_if_terminal(manifest)
                 return self.inspect(job_id)
             request = read_json(self.store.job_dir(job_id) / "request" / "user_request.json")
             has_images = any(
@@ -632,7 +649,17 @@ class AgentJobController:
                 self._checkpoint(manifest, "semantic_review", "blocked", stable_digest(bundle), [str(bundle_path)])
                 manifest = self._apply_stage_result(manifest, result)
                 self._stage_event(manifest, "stage_blocked", "semantic_review", result=result)
-                self._emit(job_id, "job_terminal", stage="semantic_review", state=manifest["state"])
+                self._emit_job_terminal_if_terminal(manifest)
+                return self.inspect(job_id)
+
+            if review_path.is_file():
+                intent = IntentContract.from_dict(
+                    read_json(self.store.job_dir(job_id) / "request" / "intent_contract.json")
+                ).to_dict()
+                review = self._load_validated_semantic_review(manifest)
+                manifest = self._apply_semantic_outcome(manifest, attempt, intent, review)
+                self._emit_semantic_outcome_event(manifest)
+                self._emit_job_terminal_if_terminal(manifest)
                 return self.inspect(job_id)
 
             expected_input_digest = semantic_reviewer_input_digest(
@@ -682,6 +709,7 @@ class AgentJobController:
 
                 reviewer_started = self.hooks.monotonic()
                 reviewer_elapsed_recorded = False
+                post_review_hard_gate: dict[str, Any] | None = None
                 try:
                     invocation = dict(
                         self.hooks.semantic_review(
@@ -705,6 +733,7 @@ class AgentJobController:
                     elapsed = max(0.0, self.hooks.monotonic() - reviewer_started)
                     manifest = self._add_active_elapsed(manifest, elapsed)
                     reviewer_elapsed_recorded = True
+                    post_review_hard_gate = self._hard_deadline_gate(manifest)
                     raw_review = dict(invocation["review"])
                     if set(raw_review) != {
                         "overall_status",
@@ -783,9 +812,16 @@ class AgentJobController:
                         stable_digest(review),
                         [str(review_path), str(receipt_path)],
                     )
+                    if post_review_hard_gate is not None:
+                        self._write_controller_stage_result(manifest, post_review_hard_gate)
+                        manifest = self._apply_stage_result(manifest, post_review_hard_gate)
+                        self._stage_event(manifest, "stage_completed", "semantic_review")
+                        self._stage_event(manifest, "stage_blocked", "budget", result=post_review_hard_gate)
+                        self._emit_job_terminal_if_terminal(manifest)
+                        return self.inspect(job_id)
                     manifest = self._apply_semantic_outcome(manifest, attempt, intent, review)
-                    self._stage_event(manifest, "stage_completed", "semantic_review")
-                    self._emit(job_id, "job_terminal", stage=manifest["current_stage"], state=manifest["state"])
+                    self._emit_semantic_outcome_event(manifest)
+                    self._emit_job_terminal_if_terminal(manifest)
                     return self.inspect(job_id)
                 except SemanticReviewerError as exc:
                     try:
@@ -879,6 +915,13 @@ class AgentJobController:
                     error_code=result["failure_code"],
                 )
                 reservations[-1] = reservation
+                post_review_hard_gate = post_review_hard_gate or self._hard_deadline_gate(manifest)
+                if post_review_hard_gate is not None:
+                    self._write_controller_stage_result(manifest, post_review_hard_gate)
+                    manifest = self._apply_stage_result(manifest, post_review_hard_gate)
+                    self._stage_event(manifest, "stage_blocked", "budget", result=post_review_hard_gate)
+                    self._emit_job_terminal_if_terminal(manifest)
+                    return self.inspect(job_id)
                 if result["failure_class"] == "interrupted":
                     self._checkpoint(manifest, "semantic_review", "interrupted", stable_digest(bundle), [str(bundle_path), str(receipt_path)])
                     manifest = self._apply_stage_result(manifest, result)
@@ -911,16 +954,17 @@ class AgentJobController:
                 if retry_budget_result is not None:
                     self._write_controller_stage_result(manifest, retry_budget_result)
                     manifest = self._apply_stage_result(manifest, retry_budget_result)
-                    self._stage_event(manifest, "stage_blocked", "semantic_review", result=retry_budget_result)
+                    self._stage_event(manifest, "stage_blocked", "budget", result=retry_budget_result)
                     return self.inspect(job_id)
                 self._checkpoint(manifest, "semantic_review", "failed", stable_digest(bundle), [str(bundle_path)])
                 exhausted = dict(result)
                 exhausted["retryable"] = False
                 exhausted["allowed_next_actions"] = ["inspect_artifacts"]
                 exhausted = StageResult.from_dict(exhausted).to_dict()
+                write_stage_result(attempt_dir, exhausted)
                 manifest = self._apply_stage_result(manifest, exhausted)
                 self._stage_event(manifest, "stage_blocked", "semantic_review", result=exhausted)
-                self._emit(job_id, "job_terminal", stage="semantic_review", state=manifest["state"])
+                self._emit_job_terminal_if_terminal(manifest)
                 return self.inspect(job_id)
             result = failure_stage_result(
                 stage="semantic_review",
@@ -933,7 +977,7 @@ class AgentJobController:
             self._write_controller_stage_result(manifest, result)
             manifest = self._apply_stage_result(manifest, result)
             self._stage_event(manifest, "stage_blocked", "semantic_review", result=result)
-            self._emit(job_id, "job_terminal", stage="semantic_review", state=manifest["state"])
+            self._emit_job_terminal_if_terminal(manifest)
             return self.inspect(job_id)
 
     def apply_revision_proposal(
@@ -988,6 +1032,7 @@ class AgentJobController:
                     job_id=manifest["job_id"],
                     attempt_id=attempt["attempt_id"],
                 )
+                self._write_controller_stage_result(manifest, result)
                 return self._apply_stage_result(manifest, result)
             attempt.update({"status": "completed", "updated_at": utc_now()})
             self.store.write_attempt(attempt)
@@ -2332,18 +2377,11 @@ class AgentJobController:
         )
 
     def _budget_gate(self, manifest: Mapping[str, Any]) -> dict[str, Any] | None:
+        hard_gate = self._hard_deadline_gate(manifest)
+        if hard_gate is not None:
+            return hard_gate
         elapsed = float(manifest["usage"]["active_elapsed_seconds"])
-        hard = int(manifest["budget"]["hard_deadline_seconds"])
         soft = int(manifest["budget"]["soft_deadline_seconds"])
-        if elapsed >= hard:
-            return failure_stage_result(
-                stage="budget",
-                failure_code="budget_exhausted",
-                message="active runtime hard deadline is exhausted; approve an extension to continue",
-                source_status="blocked",
-                job_id=manifest["job_id"],
-                attempt_id=manifest.get("current_attempt_id"),
-            )
         if elapsed >= soft and manifest["current_stage"] in {"compile", "smoke", "candidate", "semantic_review"}:
             return failure_stage_result(
                 stage="budget",
@@ -2354,6 +2392,7 @@ class AgentJobController:
                 attempt_id=manifest.get("current_attempt_id"),
             )
         if manifest["current_stage"] == "candidate":
+            hard = int(manifest["budget"]["hard_deadline_seconds"])
             required = int(manifest["budget"]["candidate_reserve_seconds"]) + int(manifest["budget"]["post_candidate_reserve_seconds"])
             if hard - elapsed < required:
                 return failure_stage_result(
@@ -2365,6 +2404,19 @@ class AgentJobController:
                     attempt_id=manifest.get("current_attempt_id"),
                 )
         return None
+
+    @staticmethod
+    def _hard_deadline_gate(manifest: Mapping[str, Any]) -> dict[str, Any] | None:
+        if float(manifest["usage"]["active_elapsed_seconds"]) < int(manifest["budget"]["hard_deadline_seconds"]):
+            return None
+        return failure_stage_result(
+            stage="budget",
+            failure_code="budget_exhausted",
+            message="active runtime hard deadline is exhausted; approve an extension to continue",
+            source_status="blocked",
+            job_id=manifest["job_id"],
+            attempt_id=manifest.get("current_attempt_id"),
+        )
 
     def _apply_stage_result(self, manifest: dict[str, Any], result: Mapping[str, Any]) -> dict[str, Any]:
         value = StageResult.from_dict(result).to_dict()
@@ -2430,11 +2482,36 @@ class AgentJobController:
         persisted = getattr(exc, "stage_result", None)
         if isinstance(persisted, Mapping) and persisted.get("status") != "completed":
             return self._with_identity(persisted, manifest["job_id"], manifest.get("current_attempt_id"))
-        stage_dir = self._stage_artifact_root(manifest)
         hint = str(getattr(exc, "_harness_stage", "") or "")
+        selected = self._changed_noncompleted_stage_result(
+            manifest,
+            stage_result_snapshot=stage_result_snapshot,
+            hint=hint,
+        )
+        if selected is not None:
+            return selected
+        return failure_stage_result(
+            stage=stage,
+            failure_code=str(getattr(exc, "code", f"{stage}_unhandled_exception")),
+            message=str(exc) or type(exc).__name__,
+            retryable=getattr(exc, "retryable", None),
+            source_status="interrupted" if isinstance(exc, (KeyboardInterrupt, SystemExit)) else None,
+            job_id=manifest["job_id"],
+            attempt_id=manifest.get("current_attempt_id"),
+            checkpoint_ref=getattr(exc, "checkpoint_ref", None),
+            request_identities=list(getattr(exc, "request_identities", []) or []),
+        )
+
+    def _changed_noncompleted_stage_result(
+        self,
+        manifest: Mapping[str, Any],
+        *,
+        stage_result_snapshot: Mapping[str, str] | None = None,
+        hint: str = "",
+    ) -> dict[str, Any] | None:
         candidates: list[tuple[Path, dict[str, Any]]] = []
         before = dict(stage_result_snapshot or {})
-        for path in sorted(stage_dir.rglob("stage_results/*.json")):
+        for path in sorted(self._stage_artifact_root(manifest).rglob("stage_results/*.json")):
             try:
                 raw = read_json(path)
                 parsed = StageResult.from_dict(raw).to_dict()
@@ -2467,17 +2544,7 @@ class AgentJobController:
                 ),
             )
             return self._with_identity(selected, manifest["job_id"], manifest.get("current_attempt_id"))
-        return failure_stage_result(
-            stage=stage,
-            failure_code=str(getattr(exc, "code", f"{stage}_unhandled_exception")),
-            message=str(exc) or type(exc).__name__,
-            retryable=getattr(exc, "retryable", None),
-            source_status="interrupted" if isinstance(exc, (KeyboardInterrupt, SystemExit)) else None,
-            job_id=manifest["job_id"],
-            attempt_id=manifest.get("current_attempt_id"),
-            checkpoint_ref=getattr(exc, "checkpoint_ref", None),
-            request_identities=list(getattr(exc, "request_identities", []) or []),
-        )
+        return None
 
     def _stage_result_snapshot(self, manifest: Mapping[str, Any]) -> dict[str, str]:
         snapshot: dict[str, str] = {}
@@ -2487,6 +2554,82 @@ class AgentJobController:
             except OSError:
                 continue
         return snapshot
+
+    def _current_leaf_stage_result(self, manifest: Mapping[str, Any]) -> dict[str, Any] | None:
+        blocker = manifest.get("blocker") if isinstance(manifest.get("blocker"), Mapping) else None
+        if blocker is not None:
+            target_stage = str(blocker["stage"])
+        elif manifest["state"] == "awaiting_semantic_review":
+            attempt_id = manifest.get("current_attempt_id")
+            semantic_result_path = (
+                self.store.attempt_dir(str(manifest["job_id"]), str(attempt_id))
+                / "stage_results"
+                / "semantic_review.json"
+                if attempt_id is not None
+                else None
+            )
+            target_stage = (
+                "semantic_review"
+                if semantic_result_path is not None and semantic_result_path.is_file()
+                else "evidence_bundle"
+            )
+        elif manifest["state"] == "completed":
+            target_stage = "semantic_review"
+        else:
+            return None
+
+        job_id = str(manifest["job_id"])
+        attempt_id = manifest.get("current_attempt_id")
+        job_root = self.store.job_dir(job_id)
+        artifact_root = self._stage_artifact_root(manifest)
+        candidates = [artifact_root / "stage_results" / f"{target_stage}.json"]
+        if attempt_id is not None:
+            attempt_dir = self.store.attempt_dir(job_id, str(attempt_id))
+            candidates.append(attempt_dir / "compilation" / "stage_results" / f"{target_stage}.json")
+            for reference_name in ("smoke_gate.json", "candidate_run.json"):
+                reference_path = attempt_dir / reference_name
+                if not reference_path.is_file():
+                    continue
+                reference = read_json(reference_path)
+                run_path = reference.get("run_dir")
+                if isinstance(run_path, str) and run_path:
+                    candidates.append(Path(run_path) / "stage_results" / f"{target_stage}.json")
+            profile = str(manifest["current_stage"])
+            if profile in {"smoke", "candidate", "quality_gate", "semantic_review"}:
+                run_profile = "candidate" if profile in {"quality_gate", "semantic_review"} else profile
+                candidates.extend(
+                    sorted((attempt_dir / "runs" / run_profile).glob(f"*/stage_results/{target_stage}.json"))
+                )
+        else:
+            candidates.append(job_root / "stage_results" / f"{target_stage}.json")
+
+        seen: set[Path] = set()
+        matches: list[tuple[Path, dict[str, Any]]] = []
+        for path in candidates:
+            normalized = path.resolve(strict=False)
+            if normalized in seen or not path.is_file():
+                continue
+            seen.add(normalized)
+            try:
+                normalized.relative_to(job_root.resolve())
+                result = StageResult.from_dict(read_json(path)).to_dict()
+            except (OSError, ValueError, TypeError):
+                continue
+            if result["stage"] != target_stage or result["job_id"] != job_id:
+                continue
+            if attempt_id is not None and result["attempt_id"] != attempt_id:
+                continue
+            if attempt_id is None and result["attempt_id"] is not None:
+                continue
+            if blocker is not None and target_stage != "semantic_review":
+                if result["status"] == "completed" or result["failure_code"] != blocker["code"]:
+                    continue
+            matches.append((path, result))
+
+        if not matches:
+            return None
+        path, result = matches[0]
+        return {"path": str(path), "result": result}
 
     @staticmethod
     def _attach_exception_stage_result(exc: BaseException, root: Path, stage: str) -> None:
@@ -2542,6 +2685,23 @@ class AgentJobController:
         if result is not None:
             payload["result"] = dict(result)
         self._emit(manifest["job_id"], event, **payload)
+
+    def _emit_semantic_outcome_event(self, manifest: Mapping[str, Any]) -> None:
+        leaf = self._current_leaf_stage_result(manifest)
+        result = leaf["result"] if leaf is not None else None
+        if result is not None and result["stage"] == "semantic_review" and result["status"] != "completed":
+            self._stage_event(manifest, "stage_blocked", "semantic_review", result=result)
+        else:
+            self._stage_event(manifest, "stage_completed", "semantic_review")
+
+    def _emit_job_terminal_if_terminal(self, manifest: Mapping[str, Any]) -> None:
+        if manifest["state"] in TERMINAL_JOB_STATES:
+            self._emit(
+                str(manifest["job_id"]),
+                "job_terminal",
+                stage=manifest["current_stage"],
+                state=manifest["state"],
+            )
 
     def _emit(self, job_id: str, event_type: str, **payload: Any) -> None:
         event = {

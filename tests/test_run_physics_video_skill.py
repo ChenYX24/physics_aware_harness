@@ -38,6 +38,7 @@ class RunPhysicsVideoSkillTests(unittest.TestCase):
             "submit_native_generation",
             "agent_reported",
             "allowed_next_actions",
+            "current_leaf_stage_result",
             "paused_interrupted",
             "awaiting_semantic_review",
             "apply-revision",

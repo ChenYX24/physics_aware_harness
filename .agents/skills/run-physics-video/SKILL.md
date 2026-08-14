@@ -47,7 +47,7 @@ Let the Controller run L0 readiness and prepare the immutable native-generation 
 python3 scripts/harness_agent_job.py --jsonl advance-until-blocked <job_id>
 ```
 
-Use JSONL for long operations. After the command stops or is interrupted, run `inspect` again. Read the manifest's `state`, `current_stage`, `blocker`, and `allowed_next_actions`, then inspect the referenced leaf `harness_stage_result_v1` artifact when a failure requires diagnosis.
+Use JSONL for long operations. After the command stops or is interrupted, run `inspect` again. Read the manifest's `state`, `current_stage`, `blocker`, and `allowed_next_actions`, then use `current_leaf_stage_result`, which includes the authoritative leaf `harness_stage_result_v1` path and Controller-validated content. Do not search run directories or select a Stage Result by recency.
 
 When generation stops with `native_generation_submission_required`, read only the `native_generation_context` path and copy the `native_generation_context_digest` returned by `inspect`. The context contains the immutable request, submission and Intent draft contracts, current CaseSpec contract, capability vocabulary, backend artifact I/O, and current examples. Generate one submission matching that context; do not invent a second schema or call the legacy planning LLM.
 

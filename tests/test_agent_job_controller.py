@@ -688,6 +688,41 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertNotEqual(fake.compile_calls[0], fake.compile_calls[-1])
         candidate = read_json(attempt_root / "candidate_run.json")
         self.assertTrue((Path(candidate["run_dir"]) / "quality_report.json").is_file())
+        leaf = inspection["current_leaf_stage_result"]
+        self.assertEqual(leaf["result"]["stage"], "evidence_bundle")
+        self.assertEqual(leaf["result"]["status"], "completed")
+        self.assertEqual(Path(leaf["path"]), attempt_root / "stage_results" / "evidence_bundle.json")
+        events = [read_json(path) for path in sorted((Path(inspection["paths"]["job_root"]) / "events").glob("*.json"))]
+        self.assertNotIn("job_terminal", [row["event"] for row in events])
+
+    def test_inspect_returns_the_current_nested_candidate_leaf_stage_result(self) -> None:
+        fake = SuccessfulHarness()
+        verify_calls = 0
+
+        def fail_candidate(run_dir: Path):
+            nonlocal verify_calls
+            verify_calls += 1
+            fake.fail_verifier = verify_calls == 2
+            return fake.verify(run_dir)
+
+        hooks = fake.hooks()
+        hooks.verify = fail_candidate
+        controller = AgentJobController(self.workspace, hooks=hooks)
+        controller.create(
+            self.request,
+            job_id="job_candidate_leaf_result",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+
+        blocked = controller.advance_until_blocked("job_candidate_leaf_result")
+
+        self.assertEqual(blocked["job"]["state"], "needs_user_decision")
+        self.assertEqual(blocked["job"]["blocker"]["stage"], "verifier")
+        leaf = blocked["current_leaf_stage_result"]
+        self.assertEqual(leaf["result"]["failure_code"], "declared_assertion_failed")
+        self.assertEqual(leaf["result"]["attempt_id"], "attempt_001")
+        self.assertIn("/runs/candidate/", leaf["path"])
 
     def test_m4_explicit_semantic_review_completes_the_job(self) -> None:
         controller, fake = self.controller()
@@ -704,6 +739,7 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertEqual(boundary["job"]["state"], "awaiting_semantic_review")
         self.assertEqual(completed["job"]["state"], "completed")
         self.assertEqual(fake.semantic_calls, 1)
+        self.assertEqual(completed["current_leaf_stage_result"]["result"]["stage"], "semantic_review")
         attempt = Path(completed["paths"]["job_root"]) / "attempts" / "attempt_001"
         self.assertTrue((attempt / "semantic_review.json").is_file())
         receipt = read_json(attempt / "reviewer_invocation_001.json")
@@ -716,6 +752,35 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertIn("stage_completed", semantic_events)
         self.assertEqual(events[-1]["event"], "job_terminal")
         self.assertEqual(events[-1]["state"], "completed")
+
+    def test_semantic_pass_publication_failure_is_the_authoritative_leaf(self) -> None:
+        controller, fake = self.controller()
+        controller.create(
+            self.request,
+            job_id="job_m4_publication_leaf",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        boundary = controller.advance_until_blocked("job_m4_publication_leaf")
+        manifest = boundary["job"]
+        manifest["target"]["publication_tier"] = "reference"
+        controller.store.write_manifest(manifest)
+
+        blocked = controller.run_semantic_review("job_m4_publication_leaf")
+
+        self.assertEqual(blocked["job"]["state"], "needs_user_decision")
+        self.assertEqual(blocked["job"]["blocker"]["code"], "publication_tier_not_satisfied")
+        self.assertEqual(fake.semantic_calls, 1)
+        leaf = blocked["current_leaf_stage_result"]
+        self.assertEqual(leaf["result"]["status"], "blocked")
+        self.assertEqual(leaf["result"]["failure_code"], "publication_tier_not_satisfied")
+        attempt = Path(blocked["paths"]["job_root"]) / "attempts" / "attempt_001"
+        self.assertEqual(Path(leaf["path"]), attempt / "stage_results" / "semantic_review.json")
+        events = [read_json(path) for path in sorted((Path(blocked["paths"]["job_root"]) / "events").glob("*.json"))]
+        semantic_events = [row for row in events if row.get("stage") == "semantic_review"]
+        self.assertEqual(semantic_events[-1]["event"], "stage_blocked")
+        self.assertEqual(semantic_events[-1]["result"]["failure_code"], "publication_tier_not_satisfied")
+        self.assertNotIn("job_terminal", [row["event"] for row in events])
 
     def test_semantic_fail_allows_intent_bounded_automatic_revision(self) -> None:
         fake = SuccessfulHarness(semantic_status="fail")
@@ -921,6 +986,32 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertEqual(failed["job"]["state"], "failed")
         self.assertEqual(fake.semantic_calls, 0)
         self.assertFalse((attempt_dir / "semantic_review.json").exists())
+
+    def test_missing_evidence_artifact_emits_failed_job_terminal(self) -> None:
+        controller, fake = self.controller()
+        controller.create(
+            self.request,
+            job_id="job_missing_evidence_artifact_terminal",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        boundary = controller.advance_until_blocked("job_missing_evidence_artifact_terminal")
+        root = Path(boundary["paths"]["job_root"])
+        attempt_dir = root / "attempts" / "attempt_001"
+        (attempt_dir / "evidence_bundle" / "evidence_summary.json").unlink()
+
+        failed = controller.run_semantic_review("job_missing_evidence_artifact_terminal")
+
+        self.assertEqual(failed["job"]["state"], "failed")
+        self.assertEqual(failed["job"]["blocker"]["code"], "evidence_bundle_validation_failed")
+        self.assertEqual(fake.semantic_calls, 0)
+        leaf = failed["current_leaf_stage_result"]["result"]
+        self.assertEqual(leaf["status"], "failed")
+        self.assertEqual(leaf["failure_code"], "evidence_bundle_validation_failed")
+        events = [read_json(path) for path in sorted((root / "events").glob("*.json"))]
+        self.assertEqual([row["event"] for row in events[-2:]], ["stage_blocked", "job_terminal"])
+        self.assertEqual(events[-1]["state"], "failed")
+        self.assertEqual(events[-1]["stage"], "semantic_review")
 
     def test_review_time_manifest_or_artifact_replacement_leaves_no_formal_review(self) -> None:
         for index, target in enumerate(("manifest", "artifact"), start=1):
@@ -1357,6 +1448,50 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertEqual(blocked["job"]["state"], "needs_user_decision")
         self.assertEqual(blocked["job"]["blocker"]["code"], "soft_deadline_reached")
         self.assertEqual(fake2.semantic_calls, 0)
+        self.assertEqual(blocked["current_leaf_stage_result"]["result"]["failure_code"], "soft_deadline_reached")
+        deadline_events = [
+            read_json(path)
+            for path in sorted((Path(blocked["paths"]["job_root"]) / "events").glob("*.json"))
+        ]
+        self.assertEqual(deadline_events[-1]["event"], "stage_blocked")
+        self.assertEqual(deadline_events[-1]["stage"], "budget")
+
+    def test_semantic_review_return_crossing_hard_deadline_blocks_without_resampling(self) -> None:
+        controller, fake = self.controller()
+        controller.create(
+            self.request,
+            job_id="job_m4_review_post_call_deadline",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        boundary = controller.advance_until_blocked("job_m4_review_post_call_deadline")
+        manifest = boundary["job"]
+        manifest["usage"]["active_elapsed_seconds"] = 1619.0
+        controller.store.write_manifest(manifest)
+        clock = iter((100.0, 282.0))
+        controller.hooks.monotonic = lambda: next(clock)
+
+        blocked = controller.run_semantic_review("job_m4_review_post_call_deadline")
+
+        self.assertEqual(blocked["job"]["state"], "needs_user_decision")
+        self.assertEqual(blocked["job"]["blocker"]["code"], "budget_exhausted")
+        self.assertEqual(blocked["job"]["usage"]["active_elapsed_seconds"], 1801.0)
+        self.assertEqual(fake.semantic_calls, 1)
+        attempt = Path(blocked["paths"]["job_root"]) / "attempts" / "attempt_001"
+        self.assertTrue((attempt / "semantic_review.json").is_file())
+        self.assertEqual(blocked["current_leaf_stage_result"]["result"]["stage"], "budget")
+        events = [read_json(path) for path in sorted((Path(blocked["paths"]["job_root"]) / "events").glob("*.json"))]
+        self.assertNotIn("job_terminal", [row["event"] for row in events])
+
+        resumed = controller.resume(
+            "job_m4_review_post_call_deadline",
+            budget_extension_seconds=300,
+        )
+        self.assertEqual(resumed["job"]["state"], "awaiting_semantic_review")
+        self.assertEqual(resumed["current_leaf_stage_result"]["result"]["stage"], "semantic_review")
+        completed = controller.run_semantic_review("job_m4_review_post_call_deadline")
+        self.assertEqual(completed["job"]["state"], "completed")
+        self.assertEqual(fake.semantic_calls, 1)
 
     def test_zero_reviewer_invocation_budget_never_calls_reviewer(self) -> None:
         controller, fake = self.controller()
@@ -1388,6 +1523,11 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertEqual(fake.generation_calls, 0)
         self.assertEqual(fake.compile_calls, [])
         self.assertEqual(fake.execute_calls, [])
+        leaf = inspection["current_leaf_stage_result"]
+        self.assertEqual(leaf["result"]["failure_code"], "catalog_missing")
+        self.assertEqual(Path(leaf["path"]), Path(inspection["paths"]["job_root"]) / "stage_results" / "intake_readiness.json")
+        events = [read_json(path) for path in sorted((Path(inspection["paths"]["job_root"]) / "events").glob("*.json"))]
+        self.assertEqual([row["event"] for row in events], ["job_created", "stage_started", "stage_blocked"])
 
     def test_intent_ambiguity_blocks_before_task_readiness_and_compile(self) -> None:
         fake = SuccessfulHarness()
@@ -1698,6 +1838,14 @@ class AgentJobControllerTests(unittest.TestCase):
 
         self.assertEqual(inspection["job"]["state"], "needs_user_decision")
         self.assertEqual(inspection["job"]["blocker"]["code"], "budget_exhausted")
+        leaf = inspection["current_leaf_stage_result"]
+        self.assertEqual(leaf["result"]["status"], "blocked")
+        self.assertEqual(leaf["result"]["failure_code"], "budget_exhausted")
+        self.assertEqual(Path(leaf["path"]), Path(inspection["paths"]["job_root"]) / "stage_results" / "budget.json")
+        events = [read_json(path) for path in sorted((Path(inspection["paths"]["job_root"]) / "events").glob("*.json"))]
+        self.assertEqual([row["event"] for row in events], ["job_created", "stage_blocked"])
+        self.assertEqual(events[-1]["stage"], "budget")
+        self.assertEqual(events[-1]["result"]["failure_code"], "budget_exhausted")
 
     def test_ue_launch_budget_stops_before_backend_invocation(self) -> None:
         controller, fake = self.controller(SuccessfulHarness(selected_backend="ue"))
