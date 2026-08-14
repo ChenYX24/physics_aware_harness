@@ -4,10 +4,11 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from harness.agent.job_controller import AgentJobController
 from harness.core.harness_config import HarnessConfigError, load_harness_config
-from harness.planning.case_generation import build_case_request
+from harness.planning.case_generation import OpenAICompatibleJSONClient, build_case_request
 
 
 def config_document(**overrides: object) -> dict[str, object]:
@@ -129,6 +130,24 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertEqual(config.planning_model, "compat-model")
         self.assertEqual(config.planning_secret_env_name(env), "OPENAI_API_KEY")
         self.assertEqual(config.planning_api_key(env), "compat-secret")
+
+    def test_effective_config_does_not_fall_back_to_an_unselected_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            path = self.write_config(root, config_document())
+            config = load_harness_config(config_path=path, repo_root=root, env={})
+            with patch.dict(
+                "os.environ",
+                {
+                    "SIM_HARNESS_LLM_API_KEY": "legacy-secret",
+                    "OPENAI_API_KEY": "other-legacy-secret",
+                },
+                clear=True,
+            ):
+                client = OpenAICompatibleJSONClient(effective_config=config)
+
+        self.assertIsNone(client.api_key)
+        self.assertEqual(client.model, "planner-model")
 
     def test_endpoint_rejects_secret_carrying_url_components_without_echoing_values(self) -> None:
         secret = "do-not-echo-this-token"

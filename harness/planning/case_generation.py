@@ -157,15 +157,19 @@ class OpenAICompatibleJSONClient:
         effective_config: EffectiveHarnessConfig | None = None,
     ) -> None:
         config = effective_config
-        self.base_url = str(
-            base_url
-            or (config.planning_base_url if config is not None else None)
-            or os.environ.get("SIM_HARNESS_LLM_BASE_URL")
-            or os.environ.get("OPENAI_BASE_URL")
-            or "https://api.openai.com/v1"
-        ).rstrip("/")
-        self.api_key = api_key or (config.planning_api_key() if config is not None else None) or os.environ.get("SIM_HARNESS_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
-        self.model = str(model or (config.planning_model if config is not None else None) or os.environ.get("SIM_HARNESS_LLM_MODEL") or os.environ.get("OPENAI_MODEL") or "").strip()
+        if config is not None:
+            self.base_url = str(base_url if base_url is not None else config.planning_base_url).rstrip("/")
+            self.api_key = api_key if api_key is not None else config.planning_api_key()
+            self.model = str(model if model is not None else config.planning_model).strip()
+        else:
+            self.base_url = str(
+                base_url
+                or os.environ.get("SIM_HARNESS_LLM_BASE_URL")
+                or os.environ.get("OPENAI_BASE_URL")
+                or "https://api.openai.com/v1"
+            ).rstrip("/")
+            self.api_key = api_key or os.environ.get("SIM_HARNESS_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
+            self.model = str(model or os.environ.get("SIM_HARNESS_LLM_MODEL") or os.environ.get("OPENAI_MODEL") or "").strip()
         self.effective_config_digest = config.digest if config is not None else None
         self.planning_target_digest = config.planning_target_digest if config is not None else None
         self.timeout_seconds = int(timeout_seconds)
