@@ -2662,6 +2662,142 @@ class AgentJobControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "allowed_adjustments"):
             controller.resume("job_frozen_policy", revised_case_spec=unlisted, revision_reason="change mass")
 
+    def test_object_leaf_adjustment_uses_stable_object_id_path(self) -> None:
+        before = case_spec_v2_fixture()
+        after = copy.deepcopy(before)
+        after["objects"][0]["geometry"]["shape_hint"] = "box"
+
+        changes = AgentJobController._json_diff(before, after)
+
+        self.assertEqual(
+            changes,
+            [
+                {
+                    "path": "$.objects.cue_ball.geometry.shape_hint",
+                    "operation": "replace",
+                    "before": "sphere",
+                    "after": "box",
+                }
+            ],
+        )
+        AgentJobController._validate_revision_changes(
+            changes,
+            {
+                "paths": ["$.objects.cue_ball.geometry.shape_hint"],
+                "ranges": {
+                    "$.objects.cue_ball.geometry.shape_hint": {
+                        "kind": "enum",
+                        "values": ["box"],
+                    }
+                },
+            },
+            repair_layer="case_spec_source",
+        )
+
+    def test_historical_provider_shape_failure_recovers_by_exact_allowed_adjustments(self) -> None:
+        controller, _ = self.controller()
+        invalid = case_spec_v2_fixture()
+        subject = invalid["objects"][0]
+        subject["geometry"]["shape_hint"] = "upright rectangular box with longest edge vertical"
+        subject["geometry"]["approx_size_m"] = [0.03, 0.12, 0.3]
+        subject["asset"] = {
+            "description": "a local procedural domino",
+            "resource_kind": "mesh_3d",
+            "must": {
+                "geometry_type": "box",
+                "source_kind": "procedural_generation",
+            },
+            "acquisition": {
+                "route": "procedural_generation",
+                "requirement": "required",
+                "origin": "user_explicit",
+                "provider_hint": "box_mesh_v1",
+                "reference_inputs": [],
+                "fallback_order": [],
+            },
+        }
+        controller.create(
+            self.request,
+            job_id="job_provider_contract_repair",
+            publication_tier="local_preview",
+            seed_case_spec=invalid,
+        )
+        blocked = controller.advance_until_blocked("job_provider_contract_repair")
+        self.assertEqual(blocked["job"]["blocker"]["code"], "invalid_generation_spec")
+        attempt_dir = Path(blocked["paths"]["job_root"]) / "attempts" / "attempt_001"
+        batch = {
+            "schema_version": "harness_asset_provider_batch_v1",
+            "case_id": "v2_ball_contact",
+            "requests": [
+                {
+                    "object_id": "cue_ball",
+                    "request_digest": "a" * 64,
+                    "generation_spec": {
+                        "recipe_id": "box_mesh_v1",
+                        "recipe_version": "v1",
+                        "shape": "upright rectangular box with longest edge vertical",
+                        "size_m": [0.03, 0.12, 0.3],
+                    },
+                }
+            ],
+            "results": [
+                {
+                    "object_id": "cue_ball",
+                    "status": "failed",
+                    "failure": {
+                        "code": "unsupported_generation_recipe",
+                        "message": "shape is not canonical",
+                        "retriable": False,
+                    },
+                }
+            ],
+        }
+        write_json(attempt_dir / "compilation" / "asset_provider_batch.json", batch)
+        provider_failure = failure_stage_result(
+            stage="provider",
+            failure_code="unsupported_generation_recipe",
+            message="shape is not canonical",
+            job_id="job_provider_contract_repair",
+            attempt_id="attempt_001",
+        )
+        write_stage_result(attempt_dir, provider_failure)
+        manifest = controller.store.load_manifest("job_provider_contract_repair")
+        controller._update_manifest(
+            manifest,
+            state="failed",
+            current_stage="compile",
+            blocker={
+                "code": "unsupported_generation_recipe",
+                "message": "shape is not canonical",
+                "stage": "provider",
+            },
+            allowed_next_actions=["inspect_artifacts"],
+        )
+
+        inspection = controller.inspect("job_provider_contract_repair")
+        repair = inspection["case_spec_contract_repair"]
+        self.assertTrue(repair["available"])
+        self.assertEqual(
+            repair["allowed_adjustments"]["paths"],
+            ["$.objects.cue_ball.geometry.shape_hint"],
+        )
+        revised = copy.deepcopy(invalid)
+        revised["objects"][0]["geometry"]["shape_hint"] = "box"
+
+        resumed = controller.resume(
+            "job_provider_contract_repair",
+            revised_case_spec=revised,
+            revision_reason="canonicalize the built-in primitive shape",
+        )
+
+        self.assertEqual(resumed["job"]["state"], "awaiting_semantic_review")
+        self.assertEqual(resumed["job"]["usage"]["case_spec_revisions"], 2)
+        proposal = read_json(attempt_dir / "revision_proposal_001.json")
+        self.assertEqual(
+            [row["path"] for row in proposal["changes"]],
+            ["$.objects.cue_ball.geometry.shape_hint"],
+        )
+
     def test_intent_projection_opens_only_constrained_non_hard_leaf_paths(self) -> None:
         fake = SuccessfulHarness(fail_verifier=True)
         controller, _ = self.controller(fake)

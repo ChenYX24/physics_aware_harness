@@ -73,14 +73,17 @@ from harness.agent.semantic_reviewer import (
 from harness.assets.asset_registry import AssetRegistry
 from harness.assets.providers.orchestrator import AssetProviderOrchestrator
 from harness.assets.providers.input_manifest import PROVIDER_INPUT_MANIFEST_SCHEMA, build_provider_input_manifest
+from harness.assets.providers.local_procedural_mesh import RECIPE_BY_SHAPE
 from harness.assets.providers.remote import MeshyModelGenerationAdapter, PolyHavenExternalSiteAdapter
 from harness.core.artifact_schema import read_json, write_json
 from harness.core.harness_config import EffectiveHarnessConfig, load_harness_config
 from harness.core.case_spec_v2 import (
     CaseSpecV2,
+    CaseSpecV2ValidationError,
     asset_requests,
     case_spec_v2_from_dict,
     compile_case_spec_v2_runtime,
+    validate_agent_case_spec_contract,
 )
 from harness.core.stage_result import (
     StageResult,
@@ -119,6 +122,11 @@ _NEXT_CONTROLLER_STAGE = {
     "quality_gate": "evidence_bundle",
     "evidence_bundle": "semantic_review",
 }
+
+_CASE_SPEC_CONTRACT_FAILURE_CODES = frozenset(
+    {"unsupported_generation_recipe", "invalid_generation_spec"}
+)
+_CANONICAL_OBJECT_PATH_SEGMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 @dataclass
 class ControllerHooks:
@@ -267,6 +275,10 @@ class AgentJobController:
         for path in sorted((root / "attempts").glob("attempt_*/attempt_manifest.json")):
             attempts.append(AttemptManifest.from_dict(read_json(path)).to_dict())
         current_leaf_stage_result = self._current_leaf_stage_result(manifest)
+        case_spec_contract_repair = self._case_spec_contract_repair_eligibility(
+            manifest,
+            current_leaf_stage_result=current_leaf_stage_result,
+        )
         return {
             "schema_version": "harness_agent_job_inspection_v1",
             "effective_config_digest": self.config.digest,
@@ -279,6 +291,7 @@ class AgentJobController:
                 manifest,
                 current_leaf_stage_result=current_leaf_stage_result,
             ),
+            "case_spec_contract_repair": case_spec_contract_repair,
             "configuration_recompile": self._configuration_recompile_eligibility(
                 manifest,
                 current_leaf_stage_result=current_leaf_stage_result,
@@ -960,12 +973,22 @@ class AgentJobController:
         resume_to_review_boundary = False
         with self.store.lock(job_id):
             manifest = self.store.load_manifest(job_id)
+            leaf = self._current_leaf_stage_result(manifest)
+            contract_repair = self._case_spec_contract_repair_eligibility(
+                manifest,
+                current_leaf_stage_result=leaf,
+            )
             if manifest["state"] not in {"blocked", "needs_user_decision", "paused_interrupted", "failed"}:
                 raise JobStoreError(f"job cannot be resumed from state {manifest['state']}")
-            if manifest["state"] == "failed" and (manifest.get("blocker") or {}).get("code") != "budget_exhausted":
+            contract_revision = revised_case_spec is not None and contract_repair["available"] is True
+            if (
+                manifest["state"] == "failed"
+                and (manifest.get("blocker") or {}).get("code") != "budget_exhausted"
+                and not contract_revision
+            ):
                 raise JobStoreError("only budget-exhausted failed jobs may be resumed")
             requested_action = "resume_with_revision" if revised_case_spec is not None else "resume"
-            if requested_action not in manifest["allowed_next_actions"]:
+            if requested_action not in manifest["allowed_next_actions"] and not contract_revision:
                 raise JobStoreError(f"current job state does not permit {requested_action}")
             prior_authorizations = copy.deepcopy(manifest["authorizations"])
             prior_budget = copy.deepcopy(manifest["budget"])
@@ -1016,6 +1039,12 @@ class AgentJobController:
                     repair_layer="case_spec_source",
                     trigger_stage=str((manifest.get("blocker") or {}).get("stage") or manifest["current_stage"]),
                     trigger_failure_code=str((manifest.get("blocker") or {}).get("code") or "user_approved_revision"),
+                    additional_allowed_adjustments=(
+                        contract_repair["allowed_adjustments"] if contract_revision else None
+                    ),
+                    evidence_refs=(
+                        [str(contract_repair["provider_batch"])] if contract_revision else None
+                    ),
                 )
             if manifest["current_stage"] == "semantic_review" and revised_case_spec is None:
                 attempt_dir = self.store.attempt_dir(job_id, manifest["current_attempt_id"])
@@ -1978,6 +2007,7 @@ class AgentJobController:
             apply_case_request_identity(raw, request),
             available_input_ids=available,
         )
+        validate_agent_case_spec_contract(initial.data)
         value = copy.deepcopy(initial.data)
         provenance = value.setdefault("provenance", {})
         provenance["case_generation"] = {
@@ -2211,6 +2241,18 @@ class AgentJobController:
     def _advance_compile(self, manifest: dict[str, Any]) -> dict[str, Any]:
         case_spec = self._load_current_case_spec(manifest)
         attempt_dir = self.store.attempt_dir(manifest["job_id"], manifest["current_attempt_id"])
+        try:
+            validate_agent_case_spec_contract(case_spec.data)
+        except CaseSpecV2ValidationError as exc:
+            result = failure_stage_result(
+                stage="compile",
+                failure_code="invalid_generation_spec",
+                message=str(exc) or type(exc).__name__,
+                job_id=manifest["job_id"],
+                attempt_id=manifest["current_attempt_id"],
+            )
+            self._write_controller_stage_result(manifest, result)
+            return self._apply_stage_result(manifest, result)
         request = read_json(self.store.job_dir(manifest["job_id"]) / "request" / "user_request.json")
         provider_manifest = self._effective_provider_input_manifest(manifest["job_id"])
         requested = str((request.get("execution_constraints") or {}).get("requested_backend") or "") or None
@@ -2735,9 +2777,19 @@ class AgentJobController:
             raise ValueError("CaseSpec path is not a canonical object path")
         value: Any = case_spec
         for component in path[2:].split("."):
-            if not isinstance(value, Mapping) or component not in value:
-                raise KeyError(path)
-            value = value[component]
+            if isinstance(value, Mapping) and component in value:
+                value = value[component]
+                continue
+            if isinstance(value, list):
+                matches = [
+                    row
+                    for row in value
+                    if isinstance(row, Mapping) and str(row.get("id") or "") == component
+                ]
+                if len(matches) == 1:
+                    value = matches[0]
+                    continue
+            raise KeyError(path)
         return value
 
     def _create_revision(
@@ -2751,6 +2803,7 @@ class AgentJobController:
         trigger_failure_code: str,
         evidence_refs: list[str] | None = None,
         suggested_paths: list[str] | None = None,
+        additional_allowed_adjustments: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if manifest["usage"]["case_spec_revisions"] >= manifest["budget"]["max_case_spec_revisions"]:
             raise JobStoreError("CaseSpec revision budget is exhausted")
@@ -2759,6 +2812,7 @@ class AgentJobController:
             raw_case_spec,
             available_input_ids=[str(row.get("input_id")) for row in request.get("inputs") or []],
         )
+        validate_agent_case_spec_contract(case_spec.data)
         intent = IntentContract.from_dict(read_json(self.store.job_dir(manifest["job_id"]) / "request" / "intent_contract.json")).to_dict()
         frozen = intent["frozen_digests"]
         if stable_digest((case_spec.data.get("verification_requirements") or {}).get("assertions") or []) != frozen["verification_assertions"]:
@@ -2772,7 +2826,10 @@ class AgentJobController:
         changes = self._json_diff(parent_spec, case_spec.data)
         if not changes:
             raise JobStoreError("revision proposal does not change the source CaseSpec")
-        allowed = self._effective_allowed_adjustments(intent)
+        allowed = self._merge_allowed_adjustments(
+            self._effective_allowed_adjustments(intent),
+            additional_allowed_adjustments,
+        )
         self._validate_revision_changes(
             changes,
             allowed,
@@ -3295,6 +3352,104 @@ class AgentJobController:
             "stage": str(result["stage"]),
             "failure_code": str(result["failure_code"]),
             "message": "correct the external cause, record an explicit reason, then reopen the same checkpoint",
+        }
+
+    def _case_spec_contract_repair_eligibility(
+        self,
+        manifest: Mapping[str, Any],
+        *,
+        current_leaf_stage_result: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        unavailable = {
+            "available": False,
+            "stage": None,
+            "failure_code": None,
+            "allowed_adjustments": {"paths": [], "ranges": {}},
+            "provider_batch": None,
+            "message": "job has no deterministic Provider contract error with an exact CaseSpec repair",
+        }
+        if (
+            manifest.get("state") not in {"failed", "needs_user_decision"}
+            or manifest.get("current_attempt_id") is None
+            or not isinstance(current_leaf_stage_result, Mapping)
+        ):
+            return unavailable
+        result = current_leaf_stage_result.get("result")
+        if (
+            not isinstance(result, Mapping)
+            or result.get("failure_code") not in _CASE_SPEC_CONTRACT_FAILURE_CODES
+            or result.get("stage") not in {"provider", "compile"}
+        ):
+            return unavailable
+        attempt_dir = self.store.attempt_dir(
+            str(manifest["job_id"]),
+            str(manifest["current_attempt_id"]),
+        )
+        batch_path = attempt_dir / "compilation" / "asset_provider_batch.json"
+        case_spec_path = attempt_dir / "case_spec.json"
+        if not batch_path.is_file() or not case_spec_path.is_file():
+            return unavailable
+        try:
+            batch = read_json(batch_path)
+            case_spec = read_json(case_spec_path)
+        except (OSError, TypeError, ValueError):
+            return unavailable
+        failed_ids = {
+            str(row.get("object_id") or "")
+            for row in batch.get("results") or []
+            if isinstance(row, Mapping)
+            and isinstance(row.get("failure"), Mapping)
+            and row["failure"].get("code") in _CASE_SPEC_CONTRACT_FAILURE_CODES
+        }
+        requests = {
+            str(row.get("object_id") or ""): row
+            for row in batch.get("requests") or []
+            if isinstance(row, Mapping) and row.get("object_id")
+        }
+        objects = {
+            str(row.get("id") or ""): row
+            for row in case_spec.get("objects") or []
+            if isinstance(row, Mapping) and row.get("id")
+        }
+        if not failed_ids:
+            return unavailable
+        recipe_shapes = {recipe: shape for shape, recipe in RECIPE_BY_SHAPE.items()}
+        constraints: dict[str, Any] = {}
+        for object_id in sorted(failed_ids):
+            request = requests.get(object_id)
+            source_object = objects.get(object_id)
+            if (
+                request is None
+                or source_object is None
+                or not _CANONICAL_OBJECT_PATH_SEGMENT.fullmatch(object_id)
+            ):
+                return unavailable
+            generation_spec = (
+                request.get("generation_spec")
+                if isinstance(request.get("generation_spec"), Mapping)
+                else {}
+            )
+            expected_shape = recipe_shapes.get(str(generation_spec.get("recipe_id") or ""))
+            geometry = (
+                source_object.get("geometry")
+                if isinstance(source_object.get("geometry"), Mapping)
+                else {}
+            )
+            if expected_shape is None or geometry.get("shape_hint") == expected_shape:
+                return unavailable
+            path = f"$.objects.{object_id}.geometry.shape_hint"
+            constraints[path] = {"kind": "enum", "values": [expected_shape]}
+        paths = sorted(constraints)
+        return {
+            "available": True,
+            "stage": str(result["stage"]),
+            "failure_code": str(result["failure_code"]),
+            "allowed_adjustments": {
+                "paths": paths,
+                "ranges": {path: constraints[path] for path in paths},
+            },
+            "provider_batch": str(batch_path),
+            "message": "submit a revised CaseSpec changing only the listed primitive shape_hint leaves",
         }
 
     def _configuration_recompile_eligibility(
@@ -4181,7 +4336,52 @@ class AgentJobController:
                 else:
                     changes.extend(cls._json_diff(before[key], after[key], child))
             return changes
+        if path == "$.objects" and isinstance(before, list) and isinstance(after, list):
+            before_by_id = cls._canonical_object_list(before)
+            after_by_id = cls._canonical_object_list(after)
+            if before_by_id is not None and after_by_id is not None and set(before_by_id) == set(after_by_id):
+                changes = []
+                for object_id in sorted(before_by_id):
+                    changes.extend(
+                        cls._json_diff(
+                            before_by_id[object_id],
+                            after_by_id[object_id],
+                            f"{path}.{object_id}",
+                        )
+                    )
+                return changes
         return [{"path": path, "operation": "replace", "before": before, "after": after}]
+
+    @staticmethod
+    def _canonical_object_list(value: list[Any]) -> dict[str, Mapping[str, Any]] | None:
+        rows: dict[str, Mapping[str, Any]] = {}
+        for row in value:
+            if not isinstance(row, Mapping):
+                return None
+            object_id = str(row.get("id") or "")
+            if not _CANONICAL_OBJECT_PATH_SEGMENT.fullmatch(object_id) or object_id in rows:
+                return None
+            rows[object_id] = row
+        return rows
+
+    @staticmethod
+    def _merge_allowed_adjustments(
+        base: Mapping[str, Any],
+        additional: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        paths = [str(path) for path in base.get("paths") or []]
+        ranges = copy.deepcopy(dict(base.get("ranges") or {}))
+        if additional is not None:
+            extra_ranges = additional.get("ranges") if isinstance(additional.get("ranges"), Mapping) else {}
+            for path in additional.get("paths") or []:
+                canonical = str(path)
+                constraint = extra_ranges.get(canonical)
+                if canonical in ranges and ranges[canonical] != constraint:
+                    raise JobStoreError(f"conflicting allowed adjustment contract for {canonical}")
+                if canonical not in paths:
+                    paths.append(canonical)
+                ranges[canonical] = copy.deepcopy(constraint)
+        return {"paths": sorted(paths), "ranges": {path: ranges[path] for path in sorted(paths)}}
 
     @staticmethod
     def _validate_revision_changes(

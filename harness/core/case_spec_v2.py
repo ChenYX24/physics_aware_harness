@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from harness.assets.providers.local_procedural_mesh import (
+    GENERIC_PROVIDER_ALIASES,
+    RECIPE_BY_SHAPE,
+)
 from harness.core.capability import CapabilityStore, canonical_capability_id
 from harness.core.physics_contract import allowed_backends_for_scene
 from harness.core.runtime_case import RUNTIME_CASE_SCHEMA_VERSION, RuntimeCase
@@ -270,6 +274,74 @@ def validate_case_spec_v2(
     issues = collect_case_spec_v2_issues(data, available_input_ids=available_input_ids)
     if issues:
         raise CaseSpecV2ValidationError(issues)
+
+
+def validate_agent_case_spec_contract(data: Mapping[str, Any]) -> None:
+    """Validate strict Agent-facing contracts that old persisted V2 files may predate.
+
+    The ordinary V2 reader remains able to inspect historical jobs. New native
+    submissions and revisions use this stricter boundary before any Provider is
+    called.
+    """
+    issues = collect_agent_case_spec_contract_issues(data)
+    if issues:
+        raise CaseSpecV2ValidationError(issues)
+
+
+def collect_agent_case_spec_contract_issues(data: Mapping[str, Any]) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    recipe_shapes = {recipe: shape for shape, recipe in RECIPE_BY_SHAPE.items()}
+    supported_hints = set(recipe_shapes) | set(GENERIC_PROVIDER_ALIASES)
+    for index, obj in enumerate(data.get("objects") or []):
+        if not isinstance(obj, Mapping):
+            continue
+        geometry = obj.get("geometry") if isinstance(obj.get("geometry"), Mapping) else {}
+        shape = str(geometry.get("shape_hint") or "").strip().casefold()
+        for request in asset_requests(obj.get("asset")):
+            acquisition = request.get("acquisition") if isinstance(request.get("acquisition"), Mapping) else {}
+            if acquisition.get("route") != "procedural_generation":
+                continue
+            shape_path = f"/objects/{index}/geometry/shape_hint"
+            if shape not in RECIPE_BY_SHAPE:
+                _issue(
+                    issues,
+                    shape_path,
+                    "procedural_shape_hint_not_canonical",
+                    "built-in procedural generation requires shape_hint box, sphere, or cylinder",
+                )
+            provider_hint = str(acquisition.get("provider_hint") or "").strip().casefold()
+            if provider_hint and provider_hint not in supported_hints:
+                _issue(
+                    issues,
+                    f"/objects/{index}/asset/acquisition/provider_hint",
+                    "unsupported_procedural_provider_hint",
+                    "use box_mesh_v1, sphere_mesh_v1, cylinder_mesh_v1, a registered generic local provider, or null",
+                )
+            expected_shape = recipe_shapes.get(provider_hint)
+            if expected_shape is not None and shape in RECIPE_BY_SHAPE and shape != expected_shape:
+                _issue(
+                    issues,
+                    shape_path,
+                    "procedural_recipe_shape_mismatch",
+                    f"{provider_hint} requires shape_hint={expected_shape}",
+                )
+            must = request.get("must") if isinstance(request.get("must"), Mapping) else {}
+            geometry_type = str(must.get("geometry_type") or "").strip().casefold()
+            if geometry_type and geometry_type not in RECIPE_BY_SHAPE:
+                _issue(
+                    issues,
+                    f"/objects/{index}/asset/must/geometry_type",
+                    "procedural_geometry_type_not_canonical",
+                    "built-in procedural generation requires geometry_type box, sphere, or cylinder",
+                )
+            elif geometry_type and shape in RECIPE_BY_SHAPE and geometry_type != shape:
+                _issue(
+                    issues,
+                    f"/objects/{index}/asset/must/geometry_type",
+                    "procedural_geometry_type_mismatch",
+                    "asset.must.geometry_type must match geometry.shape_hint",
+                )
+    return issues
 
 
 def collect_case_spec_v2_issues(

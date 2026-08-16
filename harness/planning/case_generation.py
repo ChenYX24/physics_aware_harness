@@ -1533,14 +1533,17 @@ FIELD-BY-FIELD INSTRUCTIONS
    unless the user explicitly forbids those routes for the entire scene.
 7. objects: create one entry per logical scene object. Each id must be unique, stable, machine-friendly,
    and independent of an eventual asset ID. role is semantic. geometry uses shape_hint, positive
-   approx_size_m, and optional scale_policy. scale_policy is preserve_authored or
+   approx_size_m, and optional scale_policy. For a built-in local procedural recipe, shape_hint is
+   exactly box, sphere, or cylinder; dimensions and orientation never belong in shape_hint prose.
+   scale_policy is preserve_authored or
    fit_uniform_to_approx_size. Use fit_uniform_to_approx_size for an external/model-generated mesh when
    the requested physical dimensions are part of the scenario; it applies one uniform instance scale,
    preserving mesh proportions and materials while matching the target bounding-box diagonal as closely
    as possible. Use preserve_authored when source-authored real-world scale
    is explicitly required. physics.body_type is exactly dynamic, static, or kinematic. behavior is always an
    object. Use finite three-number arrays for positions, rotations, and velocities. rotation_deg is
-   exactly [pitch, yaw, roll], matching UE Rotator semantics: incline a box ramp along X with pitch
+   exactly [pitch, yaw, roll], matching UE Rotator semantics. Heading around world vertical Z belongs
+   in yaw (the second value); pitch and roll tilt an otherwise upright object. Incline a box ramp along X with pitch
    (the first value), not yaw. In the Harness UE convention, positive pitch makes local +X downhill
    (the -X end is high), while negative pitch makes local -X downhill; place the high-end support and
    released body on the corresponding high end. A cylinder's authored/analytic axis is local Z: leave
@@ -1600,7 +1603,10 @@ FIELD-BY-FIELD INSTRUCTIONS
    routes have no fallback. For exact rule-based primitives, prefer procedural_generation and use only
    the registered provider hints box_mesh_v1, sphere_mesh_v1, or cylinder_mesh_v1; alternatively leave
    provider_hint null so the Provider can infer it from shape_hint. Never invent a recipe ID. Use box for
-   boxes/plates/walls, sphere for balls/spheres, and cylinder for rods/poles/columns/discs. approx_size_m
+   boxes/plates/walls, sphere for balls/spheres, and cylinder for rods/poles/columns/discs. When the user
+   has not required local procedural generation, use these built-ins as an efficient option for matching
+   primitives rather than a mandatory route; non-primitive assets may be better served by an authorized
+   Catalog, external_site, or model_generation source. approx_size_m
    is the full x/y/z bounding-box size in meters; sphere dimensions must be equal and cylinder x/y must
    be equal with z as its length. Irregular or articulated objects are not local primitives. If
    must.source_kind is used with procedural_generation, write the exact token procedural_generation,
@@ -1760,7 +1766,7 @@ def case_spec_generation_contract() -> dict[str, Any]:
                 "color_rgb": "optional [red, green, blue], each component between 0 and 1",
                 "fixed_material_color": "optional boolean; true when an explicit color_rgb must be rendered",
                 "geometry": {
-                    "shape_hint": "string",
+                    "shape_hint": "string; exactly box, sphere, or cylinder for built-in local procedural recipes",
                     "approx_size_m": ["positive x", "positive y", "positive z"],
                     "scale_policy": "preserve_authored or fit_uniform_to_approx_size",
                 },
@@ -1772,7 +1778,7 @@ def case_spec_generation_contract() -> dict[str, Any]:
                 },
                 "initial_state": {
                     "position_m": ["x", "y", "z"],
-                    "rotation_deg": ["x", "y", "z"],
+                    "rotation_deg": ["pitch", "yaw", "roll"],
                     "linear_velocity_m_s": ["x", "y", "z"],
                 },
                 "behavior": "object, never a string",

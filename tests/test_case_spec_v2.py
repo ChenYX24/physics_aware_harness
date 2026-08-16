@@ -7,11 +7,73 @@ from harness.core.case_spec_v2 import (
     CaseSpecV2ValidationError,
     case_spec_v2_from_dict,
     compile_case_spec_v2_runtime,
+    validate_agent_case_spec_contract,
 )
 from tests.case_spec_v2_fixture import case_spec_v2_fixture
 
 
 class CaseSpecV2Tests(unittest.TestCase):
+    def test_agent_contract_requires_canonical_local_procedural_shape(self) -> None:
+        data = case_spec_v2_fixture()
+        subject = data["objects"][0]
+        subject["geometry"]["shape_hint"] = "upright rectangular box with longest edge vertical"
+        subject["geometry"]["approx_size_m"] = [0.03, 0.12, 0.3]
+        subject["asset"] = {
+            "description": "a procedural domino",
+            "resource_kind": "mesh_3d",
+            "must": {
+                "geometry_type": "box",
+                "source_kind": "procedural_generation",
+            },
+            "acquisition": {
+                "route": "procedural_generation",
+                "requirement": "required",
+                "origin": "user_explicit",
+                "provider_hint": "box_mesh_v1",
+                "reference_inputs": [],
+                "fallback_order": [],
+            },
+        }
+
+        historical = case_spec_v2_from_dict(data)
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            validate_agent_case_spec_contract(historical.data)
+
+        self.assertIn(
+            "procedural_shape_hint_not_canonical",
+            {issue.code for issue in context.exception.issues},
+        )
+
+    def test_agent_contract_rejects_recipe_and_geometry_type_conflicts(self) -> None:
+        data = case_spec_v2_fixture()
+        subject = data["objects"][0]
+        subject["geometry"]["shape_hint"] = "sphere"
+        subject["asset"] = {
+            "description": "a conflicting primitive",
+            "resource_kind": "mesh_3d",
+            "must": {
+                "geometry_type": "cylinder",
+                "source_kind": "procedural_generation",
+            },
+            "acquisition": {
+                "route": "procedural_generation",
+                "requirement": "required",
+                "origin": "user_explicit",
+                "provider_hint": "box_mesh_v1",
+                "reference_inputs": [],
+                "fallback_order": [],
+            },
+        }
+
+        parsed = case_spec_v2_from_dict(data)
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            validate_agent_case_spec_contract(parsed.data)
+
+        self.assertEqual(
+            {issue.code for issue in context.exception.issues},
+            {"procedural_geometry_type_mismatch", "procedural_recipe_shape_mismatch"},
+        )
+
     def test_defaults_validation_and_runtime_compilation(self) -> None:
         data = case_spec_v2_fixture()
         del data["timebase"]["deterministic_seed"]

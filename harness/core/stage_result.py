@@ -139,6 +139,10 @@ _CONFIGURATION_CODES = {
     "native_generation_context_invalid",
     "native_generation_context_schema_unsupported",
 }
+_CASE_SPEC_CONTRACT_CODES = {
+    "invalid_generation_spec",
+    "unsupported_generation_recipe",
+}
 _NATIVE_SUBMISSION_INVALID_CODES = {
     "native_generation_agent_report_invalid",
     "native_generation_case_spec_invalid",
@@ -405,6 +409,8 @@ def classify_failure(
         return _classification("blocked", "blocked_user_action", False, ["request_user_action", "cancel"])
     if code in _CONFIGURATION_CODES or normalized_stage in {"readiness", "preflight"}:
         return _classification("blocked", "blocked_configuration", False, ["fix_configuration", "cancel"])
+    if code in _CASE_SPEC_CONTRACT_CODES:
+        return _classification("failed", "case_spec_invalid", False, ["revise_case_spec", "inspect_artifacts"])
     if retryable is True or (retryable is None and code in _TRANSIENT_CODES):
         actions = ["resume_checkpoint", "retry_stage"] if "provider" in normalized_stage else ["retry_stage"]
         return _classification("failed", "transient", True, actions)

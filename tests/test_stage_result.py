@@ -102,6 +102,15 @@ class StageResultContractTests(unittest.TestCase):
         self.assertEqual(capability["failure_class"], "capability_missing")
         self.assertFalse(capability["retryable"])
 
+    def test_provider_generation_contract_errors_are_case_spec_repairs(self) -> None:
+        for code in ("unsupported_generation_recipe", "invalid_generation_spec"):
+            with self.subTest(code=code):
+                current = classify_failure("provider", code, retryable=True)
+                self.assertEqual(current["failure_class"], "case_spec_invalid")
+                self.assertEqual(current["status"], "failed")
+                self.assertFalse(current["retryable"])
+                self.assertIn("revise_case_spec", current["allowed_next_actions"])
+
     def test_permission_profile_unsupported_is_a_stable_configuration_blocker(self) -> None:
         for code in (
             "reviewer_permission_profile_unsupported",

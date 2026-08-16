@@ -91,6 +91,41 @@ class NativeGenerationTests(unittest.TestCase):
         self.assertIn("backend_stage_io", context["case_spec_contract"])
         self.assertIn("valid_structure_example_do_not_copy_values", context["case_spec_contract"])
 
+    def test_native_submission_rejects_prose_in_builtin_procedural_shape(self) -> None:
+        blocked, context = self._create_context("job_native_procedural_shape")
+        submission = self._submission(context)
+        subject = submission["case_spec"]["objects"][0]
+        subject["geometry"]["shape_hint"] = "upright rectangular box with longest edge vertical"
+        subject["geometry"]["approx_size_m"] = [0.03, 0.12, 0.3]
+        subject["asset"] = {
+            "description": "a local procedural domino",
+            "resource_kind": "mesh_3d",
+            "must": {
+                "geometry_type": "box",
+                "source_kind": "procedural_generation",
+            },
+            "acquisition": {
+                "route": "procedural_generation",
+                "requirement": "required",
+                "origin": "user_explicit",
+                "provider_hint": "box_mesh_v1",
+                "reference_inputs": [],
+                "fallback_order": [],
+            },
+        }
+
+        rejected = self.controller.submit_native_generation(blocked["job"]["job_id"], submission)
+
+        self.assertEqual(rejected["job"]["state"], "blocked")
+        self.assertEqual(
+            rejected["submission_stage_result"]["failure_code"],
+            "native_generation_case_spec_invalid",
+        )
+        self.assertIn("shape_hint box, sphere, or cylinder", rejected["submission_stage_result"]["message"])
+        request_root = Path(rejected["paths"]["job_root"]) / "request"
+        self.assertFalse((request_root / "native_generation_submission.json").exists())
+        self.assertFalse((request_root / "native_generation_ack.json").exists())
+
     def test_cli_exposes_native_default_and_submission_command(self) -> None:
         script = Path(__file__).resolve().parents[1] / "scripts" / "harness_agent_job.py"
         create_help = subprocess.run(
