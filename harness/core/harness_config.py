@@ -20,13 +20,25 @@ IMAGE_CAPABILITIES = frozenset({"supported", "unsupported", "unknown"})
 PUBLICATION_TIERS = frozenset({"reference"})
 
 _ROOT_FIELDS = frozenset(
-    {"schema_version", "planning_llm", "meshy", "codex_reviewer", "ue_asset_importer", "paths", "safety"}
+    {
+        "schema_version",
+        "planning_llm",
+        "meshy",
+        "codex_reviewer",
+        "ue_asset_importer",
+        "ue_runtime",
+        "paths",
+        "safety",
+    }
 )
 _NESTED_FIELDS = {
     "planning_llm": frozenset({"base_url", "model", "image_capability", "api_key_env"}),
     "meshy": frozenset({"api_key_env"}),
     "codex_reviewer": frozenset({"executable"}),
     "ue_asset_importer": frozenset({"command"}),
+    "ue_runtime": frozenset(
+        {"map_package", "actor_class", "asset_registry", "contact_export", "runner_command"}
+    ),
     "paths": frozenset({"workspace", "catalog", "ue_project", "ue_executable"}),
     "safety": frozenset({"default_publication_tier", "external_calls_default_allow"}),
 }
@@ -46,6 +58,11 @@ class EffectiveHarnessConfig:
     meshy_api_key_env: str
     codex_executable: Path | None
     ue_asset_importer_command: tuple[str, ...]
+    ue_map_package: str
+    ue_actor_class: str
+    ue_asset_registry: Path | None
+    ue_contact_export: bool
+    ue_runner_command: tuple[str, ...]
     workspace: Path
     catalog: Path
     ue_project: Path
@@ -74,6 +91,13 @@ class EffectiveHarnessConfig:
                 "executable": str(self.codex_executable) if self.codex_executable is not None else None,
             },
             "ue_asset_importer": {"command": list(self.ue_asset_importer_command)},
+            "ue_runtime": {
+                "map_package": self.ue_map_package,
+                "actor_class": self.ue_actor_class,
+                "asset_registry": str(self.ue_asset_registry) if self.ue_asset_registry is not None else None,
+                "contact_export": self.ue_contact_export,
+                "runner_command": list(self.ue_runner_command),
+            },
             "paths": {
                 "workspace": str(self.workspace),
                 "catalog": str(self.catalog),
@@ -112,6 +136,38 @@ class EffectiveHarnessConfig:
         value = str(environ.get(self.planning_secret_env_name(environ), "")).strip()
         return value or None
 
+    def ue_map_package_for_case(self, case_spec: Mapping[str, Any] | None = None) -> str:
+        scene = case_spec.get("scene") if isinstance(case_spec, Mapping) else None
+        case_map = (
+            str(scene.get("map_preference") or scene.get("map_package") or "").strip()
+            if isinstance(scene, Mapping)
+            else ""
+        )
+        source_layer = self.sources["ue_runtime.map_package"]["layer"]
+        if source_layer in {"cli", "environment"} and self.ue_map_package:
+            return self.ue_map_package
+        return case_map or self.ue_map_package
+
+    def ue_compile_identity(self, case_spec: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        return {
+            "schema_version": "harness_ue_compile_config_v1",
+            "map_package": self.ue_map_package_for_case(case_spec),
+            "ue_project": str(self.ue_project),
+            "catalog": str(self.catalog),
+        }
+
+    def ue_execution_identity(self, case_spec: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        return {
+            "schema_version": "harness_ue_execution_config_v1",
+            "map_package": self.ue_map_package_for_case(case_spec),
+            "ue_project": str(self.ue_project),
+            "ue_executable": str(self.ue_executable) if self.ue_executable is not None else None,
+            "actor_class": self.ue_actor_class,
+            "asset_registry": str(self.ue_asset_registry) if self.ue_asset_registry is not None else None,
+            "contact_export": self.ue_contact_export,
+            "runner_command": list(self.ue_runner_command),
+        }
+
     def meshy_api_key(self, env: Mapping[str, str] | None = None) -> str | None:
         environ = os.environ if env is None else env
         value = str(environ.get(self.meshy_api_key_env, "")).strip()
@@ -123,6 +179,9 @@ class EffectiveHarnessConfig:
         codex = self.codex_executable or _which_path("codex", environ)
         importer_executable = _command_executable(self.ue_asset_importer_command, environ)
         importer_scripts = _command_scripts(self.ue_asset_importer_command)
+        runner_executable = _command_executable(self.ue_runner_command, environ)
+        runner_scripts = _command_scripts(self.ue_runner_command)
+        map_file = _ue_map_file(self.ue_project, self.ue_map_package)
         paths = {
             "workspace": self.workspace,
             "catalog": self.catalog,
@@ -163,6 +222,35 @@ class EffectiveHarnessConfig:
                         and all(path.is_file() for path in importer_scripts)
                     ),
                     "command": list(self.ue_asset_importer_command),
+                },
+            },
+            "ue_runtime": {
+                "map_package": {
+                    "value": self.ue_map_package,
+                    "source": self.sources["ue_runtime.map_package"],
+                    "resolved_umap": str(map_file) if map_file is not None else None,
+                    "exists": bool(map_file is not None and map_file.is_file()),
+                },
+                "actor_class": self.ue_actor_class,
+                "asset_registry": {
+                    "value": str(self.ue_asset_registry) if self.ue_asset_registry is not None else None,
+                    "exists": bool(self.ue_asset_registry is not None and self.ue_asset_registry.is_file()),
+                },
+                "contact_export": self.ue_contact_export,
+                "runner_command": {
+                    "value": list(self.ue_runner_command),
+                    "executable_exists": bool(
+                        runner_executable
+                        and runner_executable.is_file()
+                        and os.access(runner_executable, os.X_OK)
+                    ),
+                    "scripts_exist": all(path.is_file() for path in runner_scripts),
+                    "available": bool(
+                        runner_executable
+                        and runner_executable.is_file()
+                        and os.access(runner_executable, os.X_OK)
+                        and all(path.is_file() for path in runner_scripts)
+                    ),
                 },
             },
             "secrets": {
@@ -263,6 +351,15 @@ def load_harness_config(
         if codex_executable is not None:
             sources["codex_reviewer.executable"] = {"layer": "derived_default", "key": "PATH"}
     importer_command = _command(values["ue_asset_importer.command"], root, "ue_asset_importer.command")
+    ue_map_package = _ue_package(values["ue_runtime.map_package"], "ue_runtime.map_package", allow_empty=True)
+    ue_actor_class = _string(values["ue_runtime.actor_class"], "ue_runtime.actor_class", allow_empty=True)
+    ue_asset_registry = _path(values["ue_runtime.asset_registry"], root, "ue_runtime.asset_registry")
+    ue_contact_export = _boolean(
+        values["ue_runtime.contact_export"],
+        "ue_runtime.contact_export",
+        allow_compat_string=sources["ue_runtime.contact_export"]["layer"] == "environment",
+    )
+    ue_runner_command = _command(values["ue_runtime.runner_command"], root, "ue_runtime.runner_command")
 
     return EffectiveHarnessConfig(
         planning_base_url=base_url,
@@ -272,6 +369,11 @@ def load_harness_config(
         meshy_api_key_env=meshy_key_env,
         codex_executable=codex_executable,
         ue_asset_importer_command=importer_command,
+        ue_map_package=ue_map_package,
+        ue_actor_class=ue_actor_class,
+        ue_asset_registry=ue_asset_registry,
+        ue_contact_export=ue_contact_export,
+        ue_runner_command=ue_runner_command,
         workspace=workspace,
         catalog=catalog,
         ue_project=ue_project,
@@ -325,6 +427,11 @@ def _defaults() -> dict[str, Any]:
         "meshy.api_key_env": "SIM_HARNESS_MESHY_API_KEY",
         "codex_reviewer.executable": None,
         "ue_asset_importer.command": None,
+        "ue_runtime.map_package": "",
+        "ue_runtime.actor_class": "",
+        "ue_runtime.asset_registry": None,
+        "ue_runtime.contact_export": False,
+        "ue_runtime.runner_command": None,
         "paths.workspace": str(DEFAULT_WORKSPACE),
         "paths.catalog": None,
         "paths.ue_project": None,
@@ -343,6 +450,11 @@ def _environment_keys() -> dict[str, tuple[str, ...]]:
         "meshy.api_key_env": ("SIM_HARNESS_MESHY_API_KEY_ENV",),
         "codex_reviewer.executable": ("SIM_HARNESS_CODEX_EXECUTABLE",),
         "ue_asset_importer.command": ("SIM_HARNESS_UE_ASSET_IMPORTER_CMD",),
+        "ue_runtime.map_package": ("SIM_STUDIO_UE_MAP",),
+        "ue_runtime.actor_class": ("SIM_STUDIO_UE_ACTOR_CLASS",),
+        "ue_runtime.asset_registry": ("SIM_STUDIO_ASSET_REGISTRY",),
+        "ue_runtime.contact_export": ("SIM_STUDIO_UE_CONTACT_EXPORT",),
+        "ue_runtime.runner_command": ("SIM_STUDIO_UE_RUNNER_CMD",),
         "paths.workspace": ("SIM_HARNESS_WORKSPACE",),
         "paths.catalog": ("SIM_HARNESS_ASSET_CATALOG",),
         "paths.ue_project": ("SIM_STUDIO_UE_PROJECT",),
@@ -383,6 +495,23 @@ def _env_name(value: Any, field: str) -> str:
     raw = _string(value, field)
     if not _ENV_NAME.fullmatch(raw):
         raise HarnessConfigError(f"{field} must be an environment variable name")
+    return raw
+
+
+def _boolean(value: Any, field: str, *, allow_compat_string: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if allow_compat_string and isinstance(value, str) and value.strip() in {"0", "1"}:
+        return value.strip() == "1"
+    raise HarnessConfigError(f"{field} must be a boolean")
+
+
+def _ue_package(value: Any, field: str, *, allow_empty: bool = False) -> str:
+    raw = _string(value, field, allow_empty=allow_empty)
+    if not raw:
+        return raw
+    if not re.fullmatch(r"/Game/[A-Za-z0-9_./-]+", raw) or ".." in raw:
+        raise HarnessConfigError(f"{field} must be a /Game/... package or object path")
     return raw
 
 
@@ -427,6 +556,16 @@ def _command_executable(command: tuple[str, ...], env: Mapping[str, str]) -> Pat
 
 def _command_scripts(command: tuple[str, ...]) -> tuple[Path, ...]:
     return tuple(Path(item) for item in command[1:] if Path(item).suffix.casefold() == ".py")
+
+
+def _ue_map_file(project: Path, package: str) -> Path | None:
+    if not package.startswith("/Game/"):
+        return None
+    relative = package[len("/Game/") :].split(".", 1)[0]
+    parts = relative.split("/")
+    if not relative or any(part in {"", ".", ".."} for part in parts):
+        return None
+    return project.parent / "Content" / Path(*parts).with_suffix(".umap")
 
 
 def _string(value: Any, field: str, *, allow_empty: bool = False) -> str:

@@ -28,6 +28,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ue-executable")
     parser.add_argument("--codex-executable")
     parser.add_argument("--ue-asset-importer-command")
+    parser.add_argument("--ue-map")
+    parser.add_argument("--ue-actor-class")
+    parser.add_argument("--ue-asset-registry")
+    parser.add_argument("--ue-contact-export", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--ue-runner-command")
     parser.add_argument("--planning-base-url")
     parser.add_argument("--planning-model")
     parser.add_argument("--planning-image-capability", choices=["supported", "unsupported", "unknown"])
@@ -62,6 +67,34 @@ def parse_args() -> argparse.Namespace:
     retry_failed = commands.add_parser("retry-failed", help="Audit and reopen one terminal transient failure.")
     retry_failed.add_argument("job_id")
     retry_failed.add_argument("--reason", required=True, help="External correction made before retrying the same checkpoint.")
+
+    recompile = commands.add_parser(
+        "recompile-after-config",
+        help="Archive one Map-invalid compilation and reopen the same attempt at compile.",
+    )
+    recompile.add_argument("job_id")
+    recompile.add_argument("--reason", required=True, help="Compile-affecting configuration correction.")
+
+    review_retry = commands.add_parser(
+        "retry-review-after-contract-fix",
+        help="Authorize one new Reviewer turn after a corrected prompt/output contract.",
+    )
+    review_retry.add_argument("job_id")
+    review_retry.add_argument("--reason", required=True, help="Audited Reviewer contract correction.")
+
+    evidence_rebuild = commands.add_parser(
+        "rebuild-evidence-after-provenance",
+        help="Rebuild an evidence-deficient uncertain review from the existing Candidate.",
+    )
+    evidence_rebuild.add_argument("job_id")
+    evidence_rebuild.add_argument("--reason", required=True, help="Audited evidence provenance correction.")
+
+    review_recovery = commands.add_parser(
+        "recover-unlaunched-review",
+        help="Reopen an app-server setup failure proven to precede Reviewer model work.",
+    )
+    review_recovery.add_argument("job_id")
+    review_recovery.add_argument("--reason", required=True, help="Audited setup correction.")
 
     revise = commands.add_parser("apply-revision", help="Materialize an Intent-authorized automatic revision proposal.")
     revise.add_argument("job_id")
@@ -100,6 +133,11 @@ def main() -> int:
             "paths.ue_executable": args.ue_executable,
             "codex_reviewer.executable": args.codex_executable,
             "ue_asset_importer.command": args.ue_asset_importer_command,
+            "ue_runtime.map_package": args.ue_map,
+            "ue_runtime.actor_class": args.ue_actor_class,
+            "ue_runtime.asset_registry": args.ue_asset_registry,
+            "ue_runtime.contact_export": args.ue_contact_export,
+            "ue_runtime.runner_command": args.ue_runner_command,
             "planning_llm.base_url": args.planning_base_url,
             "planning_llm.model": args.planning_model,
             "planning_llm.image_capability": args.planning_image_capability,
@@ -152,6 +190,14 @@ def main() -> int:
         result = controller.recover_interrupted(args.job_id)
     elif args.command == "retry-failed":
         result = controller.retry_failed_stage(args.job_id, reason=args.reason)
+    elif args.command == "recompile-after-config":
+        result = controller.recompile_after_config(args.job_id, reason=args.reason)
+    elif args.command == "retry-review-after-contract-fix":
+        result = controller.retry_review_after_contract_fix(args.job_id, reason=args.reason)
+    elif args.command == "rebuild-evidence-after-provenance":
+        result = controller.rebuild_evidence_after_provenance(args.job_id, reason=args.reason)
+    elif args.command == "recover-unlaunched-review":
+        result = controller.recover_unlaunched_review(args.job_id, reason=args.reason)
     elif args.command == "review":
         result = controller.run_semantic_review(args.job_id)
     elif args.command == "apply-revision":

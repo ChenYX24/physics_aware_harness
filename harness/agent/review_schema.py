@@ -676,6 +676,12 @@ def semantic_review_output_schema() -> dict[str, Any]:
     evidence_ref = {
         "type": "object",
         "additionalProperties": False,
+        "description": (
+            "A manifest artifact plus a concrete locator. At least one of time_s, view_id, "
+            "trajectory_range, or contact_event_id must be non-null; copy locator values exactly "
+            "from the Evidence Bundle manifest. Keyframes require exact time_s and view_id; "
+            "multi-view montages require exact time_s."
+        ),
         "properties": {
             "artifact_id": {"type": "string"},
             "time_s": nullable_number,
@@ -689,7 +695,14 @@ def semantic_review_output_schema() -> dict[str, Any]:
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "overall_status": {"type": "string", "enum": sorted(SEMANTIC_STATUSES)},
+            "overall_status": {
+                "type": "string",
+                "enum": sorted(SEMANTIC_STATUSES),
+                "description": (
+                    "uncertain if any requirement is uncertain; otherwise fail if any requirement "
+                    "fails; otherwise pass"
+                ),
+            },
             "requirements": {
                 "type": "array",
                 "minItems": 1,
@@ -705,7 +718,11 @@ def semantic_review_output_schema() -> dict[str, Any]:
                     "required": ["requirement_id", "status", "rationale", "evidence_refs"],
                 },
             },
-            "repair_layer": {"type": "string", "enum": sorted(REPAIR_LAYERS)},
+            "repair_layer": {
+                "type": "string",
+                "enum": sorted(REPAIR_LAYERS),
+                "description": "Use none only for overall_status=pass; non-pass requires a non-none layer.",
+            },
             "summary": {"type": "string"},
             "suggested_adjustments": {
                 "type": "array",
@@ -713,7 +730,14 @@ def semantic_review_output_schema() -> dict[str, Any]:
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
-                        "path": {"type": "string"},
+                        "path": {
+                            "type": "string",
+                            "description": (
+                                "Copy one exact canonical path from inputs/intent_contract.json "
+                                "allowed_adjustments.paths. Do not invent paths, use array indices, "
+                                "or cite broad parent objects."
+                            ),
+                        },
                         "desired_outcome": {"type": "string"},
                         "evidence_refs": {"type": "array", "items": {"type": "string"}},
                     },

@@ -24,6 +24,13 @@ def config_document(**overrides: object) -> dict[str, object]:
         "meshy": {"api_key_env": "MESHY_TEST_KEY"},
         "codex_reviewer": {"executable": None},
         "ue_asset_importer": {"command": ["/bin/sh", "tools/importer.py"]},
+        "ue_runtime": {
+            "map_package": "",
+            "actor_class": "",
+            "asset_registry": None,
+            "contact_export": False,
+            "runner_command": None,
+        },
         "paths": {
             "workspace": "external/workspace",
             "catalog": None,
@@ -162,6 +169,91 @@ class HarnessConfigTests(unittest.TestCase):
                 path = self.write_config(root, document)
                 with self.assertRaisesRegex(HarnessConfigError, "ue_asset_importer.command"):
                     load_harness_config(config_path=path, repo_root=root, env={})
+
+    def test_ue_runtime_is_strict_and_environment_or_cli_overrides_case_map(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            document = config_document()
+            document["ue_runtime"] = {
+                "map_package": "/Game/Config/Default.Default",
+                "actor_class": "/Script/Engine.StaticMeshActor",
+                "asset_registry": "runtime/registry.json",
+                "contact_export": True,
+                "runner_command": ["/bin/sh", "runtime/runner.py"],
+            }
+            path = self.write_config(root, document)
+            case = {"scene": {"map_package": "/Game/Case/Chosen.Chosen"}}
+            file_config = load_harness_config(config_path=path, repo_root=root, env={})
+            env_config = load_harness_config(
+                config_path=path,
+                repo_root=root,
+                env={"SIM_STUDIO_UE_MAP": "/Game/Env/Override.Override"},
+            )
+            cli_config = load_harness_config(
+                config_path=path,
+                repo_root=root,
+                env={"SIM_STUDIO_UE_MAP": "/Game/Env/Override.Override"},
+                cli_overrides={"ue_runtime.map_package": "/Game/Cli/Override.Override"},
+            )
+            runtime_only_document = json.loads(json.dumps(document))
+            runtime_only_document["ue_runtime"]["actor_class"] = "/Script/Engine.Actor"  # type: ignore[index]
+            runtime_only_document["ue_runtime"]["runner_command"] = ["/bin/echo", "runtime-only"]  # type: ignore[index]
+            runtime_only_path = self.write_config(root / "runtime-only", runtime_only_document)
+            runtime_only_config = load_harness_config(
+                config_path=runtime_only_path,
+                repo_root=root,
+                env={},
+            )
+
+            self.assertEqual(file_config.ue_map_package_for_case(case), "/Game/Case/Chosen.Chosen")
+            self.assertEqual(env_config.ue_map_package_for_case(case), "/Game/Env/Override.Override")
+            self.assertEqual(cli_config.ue_map_package_for_case(case), "/Game/Cli/Override.Override")
+            self.assertTrue(file_config.ue_contact_export)
+            self.assertEqual(file_config.ue_runner_command, ("/bin/sh", str(root / "runtime" / "runner.py")))
+            self.assertEqual(file_config.ue_compile_identity(case), runtime_only_config.ue_compile_identity(case))
+            self.assertNotEqual(file_config.ue_execution_identity(case), runtime_only_config.ue_execution_identity(case))
+
+            invalid = config_document()
+            invalid["ue_runtime"] = {**document["ue_runtime"], "contact_export": "1"}  # type: ignore[arg-type]
+            path.write_text(json.dumps(invalid), encoding="utf-8")
+            with self.assertRaisesRegex(HarnessConfigError, "ue_runtime.contact_export must be a boolean"):
+                load_harness_config(config_path=path, repo_root=root, env={})
+
+    def test_ue_runtime_inspect_checks_map_registry_and_runner_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            project = root / "ue" / "SimulatorWorkspace.uproject"
+            map_file = project.parent / "Content" / "Harness" / "Configured.umap"
+            registry = root / "runtime" / "registry.json"
+            runner = root / "runtime" / "runner.py"
+            for path in (project, map_file, registry, runner):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}", encoding="utf-8")
+            document = config_document()
+            document["paths"] = {
+                "workspace": str(root / "workspace"),
+                "catalog": None,
+                "ue_project": str(project),
+                "ue_executable": None,
+            }
+            document["ue_runtime"] = {
+                "map_package": "/Game/Harness/Configured.Configured",
+                "actor_class": "/Script/Engine.StaticMeshActor",
+                "asset_registry": str(registry),
+                "contact_export": True,
+                "runner_command": ["/bin/sh", str(runner)],
+            }
+            config = load_harness_config(
+                config_path=self.write_config(root, document),
+                repo_root=root,
+                env={},
+            )
+
+            runtime = config.inspect({})["ue_runtime"]
+
+        self.assertTrue(runtime["map_package"]["exists"])
+        self.assertTrue(runtime["asset_registry"]["exists"])
+        self.assertTrue(runtime["runner_command"]["available"])
 
     def test_controller_projects_configured_ue_importer_command_without_shell_execution(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

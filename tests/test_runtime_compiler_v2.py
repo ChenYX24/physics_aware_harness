@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -20,7 +21,7 @@ from harness.core.case_spec_v2 import CaseSpecV2, case_spec_v2_from_dict, compil
 from harness.planning.backend_planner import BackendPlanningError, plan_backend
 from harness.planning.runtime_compiler import RuntimeCompilationPaused, bind_resolved_solver_assets, compile_runtime_case
 from harness.runtime.fallback_backend import FallbackBackend
-from harness.runtime.ue_backend import UEBackend, UEBackendUnavailable, empty_preflight
+from harness.runtime.ue_backend import UEBackend, UEBackendUnavailable, compile_minimal_scene_spec, empty_preflight
 from harness.verification.runtime_actor_placement_verifier import verify_runtime_actor_placement
 from tests.case_spec_v2_fixture import case_spec_v2_fixture
 
@@ -29,6 +30,80 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RuntimeCompilerV2Tests(unittest.TestCase):
+    def test_map_compile_config_enters_transaction_identity_and_scene_spec(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            map_file = root / "Configured.umap"
+            map_file.write_bytes(b"configured-map")
+            registry_data = json.loads((ROOT / "assets" / "asset_registry.example.json").read_text(encoding="utf-8"))
+            registry_data["assets"].append(
+                {
+                    "asset_id": "configured_map",
+                    "name": "Configured",
+                    "category_l1": "map",
+                    "type": "World",
+                    "ue_path": "/Game/Harness/Configured.Configured",
+                    "source_kind": "harness_generated",
+                    "source_uri": "harness://tests/maps/configured",
+                    "license": "CC0-1.0",
+                    "quality_status": "approved",
+                    "materialized": True,
+                    "sha256": hashlib.sha256(map_file.read_bytes()).hexdigest(),
+                    "paths": {"local_file": str(map_file)},
+                    "ue": {
+                        "object_path": "/Game/Harness/Configured.Configured",
+                        "class_name": "World",
+                        "dependencies": [],
+                    },
+                    "backend_bindings": {
+                        "unreal": {
+                            "object_path": "/Game/Harness/Configured.Configured",
+                            "class_name": "World",
+                            "materialized": True,
+                            "runtime_ready": True,
+                        }
+                    },
+                }
+            )
+            registry_path = root / "registry.json"
+            registry_path.write_text(json.dumps(registry_data), encoding="utf-8")
+            registry = AssetRegistry(registry_path)
+            case = case_spec_v2_from_dict(case_spec_v2_fixture())
+            first_config = {
+                "schema_version": "harness_ue_compile_config_v1",
+                "map_package": "/Game/Harness/Configured.Configured",
+                "ue_project": str(root / "Project.uproject"),
+                "catalog": str(registry_path),
+            }
+            first = compile_runtime_case(
+                case,
+                requested_backend="fallback",
+                registry=registry,
+                transaction_dir=root / "first",
+                compile_config=first_config,
+            )
+            second = compile_runtime_case(
+                case,
+                requested_backend="fallback",
+                registry=registry,
+                transaction_dir=root / "second",
+                compile_config={**first_config, "map_package": "/Game/Harness/Other.Other"},
+            )
+            first_transaction = read_json(root / "first" / "compilation_transaction.json")
+            second_transaction = read_json(root / "second" / "compilation_transaction.json")
+
+        self.assertEqual(
+            first.artifacts["asset_resolution"]["scene_map"]["requested_reference"],
+            "/Game/Harness/Configured.Configured",
+        )
+        self.assertEqual(
+            compile_minimal_scene_spec(case.data, first.artifacts["asset_resolution"])["map"]["requested_package"],
+            "/Game/Harness/Configured.Configured",
+        )
+        self.assertNotEqual(first_transaction["transaction_id"], second_transaction["transaction_id"])
+        self.assertEqual(first_transaction["asset_resolve_invocation_count"], 1)
+        self.assertEqual(second_transaction["asset_resolve_invocation_count"], 1)
+
     def test_transaction_resumes_provider_and_never_repeats_asset_resolve(self) -> None:
         class _CheckpointedOrchestrator:
             def __init__(self) -> None:

@@ -88,6 +88,7 @@ from harness.core.stage_result import (
     build_stage_result,
     classify_failure,
     failure_stage_result,
+    stage_result_from_provider_batch,
     write_stage_result,
 )
 from harness.planning.backend_planner import plan_backend
@@ -278,6 +279,14 @@ class AgentJobController:
                 manifest,
                 current_leaf_stage_result=current_leaf_stage_result,
             ),
+            "configuration_recompile": self._configuration_recompile_eligibility(
+                manifest,
+                current_leaf_stage_result=current_leaf_stage_result,
+            ),
+            "reviewer_contract_retry": self._reviewer_contract_retry_eligibility(
+                manifest,
+                current_leaf_stage_result=current_leaf_stage_result,
+            ),
             "interrupted_recovery": self._interrupted_recovery(manifest),
             "paths": {
                 "job_root": str(root),
@@ -393,6 +402,340 @@ class AgentJobController:
                 "failed_stage_retry_authorized",
                 stage=manifest["current_stage"],
                 artifact_refs=[str(receipt_path)],
+            )
+        return self.inspect(job_id)
+
+    def recompile_after_config(self, job_id: str, *, reason: str) -> dict[str, Any]:
+        """Archive one Map-invalid compilation and reopen the same attempt at compile."""
+        explanation = str(reason or "").strip()
+        if not explanation:
+            raise ValueError("configuration recompile requires a non-empty correction reason")
+        with self.store.lock(job_id):
+            manifest = self.store.load_manifest(job_id)
+            leaf = self._current_leaf_stage_result(manifest)
+            eligibility = self._configuration_recompile_eligibility(
+                manifest,
+                current_leaf_stage_result=leaf,
+            )
+            if eligibility["available"] is not True:
+                raise JobStoreError(str(eligibility["message"]))
+            attempt_id = str(manifest["current_attempt_id"])
+            attempt_dir = self.store.attempt_dir(job_id, attempt_id)
+            compilation_dir = attempt_dir / "compilation"
+            transaction = read_json(compilation_dir / "compilation_transaction.json")
+            provider = self._validated_reusable_provider_checkpoint(
+                compilation_dir,
+                job_id=job_id,
+                attempt_id=attempt_id,
+            )
+            receipts_dir = self.store.job_dir(job_id) / "receipts"
+            sequence = len(list(receipts_dir.glob("configuration_recompile_*.json"))) + 1
+            archive = attempt_dir / f"compilation_superseded_{sequence:03d}"
+            if archive.exists():
+                raise JobStoreError(f"configuration recompile archive already exists: {archive.name}")
+            blocker_result = dict(leaf["result"])
+            receipt_path = receipts_dir / f"configuration_recompile_{sequence:03d}.json"
+            write_json(
+                receipt_path,
+                {
+                    "schema_version": "harness_agent_configuration_recompile_receipt_v1",
+                    "job_id": job_id,
+                    "attempt_id": attempt_id,
+                    "blocker": {
+                        "stage": blocker_result["stage"],
+                        "failure_code": blocker_result["failure_code"],
+                        "stage_result_digest": stable_digest(blocker_result),
+                    },
+                    "correction_reason": explanation,
+                    "old_compile_config": eligibility["old_compile_config"],
+                    "old_compile_config_digest": eligibility["old_compile_config_digest"],
+                    "new_compile_config": eligibility["new_compile_config"],
+                    "new_compile_config_digest": eligibility["new_compile_config_digest"],
+                    "old_transaction_id": transaction["transaction_id"],
+                    "old_transaction_digest": stable_digest(transaction),
+                    "provider_checkpoint": provider,
+                    "usage_preserved": copy.deepcopy(manifest["usage"]),
+                    "archive": str(archive),
+                    "created_at": utc_now(),
+                },
+            )
+            compilation_dir.replace(archive)
+            compilation_dir.mkdir()
+            shutil.copy2(archive / "asset_provider_batch.json", compilation_dir / "asset_provider_batch.json")
+            source_receipts = archive / "provider_receipts"
+            if source_receipts.is_dir():
+                shutil.copytree(source_receipts, compilation_dir / "provider_receipts")
+            attempt = self.store.load_attempt(job_id, attempt_id)
+            attempt.update(
+                {
+                    "status": "generated",
+                    "compilation_id": None,
+                    "execution_fingerprint": None,
+                    "smoke_gate": None,
+                    "updated_at": utc_now(),
+                }
+            )
+            self.store.write_attempt(attempt)
+            for key in [key for key in self._compilations if key[0] == job_id and key[1] == attempt_id]:
+                self._compilations.pop(key, None)
+            manifest = self._update_manifest(
+                manifest,
+                state="paused_interrupted",
+                current_stage="compile",
+                active_compilation_id=None,
+                blocker={
+                    "code": "configuration_recompile_authorized",
+                    "message": "compile-affecting Map configuration changed; resume the audited replacement transaction",
+                    "stage": "compile",
+                },
+                allowed_next_actions=["resume", "cancel"],
+            )
+            self._emit(
+                job_id,
+                "configuration_recompile_authorized",
+                stage="compile",
+                attempt_id=attempt_id,
+                artifact_refs=[str(receipt_path), str(archive)],
+            )
+        return self.inspect(job_id)
+
+    def retry_review_after_contract_fix(self, job_id: str, *, reason: str) -> dict[str, Any]:
+        """Authorize one new Reviewer turn after a schema contract correction."""
+        explanation = str(reason or "").strip()
+        if not explanation:
+            raise ValueError("Reviewer contract retry requires a non-empty correction reason")
+        with self.store.lock(job_id):
+            manifest = self.store.load_manifest(job_id)
+            leaf = self._current_leaf_stage_result(manifest)
+            eligibility = self._reviewer_contract_retry_eligibility(
+                manifest,
+                current_leaf_stage_result=leaf,
+            )
+            if eligibility["available"] is not True:
+                raise JobStoreError(str(eligibility["message"]))
+            attempt_id = str(manifest["current_attempt_id"])
+            amendments_dir = self.store.job_dir(job_id) / "amendments"
+            sequence = len(list(amendments_dir.glob("reviewer_contract_retry_*.json"))) + 1
+            receipt_path = amendments_dir / f"reviewer_contract_retry_{sequence:03d}.json"
+            budget_before = copy.deepcopy(manifest["budget"])
+            budget_after = dict(budget_before)
+            budget_after["max_reviewer_technical_retries"] += 1
+            if int(manifest["usage"]["total_retries"]) >= budget_after["max_total_retries"]:
+                budget_after["max_total_retries"] += 1
+            budget_after = normalized_budget(budget_after)
+            write_json(
+                receipt_path,
+                {
+                    "schema_version": "harness_agent_reviewer_contract_retry_v2",
+                    "job_id": job_id,
+                    "attempt_id": attempt_id,
+                    "failure_code": "reviewer_output_schema_invalid",
+                    "failure_result_digest": eligibility["failure_result_digest"],
+                    "bundle_digest": eligibility["bundle_digest"],
+                    "prior_invocation_count": eligibility["prior_invocation_count"],
+                    "old_input_digest": eligibility["old_input_digest"],
+                    "new_input_digest": eligibility["new_input_digest"],
+                    "reviewer_technical_retries_before": budget_before["max_reviewer_technical_retries"],
+                    "reviewer_technical_retries_after": budget_after["max_reviewer_technical_retries"],
+                    "total_retries_before": budget_before["max_total_retries"],
+                    "total_retries_after": budget_after["max_total_retries"],
+                    "usage_preserved": copy.deepcopy(manifest["usage"]),
+                    "correction_reason": explanation,
+                    "created_at": utc_now(),
+                },
+            )
+            manifest = self._update_manifest(
+                manifest,
+                budget=budget_after,
+                state="awaiting_semantic_review",
+                blocker=None,
+                allowed_next_actions=["run_semantic_review", "cancel"],
+            )
+            self._emit(
+                job_id,
+                "reviewer_contract_retry_authorized",
+                stage="semantic_review",
+                attempt_id=attempt_id,
+                artifact_refs=[str(receipt_path)],
+            )
+        return self.inspect(job_id)
+
+    def rebuild_evidence_after_provenance(self, job_id: str, *, reason: str) -> dict[str, Any]:
+        """Rebuild an evidence-deficient uncertain review without rerunning the Candidate."""
+        explanation = str(reason or "").strip()
+        if not explanation:
+            raise ValueError("evidence provenance rebuild requires a non-empty correction reason")
+        with self.store.lock(job_id):
+            manifest = self.store.load_manifest(job_id)
+            if (
+                manifest["state"] != "needs_user_decision"
+                or manifest["current_stage"] != "semantic_review"
+                or (manifest.get("blocker") or {}).get("code") != "semantic_review_uncertain"
+            ):
+                raise JobStoreError("evidence provenance rebuild requires an uncertain Semantic Review")
+            attempt_id = str(manifest["current_attempt_id"])
+            attempt_dir = self.store.attempt_dir(job_id, attempt_id)
+            bundle = self._validated_current_bundle_from_files(
+                manifest,
+                expected_manifest_digest=None,
+                require_result_provenance=False,
+            )
+            review = SemanticReview.from_dict(
+                read_json(attempt_dir / "semantic_review.json"),
+                expected_requirement_ids={
+                    str(row["id"])
+                    for row in read_json(attempt_dir / "evidence_bundle" / "evidence_summary.json")["semantic_requirements"]
+                },
+                evidence_artifact_ids={str(row["artifact_id"]) for row in bundle["artifacts"]},
+                evidence_manifest=bundle,
+            ).to_dict()
+            if (
+                review["job_id"] != job_id
+                or review["attempt_id"] != attempt_id
+                or review["evidence_bundle_digest"] != stable_digest(bundle)
+                or review["overall_status"] != "uncertain"
+                or review["repair_layer"] != "evidence"
+            ):
+                raise JobStoreError("Semantic Review does not identify an evidence-layer uncertainty")
+            receipts_dir = self.store.job_dir(job_id) / "receipts"
+            sequence = len(list(receipts_dir.glob("evidence_provenance_rebuild_*.json"))) + 1
+            bundle_archive = attempt_dir / f"evidence_bundle_superseded_{sequence:03d}"
+            review_archive = attempt_dir / f"semantic_review_superseded_{sequence:03d}"
+            if bundle_archive.exists() or review_archive.exists():
+                raise JobStoreError("evidence provenance rebuild archive already exists")
+            receipt_path = receipts_dir / f"evidence_provenance_rebuild_{sequence:03d}.json"
+            write_json(
+                receipt_path,
+                {
+                    "schema_version": "harness_agent_evidence_provenance_rebuild_v1",
+                    "job_id": job_id,
+                    "attempt_id": attempt_id,
+                    "correction_reason": explanation,
+                    "old_bundle_digest": stable_digest(bundle),
+                    "old_review_digest": stable_digest(review),
+                    "usage_preserved": copy.deepcopy(manifest["usage"]),
+                    "bundle_archive": str(bundle_archive),
+                    "review_archive": str(review_archive),
+                    "created_at": utc_now(),
+                },
+            )
+            (attempt_dir / "evidence_bundle").replace(bundle_archive)
+            review_archive.mkdir()
+            for path in [
+                attempt_dir / "semantic_review.json",
+                attempt_dir / "stage_results" / "semantic_review.json",
+                attempt_dir / "stage_results" / "evidence_bundle.json",
+                *sorted(attempt_dir.glob("reviewer_reservation_*.json")),
+                *sorted(attempt_dir.glob("reviewer_invocation_*.json")),
+                *sorted((self.store.job_dir(job_id) / "amendments").glob("reviewer_contract_retry_*.json")),
+            ]:
+                if path.is_file():
+                    path.replace(review_archive / path.name)
+            attempt = self.store.load_attempt(job_id, attempt_id)
+            attempt.update({"status": "quality_gate_passed", "updated_at": utc_now()})
+            self.store.write_attempt(attempt)
+            self._update_manifest(
+                manifest,
+                state="paused_interrupted",
+                current_stage="evidence_bundle",
+                blocker={
+                    "code": "evidence_provenance_rebuild_authorized",
+                    "message": "result provenance was added; rebuild the Evidence Bundle from the existing Candidate",
+                    "stage": "evidence_bundle",
+                },
+                allowed_next_actions=["resume", "cancel"],
+            )
+            self._emit(
+                job_id,
+                "evidence_provenance_rebuild_authorized",
+                stage="evidence_bundle",
+                attempt_id=attempt_id,
+                artifact_refs=[str(receipt_path), str(bundle_archive), str(review_archive)],
+            )
+        return self.advance_until_blocked(job_id)
+
+    def recover_unlaunched_review(self, job_id: str, *, reason: str) -> dict[str, Any]:
+        """Reopen a Reviewer setup failure that occurred before any model work."""
+        explanation = str(reason or "").strip()
+        if not explanation:
+            raise ValueError("unlaunched Reviewer recovery requires a non-empty correction reason")
+        with self.store.lock(job_id):
+            manifest = self.store.load_manifest(job_id)
+            if (
+                manifest["state"] != "failed"
+                or manifest["current_stage"] != "semantic_review"
+                or (manifest.get("blocker") or {}).get("code") != "reviewer_app_server_failure"
+            ):
+                raise JobStoreError("unlaunched Reviewer recovery requires an app-server setup failure")
+            attempt_id = str(manifest["current_attempt_id"])
+            attempt_dir = self.store.attempt_dir(job_id, attempt_id)
+            reservation_paths = sorted(attempt_dir.glob("reviewer_reservation_*.json"))
+            receipt_paths = sorted(attempt_dir.glob("reviewer_invocation_*.json"))
+            if len(reservation_paths) != 1 or len(receipt_paths) != 1:
+                raise JobStoreError("unlaunched Reviewer recovery requires one current setup attempt")
+            reservation = ReviewerInvocationReservation.from_dict(read_json(reservation_paths[0])).to_dict()
+            receipt = ReviewerInvocationReceipt.from_dict(read_json(receipt_paths[0])).to_dict()
+            if (
+                reservation["job_id"] != job_id
+                or reservation["attempt_id"] != attempt_id
+                or reservation["usage_counted"] is not False
+                or reservation["outcome"] != "technical_failed"
+                or reservation["error_code"] != "reviewer_app_server_failure"
+                or receipt["job_id"] != job_id
+                or receipt["attempt_id"] != attempt_id
+                or receipt["status"] != "failed"
+                or receipt["error_code"] != "reviewer_app_server_failure"
+                or receipt["thread_id"] is not None
+                or receipt["turn_id"] is not None
+                or receipt["output_digest"] is not None
+            ):
+                raise JobStoreError("Reviewer receipt does not prove a zero-invocation setup failure")
+            bundle = self._validated_current_bundle(manifest)
+            sequence = len(list(attempt_dir.glob("reviewer_setup_superseded_*"))) + 1
+            archive = attempt_dir / f"reviewer_setup_superseded_{sequence:03d}"
+            if archive.exists():
+                raise JobStoreError("Reviewer setup archive already exists")
+            receipts_dir = self.store.job_dir(job_id) / "receipts"
+            recovery_path = receipts_dir / f"unlaunched_reviewer_recovery_{sequence:03d}.json"
+            write_json(
+                recovery_path,
+                {
+                    "schema_version": "harness_agent_unlaunched_reviewer_recovery_v1",
+                    "job_id": job_id,
+                    "attempt_id": attempt_id,
+                    "failure_code": "reviewer_app_server_failure",
+                    "bundle_digest": stable_digest(bundle),
+                    "reservation_digest": stable_digest(reservation),
+                    "receipt_digest": stable_digest(receipt),
+                    "usage_preserved": copy.deepcopy(manifest["usage"]),
+                    "correction_reason": explanation,
+                    "archive": str(archive),
+                    "created_at": utc_now(),
+                },
+            )
+            archive.mkdir()
+            for path in [
+                *reservation_paths,
+                *receipt_paths,
+                attempt_dir / "stage_results" / "semantic_review.json",
+            ]:
+                if path.is_file():
+                    path.replace(archive / path.name)
+            attempt = self.store.load_attempt(job_id, attempt_id)
+            attempt.update({"status": "awaiting_semantic_review", "updated_at": utc_now()})
+            self.store.write_attempt(attempt)
+            self._update_manifest(
+                manifest,
+                state="awaiting_semantic_review",
+                blocker=None,
+                allowed_next_actions=["run_semantic_review", "cancel"],
+            )
+            self._emit(
+                job_id,
+                "unlaunched_reviewer_recovered",
+                stage="semantic_review",
+                attempt_id=attempt_id,
+                artifact_refs=[str(recovery_path), str(archive)],
             )
         return self.inspect(job_id)
 
@@ -524,7 +867,7 @@ class AgentJobController:
                 self._start_in_flight(manifest, stage, started_monotonic=started)
                 in_flight_outcome = "returned"
                 try:
-                    with self._effective_environment():
+                    with self._effective_environment(manifest):
                         manifest = self._advance_one(manifest)
                 except (KeyboardInterrupt, SystemExit) as exc:
                     in_flight_outcome = "interrupted"
@@ -821,6 +1164,7 @@ class AgentJobController:
                 invocation_count = int(reservation["invocation_count"])
                 receipt_path = attempt_dir / f"reviewer_invocation_{invocation_count:03d}.json"
                 written_review = False
+                raw_review: dict[str, Any] | None = None
                 technical_reservations = sum(row["role"] == "technical_retry" for row in reservations)
                 recorded_technical_retries = int(manifest["usage"]["stage_retries"].get("semantic_review", 0))
                 if reservation["role"] == "technical_retry" and technical_reservations > recorded_technical_retries:
@@ -1023,6 +1367,31 @@ class AgentJobController:
                     )
                 except (ValueError, KeyError, TypeError) as exc:
                     in_flight_outcome = "failed"
+                    rejected_refs: list[dict[str, Any]] = []
+                    if raw_review is not None:
+                        rejected_path = attempt_dir / f"reviewer_output_rejected_{invocation_count:03d}.json"
+                        write_json(
+                            rejected_path,
+                            {
+                                "schema_version": "harness_rejected_reviewer_output_v1",
+                                "job_id": job_id,
+                                "attempt_id": attempt_id,
+                                "invocation_count": invocation_count,
+                                "input_digest": expected_input_digest,
+                                "output_digest": stable_digest(raw_review),
+                                "failure_code": "reviewer_output_schema_invalid",
+                                "message": str(exc),
+                                "review": raw_review,
+                                "created_at": utc_now(),
+                            },
+                        )
+                        rejected_refs.append(
+                            {
+                                "name": "rejected_reviewer_output",
+                                "path": str(rejected_path),
+                                "schema_version": "harness_rejected_reviewer_output_v1",
+                            }
+                        )
                     result = failure_stage_result(
                         stage="semantic_review",
                         failure_code="reviewer_output_schema_invalid",
@@ -1031,6 +1400,7 @@ class AgentJobController:
                         job_id=job_id,
                         attempt_id=attempt_id,
                         invocation_count=invocation_count,
+                        artifact_refs=rejected_refs,
                     )
                 except BaseException:
                     close_in_flight = False
@@ -1856,6 +2226,7 @@ class AgentJobController:
             job_id=manifest["job_id"],
             attempt_id=manifest["current_attempt_id"],
             transaction_dir=attempt_dir / "compilation",
+            compile_config=self.config.ue_compile_identity(case_spec.data),
         )
         compilation.write(attempt_dir / "compilation")
         manifest = self._reconcile_provider_usage(manifest)
@@ -2066,6 +2437,11 @@ class AgentJobController:
                 key=lambda value: value.name,
             )
         ]
+        result_provenance = self._evidence_result_provenance(
+            manifest,
+            attempt_dir=attempt_dir,
+            run_dir=Path(str(candidate["run_dir"])),
+        )
         result = dict(
             self.hooks.evidence(
                 job_id=job_id,
@@ -2074,6 +2450,7 @@ class AgentJobController:
                 candidate_run_dir=Path(str(candidate["run_dir"])),
                 request=request,
                 intent_contract=intent,
+                result_provenance=result_provenance,
                 intent_amendments=intent_amendments,
             )
         )
@@ -2097,6 +2474,7 @@ class AgentJobController:
             expected_candidate_run_dir=Path(str(candidate["run_dir"])),
             expected_intent_contract_digest=manifest["intent_contract_digest"],
             expected_snapshots=snapshots,
+            expected_result_provenance=result_provenance,
             expected_manifest_digest=stable_digest(bundle),
         )
         attempt.update({"status": "awaiting_semantic_review", "updated_at": utc_now()})
@@ -2114,6 +2492,85 @@ class AgentJobController:
             current_stage="semantic_review",
             allowed_next_actions=["run_semantic_review", "cancel"],
         )
+
+    def _evidence_result_provenance(
+        self,
+        manifest: Mapping[str, Any],
+        *,
+        attempt_dir: Path,
+        run_dir: Path,
+    ) -> dict[str, Any]:
+        asset_resolution_path = attempt_dir / "compilation" / "asset_resolution.json"
+        provider_batch_path = attempt_dir / "compilation" / "asset_provider_batch.json"
+        quality_path = run_dir / "quality_report.json"
+        asset_resolution = read_json(asset_resolution_path)
+        provider_batch = read_json(provider_batch_path)
+        quality = read_json(quality_path)
+        readiness = ((quality.get("source_reports") or {}).get("run_readiness") or {})
+        achieved_tier = readiness.get("publication_tier")
+        if achieved_tier not in {"diagnostic_only", "local_preview", "reference"}:
+            raise JobStoreError("Quality Report lacks a valid achieved publication tier")
+
+        assets = []
+        for resolution in asset_resolution.get("assets") or []:
+            selected = resolution.get("selected_asset") if isinstance(resolution, Mapping) else None
+            intent = resolution.get("intent") if isinstance(resolution, Mapping) else None
+            provenance = selected.get("provenance") if isinstance(selected, Mapping) else None
+            if not isinstance(selected, Mapping) or not isinstance(intent, Mapping) or not isinstance(provenance, Mapping):
+                raise JobStoreError("Asset Resolve lacks selected-asset provenance")
+            assets.append(
+                {
+                    "object_id": intent.get("object_id"),
+                    "slot": intent.get("slot"),
+                    "asset_id": selected.get("asset_id"),
+                    "source_kind": selected.get("source_kind"),
+                    "license_tier": selected.get("license_tier"),
+                    "provider_id": provenance.get("provider_id"),
+                    "recipe_id": provenance.get("recipe_id"),
+                    "receipt_id": provenance.get("receipt_id"),
+                }
+            )
+        routes = sorted(
+            {
+                str(row.get("route"))
+                for row in provider_batch.get("requests") or []
+                if isinstance(row, Mapping) and row.get("route")
+            }
+        )
+        receipt_ids = sorted(str(value) for value in provider_batch.get("receipt_ids") or [])
+        intent = read_json(self.store.job_dir(str(manifest["job_id"])) / "request" / "intent_contract.json")
+        requested_tier = (intent.get("execution") or {}).get("publication_tier")
+        if requested_tier not in {"diagnostic_only", "local_preview", "reference"}:
+            raise JobStoreError("Intent Contract lacks a valid requested publication tier")
+        return {
+            "schema_version": "harness_evidence_result_provenance_v1",
+            "publication": {
+                "requested_tier": requested_tier,
+                "achieved_tier": achieved_tier,
+                "quality_report": {
+                    "path": quality_path.relative_to(attempt_dir).as_posix(),
+                    "sha256": self._sha256_file(quality_path),
+                },
+            },
+            "assets": {
+                "items": assets,
+                "asset_resolution": {
+                    "path": asset_resolution_path.relative_to(attempt_dir).as_posix(),
+                    "sha256": self._sha256_file(asset_resolution_path),
+                },
+            },
+            "provider_usage": {
+                "routes": routes,
+                "external_provider_used": bool(set(routes).intersection({"external_site", "model_generation"})),
+                "paid_submissions": int(manifest["usage"]["paid_submissions"]),
+                "request_count": len(provider_batch.get("requests") or []),
+                "receipt_count": len(receipt_ids),
+                "provider_batch": {
+                    "path": provider_batch_path.relative_to(attempt_dir).as_posix(),
+                    "sha256": self._sha256_file(provider_batch_path),
+                },
+            },
+        }
 
     def _compilation_for_attempt(
         self,
@@ -2141,6 +2598,7 @@ class AgentJobController:
             job_id=key[0],
             attempt_id=key[1],
             transaction_dir=attempt_dir / "compilation",
+            compile_config=self.config.ue_compile_identity(case_spec.data),
         )
         self._compilations[key] = compilation
         return compilation
@@ -2605,11 +3063,22 @@ class AgentJobController:
                 "degraded_preview_only",
                 "soft_deadline_reached",
             } else "blocked"
+            actions = (
+                ["recompile_after_config", "cancel"]
+                if value["failure_class"] == "blocked_configuration"
+                and value["failure_code"] in {
+                    "F3_UE_MAP_MISSING",
+                    "F3_UE_MAP_INVALID",
+                    "F3_UE_MAP_PACKAGE_MISSING",
+                    "F3_UE_MAP_UNRESOLVED",
+                }
+                else ["resume", "cancel"]
+            )
             return self._update_manifest(
                 manifest,
                 state=state,
                 blocker={"code": value["failure_code"], "message": value["message"], "stage": value["stage"]},
-                allowed_next_actions=["resume", "cancel"],
+                allowed_next_actions=actions,
             )
         if value["failure_class"] in {"case_spec_invalid", "verification_failed", "render_sync_failed", "quality_gate_failed"}:
             return self._update_manifest(
@@ -2826,6 +3295,252 @@ class AgentJobController:
             "stage": str(result["stage"]),
             "failure_code": str(result["failure_code"]),
             "message": "correct the external cause, record an explicit reason, then reopen the same checkpoint",
+        }
+
+    def _configuration_recompile_eligibility(
+        self,
+        manifest: Mapping[str, Any],
+        *,
+        current_leaf_stage_result: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        unavailable = {
+            "available": False,
+            "stage": None,
+            "failure_code": None,
+            "old_compile_config": None,
+            "old_compile_config_digest": None,
+            "new_compile_config": None,
+            "new_compile_config_digest": None,
+            "message": "job has no Map configuration blocker eligible for recompilation",
+        }
+        if (
+            manifest.get("state") != "blocked"
+            or manifest.get("current_attempt_id") is None
+            or not isinstance(current_leaf_stage_result, Mapping)
+        ):
+            return unavailable
+        result = current_leaf_stage_result.get("result")
+        map_codes = {
+            "F3_UE_MAP_MISSING",
+            "F3_UE_MAP_INVALID",
+            "F3_UE_MAP_PACKAGE_MISSING",
+            "F3_UE_MAP_UNRESOLVED",
+        }
+        if (
+            not isinstance(result, Mapping)
+            or result.get("status") != "blocked"
+            or result.get("failure_class") != "blocked_configuration"
+            or result.get("stage") not in {"compile", "preflight"}
+            or result.get("failure_code") not in map_codes
+        ):
+            return unavailable
+        attempt_id = str(manifest["current_attempt_id"])
+        attempt_dir = self.store.attempt_dir(str(manifest["job_id"]), attempt_id)
+        compilation_dir = attempt_dir / "compilation"
+        transaction_path = compilation_dir / "compilation_transaction.json"
+        if not transaction_path.is_file():
+            return {**unavailable, "message": "eligible Map blocker has no completed compilation transaction"}
+        try:
+            transaction = read_json(transaction_path)
+            attempt = self.store.load_attempt(str(manifest["job_id"]), attempt_id)
+            if (
+                not isinstance(transaction, Mapping)
+                or transaction.get("state") != "completed"
+                or int(transaction.get("asset_resolve_invocation_count") or 0) != 1
+                or (transaction.get("input_identity") or {}).get("case_spec_digest") != attempt["case_spec_digest"]
+            ):
+                raise ValueError("transaction is not a completed single-Resolve compilation for this CaseSpec")
+            self._validated_reusable_provider_checkpoint(
+                compilation_dir,
+                job_id=str(manifest["job_id"]),
+                attempt_id=attempt_id,
+            )
+            case_spec = read_json(attempt_dir / "case_spec.json")
+            old_config = self._transaction_compile_config(transaction, compilation_dir)
+            new_config = self.config.ue_compile_identity(case_spec)
+        except (OSError, TypeError, ValueError, JobStoreError) as exc:
+            return {**unavailable, "message": f"configuration recompile checkpoint is invalid: {exc}"}
+        old_digest = stable_digest(old_config)
+        new_digest = stable_digest(new_config)
+        failure_code = str(result["failure_code"])
+        map_correction_missing = (
+            failure_code == "F3_UE_MAP_MISSING"
+            and (
+                not new_config["map_package"]
+                or old_config["map_package"] == new_config["map_package"]
+            )
+        )
+        if old_digest == new_digest or map_correction_missing:
+            return {
+                **unavailable,
+                "stage": str(result["stage"]),
+                "failure_code": str(result["failure_code"]),
+                "old_compile_config": old_config,
+                "old_compile_config_digest": old_digest,
+                "new_compile_config": new_config,
+                "new_compile_config_digest": new_digest,
+                "message": "compile-affecting Map/UE project/Catalog configuration has not corrected the Map blocker",
+            }
+        return {
+            "available": True,
+            "stage": str(result["stage"]),
+            "failure_code": str(result["failure_code"]),
+            "old_compile_config": old_config,
+            "old_compile_config_digest": old_digest,
+            "new_compile_config": new_config,
+            "new_compile_config_digest": new_digest,
+            "message": "archive the old compilation and rebuild from compile with the same Provider checkpoint",
+        }
+
+    def _reviewer_contract_retry_eligibility(
+        self,
+        manifest: Mapping[str, Any],
+        *,
+        current_leaf_stage_result: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        unavailable = {
+            "available": False,
+            "failure_result_digest": None,
+            "bundle_digest": None,
+            "prior_invocation_count": None,
+            "old_input_digest": None,
+            "new_input_digest": None,
+            "message": "job has no Reviewer schema failure eligible for a contract-fix retry",
+        }
+        if (
+            manifest.get("state") != "failed"
+            or manifest.get("current_stage") != "semantic_review"
+            or manifest.get("current_attempt_id") is None
+            or not isinstance(current_leaf_stage_result, Mapping)
+        ):
+            return unavailable
+        result = current_leaf_stage_result.get("result")
+        if (
+            not isinstance(result, Mapping)
+            or result.get("stage") != "semantic_review"
+            or result.get("status") != "failed"
+            or result.get("failure_code") != "reviewer_output_schema_invalid"
+        ):
+            return unavailable
+        job_id = str(manifest["job_id"])
+        attempt_id = str(manifest["current_attempt_id"])
+        amendment_paths = sorted(
+            (self.store.job_dir(job_id) / "amendments").glob("reviewer_contract_retry_*.json")
+        )
+        if len(amendment_paths) >= 2:
+            return {**unavailable, "message": "this Job already used its two explicitly authorized Reviewer contract-fix retries"}
+        try:
+            bundle = self._validated_current_bundle(manifest)
+            if not self._technical_completion_intact(manifest, bundle):
+                raise ValueError("Candidate technical gates are no longer intact")
+            bundle_digest = stable_digest(bundle)
+            request = read_json(self.store.job_dir(job_id) / "request" / "user_request.json")
+            has_images = any(
+                isinstance(row, Mapping) and row.get("kind") == "image"
+                for row in request.get("inputs") or []
+            )
+            attempt_dir = self.store.attempt_dir(job_id, attempt_id)
+            reservation_paths = sorted(attempt_dir.glob("reviewer_reservation_*.json"))
+            if not reservation_paths:
+                raise ValueError("Reviewer reservations are missing")
+            first = ReviewerInvocationReservation.from_dict(read_json(reservation_paths[0])).to_dict()
+            old_input_digest = str(first["input_digest"])
+            current_input_digest = semantic_reviewer_input_digest(
+                bundle_dir=attempt_dir / "evidence_bundle",
+                bundle_manifest=bundle,
+                include_original_images=has_images,
+            )
+            reservations = self._reviewer_reservations(
+                attempt_dir,
+                job_id=job_id,
+                attempt_id=attempt_id,
+                bundle_digest=bundle_digest,
+                input_digest=current_input_digest if amendment_paths else old_input_digest,
+            )
+            if (
+                len(reservations) != int(result.get("invocation_count") or 0)
+                or not all(bool(row["usage_counted"]) for row in reservations)
+                or reservations[-1]["outcome"] != "technical_failed"
+                or reservations[-1]["error_code"] != "reviewer_output_schema_invalid"
+            ):
+                raise ValueError("Reviewer failure history is not a completed schema-invalid retry sequence")
+            old_input_digest = str(reservations[-1]["input_digest"])
+            new_input_digest = current_input_digest
+            if old_input_digest == new_input_digest:
+                raise ValueError("Reviewer prompt/output contract digest has not changed")
+        except (EvidenceBundleError, JobStoreError, OSError, TypeError, ValueError) as exc:
+            return {**unavailable, "message": f"Reviewer contract-fix retry is unavailable: {exc}"}
+        return {
+            "available": True,
+            "failure_result_digest": stable_digest(result),
+            "bundle_digest": bundle_digest,
+            "prior_invocation_count": len(reservations),
+            "old_input_digest": old_input_digest,
+            "new_input_digest": new_input_digest,
+            "message": "authorize one new Reviewer turn against the corrected prompt/output contract",
+        }
+
+    @staticmethod
+    def _transaction_compile_config(
+        transaction: Mapping[str, Any],
+        compilation_dir: Path,
+    ) -> dict[str, str]:
+        recorded = transaction.get("compile_config")
+        if isinstance(recorded, Mapping) and set(recorded) == {
+            "schema_version",
+            "map_package",
+            "ue_project",
+            "catalog",
+        }:
+            return {key: str(recorded[key]) for key in recorded}
+        resolution_path = compilation_dir / "asset_resolution.json"
+        resolution = read_json(resolution_path) if resolution_path.is_file() else {}
+        scene_map = resolution.get("scene_map") if isinstance(resolution, Mapping) else None
+        map_package = (
+            str(scene_map.get("requested_reference") or "")
+            if isinstance(scene_map, Mapping)
+            else ""
+        )
+        snapshot = transaction.get("catalog_snapshot")
+        catalog = str(snapshot.get("path") or "") if isinstance(snapshot, Mapping) else ""
+        return {
+            "schema_version": "harness_ue_compile_config_v1",
+            "map_package": map_package,
+            "ue_project": "",
+            "catalog": catalog,
+        }
+
+    @staticmethod
+    def _validated_reusable_provider_checkpoint(
+        compilation_dir: Path,
+        *,
+        job_id: str,
+        attempt_id: str,
+    ) -> dict[str, Any]:
+        batch_path = compilation_dir / "asset_provider_batch.json"
+        if not batch_path.is_file():
+            raise JobStoreError("completed compilation has no Provider batch checkpoint")
+        batch = read_json(batch_path)
+        if not isinstance(batch, Mapping):
+            raise JobStoreError("Provider batch checkpoint must be an object")
+        result = stage_result_from_provider_batch(batch, job_id=job_id, attempt_id=attempt_id)
+        if result["status"] != "completed":
+            raise JobStoreError("Provider batch checkpoint is not completed")
+        request_identities = list(result["request_identities"])
+        if any(not identity for identity in request_identities) or len(request_identities) != len(set(request_identities)):
+            raise JobStoreError("Provider batch request identities are missing or duplicated")
+        receipt_ids = [str(value) for value in batch.get("receipt_ids") or []]
+        if len(receipt_ids) != len(set(receipt_ids)) or any(not value for value in receipt_ids):
+            raise JobStoreError("Provider receipt identities are missing or duplicated")
+        for receipt_id in receipt_ids:
+            path = compilation_dir / "provider_receipts" / f"{receipt_id}.json"
+            receipt = read_json(path) if path.is_file() else None
+            if not isinstance(receipt, Mapping) or receipt.get("receipt_id") != receipt_id:
+                raise JobStoreError(f"Provider receipt checkpoint is missing or mismatched: {receipt_id}")
+        return {
+            "batch_digest": stable_digest(batch),
+            "request_identities": request_identities,
+            "receipt_ids": receipt_ids,
         }
 
     @staticmethod
@@ -3304,6 +4019,7 @@ class AgentJobController:
         return stable_digest(
             {
                 "case_spec": case_spec,
+                "ue_execution_config": self.config.ue_execution_identity(case_spec),
                 "asset_resolution": compilation.artifacts.get("asset_resolution"),
                 "scene_layout": compilation.artifacts.get("scene_layout"),
                 "runtime_actor_placement": compilation.artifacts.get("runtime_actor_placement"),
@@ -3407,12 +4123,26 @@ class AgentJobController:
                     os.environ[key] = value
 
     @contextmanager
-    def _effective_environment(self):
+    def _effective_environment(self, manifest: Mapping[str, Any] | None = None):
+        case_spec = None
+        if manifest is not None and manifest.get("current_attempt_id"):
+            path = self.store.attempt_dir(
+                str(manifest["job_id"]), str(manifest["current_attempt_id"])
+            ) / "case_spec.json"
+            if path.is_file():
+                case_spec = read_json(path)
         values = {
             "SIM_HARNESS_WORKSPACE": str(self.config.workspace),
             "SIM_HARNESS_ASSET_CATALOG": str(self.config.catalog),
             "SIM_STUDIO_UE_PROJECT": str(self.config.ue_project),
+            "SIM_STUDIO_UE_MAP": self.config.ue_map_package_for_case(case_spec),
+            "SIM_STUDIO_UE_ACTOR_CLASS": self.config.ue_actor_class,
+            "SIM_STUDIO_UE_CONTACT_EXPORT": "1" if self.config.ue_contact_export else "0",
         }
+        if self.config.ue_asset_registry is not None:
+            values["SIM_STUDIO_ASSET_REGISTRY"] = str(self.config.ue_asset_registry)
+        if self.config.ue_runner_command:
+            values["SIM_STUDIO_UE_RUNNER_CMD"] = shlex.join(self.config.ue_runner_command)
         if self.config.ue_executable is not None:
             values["SIM_STUDIO_UE_EXECUTABLE"] = str(self.config.ue_executable)
         if self.config.codex_executable is not None:
@@ -3554,6 +4284,7 @@ class AgentJobController:
         manifest: Mapping[str, Any],
         *,
         expected_manifest_digest: str | None,
+        require_result_provenance: bool = True,
     ) -> dict[str, Any]:
         job_id = str(manifest["job_id"])
         attempt_id = str(manifest["current_attempt_id"])
@@ -3575,6 +4306,23 @@ class AgentJobController:
             intent_contract=intent,
             intent_amendments=amendments,
         )
+        validate_current_evidence_bundle(
+            manifest_path=attempt_dir / "evidence_bundle" / "manifest.json",
+            job_id=job_id,
+            attempt=attempt,
+            attempt_dir=attempt_dir,
+            expected_intent_contract_digest=str(manifest["intent_contract_digest"]),
+            expected_snapshots=snapshots,
+            expected_manifest_digest=expected_manifest_digest,
+        )
+        result_provenance = None
+        if require_result_provenance:
+            candidate = read_json(attempt_dir / "candidate_run.json")
+            result_provenance = self._evidence_result_provenance(
+                manifest,
+                attempt_dir=attempt_dir,
+                run_dir=Path(str(candidate["run_dir"])),
+            )
         return validate_current_evidence_bundle(
             manifest_path=attempt_dir / "evidence_bundle" / "manifest.json",
             job_id=job_id,
@@ -3582,6 +4330,7 @@ class AgentJobController:
             attempt_dir=attempt_dir,
             expected_intent_contract_digest=str(manifest["intent_contract_digest"]),
             expected_snapshots=snapshots,
+            expected_result_provenance=result_provenance,
             expected_manifest_digest=expected_manifest_digest,
         )
 
@@ -3594,9 +4343,20 @@ class AgentJobController:
         bundle_digest: str,
         input_digest: str,
     ) -> list[dict[str, Any]]:
+        transitions = self._reviewer_contract_retry_transitions(
+            attempt_dir,
+            job_id=job_id,
+            attempt_id=attempt_id,
+            bundle_digest=bundle_digest,
+            input_digest=input_digest,
+        )
         reservations: list[dict[str, Any]] = []
         for expected_count, path in enumerate(sorted(attempt_dir.glob("reviewer_reservation_*.json")), start=1):
             reservation = ReviewerInvocationReservation.from_dict(read_json(path)).to_dict()
+            expected_input_digest = transitions[0]["old_input_digest"] if transitions else input_digest
+            for transition in transitions:
+                if expected_count > transition["prior_invocation_count"]:
+                    expected_input_digest = transition["new_input_digest"]
             identity_core = {
                 "job_id": reservation["job_id"],
                 "attempt_id": reservation["attempt_id"],
@@ -3610,7 +4370,7 @@ class AgentJobController:
                 or reservation["attempt_id"] != attempt_id
                 or reservation["invocation_count"] != expected_count
                 or reservation["bundle_digest"] != bundle_digest
-                or reservation["input_digest"] != input_digest
+                or reservation["input_digest"] != expected_input_digest
                 or reservation["invocation_id"] != f"reviewer_{stable_digest(identity_core)[:16]}"
             ):
                 raise JobStoreError("Reviewer invocation reservation identity does not match the current attempt")
@@ -3625,7 +4385,7 @@ class AgentJobController:
                     receipt["job_id"] != job_id
                     or receipt["attempt_id"] != attempt_id
                     or receipt["invocation_count"] != expected_count
-                    or receipt["input_digest"] != input_digest
+                    or receipt["input_digest"] != reservation["input_digest"]
                 ):
                     raise JobStoreError("Reviewer receipt identity does not match its reservation")
                 if reservation["state"] != "receipt_recorded":
@@ -3668,6 +4428,111 @@ class AgentJobController:
         if any(count > len(reservations) for count in receipt_counts):
             raise JobStoreError("Reviewer receipt exists without a durable invocation reservation")
         return reservations
+
+    def _reviewer_contract_retry_transitions(
+        self,
+        attempt_dir: Path,
+        *,
+        job_id: str,
+        attempt_id: str,
+        bundle_digest: str,
+        input_digest: str,
+    ) -> list[dict[str, Any]]:
+        paths = sorted(
+            (self.store.job_dir(job_id) / "amendments").glob("reviewer_contract_retry_*.json")
+        )
+        if not paths:
+            return []
+        if len(paths) > 2:
+            raise JobStoreError("Reviewer contract-fix retry receipt sequence is invalid")
+        common_fields = {
+            "schema_version",
+            "job_id",
+            "attempt_id",
+            "failure_code",
+            "failure_result_digest",
+            "bundle_digest",
+            "prior_invocation_count",
+            "old_input_digest",
+            "new_input_digest",
+            "reviewer_technical_retries_before",
+            "reviewer_technical_retries_after",
+            "usage_preserved",
+            "correction_reason",
+            "created_at",
+        }
+        transitions: list[dict[str, Any]] = []
+        for sequence, path in enumerate(paths, start=1):
+            if path.name != f"reviewer_contract_retry_{sequence:03d}.json":
+                raise JobStoreError("Reviewer contract-fix retry receipt sequence is invalid")
+            data = read_json(path)
+            schema_version = data.get("schema_version") if isinstance(data, Mapping) else None
+            expected = (
+                common_fields
+                if schema_version == "harness_agent_reviewer_contract_retry_v1"
+                else common_fields | {"total_retries_before", "total_retries_after"}
+            )
+            if (
+                not isinstance(data, Mapping)
+                or schema_version not in {
+                    "harness_agent_reviewer_contract_retry_v1",
+                    "harness_agent_reviewer_contract_retry_v2",
+                }
+                or set(data) != expected
+            ):
+                raise JobStoreError("Reviewer contract-fix retry receipt has invalid fields")
+            prior_count = data["prior_invocation_count"]
+            before = data["reviewer_technical_retries_before"]
+            after = data["reviewer_technical_retries_after"]
+            digests_valid = all(
+                isinstance(data[field], str) and re.fullmatch(r"[0-9a-f]{64}", data[field])
+                for field in ("failure_result_digest", "bundle_digest", "old_input_digest", "new_input_digest")
+            )
+            totals_valid = True
+            if schema_version == "harness_agent_reviewer_contract_retry_v2":
+                total_before = data["total_retries_before"]
+                total_after = data["total_retries_after"]
+                totals_valid = (
+                    isinstance(total_before, int)
+                    and not isinstance(total_before, bool)
+                    and isinstance(total_after, int)
+                    and not isinstance(total_after, bool)
+                    and total_after in {total_before, total_before + 1}
+                )
+            previous = transitions[-1] if transitions else None
+            if (
+                data["job_id"] != job_id
+                or data["attempt_id"] != attempt_id
+                or data["failure_code"] != "reviewer_output_schema_invalid"
+                or data["bundle_digest"] != bundle_digest
+                or data["old_input_digest"] == data["new_input_digest"]
+                or not digests_valid
+                or not isinstance(prior_count, int)
+                or isinstance(prior_count, bool)
+                or prior_count < 1
+                or not isinstance(before, int)
+                or isinstance(before, bool)
+                or not isinstance(after, int)
+                or isinstance(after, bool)
+                or after != before + 1
+                or not totals_valid
+                or (
+                    previous is not None
+                    and (
+                        data["old_input_digest"] != previous["new_input_digest"]
+                        or prior_count <= previous["prior_invocation_count"]
+                        or before != previous["reviewer_technical_retries_after"]
+                    )
+                )
+            ):
+                raise JobStoreError("Reviewer contract-fix retry receipt identity is invalid")
+            transitions.append(dict(data))
+        reservation_count = len(list(attempt_dir.glob("reviewer_reservation_*.json")))
+        if any(row["prior_invocation_count"] > reservation_count for row in transitions):
+            raise JobStoreError("Reviewer contract-fix retry receipt references a missing prior invocation")
+        if reservation_count == transitions[-1]["prior_invocation_count"] and input_digest != transitions[-1]["new_input_digest"]:
+            raise JobStoreError("Reviewer contract-fix retry input digest does not match the authorized transition")
+        return transitions
 
     def _next_reviewer_reservation(
         self,
@@ -3742,18 +4607,20 @@ class AgentJobController:
         attempts_root = self.store.job_dir(job_id) / "attempts"
         for attempt_dir in sorted(path for path in attempts_root.glob("attempt_*") if path.is_dir()):
             expected_attempt_id = attempt_dir.name
-            for expected_count, path in enumerate(
-                sorted(attempt_dir.glob("reviewer_reservation_*.json")),
-                start=1,
-            ):
-                reservation = ReviewerInvocationReservation.from_dict(read_json(path)).to_dict()
-                if (
-                    reservation["job_id"] != job_id
-                    or reservation["attempt_id"] != expected_attempt_id
-                    or reservation["invocation_count"] != expected_count
+            review_roots = [attempt_dir, *sorted(attempt_dir.glob("semantic_review_superseded_*"))]
+            for review_root in review_roots:
+                for expected_count, path in enumerate(
+                    sorted(review_root.glob("reviewer_reservation_*.json")),
+                    start=1,
                 ):
-                    raise JobStoreError("Reviewer reservation sequence cannot rebuild Job usage")
-                launched += int(reservation["usage_counted"])
+                    reservation = ReviewerInvocationReservation.from_dict(read_json(path)).to_dict()
+                    if (
+                        reservation["job_id"] != job_id
+                        or reservation["attempt_id"] != expected_attempt_id
+                        or reservation["invocation_count"] != expected_count
+                    ):
+                        raise JobStoreError("Reviewer reservation sequence cannot rebuild Job usage")
+                    launched += int(reservation["usage_counted"])
         if int(manifest["usage"]["reviewer_invocations"]) == launched:
             return dict(manifest)
         usage = copy.deepcopy(manifest["usage"])

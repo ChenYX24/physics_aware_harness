@@ -274,6 +274,7 @@ class SuccessfulHarness:
             "status": "pass",
             "hard_gate_passed": True,
             "hard_gate": {"failures": []},
+            "source_reports": {"run_readiness": {"publication_tier": "reference"}},
         }
         write_json(run_dir / "quality_report.json", report)
         write_stage_result(run_dir, build_stage_result(stage="quality_gate", status="completed"))
@@ -292,6 +293,7 @@ class SuccessfulHarness:
                     kwargs["intent_contract"],
                     kwargs.get("intent_amendments") or [],
                 ),
+                "result_provenance": kwargs["result_provenance"],
             },
         )
 
@@ -424,7 +426,7 @@ class SuccessfulHarness:
         lifecycle_callback = kwargs.get("lifecycle_callback")
         if lifecycle_callback is not None:
             lifecycle_callback("started")
-        repair_layer = "none" if self.semantic_status == "pass" else "camera" if self.semantic_status == "fail" else "user_decision"
+        repair_layer = "none" if self.semantic_status == "pass" else "camera" if self.semantic_status == "fail" else "evidence"
         semantic_requirements = read_json(bundle_dir / "evidence_summary.json")["semantic_requirements"]
         raw = {
             "overall_status": self.semantic_status,
@@ -928,6 +930,42 @@ class AgentJobControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "explicit review boundary"):
             controller.run_semantic_review("job_m4_semantic_uncertain")
         self.assertEqual(fake.semantic_calls, 1)
+
+    def test_evidence_provenance_rebuild_reuses_candidate_and_preserves_usage(self) -> None:
+        controller, fake = self.controller(SuccessfulHarness(semantic_status="uncertain"))
+        controller.create(
+            self.request,
+            job_id="job_m4_evidence_rebuild",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        controller.advance_until_blocked("job_m4_evidence_rebuild")
+        uncertain = controller.run_semantic_review("job_m4_evidence_rebuild")
+        usage_before = copy.deepcopy(uncertain["job"]["usage"])
+
+        rebuilt = controller.rebuild_evidence_after_provenance(
+            "job_m4_evidence_rebuild",
+            reason="project authoritative result provenance into the Evidence Bundle",
+        )
+
+        self.assertEqual(rebuilt["job"]["state"], "awaiting_semantic_review")
+        self.assertGreaterEqual(rebuilt["job"]["usage"]["active_elapsed_seconds"], usage_before["active_elapsed_seconds"])
+        self.assertEqual(
+            {key: value for key, value in rebuilt["job"]["usage"].items() if key != "active_elapsed_seconds"},
+            {key: value for key, value in usage_before.items() if key != "active_elapsed_seconds"},
+        )
+        self.assertEqual(fake.execute_calls, ["smoke", "candidate"])
+        self.assertEqual(fake.semantic_calls, 1)
+        attempt = Path(rebuilt["paths"]["job_root"]) / "attempts" / "attempt_001"
+        self.assertTrue((attempt / "evidence_bundle_superseded_001" / "manifest.json").is_file())
+        self.assertTrue((attempt / "semantic_review_superseded_001" / "semantic_review.json").is_file())
+        self.assertFalse((attempt / "semantic_review.json").exists())
+        summary = read_json(attempt / "evidence_bundle" / "evidence_summary.json")
+        self.assertEqual(summary["result_provenance"]["provider_usage"]["paid_submissions"], 0)
+
+        reviewed = controller.run_semantic_review("job_m4_evidence_rebuild")
+        self.assertEqual(reviewed["job"]["usage"]["reviewer_invocations"], 2)
+        self.assertEqual(fake.semantic_calls, 2)
 
     def test_reviewer_receipt_and_body_are_bound_to_the_current_invocation(self) -> None:
         mutations = (
@@ -1992,6 +2030,255 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertEqual(calls, 4)
         self.assertEqual(resumed["job"]["usage"]["total_retries"], 1)
 
+    def test_map_blocker_recompile_archives_transaction_and_preserves_provider_and_usage(self) -> None:
+        controller, fake = self.controller()
+        controller.create(
+            self.request,
+            job_id="job_map_config_recompile",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        completed = controller.advance_until_blocked("job_map_config_recompile")
+        root = Path(completed["paths"]["job_root"])
+        attempt_dir = root / "attempts" / "attempt_001"
+        attempt = controller.store.load_attempt("job_map_config_recompile", "attempt_001")
+        transaction_path = attempt_dir / "compilation" / "compilation_transaction.json"
+        transaction = read_json(transaction_path)
+        transaction["input_identity"] = {
+            "case_spec_digest": attempt["case_spec_digest"],
+            "requested_backend": "fallback",
+        }
+        transaction["catalog_snapshot"] = {
+            "path": str(controller.config.catalog),
+            "sha256": None,
+        }
+        write_json(transaction_path, transaction)
+        blocker = failure_stage_result(
+            stage="preflight",
+            failure_code="F3_UE_MAP_MISSING",
+            message="compiled scene has no requested Map",
+            source_status="blocked",
+            job_id="job_map_config_recompile",
+            attempt_id="attempt_001",
+        )
+        write_stage_result(attempt_dir, blocker)
+        manifest = controller.store.load_manifest("job_map_config_recompile")
+        controller._update_manifest(
+            manifest,
+            state="blocked",
+            current_stage="smoke",
+            blocker={"code": "F3_UE_MAP_MISSING", "message": blocker["message"], "stage": "preflight"},
+            allowed_next_actions=["resume", "cancel"],
+        )
+        before = controller.inspect("job_map_config_recompile")
+        usage_before = copy.deepcopy(before["job"]["usage"])
+        provider_before = read_json(attempt_dir / "compilation" / "asset_provider_batch.json")
+
+        reopened = controller.recompile_after_config(
+            "job_map_config_recompile",
+            reason="configured the Catalog-qualified Harness Map",
+        )
+
+        self.assertTrue(before["configuration_recompile"]["available"])
+        self.assertEqual(reopened["job"]["state"], "paused_interrupted")
+        self.assertEqual(reopened["job"]["current_stage"], "compile")
+        self.assertEqual(reopened["job"]["current_attempt_id"], "attempt_001")
+        self.assertEqual(reopened["job"]["usage"], usage_before)
+        self.assertFalse((attempt_dir / "compilation" / "compilation_transaction.json").exists())
+        self.assertEqual(read_json(attempt_dir / "compilation" / "asset_provider_batch.json"), provider_before)
+        self.assertTrue((attempt_dir / "compilation_superseded_001" / "compilation_transaction.json").is_file())
+        receipt = read_json(root / "receipts" / "configuration_recompile_001.json")
+        self.assertNotEqual(receipt["old_compile_config_digest"], receipt["new_compile_config_digest"])
+        self.assertEqual(receipt["provider_checkpoint"]["request_identities"], [])
+        self.assertEqual(fake.compile_calls.count((("event_closeup",), ("rgb",))), 1)
+
+        resumed = controller.resume("job_map_config_recompile")
+        self.assertEqual(resumed["job"]["state"], "awaiting_semantic_review")
+        self.assertEqual(resumed["job"]["current_attempt_id"], "attempt_001")
+        self.assertEqual(fake.compile_calls.count((("event_closeup",), ("rgb",))), 2)
+        self.assertGreaterEqual(
+            resumed["job"]["usage"]["active_elapsed_seconds"],
+            usage_before["active_elapsed_seconds"],
+        )
+        self.assertEqual(
+            {key: value for key, value in resumed["job"]["usage"].items() if key != "active_elapsed_seconds"},
+            {key: value for key, value in usage_before.items() if key != "active_elapsed_seconds"},
+        )
+
+    def test_configuration_recompile_rejects_non_map_and_non_configuration_failures(self) -> None:
+        controller, _ = self.controller()
+        controller.create(
+            self.request,
+            job_id="job_recompile_rejected",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        completed = controller.advance_until_blocked("job_recompile_rejected")
+        manifest = controller.store.load_manifest("job_recompile_rejected")
+        attempt_dir = Path(completed["paths"]["job_root"]) / "attempts" / "attempt_001"
+        for stage, code in (("preflight", "F4_UE_ACTOR_CLASS_MISSING"), ("verifier", "declared_assertion_failed")):
+            result = failure_stage_result(
+                stage=stage,
+                failure_code=code,
+                message="not a compile-affecting Map correction",
+                source_status="blocked" if stage == "preflight" else None,
+                job_id="job_recompile_rejected",
+                attempt_id="attempt_001",
+            )
+            write_stage_result(attempt_dir, result)
+            controller._update_manifest(
+                manifest,
+                state="blocked",
+                current_stage="smoke",
+                blocker={"code": code, "message": result["message"], "stage": stage},
+                allowed_next_actions=["resume", "cancel"],
+            )
+            inspection = controller.inspect("job_recompile_rejected")
+            self.assertFalse(inspection["configuration_recompile"]["available"])
+            with self.assertRaises(JobStoreError):
+                controller.recompile_after_config("job_recompile_rejected", reason="irrelevant change")
+            manifest = controller.store.load_manifest("job_recompile_rejected")
+
+    def test_reviewer_contract_fix_chains_two_digests_without_reexecuting_candidate(self) -> None:
+        fake = SuccessfulHarness()
+        hooks = fake.hooks()
+        successful_review = hooks.semantic_review
+        digest = {"value": "a" * 64}
+        calls = 0
+
+        def schema_invalid_then_valid(**kwargs):
+            nonlocal calls
+            calls += 1
+            result = successful_review(**kwargs)
+            if calls <= 3:
+                for requirement in result["review"]["requirements"]:
+                    requirement["evidence_refs"][0].update(
+                        {
+                            "time_s": None,
+                            "view_id": None,
+                            "trajectory_range": None,
+                            "contact_event_id": None,
+                        }
+                    )
+                result["receipt"]["output_digest"] = stable_digest(result["review"])
+            result["receipt"]["input_digest"] = digest["value"]
+            return result
+
+        hooks.semantic_review = schema_invalid_then_valid
+        controller = AgentJobController(self.workspace, hooks=hooks)
+        with (
+            patch(
+                "harness.agent.job_controller.semantic_reviewer_input_digest",
+                side_effect=lambda **_kwargs: digest["value"],
+            ),
+            patch(
+                "tests.test_agent_job_controller.semantic_reviewer_input_digest",
+                side_effect=lambda **_kwargs: digest["value"],
+            ),
+        ):
+            controller.create(
+                self.request,
+                job_id="job_reviewer_contract_retry",
+                budget={"max_total_retries": 2},
+                publication_tier="local_preview",
+                seed_case_spec=case_spec_v2_fixture(),
+            )
+            ready = controller.advance_until_blocked("job_reviewer_contract_retry")
+            failed = controller.run_semantic_review("job_reviewer_contract_retry")
+
+            self.assertEqual(failed["job"]["state"], "failed")
+            self.assertEqual(failed["job"]["blocker"]["code"], "reviewer_output_schema_invalid")
+            self.assertFalse(failed["reviewer_contract_retry"]["available"])
+            usage_before = copy.deepcopy(failed["job"]["usage"])
+            budget_before = copy.deepcopy(failed["job"]["budget"])
+            execute_before = list(fake.execute_calls)
+            bundle_before = stable_digest(
+                read_json(Path(ready["paths"]["job_root"]) / "attempts" / "attempt_001" / "evidence_bundle" / "manifest.json")
+            )
+
+            digest["value"] = "b" * 64
+            eligible = controller.inspect("job_reviewer_contract_retry")
+            self.assertTrue(eligible["reviewer_contract_retry"]["available"])
+            reopened = controller.retry_review_after_contract_fix(
+                "job_reviewer_contract_retry",
+                reason="Reviewer locator contract is now explicit in the prompt and output schema",
+            )
+
+            self.assertEqual(reopened["job"]["state"], "awaiting_semantic_review")
+            self.assertEqual(reopened["job"]["usage"], usage_before)
+            self.assertEqual(
+                reopened["job"]["budget"]["max_reviewer_technical_retries"],
+                budget_before["max_reviewer_technical_retries"] + 1,
+            )
+            receipt_path = Path(reopened["paths"]["job_root"]) / "amendments" / "reviewer_contract_retry_001.json"
+            receipt = read_json(receipt_path)
+            self.assertEqual(receipt["schema_version"], "harness_agent_reviewer_contract_retry_v2")
+            self.assertEqual(receipt["old_input_digest"], "a" * 64)
+            self.assertEqual(receipt["new_input_digest"], "b" * 64)
+            self.assertEqual(receipt["usage_preserved"], usage_before)
+
+            # The real Job created receipt 001 before v2 added explicit total-retry
+            # budget fields. Preserve and validate that immutable v1 migration shape.
+            receipt["schema_version"] = "harness_agent_reviewer_contract_retry_v1"
+            receipt.pop("total_retries_before")
+            receipt.pop("total_retries_after")
+            write_json(receipt_path, receipt)
+
+            failed_again = controller.run_semantic_review("job_reviewer_contract_retry")
+
+            self.assertEqual(failed_again["job"]["state"], "failed")
+            self.assertEqual(calls, 3)
+            self.assertEqual(failed_again["job"]["usage"]["total_retries"], 2)
+            digest["value"] = "c" * 64
+            eligible_again = controller.inspect("job_reviewer_contract_retry")
+            self.assertTrue(eligible_again["reviewer_contract_retry"]["available"])
+            reopened_again = controller.retry_review_after_contract_fix(
+                "job_reviewer_contract_retry",
+                reason="Canonical adjustment paths are now explicit in the Reviewer contract",
+            )
+
+            self.assertEqual(reopened_again["job"]["state"], "awaiting_semantic_review")
+            self.assertEqual(
+                reopened_again["job"]["budget"]["max_reviewer_technical_retries"],
+                budget_before["max_reviewer_technical_retries"] + 2,
+            )
+            self.assertEqual(reopened_again["job"]["budget"]["max_total_retries"], 3)
+            receipt_002 = read_json(
+                Path(reopened_again["paths"]["job_root"])
+                / "amendments"
+                / "reviewer_contract_retry_002.json"
+            )
+            self.assertEqual(receipt_002["schema_version"], "harness_agent_reviewer_contract_retry_v2")
+            self.assertEqual(receipt_002["old_input_digest"], "b" * 64)
+            self.assertEqual(receipt_002["new_input_digest"], "c" * 64)
+            self.assertEqual(receipt_002["prior_invocation_count"], 3)
+            self.assertEqual(receipt_002["total_retries_before"], 2)
+            self.assertEqual(receipt_002["total_retries_after"], 3)
+
+            completed = controller.run_semantic_review("job_reviewer_contract_retry")
+
+            self.assertEqual(completed["job"]["state"], "completed")
+            self.assertEqual(calls, 4)
+            self.assertEqual(fake.execute_calls, execute_before)
+            self.assertEqual(completed["job"]["usage"]["reviewer_invocations"], 4)
+            self.assertEqual(
+                stable_digest(
+                    read_json(
+                        Path(completed["paths"]["job_root"])
+                        / "attempts"
+                        / "attempt_001"
+                        / "evidence_bundle"
+                        / "manifest.json"
+                    )
+                ),
+                bundle_before,
+            )
+            with self.assertRaises(JobStoreError):
+                controller.retry_review_after_contract_fix(
+                    "job_reviewer_contract_retry",
+                    reason="a second contract retry is forbidden",
+                )
+
     def test_failed_importer_usage_migrates_before_same_job_retry(self) -> None:
         controller, _ = self.controller()
         controller.create(
@@ -2109,6 +2396,44 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertEqual([row["event"] for row in events], ["job_created", "stage_blocked"])
         self.assertEqual(events[-1]["stage"], "budget")
         self.assertEqual(events[-1]["result"]["failure_code"], "budget_exhausted")
+
+    def test_unlaunched_reviewer_setup_failure_recovers_without_retry_or_usage(self) -> None:
+        fake = SuccessfulHarness()
+        hooks = fake.hooks()
+
+        def setup_failure(**kwargs):
+            raise SemanticReviewerError(
+                "reviewer_app_server_failure",
+                "state runtime is unavailable",
+                retryable=True,
+                receipt=failed_reviewer_receipt(kwargs, "reviewer_app_server_failure"),
+            )
+
+        hooks.semantic_review = setup_failure
+        controller = AgentJobController(self.workspace, hooks=hooks)
+        controller.create(
+            self.request,
+            job_id="job_m4_unlaunched_review",
+            budget={"max_total_retries": 0},
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        controller.advance_until_blocked("job_m4_unlaunched_review")
+        failed = controller.run_semantic_review("job_m4_unlaunched_review")
+        self.assertEqual(failed["job"]["usage"]["reviewer_invocations"], 0)
+        self.assertEqual(failed["job"]["usage"]["total_retries"], 0)
+
+        recovered = controller.recover_unlaunched_review(
+            "job_m4_unlaunched_review",
+            reason="make the Reviewer state directory writable",
+        )
+        self.assertEqual(recovered["job"]["state"], "awaiting_semantic_review")
+        controller.hooks.semantic_review = fake.semantic_review
+        completed = controller.run_semantic_review("job_m4_unlaunched_review")
+
+        self.assertEqual(completed["job"]["state"], "completed")
+        self.assertEqual(completed["job"]["usage"]["reviewer_invocations"], 1)
+        self.assertEqual(completed["job"]["usage"]["total_retries"], 0)
 
     def test_ue_launch_budget_stops_before_backend_invocation(self) -> None:
         controller, fake = self.controller(SuccessfulHarness(selected_backend="ue"))
@@ -2483,6 +2808,14 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertEqual(failed["job"]["blocker"]["code"], "reviewer_output_schema_invalid")
         attempt = Path(failed["paths"]["job_root"]) / "attempts" / "attempt_001"
         self.assertFalse((attempt / "semantic_review.json").exists())
+        rejected = read_json(attempt / "reviewer_output_rejected_001.json")
+        self.assertEqual(rejected["schema_version"], "harness_rejected_reviewer_output_v1")
+        self.assertEqual(rejected["failure_code"], "reviewer_output_schema_invalid")
+        self.assertEqual(rejected["invocation_count"], 1)
+        self.assertEqual(
+            failed["current_leaf_stage_result"]["result"]["artifact_refs"][0]["path"],
+            str(attempt / "reviewer_output_rejected_001.json"),
+        )
 
     def test_authorization_resume_writes_amendment_and_effective_provider_manifest(self) -> None:
         image = self.workspace / "authorization.png"
@@ -2620,6 +2953,7 @@ class AgentJobCliTests(unittest.TestCase):
         self.assertIn("apply-revision", completed.stdout)
         self.assertIn("recover-interrupted", completed.stdout)
         self.assertIn("retry-failed", completed.stdout)
+        self.assertIn("recompile-after-config", completed.stdout)
 
     def test_create_and_inspect_emit_structured_json(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

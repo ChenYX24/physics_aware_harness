@@ -18,6 +18,16 @@
       "/Users/laplace/phyawareharness/physics_aware_harness/scripts/harness_ue_asset_importer.py"
     ]
   },
+  "ue_runtime": {
+    "map_package": "/Game/HarnessGenerated/Maps/BallBoardSmoke.BallBoardSmoke",
+    "actor_class": "/Script/Engine.StaticMeshActor",
+    "asset_registry": "/Volumes/TiPlus7100s/SimulatorWorkspace/physics_aware_harness/catalog/local_generated/asset_registry.local.json",
+    "contact_export": true,
+    "runner_command": [
+      "/Users/laplace/miniforge3/bin/python",
+      "/Users/laplace/phyawareharness/physics_aware_harness/scripts/harness_local_ue_runner.py"
+    ]
+  },
   "paths": {
     "workspace": "/Volumes/TiPlus7100s/SimulatorWorkspace/physics_aware_harness",
     "catalog": null,

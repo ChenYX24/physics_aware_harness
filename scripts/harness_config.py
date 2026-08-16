@@ -22,6 +22,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ue-executable")
     parser.add_argument("--codex-executable")
     parser.add_argument("--ue-asset-importer-command")
+    parser.add_argument("--ue-map")
+    parser.add_argument("--ue-actor-class")
+    parser.add_argument("--ue-asset-registry")
+    parser.add_argument("--ue-contact-export", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--ue-runner-command")
     parser.add_argument("--planning-base-url")
     parser.add_argument("--planning-model")
     parser.add_argument("--planning-image-capability", choices=["supported", "unsupported", "unknown"])
@@ -41,6 +46,11 @@ def main() -> int:
         "paths.ue_executable": args.ue_executable,
         "codex_reviewer.executable": args.codex_executable,
         "ue_asset_importer.command": args.ue_asset_importer_command,
+        "ue_runtime.map_package": args.ue_map,
+        "ue_runtime.actor_class": args.ue_actor_class,
+        "ue_runtime.asset_registry": args.ue_asset_registry,
+        "ue_runtime.contact_export": args.ue_contact_export,
+        "ue_runtime.runner_command": args.ue_runner_command,
         "planning_llm.base_url": args.planning_base_url,
         "planning_llm.model": args.planning_model,
         "planning_llm.image_capability": args.planning_image_capability,

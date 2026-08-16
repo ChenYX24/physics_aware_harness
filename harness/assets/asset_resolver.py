@@ -22,6 +22,7 @@ def resolve_asset_intents(
     provider_results: dict[tuple[str, str], dict[str, Any]] | None = None,
     target_backend: str = "unreal",
     allow_local_preview: bool | None = None,
+    requested_map_package: str | None = None,
 ) -> dict[str, Any]:
     registry = registry or AssetRegistry()
     if allow_local_preview is None:
@@ -161,6 +162,7 @@ def resolve_asset_intents(
         registry=registry,
         top_k=top_k,
         allow_local_preview=allow_local_preview,
+        requested_reference=requested_map_package,
     )
     resolution_rows = [*rows, *([scene_map] if scene_map else [])]
     selected = [row["selected_asset"] for row in resolution_rows if row.get("selected_asset")]
@@ -204,12 +206,21 @@ def resolve_asset_intents(
     return result
 
 
-def requested_map_reference(case_spec: dict[str, Any] | None = None) -> str:
-    explicit = os.environ.get("SIM_STUDIO_UE_MAP", "").strip()
+def requested_map_reference(
+    case_spec: dict[str, Any] | None = None,
+    *,
+    explicit_override: str | None = None,
+    default: str = "",
+) -> str:
+    explicit = (
+        os.environ.get("SIM_STUDIO_UE_MAP", "").strip()
+        if explicit_override is None
+        else str(explicit_override).strip()
+    )
     if explicit:
         return explicit
     scene = case_spec.get("scene") if isinstance(case_spec, dict) and isinstance(case_spec.get("scene"), dict) else {}
-    return str(scene.get("map_preference") or scene.get("map_package") or "").strip()
+    return str(scene.get("map_preference") or scene.get("map_package") or default).strip()
 
 
 def resolve_scene_map(
@@ -218,8 +229,9 @@ def resolve_scene_map(
     registry: AssetRegistry,
     top_k: int,
     allow_local_preview: bool,
+    requested_reference: str | None = None,
 ) -> dict[str, Any] | None:
-    requested = requested_map_reference(case_spec)
+    requested = requested_map_reference(case_spec, explicit_override=requested_reference)
     if not requested:
         return None
     query = requested.rsplit(".", 1)[-1].rsplit("/", 1)[-1] if requested.startswith("/Game/") else requested

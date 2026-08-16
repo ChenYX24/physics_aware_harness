@@ -8,10 +8,36 @@ from pathlib import Path
 from unittest.mock import patch
 
 from harness.agent.semantic_reviewer import CodexAppServerReviewer, SemanticReviewerError
-from harness.agent.review_schema import ReviewerInvocationReceipt, SemanticReview
+from harness.agent.review_schema import ReviewerInvocationReceipt, SemanticReview, semantic_review_output_schema
 
 
 class SemanticReviewerAdapterTests(unittest.TestCase):
+    def test_reviewer_prompt_and_schema_explain_concrete_locator_contract(self) -> None:
+        prompt = CodexAppServerReviewer._input_items(
+            Path("/tmp/evidence-bundle"),
+            {"artifacts": []},
+            include_original_images=False,
+        )[0]["text"]
+        self.assertIn("the four locator fields must not all be null", prompt)
+        self.assertIn("A keyframe citation requires both its exact time_s and view_id", prompt)
+        self.assertIn("Input snapshots cannot support a pass verdict by themselves", prompt)
+        self.assertIn("copy path exactly from inputs/intent_contract.json allowed_adjustments.paths", prompt)
+        self.assertIn("Never invent a path", prompt)
+        self.assertIn("Set overall_status to uncertain if any requirement is uncertain", prompt)
+        self.assertIn("Use repair_layer=none only for an overall pass", prompt)
+
+        evidence_ref = (
+            semantic_review_output_schema()["properties"]["requirements"]["items"]
+            ["properties"]["evidence_refs"]["items"]
+        )
+        self.assertIn("At least one", evidence_ref["description"])
+        self.assertIn("Keyframes require exact time_s and view_id", evidence_ref["description"])
+        adjustment_path = (
+            semantic_review_output_schema()["properties"]["suggested_adjustments"]["items"]
+            ["properties"]["path"]
+        )
+        self.assertIn("allowed_adjustments.paths", adjustment_path["description"])
+
     def test_semantic_review_rejects_unknown_fields_and_evidence_references(self) -> None:
         payload = {
             "schema_version": "harness_semantic_review_v1",

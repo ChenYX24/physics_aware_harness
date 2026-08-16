@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import math
+import os
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Any, Mapping
 
 from harness.assets.asset_intent_compiler import CompiledAssetIntent, compile_v2_asset_intents
 from harness.assets.asset_registry import AssetRegistry
-from harness.assets.asset_resolver import resolve_asset_intents
+from harness.assets.asset_resolver import requested_map_reference, resolve_asset_intents
 from harness.assets.providers.orchestrator import AssetProviderOrchestrator
 from harness.core.artifact_schema import read_json, write_json
 from harness.core.stage_result import (
@@ -141,6 +142,7 @@ def compile_runtime_case(
     job_id: str | None = None,
     attempt_id: str | None = None,
     transaction_dir: str | Path | None = None,
+    compile_config: Mapping[str, Any] | None = None,
 ) -> RuntimeCompilation:
     started = time.perf_counter()
     try:
@@ -156,6 +158,7 @@ def compile_runtime_case(
             transaction_dir=transaction_dir,
             job_id=job_id,
             attempt_id=attempt_id,
+            compile_config=compile_config,
         )
     except BaseException as exc:
         persisted_result = getattr(exc, "stage_result", None)
@@ -223,12 +226,18 @@ def _compile_runtime_case_impl(
     transaction_dir: str | Path | None = None,
     job_id: str | None = None,
     attempt_id: str | None = None,
+    compile_config: Mapping[str, Any] | None = None,
 ) -> RuntimeCompilation:
     if not isinstance(case_spec, CaseSpecV2):
         raise TypeError("Runtime Compiler accepts only a validated CaseSpec V2")
     runtime_case = compile_case_spec_v2_runtime(case_spec)
     source_data = copy.deepcopy(case_spec.data)
     registry = registry or AssetRegistry()
+    effective_compile_config = _compile_config_identity(
+        compile_config,
+        case_spec=case_spec,
+        registry=registry,
+    )
 
     backend_selection = plan_backend(
         runtime_case.data,
@@ -254,6 +263,7 @@ def _compile_runtime_case_impl(
         backend_selection=backend_selection,
         runtime_case=runtime_case,
         compiled_intents=compiled_intents,
+        compile_config=effective_compile_config,
     )
     provider_orchestration = _provider_for_compilation_transaction(
         transaction_root,
@@ -279,6 +289,7 @@ def _compile_runtime_case_impl(
         registry=registry,
         job_id=job_id,
         attempt_id=attempt_id,
+        requested_map_package=effective_compile_config["map_package"],
     )
     solver_contract_error = bind_resolved_solver_assets(runtime_case.data, asset_resolution)
     scene_layout = build_static_scene_layout(
@@ -348,6 +359,7 @@ def _compile_runtime_case_impl(
         "stage_order": list(COMPILATION_STAGE_ORDER),
         "completed_stages": list(COMPILATION_STAGE_ORDER),
         "asset_resolve_invocation_count": int(transaction.get("asset_resolve_invocation_count") or 1),
+        "compile_config_digest": _stable_digest(effective_compile_config),
         "backend_selection": copy.deepcopy(backend_selection),
         "artifact_schemas": {
             ARTIFACT_FILENAMES[key]: value.get("schema_version")
@@ -387,16 +399,19 @@ def _begin_compilation_transaction(
     backend_selection: Mapping[str, Any],
     runtime_case: RuntimeCase,
     compiled_intents: tuple[CompiledAssetIntent, ...],
+    compile_config: Mapping[str, str],
 ) -> dict[str, Any]:
     identity = {
         "case_spec_digest": _stable_digest(case_spec.data),
         "requested_backend": requested_backend,
+        "compile_config_digest": _stable_digest(compile_config),
     }
     transaction_id = f"compilation_{_stable_digest(identity)[:24]}"
     fresh = {
         "schema_version": COMPILATION_TRANSACTION_SCHEMA_VERSION,
         "transaction_id": transaction_id,
         "input_identity": identity,
+        "compile_config": dict(compile_config),
         "latest_projection": {
             "requested_views": list(requested_views) if requested_views is not None else None,
             "render_passes": list(render_passes) if render_passes is not None else None,
@@ -494,6 +509,7 @@ def _resolve_for_compilation_transaction(
     registry: AssetRegistry,
     job_id: str | None,
     attempt_id: str | None,
+    requested_map_package: str,
 ) -> dict[str, Any]:
     resolution_path = root / ARTIFACT_FILENAMES["asset_resolution"] if root is not None else None
     if resolution_path is not None and resolution_path.is_file():
@@ -527,6 +543,7 @@ def _resolve_for_compilation_transaction(
         provider_results=provider_orchestration.results,
         target_backend=target_asset_backend,
         allow_local_preview=(case_spec.data.get("asset_policy") or {}).get("required_license_tier") == "local_preview",
+        requested_map_package=requested_map_package,
     )
     if resolution_path is not None:
         write_json(resolution_path, resolution)
@@ -575,6 +592,40 @@ def _sha256_file(path: Path) -> str:
 def _stable_digest(value: Any) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _compile_config_identity(
+    value: Mapping[str, Any] | None,
+    *,
+    case_spec: CaseSpecV2,
+    registry: AssetRegistry,
+) -> dict[str, str]:
+    data = (
+        {
+            "schema_version": "harness_ue_compile_config_v1",
+            "map_package": requested_map_reference(case_spec.data),
+            "ue_project": os.environ.get("SIM_STUDIO_UE_PROJECT", "").strip(),
+            "catalog": str(registry.path.resolve(strict=False)),
+        }
+        if value is None
+        else dict(value)
+    )
+    expected = {"schema_version", "map_package", "ue_project", "catalog"}
+    if set(data) != expected or data.get("schema_version") != "harness_ue_compile_config_v1":
+        raise ValueError("compile_config must be a strict harness_ue_compile_config_v1 object")
+    for field in ("map_package", "ue_project", "catalog"):
+        if not isinstance(data.get(field), str):
+            raise ValueError(f"compile_config.{field} must be a string")
+    catalog = str(Path(data["catalog"]).expanduser().resolve(strict=False))
+    actual_catalog = str(registry.path.expanduser().resolve(strict=False))
+    if catalog != actual_catalog:
+        raise ValueError("compile_config.catalog must match the AssetRegistry used by Runtime Compiler")
+    return {
+        "schema_version": "harness_ue_compile_config_v1",
+        "map_package": data["map_package"].strip(),
+        "ue_project": data["ue_project"].strip(),
+        "catalog": catalog,
+    }
 
 
 def _compile_runtime_plan(

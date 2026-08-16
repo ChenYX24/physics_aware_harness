@@ -65,6 +65,12 @@ class EvidenceBundleTests(unittest.TestCase):
         self.intent = {
             "hard_requirements": [{"id": "original_user_request", "text": "drop the ball", "frozen": True}]
         }
+        self.result_provenance = {
+            "schema_version": "harness_evidence_result_provenance_v1",
+            "publication": {"requested_tier": "local_preview", "achieved_tier": "local_preview"},
+            "assets": {"items": []},
+            "provider_usage": {"external_provider_used": False, "paid_submissions": 0},
+        }
 
     @staticmethod
     def fake_ffmpeg(command):
@@ -81,6 +87,7 @@ class EvidenceBundleTests(unittest.TestCase):
             candidate_run_dir=self.run_dir,
             request=self.request,
             intent_contract=self.intent,
+            result_provenance=self.result_provenance,
             ffmpeg="/usr/bin/true",
             command_runner=self.fake_ffmpeg,
         )
@@ -101,6 +108,8 @@ class EvidenceBundleTests(unittest.TestCase):
         self.assertEqual([row["after"][0]["value"] for row in trajectory["state_transitions"]], ["impact", "resting"])
         self.assertEqual(trajectory["readable_ranges"][1]["event_refs"], ["contact_000"])
         self.assertIn("intent_amendments_snapshot", {row["artifact_id"] for row in manifest["artifacts"]})
+        summary = read_json(self.attempt_dir / "evidence_bundle" / "evidence_summary.json")
+        self.assertEqual(summary["result_provenance"], self.result_provenance)
         self.assertTrue(Path(result["manifest_path"]).is_file())
         self.assertEqual(result["stage_result"]["status"], "completed")
 
@@ -133,6 +142,7 @@ class EvidenceBundleTests(unittest.TestCase):
             candidate_run_dir=self.run_dir,
             request=self.request,
             intent_contract=self.intent,
+            result_provenance=self.result_provenance,
             ffmpeg="/usr/bin/true",
             command_runner=self.fake_ffmpeg,
         )
@@ -148,6 +158,7 @@ class EvidenceBundleTests(unittest.TestCase):
                 candidate_run_dir=self.run_dir,
                 request=self.request,
                 intent_contract=self.intent,
+                result_provenance=self.result_provenance,
                 ffmpeg="/usr/bin/true",
                 command_runner=self.fake_ffmpeg,
             )
@@ -160,6 +171,7 @@ class EvidenceBundleTests(unittest.TestCase):
             candidate_run_dir=self.run_dir,
             request=self.request,
             intent_contract=self.intent,
+            result_provenance=self.result_provenance,
             ffmpeg="/usr/bin/true",
             command_runner=self.fake_ffmpeg,
         )
@@ -178,6 +190,7 @@ class EvidenceBundleTests(unittest.TestCase):
                 candidate_run_dir=self.run_dir,
                 request=self.request,
                 intent_contract=self.intent,
+                result_provenance=self.result_provenance,
                 ffmpeg="/usr/bin/true",
                 command_runner=self.fake_ffmpeg,
             )
@@ -205,6 +218,7 @@ class EvidenceBundleTests(unittest.TestCase):
                     candidate_run_dir=self.run_dir,
                     request=self.request,
                     intent_contract=self.intent,
+                    result_provenance=self.result_provenance,
                     ffmpeg="/usr/bin/true",
                     command_runner=self.fake_ffmpeg,
                 )
@@ -219,6 +233,7 @@ class EvidenceBundleTests(unittest.TestCase):
                         candidate_run_dir=self.run_dir,
                         request=self.request,
                         intent_contract=self.intent,
+                        result_provenance=self.result_provenance,
                         ffmpeg="/usr/bin/true",
                         command_runner=self.fake_ffmpeg,
                     )
@@ -232,6 +247,7 @@ class EvidenceBundleTests(unittest.TestCase):
             candidate_run_dir=self.run_dir,
             request=self.request,
             intent_contract=self.intent,
+            result_provenance=self.result_provenance,
             ffmpeg="/usr/bin/true",
             command_runner=self.fake_ffmpeg,
         )
@@ -246,6 +262,7 @@ class EvidenceBundleTests(unittest.TestCase):
                 candidate_run_dir=self.run_dir,
                 request=self.request,
                 intent_contract=self.intent,
+                result_provenance=self.result_provenance,
                 ffmpeg="/usr/bin/true",
                 command_runner=self.fake_ffmpeg,
             )
@@ -261,6 +278,7 @@ class EvidenceBundleTests(unittest.TestCase):
                 candidate_run_dir=self.run_dir,
                 request=changed_request,
                 intent_contract=self.intent,
+                result_provenance=self.result_provenance,
                 ffmpeg="/usr/bin/true",
                 command_runner=self.fake_ffmpeg,
             )

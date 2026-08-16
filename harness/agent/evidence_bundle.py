@@ -35,6 +35,7 @@ def build_evidence_bundle(
     candidate_run_dir: str | Path,
     request: Mapping[str, Any],
     intent_contract: Mapping[str, Any],
+    result_provenance: Mapping[str, Any],
     intent_amendments: Sequence[Mapping[str, Any]] = (),
     ffmpeg: str = "ffmpeg",
     command_runner: CommandRunner | None = None,
@@ -68,6 +69,7 @@ def build_evidence_bundle(
             expected_candidate_run_dir=run_dir,
             expected_intent_contract_digest=str(attempt["intent_contract_digest"]),
             expected_snapshots=snapshots,
+            expected_result_provenance=result_provenance,
         )
         return {
             "manifest": manifest,
@@ -137,6 +139,7 @@ def build_evidence_bundle(
             "trajectory": trajectory_summary,
             "contacts": timeline,
             "technical_gates": technical_gates,
+            "result_provenance": dict(result_provenance),
         },
     )
     artifacts.append(_bundle_artifact(bundle_dir, "evidence_summary", "structured_summary", summary_path, source_ref=None))
@@ -213,6 +216,7 @@ def build_evidence_bundle(
         expected_candidate_run_dir=run_dir,
         expected_intent_contract_digest=str(attempt["intent_contract_digest"]),
         expected_snapshots=snapshots,
+        expected_result_provenance=result_provenance,
         expected_manifest_digest=stable_digest(manifest),
     )
     return {
@@ -237,6 +241,7 @@ def validate_current_evidence_bundle(
     expected_candidate_run_dir: str | Path | None = None,
     expected_intent_contract_digest: str | None = None,
     expected_snapshots: Mapping[str, Any] | None = None,
+    expected_result_provenance: Mapping[str, Any] | None = None,
     expected_manifest_digest: str | None = None,
 ) -> dict[str, Any]:
     """Validate that a materialized bundle is the current attempt's exact evidence."""
@@ -250,6 +255,7 @@ def validate_current_evidence_bundle(
             expected_candidate_run_dir=expected_candidate_run_dir,
             expected_intent_contract_digest=expected_intent_contract_digest,
             expected_snapshots=expected_snapshots,
+            expected_result_provenance=expected_result_provenance,
             expected_manifest_digest=expected_manifest_digest,
         )
     except EvidenceBundleError:
@@ -270,6 +276,7 @@ def _validate_current_evidence_bundle(
     expected_candidate_run_dir: str | Path | None,
     expected_intent_contract_digest: str | None,
     expected_snapshots: Mapping[str, Any] | None,
+    expected_result_provenance: Mapping[str, Any] | None,
     expected_manifest_digest: str | None,
 ) -> dict[str, Any]:
     raw_attempt_dir = Path(attempt_dir).absolute()
@@ -409,6 +416,11 @@ def _validate_current_evidence_bundle(
             raise EvidenceBundleError(
                 "evidence_semantic_requirements_mismatch",
                 "Evidence Bundle Semantic Review requirements are stale",
+            )
+        if expected_result_provenance is not None and summary.get("result_provenance") != dict(expected_result_provenance):
+            raise EvidenceBundleError(
+                "evidence_result_provenance_mismatch",
+                "Evidence Bundle result provenance is stale",
             )
     return manifest
 
