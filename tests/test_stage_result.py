@@ -332,6 +332,24 @@ class StageResultAdapterTests(unittest.TestCase):
         self.assertEqual(result["failure_class"], "execution_failed")
         self.assertIn("open_development_issue", result["allowed_next_actions"])
 
+    def test_preview_shadow_quality_failures_are_classified_as_harness_defects(self) -> None:
+        for code in (
+            "F_UE_LIGHTING_REPORT_MISSING",
+            "F_UE_PREVIEW_SHADOW_INDICATOR_ACTIVE",
+            "F_UE_RUNTIME_LIGHT_MOBILITY_INVALID",
+        ):
+            with self.subTest(code=code):
+                result = stage_result_from_quality_report(
+                    {
+                        "schema_version": "harness_run_quality_v1",
+                        "status": "fail",
+                        "hard_gate": {"failures": [{"code": code, "message": "render defect"}]},
+                    }
+                )
+                self.assertEqual(result["failure_class"], "harness_bug")
+                self.assertNotIn("revise_case_spec", result["allowed_next_actions"])
+                self.assertIn("open_development_issue", result["allowed_next_actions"])
+
 
 if __name__ == "__main__":
     unittest.main()

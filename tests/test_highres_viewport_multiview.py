@@ -22,6 +22,223 @@ class Vector:
 
 
 class HighresViewportMultiviewTests(unittest.TestCase):
+    def test_existing_static_and_stationary_map_lights_are_normalized_to_movable(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        names = {
+            "set_editor_property_if_available",
+            "get_light_component",
+            "unreal_class_name",
+            "light_mobility_name",
+            "read_light_mobility",
+            "make_light_movable",
+            "light_component_enabled",
+            "inspect_runtime_light",
+            "is_light_actor",
+            "configure_existing_map_lights",
+            "audit_runtime_lights",
+        }
+        functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+
+        class UnrealClass:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            def get_name(self) -> str:
+                return self.name
+
+        class LightComponent:
+            def __init__(self, class_name: str, mobility: str, *, mobility_failure: bool = False) -> None:
+                self.class_name = class_name
+                self.properties = {"mobility": mobility, "visible": True, "hidden_in_game": False}
+                self.mobility_failure = mobility_failure
+
+            def get_class(self):
+                return UnrealClass(self.class_name)
+
+            def get_editor_property(self, name):
+                return self.properties[name]
+
+            def set_editor_property(self, name, value):
+                if name == "mobility" and self.mobility_failure:
+                    raise RuntimeError("mobility property rejected")
+                self.properties[name] = value
+
+            def set_mobility(self, value):
+                if self.mobility_failure:
+                    raise RuntimeError("mobility setter rejected")
+                self.properties["mobility"] = value
+
+            def set_visibility(self, value, _propagate):
+                self.properties["visible"] = value
+
+            def set_hidden_in_game(self, value, _propagate):
+                self.properties["hidden_in_game"] = value
+
+        class Actor:
+            def __init__(self, label: str, class_name: str, component=None) -> None:
+                self.label = label
+                self.class_name = class_name
+                self.component = component
+                self.hidden = False
+
+            def get_actor_label(self):
+                return self.label
+
+            def get_path_name(self):
+                return f"/Game/Test.{self.label}"
+
+            def get_class(self):
+                return UnrealClass(self.class_name)
+
+            def get_component_by_class(self, _class):
+                return self.component
+
+            def set_actor_hidden_in_game(self, value):
+                self.hidden = value
+
+            def is_hidden(self):
+                return self.hidden
+
+        static = Actor("Sun", "DirectionalLight", LightComponent("DirectionalLightComponent", "STATIC"))
+        stationary = Actor("Sky", "SkyLight", LightComponent("SkyLightComponent", "STATIONARY"))
+        movable = Actor("Fill", "PointLight", LightComponent("PointLightComponent", "MOVABLE"))
+        atmosphere = Actor("Atmosphere", "SkyAtmosphere")
+        unreal = types.SimpleNamespace(
+            LightComponent=type("UnrealLightComponent", (), {}),
+            ComponentMobility=types.SimpleNamespace(MOVABLE="MOVABLE"),
+        )
+        namespace = {"unreal": unreal}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"), namespace)
+
+        report = namespace["configure_existing_map_lights"](
+            types.SimpleNamespace(get_all_level_actors=lambda: [static, stationary, movable, atmosphere]),
+            True,
+            normalize_to_movable=True,
+        )
+
+        self.assertEqual(report["inspected"], 3)
+        self.assertEqual(report["normalized_to_movable"], 2)
+        self.assertEqual([item["final_mobility"] for item in report["lights"]], ["MOVABLE", "MOVABLE", "MOVABLE"])
+        self.assertEqual(report["failures"], [])
+        self.assertTrue(report["preview_shadow_safe"])
+
+        runtime_fill = Actor(
+            "native_phenomena_demo_runtime_fill",
+            "PointLight",
+            LightComponent("PointLightComponent", "STATIC"),
+        )
+        audit = namespace["audit_runtime_lights"](
+            types.SimpleNamespace(get_all_level_actors=lambda: [static, stationary, movable, atmosphere, runtime_fill]),
+            normalize_to_movable=True,
+        )
+        self.assertEqual(audit["inspected"], 4)
+        self.assertEqual(audit["normalized_to_movable"], 1)
+        self.assertTrue(audit["preview_shadow_safe"])
+
+    def test_map_light_mobility_failure_is_structured(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        names = {
+            "set_editor_property_if_available",
+            "get_light_component",
+            "unreal_class_name",
+            "light_mobility_name",
+            "read_light_mobility",
+            "make_light_movable",
+            "inspect_runtime_light",
+            "is_light_actor",
+            "configure_existing_map_lights",
+        }
+        functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+
+        class Component:
+            def __init__(self) -> None:
+                self.properties = {"mobility": "STATIC", "visible": True, "hidden_in_game": False}
+
+            def get_class(self):
+                return types.SimpleNamespace(get_name=lambda: "DirectionalLightComponent")
+
+            def get_editor_property(self, name):
+                return self.properties[name]
+
+            def set_editor_property(self, name, value):
+                if name == "mobility":
+                    raise RuntimeError("rejected")
+                self.properties[name] = value
+
+            def set_mobility(self, _value):
+                raise RuntimeError("rejected")
+
+            def set_visibility(self, *_args):
+                pass
+
+            def set_hidden_in_game(self, *_args):
+                pass
+
+        component = Component()
+        actor = types.SimpleNamespace(
+            get_actor_label=lambda: "BrokenSun",
+            get_path_name=lambda: "/Game/Test.BrokenSun",
+            get_class=lambda: types.SimpleNamespace(get_name=lambda: "DirectionalLight"),
+            get_component_by_class=lambda _class: component,
+            set_actor_hidden_in_game=lambda _value: None,
+        )
+        namespace = {
+            "unreal": types.SimpleNamespace(
+                LightComponent=type("UnrealLightComponent", (), {}),
+                ComponentMobility=types.SimpleNamespace(MOVABLE="MOVABLE"),
+            )
+        }
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"), namespace)
+
+        report = namespace["configure_existing_map_lights"](
+            types.SimpleNamespace(get_all_level_actors=lambda: [actor]),
+            True,
+            normalize_to_movable=True,
+        )
+
+        self.assertFalse(report["preview_shadow_safe"])
+        self.assertEqual(report["remaining_non_movable"], ["BrokenSun"])
+        self.assertIn("light_mobility_update_failed", {item["code"] for item in report["failures"]})
+
+    def test_highres_viewport_disables_preview_shadow_indicator_and_confirms_game_view(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "configure_clean_highres_viewport"
+        )
+        commands = []
+
+        class LevelEditor:
+            def __init__(self) -> None:
+                self.game_view = False
+
+            def editor_get_game_view(self):
+                return self.game_view
+
+            def editor_set_game_view(self, value):
+                self.game_view = value
+
+        level_editor = LevelEditor()
+        unreal = types.SimpleNamespace(
+            LevelEditorSubsystem=type("LevelEditorSubsystem", (), {}),
+            get_editor_subsystem=lambda _class: level_editor,
+            SystemLibrary=types.SimpleNamespace(execute_console_command=lambda _world, command: commands.append(command)),
+            EditorLevelLibrary=types.SimpleNamespace(editor_invalidate_viewports=lambda: None),
+        )
+        namespace = {"unreal": unreal}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+
+        report = namespace["configure_clean_highres_viewport"]()
+
+        self.assertTrue(report["game_view_after"])
+        self.assertIn("showflag.PreviewShadowsIndicator 0", commands)
+        self.assertTrue(report["preview_shadow_indicator_disabled"])
+        self.assertTrue(report["preview_shadow_safe"])
+
     def test_precomputed_trajectory_uses_named_runtime_rotator_mapping(self) -> None:
         source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
@@ -499,7 +716,12 @@ class HighresViewportMultiviewTests(unittest.TestCase):
             "start_editor_physics_capture": lambda *_: {"enabled": True},
             "runtime_physics_controls": lambda *_: {},
             "int_control": lambda value, default, *_: default if value is None else int(value),
-            "configure_clean_highres_viewport": lambda: [],
+            "configure_clean_highres_viewport": lambda: {
+                "game_view_after": True,
+                "preview_shadow_indicator_disabled": True,
+                "preview_shadow_safe": True,
+                "failures": [],
+            },
             "settle_highres_viewport": settle_viewport,
             "write_summary": lambda summary: summaries.append(copy.deepcopy(summary)),
             "analytic_contact_solver_enabled": lambda *_: True,

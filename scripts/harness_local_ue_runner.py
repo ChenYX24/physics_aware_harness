@@ -1109,6 +1109,55 @@ def duration_from_camera_plan(camera_plan: dict[str, Any]) -> float:
     return 4.0
 
 
+def build_map_report(
+    native_summary: dict[str, Any],
+    rgb_summary: dict[str, Any],
+    scene_spec: dict[str, Any],
+    camera_plan: dict[str, Any],
+) -> dict[str, Any]:
+    selected_map = native_summary.get("selected_map") or {}
+    rgb_lighting = rgb_summary.get("lighting") if isinstance(rgb_summary.get("lighting"), dict) else {}
+    rgb_capture_backend = rgb_summary.get("capture_backend") or rgb_lighting.get("capture_backend")
+    rgb_viewport_hygiene = rgb_lighting.get("highres_viewport") if isinstance(rgb_lighting.get("highres_viewport"), dict) else None
+    rgb_runtime_light_audit = rgb_lighting.get("runtime_light_audit") if isinstance(rgb_lighting.get("runtime_light_audit"), dict) else None
+    rgb_existing_map_lights = rgb_lighting.get("existing_map_lights") if isinstance(rgb_lighting.get("existing_map_lights"), dict) else None
+    requested_map_asset = (scene_spec.get("background") or {}).get("ue5_path")
+    requested_map = canonical_game_package(requested_map_asset)
+    opened_map = canonical_game_package(selected_map.get("opened_package") or selected_map.get("path"))
+    actor_count = int(native_summary.get("loaded_map_actor_count") or 0)
+    map_failures = []
+    if not selected_map.get("opened"):
+        map_failures.append("F_MAP_NOT_OPENED")
+    if requested_map and opened_map != requested_map:
+        map_failures.append("F_MAP_PACKAGE_MISMATCH")
+    if actor_count < 1:
+        map_failures.append("F_MAP_EMPTY")
+    return {
+        "schema_version": "harness_map_report_v1",
+        "status": "fail" if map_failures else "pass",
+        "failure_codes": map_failures,
+        "requested_package": requested_map,
+        "requested_asset_path": requested_map_asset,
+        "opened_package": opened_map,
+        "opened": bool(selected_map.get("opened")),
+        "dependency_policy": "runtime_load_success",
+        "loaded_actor_count": actor_count,
+        "visible_actor_count": int((native_summary.get("visible_map_actors") or {}).get("actors") or 0),
+        "visible_component_count": int((native_summary.get("visible_map_actors") or {}).get("components") or 0),
+        "scene_origin_cm": native_summary.get("scene_origin") or [],
+        "render_bounds_cm": native_summary.get("camera_pose") or {},
+        "available_lights": ((native_summary.get("lighting") or {}).get("existing_map_lights") or {}),
+        "rgb_capture": {
+            "backend": rgb_capture_backend,
+            "existing_map_lights": rgb_existing_map_lights,
+            "runtime_light_audit": rgb_runtime_light_audit,
+            "viewport_hygiene": rgb_viewport_hygiene,
+            "preview_shadow_safe": rgb_lighting.get("preview_shadow_safe"),
+        },
+        "camera_ids": [str(view.get("camera_id")) for view in camera_plan.get("views", []) if view.get("camera_id")],
+    }
+
+
 def standardize_native_output(
     run_dir: Path,
     native_output: Path,
@@ -1180,37 +1229,9 @@ def standardize_native_output(
             "passes": {**native_passes, "rgb": rgb_passes.get("rgb") or {"status": "missing", "views": []}},
         },
     )
-    selected_map = native_summary.get("selected_map") or {}
-    requested_map_asset = ((scene_spec or {}).get("background") or {}).get("ue5_path")
-    requested_map = canonical_game_package(requested_map_asset)
-    opened_map = canonical_game_package(selected_map.get("opened_package") or selected_map.get("path"))
-    actor_count = int(native_summary.get("loaded_map_actor_count") or 0)
-    map_failures = []
-    if not selected_map.get("opened"):
-        map_failures.append("F_MAP_NOT_OPENED")
-    if requested_map and opened_map != requested_map:
-        map_failures.append("F_MAP_PACKAGE_MISMATCH")
-    if actor_count < 1:
-        map_failures.append("F_MAP_EMPTY")
     write_json(
         run_dir / "map_report.json",
-        {
-            "schema_version": "harness_map_report_v1",
-            "status": "fail" if map_failures else "pass",
-            "failure_codes": map_failures,
-            "requested_package": requested_map,
-            "requested_asset_path": requested_map_asset,
-            "opened_package": opened_map,
-            "opened": bool(selected_map.get("opened")),
-            "dependency_policy": "runtime_load_success",
-            "loaded_actor_count": actor_count,
-            "visible_actor_count": int((native_summary.get("visible_map_actors") or {}).get("actors") or 0),
-            "visible_component_count": int((native_summary.get("visible_map_actors") or {}).get("components") or 0),
-            "scene_origin_cm": native_summary.get("scene_origin") or [],
-            "render_bounds_cm": native_summary.get("camera_pose") or {},
-            "available_lights": ((native_summary.get("lighting") or {}).get("existing_map_lights") or {}),
-            "camera_ids": [str(view.get("camera_id")) for view in camera_plan.get("views", []) if view.get("camera_id")],
-        },
+        build_map_report(native_summary, rgb_summary, scene_spec or {}, camera_plan),
     )
     native_rgb_views = [
         view

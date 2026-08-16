@@ -148,6 +148,11 @@ _NATIVE_SUBMISSION_INVALID_CODES = {
     "native_generation_submission_context_mismatch",
     "native_generation_submission_schema_invalid",
 }
+_HARNESS_RENDER_DEFECT_CODES = {
+    "f_ue_lighting_report_missing",
+    "f_ue_preview_shadow_indicator_active",
+    "f_ue_runtime_light_mobility_invalid",
+}
 _TRANSIENT_CODES = {
     "backend_importer_timeout",
     "f7_ue_runner_exception",
@@ -403,6 +408,8 @@ def classify_failure(
     if retryable is True or (retryable is None and code in _TRANSIENT_CODES):
         actions = ["resume_checkpoint", "retry_stage"] if "provider" in normalized_stage else ["retry_stage"]
         return _classification("failed", "transient", True, actions)
+    if code in _HARNESS_RENDER_DEFECT_CODES:
+        return _classification("failed", "harness_bug", False, ["inspect_artifacts", "open_development_issue"])
     if "solver_provenance" in code or "physics_capture" in code:
         return _classification("failed", "execution_failed", False, ["inspect_artifacts", "open_development_issue"])
     if code.endswith("_exception") or code.endswith("_unhandled_exception"):

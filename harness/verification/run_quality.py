@@ -251,6 +251,22 @@ def summarize_report(name: str, value: Any, path: str) -> dict[str, Any]:
         }
     if name == "map_report":
         selected = value.get("selected_map") if isinstance(value.get("selected_map"), dict) else {}
+        rgb_capture = value.get("rgb_capture") if isinstance(value.get("rgb_capture"), dict) else None
+        runtime_light_audit = (
+            rgb_capture.get("runtime_light_audit")
+            if isinstance(rgb_capture, dict) and isinstance(rgb_capture.get("runtime_light_audit"), dict)
+            else None
+        )
+        viewport_hygiene = (
+            rgb_capture.get("viewport_hygiene")
+            if isinstance(rgb_capture, dict) and isinstance(rgb_capture.get("viewport_hygiene"), dict)
+            else None
+        )
+        existing_map_lights = (
+            rgb_capture.get("existing_map_lights")
+            if isinstance(rgb_capture, dict) and isinstance(rgb_capture.get("existing_map_lights"), dict)
+            else None
+        )
         opened = selected.get("map_opened")
         if opened is None:
             opened = value.get("opened") if value.get("opened") is not None else value.get("map_opened")
@@ -266,6 +282,36 @@ def summarize_report(name: str, value: Any, path: str) -> dict[str, Any]:
             "map_opened": opened,
             "fallback_map": selected.get("fallback_map") or value.get("fallback_map"),
             "warnings": len(value.get("warnings") or []),
+            "capture_backend": rgb_capture.get("backend") if isinstance(rgb_capture, dict) else None,
+            "rgb_lighting_report_present": bool(
+                isinstance(rgb_capture, dict)
+                and isinstance(runtime_light_audit, dict)
+                and isinstance(viewport_hygiene, dict)
+                and isinstance(existing_map_lights, dict)
+                and isinstance(rgb_capture.get("preview_shadow_safe"), bool)
+            ),
+            "preview_shadow_indicator_disabled": (
+                viewport_hygiene.get("preview_shadow_indicator_disabled")
+                if isinstance(viewport_hygiene, dict)
+                else None
+            ),
+            "game_view_after": viewport_hygiene.get("game_view_after") if isinstance(viewport_hygiene, dict) else None,
+            "runtime_light_failure_count": (
+                len(runtime_light_audit.get("failures") or [])
+                if isinstance(runtime_light_audit, dict)
+                else None
+            ),
+            "remaining_non_movable": (
+                list(runtime_light_audit.get("remaining_non_movable") or [])
+                if isinstance(runtime_light_audit, dict)
+                else None
+            ),
+            "runtime_lights_preview_shadow_safe": (
+                runtime_light_audit.get("preview_shadow_safe")
+                if isinstance(runtime_light_audit, dict)
+                else None
+            ),
+            "preview_shadow_safe": rgb_capture.get("preview_shadow_safe") if isinstance(rgb_capture, dict) else None,
         }
     if name == "sensor_state":
         return {
@@ -321,6 +367,44 @@ def validate_source_gates(summaries: dict[str, Any], failures: list[dict[str, An
     map_report = summaries["map_report"]
     if map_report.get("present") and (map_report.get("status") != "pass" or map_report.get("map_opened") is False or map_report.get("package_match") is False):
         failures.append(issue("F_MAP_GATE_FAILED", "map report did not prove the requested package was opened", selected_map=map_report.get("selected_map"), requested_map=map_report.get("requested_map")))
+    if readiness.get("backend") == "ue" and map_report.get("present"):
+        capture_backend = map_report.get("capture_backend")
+        if not capture_backend:
+            failures.append(issue("F_UE_LIGHTING_REPORT_MISSING", "UE map report does not identify the RGB capture backend"))
+        elif capture_backend == "highres_viewport":
+            if map_report.get("rgb_lighting_report_present") is not True:
+                failures.append(issue("F_UE_LIGHTING_REPORT_MISSING", "highres_viewport RGB lighting report is incomplete"))
+            else:
+                if (
+                    map_report.get("preview_shadow_indicator_disabled") is not True
+                    or map_report.get("game_view_after") is not True
+                ):
+                    failures.append(
+                        issue(
+                            "F_UE_PREVIEW_SHADOW_INDICATOR_ACTIVE",
+                            "highres_viewport did not prove Game View and Preview Shadows Indicator hygiene",
+                            game_view_after=map_report.get("game_view_after"),
+                            preview_shadow_indicator_disabled=map_report.get("preview_shadow_indicator_disabled"),
+                        )
+                    )
+                if (
+                    map_report.get("runtime_lights_preview_shadow_safe") is not True
+                    or int(map_report.get("runtime_light_failure_count") or 0) > 0
+                    or bool(map_report.get("remaining_non_movable"))
+                ):
+                    failures.append(
+                        issue(
+                            "F_UE_RUNTIME_LIGHT_MOBILITY_INVALID",
+                            "enabled runtime RGB lights were not all normalized to Movable",
+                            failure_count=map_report.get("runtime_light_failure_count"),
+                            remaining_non_movable=map_report.get("remaining_non_movable"),
+                        )
+                    )
+                if map_report.get("preview_shadow_safe") is not True and not any(
+                    item.get("code") in {"F_UE_PREVIEW_SHADOW_INDICATOR_ACTIVE", "F_UE_RUNTIME_LIGHT_MOBILITY_INVALID"}
+                    for item in failures
+                ):
+                    failures.append(issue("F_UE_PREVIEW_SHADOW_INDICATOR_ACTIVE", "highres_viewport preview-shadow safety is false"))
     assets = summaries["asset_resolution"]
     if assets.get("present") and int(assets.get("unresolved_count") or 0) > 0:
         failures.append(issue("F_ASSET_UNRESOLVED", "asset resolution contains unresolved objects", count=assets.get("unresolved_count")))

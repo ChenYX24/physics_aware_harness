@@ -1085,6 +1085,41 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertTrue(scene["physics_controls"]["simulate_physics"])
         self.assertEqual(scene["map_lighting_controls"]["capture_backend"], "highres_viewport")
 
+    def test_map_report_projects_lighting_from_the_actual_rgb_pass(self) -> None:
+        from scripts.harness_local_ue_runner import build_map_report
+
+        native_summary = {
+            "selected_map": {"opened": True, "opened_package": "/Game/Test"},
+            "loaded_map_actor_count": 2,
+            "lighting": {"existing_map_lights": {"source": "data_pass"}},
+        }
+        rgb_summary = {
+            "capture_backend": "highres_viewport",
+            "lighting": {
+                "capture_backend": "highres_viewport",
+                "existing_map_lights": {"source": "rgb_pass"},
+                "runtime_light_audit": {"preview_shadow_safe": True},
+                "highres_viewport": {
+                    "game_view_after": True,
+                    "preview_shadow_indicator_disabled": True,
+                },
+                "preview_shadow_safe": True,
+            },
+        }
+
+        report = build_map_report(
+            native_summary,
+            rgb_summary,
+            {"background": {"ue5_path": "/Game/Test.Test"}},
+            {"views": [{"camera_id": "front_static"}]},
+        )
+
+        self.assertEqual(report["status"], "pass")
+        self.assertEqual(report["available_lights"]["source"], "data_pass")
+        self.assertEqual(report["rgb_capture"]["existing_map_lights"]["source"], "rgb_pass")
+        self.assertEqual(report["rgb_capture"]["backend"], "highres_viewport")
+        self.assertTrue(report["rgb_capture"]["preview_shadow_safe"])
+
     def test_chaos_output_replay_is_not_labeled_as_mujoco(self) -> None:
         from scripts.harness_local_ue_runner import build_runtime_scene
 

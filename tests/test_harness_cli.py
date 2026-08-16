@@ -168,7 +168,7 @@ for view in camera_plan["views"]:
     }), encoding="utf-8")
     render_views.append({"camera_id": camera_id, "rgb": f"views/{camera_id}/rgb.mp4", "depth": f"views/{camera_id}/depth.exr", "segmentation": f"views/{camera_id}/segmentation.exr"})
 (run_dir / "render_manifest.json").write_text(json.dumps({"schema_version": "harness_render_manifest_v1", "backend": "ue", "render_available": True, "views": render_views, "passes": [{"name": "rgb"}, {"name": "depth"}, {"name": "segmentation"}]}), encoding="utf-8")
-(run_dir / "map_report.json").write_text(json.dumps({"schema_version": "harness_map_report_v1", "status": "pass", "requested_package": args.map, "opened_package": args.map, "opened": True, "loaded_actor_count": 1}), encoding="utf-8")
+(run_dir / "map_report.json").write_text(json.dumps({"schema_version": "harness_map_report_v1", "status": "pass", "requested_package": args.map, "opened_package": args.map, "opened": True, "loaded_actor_count": 1, "rgb_capture": {"backend": "scene_capture"}}), encoding="utf-8")
 (run_dir / "video.mp4").write_bytes((run_dir / "views" / camera_plan["views"][0]["camera_id"] / "rgb.mp4").read_bytes())
 """.lstrip(),
         encoding="utf-8",

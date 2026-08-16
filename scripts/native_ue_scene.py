@@ -1974,6 +1974,143 @@ def get_light_component(actor):
         return None
 
 
+def unreal_class_name(obj) -> str:
+    try:
+        cls = obj.get_class()
+        if cls:
+            return str(cls.get_name())
+    except Exception:
+        pass
+    return type(obj).__name__
+
+
+def light_mobility_name(value) -> str | None:
+    if value is None:
+        return None
+    candidates = [getattr(value, "name", None), str(value)]
+    for candidate in candidates:
+        text = str(candidate or "").upper()
+        for name in ("STATIC", "STATIONARY", "MOVABLE"):
+            if name in text:
+                return name
+    return str(value)
+
+
+def read_light_mobility(component) -> tuple[str | None, str | None]:
+    try:
+        return light_mobility_name(component.get_editor_property("mobility")), None
+    except Exception as exc:
+        return None, str(exc)
+
+
+def make_light_movable(component) -> tuple[str | None, str | None]:
+    movable = getattr(getattr(unreal, "ComponentMobility", None), "MOVABLE", None)
+    if movable is None:
+        return None, "unreal.ComponentMobility.MOVABLE is unavailable"
+    failures = []
+    setter = getattr(component, "set_mobility", None)
+    if callable(setter):
+        try:
+            setter(movable)
+            return "set_mobility", None
+        except Exception as exc:
+            failures.append(f"set_mobility:{exc}")
+    try:
+        component.set_editor_property("mobility", movable)
+        return "set_editor_property", None
+    except Exception as exc:
+        failures.append(f"set_editor_property:{exc}")
+    return None, "; ".join(failures)
+
+
+def light_component_enabled(actor, component) -> bool:
+    try:
+        if component.get_editor_property("visible") is False:
+            return False
+    except Exception:
+        pass
+    try:
+        if component.get_editor_property("hidden_in_game") is True:
+            return False
+    except Exception:
+        pass
+    try:
+        if actor.is_hidden():
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def inspect_runtime_light(actor, component, *, enabled: bool, normalize_to_movable: bool) -> tuple[dict, list[dict]]:
+    try:
+        actor_label = str(actor.get_actor_label())
+    except Exception:
+        actor_label = unreal_class_name(actor)
+    try:
+        actor_path = str(actor.get_path_name())
+    except Exception:
+        actor_path = None
+    original_mobility, read_error = read_light_mobility(component)
+    update_method = None
+    update_error = None
+    if normalize_to_movable and enabled and original_mobility != "MOVABLE":
+        update_method, update_error = make_light_movable(component)
+    final_mobility, final_read_error = read_light_mobility(component)
+    record = {
+        "actor": actor_label,
+        "actor_path": actor_path,
+        "actor_class": unreal_class_name(actor),
+        "component_class": unreal_class_name(component),
+        "enabled": bool(enabled),
+        "original_mobility": original_mobility,
+        "final_mobility": final_mobility,
+        "mobility_update_method": update_method,
+        "normalized_to_movable": bool(
+            normalize_to_movable
+            and enabled
+            and original_mobility != "MOVABLE"
+            and final_mobility == "MOVABLE"
+        ),
+    }
+    failures = []
+    if read_error:
+        failures.append(
+            {
+                "code": "light_mobility_read_failed",
+                "actor": actor_label,
+                "phase": "before",
+                "message": read_error,
+            }
+        )
+    if update_error:
+        failures.append(
+            {
+                "code": "light_mobility_update_failed",
+                "actor": actor_label,
+                "message": update_error,
+            }
+        )
+    if final_read_error:
+        failures.append(
+            {
+                "code": "light_mobility_read_failed",
+                "actor": actor_label,
+                "phase": "after",
+                "message": final_read_error,
+            }
+        )
+    if normalize_to_movable and enabled and final_mobility != "MOVABLE":
+        failures.append(
+            {
+                "code": "light_mobility_not_movable",
+                "actor": actor_label,
+                "final_mobility": final_mobility,
+            }
+        )
+    return record, failures
+
+
 def set_light(actor, intensity: float, color=None):
     component = get_light_component(actor)
     if not component:
@@ -1986,37 +2123,116 @@ def set_light(actor, intensity: float, color=None):
 def is_light_actor(actor) -> bool:
     if actor.get_actor_label().startswith("native_phenomena_demo_"):
         return False
-    if get_light_component(actor):
-        return True
-    class_name = actor.get_class().get_name() if actor.get_class() else ""
-    return "Light" in class_name or "SkyAtmosphere" in class_name
+    return get_light_component(actor) is not None
 
 
-def configure_existing_map_lights(editor, enabled: bool) -> dict:
+def configure_existing_map_lights(editor, enabled: bool, *, normalize_to_movable: bool = False) -> dict:
     inspected = 0
     changed = 0
+    normalized_to_movable = 0
+    lights = []
+    failures = []
     for actor in editor.get_all_level_actors():
         if not is_light_actor(actor):
             continue
         inspected += 1
         try:
             actor.set_actor_hidden_in_game(not enabled)
-        except Exception:
-            pass
+        except Exception as exc:
+            failures.append(
+                {
+                    "code": "light_actor_visibility_update_failed",
+                    "actor": str(actor.get_actor_label()),
+                    "message": str(exc),
+                }
+            )
         component = get_light_component(actor)
         if component:
-            if set_editor_property_if_available(component, "visible", enabled):
-                changed += 1
-            set_editor_property_if_available(component, "hidden_in_game", not enabled)
             try:
                 component.set_visibility(enabled, True)
-            except Exception:
-                pass
+                changed += 1
+            except Exception as exc:
+                failures.append(
+                    {
+                        "code": "light_component_visibility_update_failed",
+                        "actor": str(actor.get_actor_label()),
+                        "method": "set_visibility",
+                        "message": str(exc),
+                    }
+                )
             try:
                 component.set_hidden_in_game(not enabled, True)
-            except Exception:
-                pass
-    return {"enabled": enabled, "inspected": inspected, "changed": changed}
+            except Exception as exc:
+                failures.append(
+                    {
+                        "code": "light_component_visibility_update_failed",
+                        "actor": str(actor.get_actor_label()),
+                        "method": "set_hidden_in_game",
+                        "message": str(exc),
+                    }
+                )
+            record, mobility_failures = inspect_runtime_light(
+                actor,
+                component,
+                enabled=enabled,
+                normalize_to_movable=normalize_to_movable,
+            )
+            lights.append(record)
+            normalized_to_movable += int(record["normalized_to_movable"])
+            failures.extend(mobility_failures)
+    remaining_non_movable = [
+        item["actor"]
+        for item in lights
+        if item["enabled"] and normalize_to_movable and item["final_mobility"] != "MOVABLE"
+    ]
+    return {
+        "enabled": enabled,
+        "inspected": inspected,
+        "changed": changed,
+        "mobility_normalization_required": bool(normalize_to_movable),
+        "normalized_to_movable": normalized_to_movable,
+        "remaining_non_movable": remaining_non_movable,
+        "lights": lights,
+        "failures": failures,
+        "preview_shadow_safe": not failures and not remaining_non_movable,
+    }
+
+
+def audit_runtime_lights(editor, *, normalize_to_movable: bool) -> dict:
+    lights = []
+    failures = []
+    normalized_to_movable = 0
+    enabled_count = 0
+    for actor in editor.get_all_level_actors():
+        component = get_light_component(actor)
+        if component is None:
+            continue
+        enabled = light_component_enabled(actor, component)
+        enabled_count += int(enabled)
+        record, record_failures = inspect_runtime_light(
+            actor,
+            component,
+            enabled=enabled,
+            normalize_to_movable=normalize_to_movable,
+        )
+        lights.append(record)
+        normalized_to_movable += int(record["normalized_to_movable"])
+        failures.extend(record_failures)
+    remaining_non_movable = [
+        item["actor"]
+        for item in lights
+        if item["enabled"] and normalize_to_movable and item["final_mobility"] != "MOVABLE"
+    ]
+    return {
+        "inspected": len(lights),
+        "enabled": enabled_count,
+        "mobility_normalization_required": bool(normalize_to_movable),
+        "normalized_to_movable": normalized_to_movable,
+        "remaining_non_movable": remaining_non_movable,
+        "lights": lights,
+        "failures": failures,
+        "preview_shadow_safe": not failures and not remaining_non_movable,
+    }
 
 
 def spawn_optional_actor(editor, class_name: str, location: unreal.Vector, label: str):
@@ -5539,13 +5755,26 @@ def setup_scene(runtime_scene: dict | None = None):
     write_progress_marker("setup_scene_configure_world_done")
     render_quality = configure_render_quality()
     write_progress_marker("setup_scene_render_quality_done")
+    preview_shadow_mobility_required = str(lighting_profile.get("capture_backend") or "scene_capture") == "highres_viewport"
     skip_complex_lighting = bool(runtime_scene and runtime_scene.get("case_type") == "third_person_box_throw")
     if skip_complex_lighting:
-        existing_map_lights = {"enabled": True, "inspected": 0, "changed": 0, "skipped": True}
+        existing_map_lights = {
+            "enabled": True,
+            "inspected": 0,
+            "changed": 0,
+            "skipped": True,
+            "mobility_normalization_required": preview_shadow_mobility_required,
+            "normalized_to_movable": 0,
+            "remaining_non_movable": [],
+            "lights": [],
+            "failures": [],
+            "preview_shadow_safe": True,
+        }
     else:
         existing_map_lights = configure_existing_map_lights(
             editor,
             lighting_enabled(lighting_controls, "use_existing_map_lights"),
+            normalize_to_movable=preview_shadow_mobility_required,
         )
     write_progress_marker("setup_scene_existing_map_lights_done")
     background_stage_actors = []
@@ -5629,6 +5858,14 @@ def setup_scene(runtime_scene: dict | None = None):
         spawn_optional_actor(editor, "SkyAtmosphere", scene_origin, "native_phenomena_demo_sky_atmosphere")
     if not skip_complex_lighting:
         custom_lights = spawn_runtime_custom_lights(editor, runtime_scene, scene_origin)
+    runtime_light_audit = audit_runtime_lights(
+        editor,
+        normalize_to_movable=preview_shadow_mobility_required,
+    )
+    write_progress_marker(
+        "setup_scene_runtime_light_audit_done",
+        f"safe={runtime_light_audit.get('preview_shadow_safe')}:enabled={runtime_light_audit.get('enabled')}",
+    )
 
     materials = {
         "runtime_balloon_red": create_generated_material("M_Agentic_Runtime_BalloonRed", unreal.LinearColor(0.92, 0.05, 0.06, 1.0), 0.46, 0.0, 0.16),
@@ -6511,6 +6748,7 @@ def setup_scene(runtime_scene: dict | None = None):
                 "map_backdrop_helpers_enabled": MAP_BACKDROP_HELPERS,
                 "stable_stage_anchors_enabled": STABLE_STAGE_ANCHORS,
                 "existing_map_lights": existing_map_lights,
+                "runtime_light_audit": runtime_light_audit,
                 "map_boost_lights": map_boost_lights,
                 "custom_lights": custom_lights,
                 "generated_material_version": GENERATED_MATERIAL_VERSION,
@@ -9135,13 +9373,24 @@ def write_progress_marker(stage: str, detail: str | None = None) -> None:
         pass
 
 
-def configure_clean_highres_viewport() -> list[str]:
+def configure_clean_highres_viewport() -> dict:
+    failures = []
+    game_view_before = None
+    game_view_after = None
+    game_view_requested = False
     try:
         level_editor = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
-        if level_editor and not level_editor.editor_get_game_view():
+        if not level_editor:
+            failures.append({"code": "level_editor_subsystem_unavailable"})
+        else:
+            game_view_before = bool(level_editor.editor_get_game_view())
+        if level_editor and not game_view_before:
+            game_view_requested = True
             level_editor.editor_set_game_view(True)
-    except Exception:
-        pass
+        if level_editor:
+            game_view_after = bool(level_editor.editor_get_game_view())
+    except Exception as exc:
+        failures.append({"code": "game_view_configuration_failed", "message": str(exc)})
     commands = [
         "viewmode lit",
         "showflag.Selection 0",
@@ -9151,19 +9400,48 @@ def configure_clean_highres_viewport() -> list[str]:
         "showflag.CompositeEditorPrimitives 0",
         "showflag.ModeWidgets 0",
         "showflag.CameraFrustums 0",
+        "showflag.PreviewShadowsIndicator 0",
     ]
     applied = []
     for command in commands:
         try:
             unreal.SystemLibrary.execute_console_command(None, command)
             applied.append(command)
-        except Exception:
-            pass
+        except Exception as exc:
+            failures.append(
+                {
+                    "code": "viewport_show_flag_command_failed",
+                    "command": command,
+                    "message": str(exc),
+                }
+            )
     try:
         unreal.EditorLevelLibrary.editor_invalidate_viewports()
-    except Exception:
-        pass
-    return applied
+    except Exception as exc:
+        failures.append({"code": "viewport_invalidation_failed", "message": str(exc)})
+    preview_command = "showflag.PreviewShadowsIndicator 0"
+    preview_command_executed = preview_command in applied
+    preview_shadow_failures = [
+        item
+        for item in failures
+        if item.get("code") in {"level_editor_subsystem_unavailable", "game_view_configuration_failed"}
+        or item.get("command") == preview_command
+    ]
+    return {
+        "game_view_before": game_view_before,
+        "game_view_requested": game_view_requested,
+        "game_view_after": game_view_after,
+        "commands": commands,
+        "applied_commands": applied,
+        "preview_shadows_indicator": {
+            "show_flag": "PreviewShadowsIndicator",
+            "command": preview_command,
+            "command_executed": preview_command_executed,
+        },
+        "failures": failures,
+        "preview_shadow_indicator_disabled": preview_command_executed,
+        "preview_shadow_safe": game_view_after is True and preview_command_executed and not preview_shadow_failures,
+    }
 
 
 def start_highres_viewport_capture(
@@ -9307,11 +9585,17 @@ def start_highres_viewport_capture(
             "removed_frame_dirs": [],
         },
     }
+    viewport_hygiene = configure_clean_highres_viewport()
     summary["lighting"]["highres_viewport"] = {
-        "force_game_view": False,
+        "force_game_view": viewport_hygiene.get("game_view_after") is True,
         "frame_extension": "png",
-        "clean_viewport_commands": configure_clean_highres_viewport(),
+        **viewport_hygiene,
     }
+    runtime_light_audit = summary["lighting"].get("runtime_light_audit") or {}
+    summary["lighting"]["preview_shadow_safe"] = bool(
+        runtime_light_audit.get("preview_shadow_safe") is True
+        and viewport_hygiene.get("preview_shadow_safe") is True
+    )
     summary["capture_readiness"] = {
         "schema_version": "capture_readiness_v1",
         "warmup_frames": RENDER_WARMUP_FRAMES,

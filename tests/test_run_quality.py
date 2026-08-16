@@ -33,6 +33,55 @@ class RunQualityTests(unittest.TestCase):
             self.assertTrue(readiness["physics_ready"])
             self.assertEqual(readiness["physics_provenance"]["status"], "pass")
 
+    def test_highres_viewport_requires_complete_rgb_lighting_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_run(Path(tmp))
+            map_report = self.read_json(run_dir / "map_report.json")
+            map_report.pop("rgb_capture")
+            self.write_json(run_dir / "map_report.json", map_report)
+
+            with self.mock_ffprobe():
+                report = evaluate_run(run_dir, write=False)
+
+            self.assertIn(
+                "F_UE_LIGHTING_REPORT_MISSING",
+                {item["code"] for item in report["hard_gate"]["failures"]},
+            )
+
+    def test_highres_viewport_rejects_active_preview_shadow_indicator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_run(Path(tmp))
+            map_report = self.read_json(run_dir / "map_report.json")
+            map_report["rgb_capture"]["viewport_hygiene"]["preview_shadow_indicator_disabled"] = False
+            map_report["rgb_capture"]["preview_shadow_safe"] = False
+            self.write_json(run_dir / "map_report.json", map_report)
+
+            with self.mock_ffprobe():
+                report = evaluate_run(run_dir, write=False)
+
+            self.assertIn(
+                "F_UE_PREVIEW_SHADOW_INDICATOR_ACTIVE",
+                {item["code"] for item in report["hard_gate"]["failures"]},
+            )
+
+    def test_highres_viewport_rejects_non_movable_runtime_light(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_run(Path(tmp))
+            map_report = self.read_json(run_dir / "map_report.json")
+            audit = map_report["rgb_capture"]["runtime_light_audit"]
+            audit["preview_shadow_safe"] = False
+            audit["remaining_non_movable"] = ["StaticSun"]
+            map_report["rgb_capture"]["preview_shadow_safe"] = False
+            self.write_json(run_dir / "map_report.json", map_report)
+
+            with self.mock_ffprobe():
+                report = evaluate_run(run_dir, write=False)
+
+            self.assertIn(
+                "F_UE_RUNTIME_LIGHT_MOBILITY_INVALID",
+                {item["code"] for item in report["hard_gate"]["failures"]},
+            )
+
     def test_combined_native_pass_is_a_first_class_solver_evidence_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = self.make_run(Path(tmp))
@@ -554,7 +603,38 @@ class RunQualityTests(unittest.TestCase):
                 "views": {"front_static": {"rgb_path": "views/front_static/rgb.mp4"}},
             },
         )
-        self.write_json(run_dir / "map_report.json", {"status": "pass", "map_opened": True, "selected_map": {"path": "/Game/Test.Test"}})
+        self.write_json(
+            run_dir / "map_report.json",
+            {
+                "status": "pass",
+                "map_opened": True,
+                "selected_map": {"path": "/Game/Test.Test"},
+                "rgb_capture": {
+                    "backend": "highres_viewport",
+                    "existing_map_lights": {
+                        "inspected": 1,
+                        "normalized_to_movable": 1,
+                        "failures": [],
+                        "preview_shadow_safe": True,
+                    },
+                    "runtime_light_audit": {
+                        "inspected": 1,
+                        "enabled": 1,
+                        "normalized_to_movable": 0,
+                        "remaining_non_movable": [],
+                        "failures": [],
+                        "preview_shadow_safe": True,
+                    },
+                    "viewport_hygiene": {
+                        "game_view_after": True,
+                        "preview_shadow_indicator_disabled": True,
+                        "failures": [],
+                        "preview_shadow_safe": True,
+                    },
+                    "preview_shadow_safe": True,
+                },
+            },
+        )
         self.write_json(run_dir / "sensor_state.json", {"frame_count": 2, "views": [{"camera_id": "front_static"}], "depth": {"source": "ue_scene_capture"}, "segmentation": {"instance_level": True}})
         self.write_json(
             run_dir / "asset_resolution.json",
