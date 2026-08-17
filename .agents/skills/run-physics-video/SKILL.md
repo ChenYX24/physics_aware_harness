@@ -9,7 +9,9 @@ Operate one durable Physics-Aware Harness job from the normal Codex TUI. Use the
 
 ## Establish the job
 
-Work from the repository root containing `harness/` and `scripts/harness_agent_job.py`. Keep the Catalog, jobs, runs, media, caches, and imported assets in the external Harness workspace. Never create runtime output in the Git worktree.
+Resolve the repository root before running any Harness command. Use the current directory when it contains `harness/`, `scripts/harness_config.py`, and `scripts/harness_agent_job.py`; otherwise read `repository_root` from `~/.config/physics-aware-harness/agent.json` and use that directory as the command workdir after validating the same paths. If neither location is valid, stop with a configuration error. Do not recursively search the filesystem or guess a relative child directory.
+
+Keep the Catalog, jobs, runs, media, caches, and imported assets in the external Harness workspace. Never create runtime output in the Git worktree.
 
 Before creating or resuming a job, display the secret-free effective control-plane configuration:
 
