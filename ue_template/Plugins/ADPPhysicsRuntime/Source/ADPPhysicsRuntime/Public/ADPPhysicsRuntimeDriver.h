@@ -162,13 +162,14 @@ public:
 		bool bEnableGravity,
 		float LinearDamping,
 		float AngularDamping,
-		bool bSimulatePhysics);
+		bool bSimulatePhysics,
+		bool bCollisionEnabled);
 
 	UFUNCTION(BlueprintCallable, Category = "ADP Physics")
 	void RegisterStaticBody(FName BodyId, AActor* Actor);
 
 	UFUNCTION(BlueprintCallable, Category = "ADP Physics")
-	void RegisterStaticBodyWithCollider(FName BodyId, AActor* Actor, FName ColliderKind);
+	void RegisterStaticBodyWithCollider(FName BodyId, AActor* Actor, FName ColliderKind, bool bCollisionEnabled);
 
 	UFUNCTION(BlueprintCallable, Category = "ADP Physics")
 	void StartCapture(float InSampleIntervalSeconds, int32 InMaxFrames, const FString& InOutputPath);

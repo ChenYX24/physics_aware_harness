@@ -8569,11 +8569,13 @@ def start_cpp_runtime_driver(actors: dict, runtime_scene: dict | None, status: d
         if not actor:
             continue
         properties = obj.get("physics_properties") or {}
+        collision_enabled = bool_control(properties.get("collision_enabled"), bool(controls.get("collision_enabled", True)))
         try:
             driver.register_static_body_with_collider(
                 ue_name(actor_id),
                 actor,
                 ue_name(str(properties.get("collider") or "unknown").casefold()),
+                collision_enabled,
             )
             cpp_status["registered_static"].append(actor_id)
         except Exception as exc:
@@ -8593,6 +8595,7 @@ def start_cpp_runtime_driver(actors: dict, runtime_scene: dict | None, status: d
         gravity = bool_control(properties.get("enable_gravity"), bool(controls.get("gravity_enabled", True)))
         linear_damping = float_control(properties.get("linear_damping"), 0.15, 0.0, None)
         angular_damping = float_control(properties.get("angular_damping"), 0.25, 0.0, None)
+        collision_enabled = bool_control(properties.get("collision_enabled"), bool(controls.get("collision_enabled", True)))
         simulate_body = True
         if obj.get("behavior") == "third_person_runner":
             simulate_body = False
@@ -8610,6 +8613,7 @@ def start_cpp_runtime_driver(actors: dict, runtime_scene: dict | None, status: d
                 linear_damping,
                 angular_damping,
                 simulate_body,
+                collision_enabled,
             )
             cpp_status["registered_dynamic"].append(actor_id)
         except Exception as exc:

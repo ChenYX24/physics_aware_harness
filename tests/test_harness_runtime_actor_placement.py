@@ -251,6 +251,34 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual(by_object["magnet_source"]["physics"]["collision_enabled"], False)
         self.assertTrue(by_object["steel_ball"]["physics"]["simulate_physics"])
 
+    def test_collision_disabled_binding_reaches_runtime_scene(self) -> None:
+        from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement
+
+        binding = {
+            "object_id": "visual_container",
+            "runtime_actor_id": "actor_visual_container",
+            "role": "visible container",
+            "asset": {
+                "ue_path": "/Game/Props/SM_Container.SM_Container",
+                "runtime_usage": "collision_and_visual",
+            },
+            "bounds": {"extents_m": [0.5, 0.5, 0.5]},
+            "transform": {"position_m": [0.0, 0.0, 0.5]},
+            "physics": {
+                "simulate_physics": False,
+                "kinematic": True,
+                "collision_enabled": False,
+                "collider": "box",
+            },
+        }
+
+        _, static = runtime_objects_from_actor_placement(
+            {"actor_bindings": [binding]},
+            {"objects": [{"id": "visual_container"}]},
+        )
+
+        self.assertFalse(static[0]["physics_properties"]["collision_enabled"])
+
     def test_verifier_rejects_physics_object_without_asset_or_proxy(self) -> None:
         from harness.assets.asset_resolver import resolve_asset_intents
         from harness.planning.static_scene_builder import build_static_scene_layout

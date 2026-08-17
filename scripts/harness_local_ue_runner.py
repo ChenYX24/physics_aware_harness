@@ -521,6 +521,7 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
             "angular_damping": angular_damping,
             "enable_gravity": case_object.get("enable_gravity", physics.get("enable_gravity")),
             "use_ccd": case_object.get("use_ccd", physics.get("use_ccd")),
+            "collision_enabled": bool(physics.get("collision_enabled", True)),
             "collision_profile": physics.get("collision_profile"),
             "collider": physics.get("collider"),
             "collision_geometry_source": physics.get("collision_geometry_source"),

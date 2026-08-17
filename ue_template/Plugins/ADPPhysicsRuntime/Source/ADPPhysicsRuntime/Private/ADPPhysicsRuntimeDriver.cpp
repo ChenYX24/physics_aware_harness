@@ -213,7 +213,8 @@ void AADPPhysicsRuntimeDriver::RegisterBodyMetersWithCollider(
 	bool bEnableGravity,
 	float LinearDamping,
 	float AngularDamping,
-	bool bSimulatePhysics)
+	bool bSimulatePhysics,
+	bool bCollisionEnabled)
 {
 	RegisterBodyMeters(
 		BodyId,
@@ -228,6 +229,7 @@ void AADPPhysicsRuntimeDriver::RegisterBodyMetersWithCollider(
 	if (BodyConfigs.Num() > 0 && BodyConfigs.Last().BodyId == BodyId && BodyConfigs.Last().Actor.Get() == Actor)
 	{
 		BodyConfigs.Last().ColliderKind = ColliderKind;
+		BodyConfigs.Last().bCollisionEnabled = bCollisionEnabled;
 	}
 }
 
@@ -248,12 +250,13 @@ void AADPPhysicsRuntimeDriver::RegisterStaticBody(FName BodyId, AActor* Actor)
 	BodyConfigs.Add(Config);
 }
 
-void AADPPhysicsRuntimeDriver::RegisterStaticBodyWithCollider(FName BodyId, AActor* Actor, FName ColliderKind)
+void AADPPhysicsRuntimeDriver::RegisterStaticBodyWithCollider(FName BodyId, AActor* Actor, FName ColliderKind, bool bCollisionEnabled)
 {
 	RegisterStaticBody(BodyId, Actor);
 	if (BodyConfigs.Num() > 0 && BodyConfigs.Last().BodyId == BodyId && BodyConfigs.Last().Actor.Get() == Actor)
 	{
 		BodyConfigs.Last().ColliderKind = ColliderKind;
+		BodyConfigs.Last().bCollisionEnabled = bCollisionEnabled;
 	}
 }
 
@@ -363,11 +366,14 @@ void AADPPhysicsRuntimeDriver::ConfigureBody(const FADPDrivenBodyConfig& Config)
 	}
 
 	Primitive->SetMobility(EComponentMobility::Movable);
-	Primitive->SetCollisionEnabled(Config.bCollisionEnabled ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
 	Primitive->SetCollisionProfileName(Config.bDynamic ? FName(TEXT("PhysicsActor")) : FName(TEXT("BlockAll")));
-	Primitive->SetNotifyRigidBodyCollision(true);
+	Primitive->SetCollisionEnabled(Config.bCollisionEnabled ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
+	Primitive->SetNotifyRigidBodyCollision(Config.bCollisionEnabled);
 	Primitive->OnComponentHit.RemoveDynamic(this, &AADPPhysicsRuntimeDriver::HandleComponentHit);
-	Primitive->OnComponentHit.AddDynamic(this, &AADPPhysicsRuntimeDriver::HandleComponentHit);
+	if (Config.bCollisionEnabled)
+	{
+		Primitive->OnComponentHit.AddDynamic(this, &AADPPhysicsRuntimeDriver::HandleComponentHit);
+	}
 	Primitive->SetSimulatePhysics(Config.bDynamic && Config.bSimulatePhysics);
 	Primitive->SetEnableGravity(Config.bDynamic && Config.bEnableGravity);
 
@@ -440,7 +446,7 @@ void AADPPhysicsRuntimeDriver::CaptureFrame()
 		{
 			const FADPDrivenBodyConfig& A = BodyConfigs[IndexA];
 			const FADPDrivenBodyConfig& B = BodyConfigs[IndexB];
-			if (!A.bDynamic && !B.bDynamic)
+			if (!A.bCollisionEnabled || !B.bCollisionEnabled || (!A.bDynamic && !B.bDynamic))
 			{
 				continue;
 			}

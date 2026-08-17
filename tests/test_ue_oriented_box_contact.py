@@ -19,10 +19,23 @@ class UEOrientedBoxContactTests(unittest.TestCase):
             / "Private"
             / "ADPPhysicsRuntimeDriver.cpp"
         ).read_text(encoding="utf-8")
+        header = (
+            ROOT
+            / "ue_template"
+            / "Plugins"
+            / "ADPPhysicsRuntime"
+            / "Source"
+            / "ADPPhysicsRuntime"
+            / "Public"
+            / "ADPPhysicsRuntimeDriver.h"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("OrientedBoxSignedMargin", source)
         self.assertIn("adp_cpp_runtime_oriented_box_sat", source)
         self.assertIn("SignedMarginCm > ContactToleranceCm", source)
+        self.assertIn("bool bCollisionEnabled", header)
+        self.assertGreaterEqual(source.count("BodyConfigs.Last().bCollisionEnabled = bCollisionEnabled"), 2)
+        self.assertIn("!A.bCollisionEnabled || !B.bCollisionEnabled", source)
         self.assertNotIn("GetActorBounds(false, OriginA", source)
 
     def test_native_scene_registers_explicit_collider_kind(self) -> None:
