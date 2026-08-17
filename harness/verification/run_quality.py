@@ -1185,7 +1185,7 @@ def validate_solver_execution(
     canonical_contact_events = canonical_contact_payload.get("events") if isinstance(canonical_contact_payload, dict) else canonical_contact_payload
     canonical_contact_events = canonical_contact_events if isinstance(canonical_contact_events, list) else []
     contact_method_mapping = {
-        "adp_cpp_runtime_bounds_overlap_or_near_contact": "ue_postsolve_bounds_inference",
+        "adp_cpp_runtime_oriented_box_sat": "ue_postsolve_bounds_inference",
         "ue_on_component_hit": "ue_native_component_hit",
     }
     raw_contact_signatures: Counter[tuple[int, tuple[str, str]]] = Counter()

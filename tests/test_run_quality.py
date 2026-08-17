@@ -22,6 +22,7 @@ class RunQualityTests(unittest.TestCase):
             self.assertTrue(report["hard_gate_passed"])
             self.assertEqual(report["status"], "pass")
             self.assertEqual(report["solver_execution"]["status"], "pass")
+            self.assertEqual(report["solver_execution"]["contact_evidence"], "ue_postsolve_bounds_inference")
             self.assertTrue(report["contacts"]["initial_expected_contact_free"])
             self.assertEqual(report["contacts"]["initial_contact_scope"], "expected_collision_graph")
             self.assertTrue(report["ranking"]["eligible"])
@@ -169,7 +170,7 @@ class RunQualityTests(unittest.TestCase):
                     "contacts": ([{
                         "objects": ["ball_a", "ball_b"],
                         "method": "ue_postsolve_bounds_inference",
-                        "raw_method": "adp_cpp_runtime_bounds_overlap_or_near_contact",
+                        "raw_method": "adp_cpp_runtime_oriented_box_sat",
                     }] if contact else []),
                 }
 
@@ -774,7 +775,7 @@ class RunQualityTests(unittest.TestCase):
                                 "source": "adp_cpp_runtime_driver",
                             }
                         },
-                        "contacts": [] if contact_frame != 0 else [{"objects": ["ball_a", "ball_b"], "method": "adp_cpp_runtime_bounds_overlap_or_near_contact"}],
+                        "contacts": [] if contact_frame != 0 else [{"objects": ["ball_a", "ball_b"], "method": "adp_cpp_runtime_oriented_box_sat"}],
                     },
                     {
                         "frame": 1,
@@ -788,7 +789,7 @@ class RunQualityTests(unittest.TestCase):
                                 "source": "adp_cpp_runtime_driver",
                             }
                         },
-                        "contacts": [] if contact_frame != 1 else [{"objects": ["ball_a", "ball_b"], "method": "adp_cpp_runtime_bounds_overlap_or_near_contact"}],
+                        "contacts": [] if contact_frame != 1 else [{"objects": ["ball_a", "ball_b"], "method": "adp_cpp_runtime_oriented_box_sat"}],
                     },
                 ],
             },
@@ -799,7 +800,7 @@ class RunQualityTests(unittest.TestCase):
                 "frame": contact_frame,
                 "objects": ["ball_a", "ball_b"],
                 "method": "ue_postsolve_bounds_inference",
-                "raw_method": "adp_cpp_runtime_bounds_overlap_or_near_contact",
+                "raw_method": "adp_cpp_runtime_oriented_box_sat",
             }],
         )
         self.write_json(
