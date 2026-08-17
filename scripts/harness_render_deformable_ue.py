@@ -340,7 +340,7 @@ def main() -> int:
         "CHAOS_SIMULATION_ENABLED": "0",
         "SIM_STUDIO_UE_CAPTURE_BACKEND": "highres_viewport",
         "WORLD_MODEL_RENDER_PASS_MODE": render_mode,
-        "KEEP_RENDER_FRAMES": "0",
+        "KEEP_RENDER_FRAMES": os.environ.get("SIM_STUDIO_KEEP_RENDER_FRAMES", "0"),
         "VIDEO_CRF": "18",
         "VIDEO_PRESET": "fast",
         "RENDER_SURFACE_REPLAY_MATERIAL_WARMUP_SECONDS": "4.0" if profile.name == "smoke" else "0.5",

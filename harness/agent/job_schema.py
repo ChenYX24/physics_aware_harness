@@ -142,8 +142,8 @@ class JobManifest:
         if data["intent_contract_digest"] is not None:
             _sha256(data["intent_contract_digest"], "intent_contract_digest")
         target = _mapping(data["target"], "target")
-        if target.get("execution_profile") != "candidate":
-            raise ValueError("target.execution_profile must be candidate")
+        if target.get("execution_profile") not in {"candidate", "local_preview"}:
+            raise ValueError("target.execution_profile must be candidate or local_preview")
         if target.get("publication_tier") not in PUBLICATION_TIERS:
             raise ValueError("target.publication_tier is invalid")
         authorizations = _mapping(data["authorizations"], "authorizations")

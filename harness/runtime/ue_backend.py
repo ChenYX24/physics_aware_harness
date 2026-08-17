@@ -899,16 +899,32 @@ def standardize_runner_outputs(run_dir: Path, output_dir: Path, case: RuntimeCas
     collision_reference = collision_geometry_reference_status(run_dir)
     assets_reference_ready = asset_catalog_reference_ready and collision_reference["ready"]
     physics_ready, physics_provenance = evaluate_ue_physics_readiness(run_dir)
-    execution_ready = map_ready and physics_ready and verifier_report["status"] == "pass" and all(observability[key] for key in ("camera_plan_ready", "multi_view_ready", "render_pass_ready", "sync_ready")) and observability["depth_ready"] and bool(render_sync.get("camera_state_ready")) and (run_dir / "sensor_state.json").exists()
-    local_preview_ready = execution_ready and not assets_reference_ready and (
+    required_modalities = set(render_passes)
+    complete_sensor_contract = {"rgb", "depth", "segmentation"}.issubset(required_modalities)
+    execution_ready = (
+        map_ready
+        and physics_ready
+        and verifier_report["status"] == "pass"
+        and all(
+            observability[key]
+            for key in ("camera_plan_ready", "multi_view_ready", "render_pass_ready", "sync_ready")
+        )
+        and ("depth" not in required_modalities or observability["depth_ready"])
+        and bool(render_sync.get("camera_state_ready"))
+        and (run_dir / "sensor_state.json").exists()
+    )
+    reference_ready = execution_ready and complete_sensor_contract and assets_reference_ready
+    local_preview_ready = execution_ready and (
         int(asset_quality.get("local_preview_count") or 0) > 0 or asset_catalog_reference_ready
     )
     run_readiness = {
         "schema_version": "harness_run_readiness_v1",
         "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
-        "reference_ready": execution_ready and assets_reference_ready,
+        "reference_ready": reference_ready,
         "local_preview_ready": local_preview_ready,
-        "publication_tier": "reference" if execution_ready and assets_reference_ready else "local_preview" if local_preview_ready else "rejected",
+        "publication_tier": "reference" if reference_ready else "local_preview" if local_preview_ready else "rejected",
+        "required_modalities": sorted(required_modalities),
+        "complete_sensor_contract": complete_sensor_contract,
         "assets_reference_ready": assets_reference_ready,
         "asset_catalog_reference_ready": asset_catalog_reference_ready,
         "collision_geometry_reference_ready": collision_reference["ready"],

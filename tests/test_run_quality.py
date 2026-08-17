@@ -34,6 +34,43 @@ class RunQualityTests(unittest.TestCase):
             self.assertTrue(readiness["physics_ready"])
             self.assertEqual(readiness["physics_provenance"]["status"], "pass")
 
+    def test_local_preview_requires_rgb_but_not_depth_or_segmentation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_run(Path(tmp))
+            self.write_json(
+                run_dir / "execution_profile.json",
+                {"name": "local_preview", "render_passes": ["rgb"]},
+            )
+            for path in (
+                run_dir / "views" / "front_static" / "depth.exr",
+                run_dir / "views" / "front_static" / "segmentation.exr",
+            ):
+                path.unlink()
+            sensor = self.read_json(run_dir / "sensor_state.json")
+            sensor["depth"] = {"source": "missing"}
+            sensor["segmentation"] = {"instance_level": False}
+            self.write_json(run_dir / "sensor_state.json", sensor)
+            readiness = self.read_json(run_dir / "run_readiness.json")
+            readiness.update(
+                {
+                    "reference_ready": False,
+                    "local_preview_ready": True,
+                    "publication_tier": "local_preview",
+                }
+            )
+            self.write_json(run_dir / "run_readiness.json", readiness)
+
+            with self.mock_ffprobe():
+                report = evaluate_run(run_dir, write=False)
+
+            self.assertTrue(report["hard_gate_passed"], report["hard_gate"]["failures"])
+            self.assertEqual(report["quality_contract"]["required_modalities"], ["rgb"])
+            self.assertFalse(report["quality_contract"]["complete_sensor_contract"])
+            self.assertEqual(report["depth_geometry"]["status"], "not_required")
+            media = report["media"]["views"]["front_static"]
+            self.assertEqual(media["depth"]["status"], "not_required")
+            self.assertEqual(media["segmentation"]["status"], "not_required")
+
     def test_highres_viewport_requires_complete_rgb_lighting_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = self.make_run(Path(tmp))

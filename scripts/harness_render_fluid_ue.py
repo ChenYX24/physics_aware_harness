@@ -441,7 +441,7 @@ def main() -> int:
             "CHAOS_SIMULATION_ENABLED": "0",
             "SIM_STUDIO_UE_CAPTURE_BACKEND": "highres_viewport",
             "WORLD_MODEL_RENDER_PASS_MODE": render_mode,
-            "KEEP_RENDER_FRAMES": "0",
+            "KEEP_RENDER_FRAMES": os.environ.get("SIM_STUDIO_KEEP_RENDER_FRAMES", "0"),
             "VIDEO_CRF": "18",
             "VIDEO_PRESET": "fast",
             # Pay the shader/material cold-start cost in the disposable smoke

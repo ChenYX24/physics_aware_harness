@@ -71,6 +71,18 @@ EXECUTION_PROFILES: dict[str, ExecutionProfile] = {
         artifact_eligibility="review_candidate",
         purpose="Full-HD five-camera multimodal review candidate.",
     ),
+    "local_preview": ExecutionProfile(
+        name="local_preview",
+        views=("front_static", "event_closeup"),
+        render_passes=("rgb",),
+        render_mode="rgb",
+        width=1280,
+        height=720,
+        render_fps=24,
+        physics_hz=120,
+        artifact_eligibility="local_preview",
+        purpose="HD two-camera RGB preview with physics, camera, and semantic verification.",
+    ),
     "publish": ExecutionProfile(
         name="publish",
         views=COMPLETE_CASE_VIEWS,
@@ -176,6 +188,12 @@ def promotion(profile: ExecutionProfile, status: str) -> dict[str, Any]:
             "eligible": passed,
             "next_profile": "publish" if passed else None,
             "reason": "requires_explicit_keep_before_publish" if passed else "candidate_failed",
+        }
+    if profile.name == "local_preview":
+        return {
+            "eligible": False,
+            "next_profile": None,
+            "reason": "terminal_local_preview" if passed else "local_preview_failed",
         }
     return {"eligible": False, "next_profile": None, "reason": "terminal_profile"}
 

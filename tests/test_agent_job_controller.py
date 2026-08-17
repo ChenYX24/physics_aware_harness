@@ -682,13 +682,18 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertEqual(inspection["job"]["state"], "awaiting_semantic_review")
         self.assertEqual(inspection["job"]["current_stage"], "semantic_review")
         self.assertNotEqual(inspection["job"]["state"], "completed")
-        self.assertEqual(fake.execute_calls, ["smoke", "candidate"])
+        self.assertEqual(fake.execute_calls, ["smoke", "local_preview"])
+        self.assertEqual(inspection["job"]["target"]["execution_profile"], "local_preview")
         self.assertEqual(len(inspection["attempts"]), 1)
         attempt_root = Path(inspection["paths"]["job_root"]) / "attempts" / "attempt_001"
         gate = read_json(attempt_root / "smoke_gate.json")
         self.assertEqual(gate["mode"], "executed")
         self.assertEqual(gate["status"], "pass")
         self.assertNotEqual(fake.compile_calls[0], fake.compile_calls[-1])
+        self.assertEqual(
+            fake.compile_calls[-1],
+            (("front_static", "event_closeup"), ("rgb",)),
+        )
         candidate = read_json(attempt_root / "candidate_run.json")
         self.assertTrue((Path(candidate["run_dir"]) / "quality_report.json").is_file())
         leaf = inspection["current_leaf_stage_result"]
@@ -954,7 +959,7 @@ class AgentJobControllerTests(unittest.TestCase):
             {key: value for key, value in rebuilt["job"]["usage"].items() if key != "active_elapsed_seconds"},
             {key: value for key, value in usage_before.items() if key != "active_elapsed_seconds"},
         )
-        self.assertEqual(fake.execute_calls, ["smoke", "candidate"])
+        self.assertEqual(fake.execute_calls, ["smoke", "local_preview"])
         self.assertEqual(fake.semantic_calls, 1)
         attempt = Path(rebuilt["paths"]["job_root"]) / "attempts" / "attempt_001"
         self.assertTrue((attempt / "evidence_bundle_superseded_001" / "manifest.json").is_file())
@@ -2369,7 +2374,7 @@ class AgentJobControllerTests(unittest.TestCase):
         restarted = AgentJobController(self.workspace, hooks=hooks)
         resumed = restarted.resume("job_verifier_resume")
         self.assertEqual(resumed["job"]["state"], "awaiting_semantic_review")
-        self.assertEqual(fake.execute_calls, ["smoke", "candidate"])
+        self.assertEqual(fake.execute_calls, ["smoke", "local_preview"])
 
     def test_default_budget_and_hard_deadline_gate(self) -> None:
         self.assertEqual(DEFAULT_BUDGET["max_case_spec_revisions"], 5)
@@ -2634,7 +2639,7 @@ class AgentJobControllerTests(unittest.TestCase):
             seed_case_spec=case_spec_v2_fixture(),
         )
         inspection = controller.advance_until_blocked("job_reused_smoke")
-        self.assertEqual(fake.execute_calls, ["smoke", "candidate"])
+        self.assertEqual(fake.execute_calls, ["smoke", "local_preview"])
         manifest = inspection["job"]
         manifest.update(
             {
@@ -2652,7 +2657,7 @@ class AgentJobControllerTests(unittest.TestCase):
             Path(resumed["paths"]["job_root"]) / "attempts" / "attempt_001" / "smoke_gate.json"
         )
         self.assertEqual(gate["mode"], "reused")
-        self.assertEqual(fake.execute_calls, ["smoke", "candidate"])
+        self.assertEqual(fake.execute_calls, ["smoke", "local_preview"])
 
     def test_incomplete_smoke_evidence_is_not_reused(self) -> None:
         controller, fake = self.controller()

@@ -11,6 +11,7 @@ from typing import Any
 from harness.core.artifact_schema import write_json
 from harness.core.stage_result import stage_result_from_quality_report, write_stage_result
 from harness.runtime.backend_policy import backend_plan
+from harness.runtime.execution_profile import EXECUTION_PROFILES, execution_profile
 from harness.verification.depth_geometry_verifier import verify_depth_geometry
 from harness.verification.render_sync_checker import depth_pixel_statistics, sequence_evidence_for_view
 
@@ -32,22 +33,53 @@ def evaluate_run(
 
     failures: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
+    quality_contract = quality_contract_for_run(run_dir)
+    required_modalities = set(quality_contract["required_modalities"])
     report_summaries, raw_reports = summarize_source_reports(run_dir, failures, warnings)
 
     view_ids = discover_view_ids(run_dir, raw_reports.get("render_sync"))
-    media = validate_media(run_dir, view_ids, ffprobe, failures, warnings)
-    sensor_sequences = validate_sensor_sequences(run_dir, view_ids, media, failures)
+    media = validate_media(
+        run_dir,
+        view_ids,
+        ffprobe,
+        failures,
+        warnings,
+        required_modalities=required_modalities,
+    )
+    sensor_sequences = validate_sensor_sequences(
+        run_dir,
+        view_ids,
+        media,
+        failures,
+        required_modalities=required_modalities,
+    )
     trajectory, trajectory_frames = validate_trajectory(run_dir, failures)
     solver_execution = validate_solver_execution(run_dir, trajectory_frames, failures)
     refresh_ue_readiness_summary(
         report_summaries.get("run_readiness"),
         raw_reports.get("run_readiness"),
         solver_execution,
+        required_modalities=required_modalities,
     )
-    validate_source_gates(report_summaries, failures, warnings)
+    validate_source_gates(
+        report_summaries,
+        failures,
+        warnings,
+        required_modalities=required_modalities,
+    )
     contacts = validate_contacts(run_dir, trajectory_frames, failures)
     camera_motion = validate_camera_motion(run_dir, failures)
-    depth_geometry = verify_depth_geometry(run_dir, write=write)
+    depth_geometry = (
+        verify_depth_geometry(run_dir, write=write)
+        if {"depth", "segmentation"}.issubset(required_modalities)
+        else {
+            "schema_version": "harness_depth_geometry_report_v1",
+            "status": "not_required",
+            "applicable": False,
+            "reason": "execution_profile_does_not_require_depth_and_segmentation",
+            "failure_codes": [],
+        }
+    )
     if depth_geometry.get("status") == "fail":
         failures.append(
             issue(
@@ -71,6 +103,7 @@ def evaluate_run(
         "run_dir": str(run_dir.resolve()),
         "status": "pass" if hard_gate_passed else "fail",
         "hard_gate_passed": hard_gate_passed,
+        "quality_contract": quality_contract,
         "hard_gate": {
             "status": "pass" if hard_gate_passed else "fail",
             "passed": hard_gate_passed,
@@ -127,7 +160,13 @@ def synchronize_run_readiness(run_dir: Path, quality_report: dict[str, Any]) -> 
         write_json(output_path, readiness)
 
 
-def refresh_ue_readiness_summary(summary: Any, readiness: Any, provenance: Any) -> None:
+def refresh_ue_readiness_summary(
+    summary: Any,
+    readiness: Any,
+    provenance: Any,
+    *,
+    required_modalities: set[str] | None = None,
+) -> None:
     if not isinstance(summary, dict) or not isinstance(readiness, dict) or readiness.get("backend") != "ue":
         return
     provenance_ready = isinstance(provenance, dict) and provenance.get("status") in {"pass", "not_required"}
@@ -143,13 +182,20 @@ def refresh_ue_readiness_summary(summary: Any, readiness: Any, provenance: Any) 
     )
     if not all(key in readiness for key in detailed_execution_keys):
         return
+    modalities = required_modalities or {"rgb", "depth", "segmentation"}
+    required_execution_keys = [
+        key
+        for key in detailed_execution_keys
+        if key != "depth_ready" or "depth" in modalities
+    ]
     execution_ready = provenance_ready and readiness.get("verifier_status") == "pass" and all(
-        readiness.get(key) is True for key in detailed_execution_keys
+        readiness.get(key) is True for key in required_execution_keys
     )
     assets_reference_ready = readiness.get("assets_reference_ready") is True
     local_asset_ready = int(readiness.get("local_preview_asset_count") or 0) > 0 or readiness.get("asset_catalog_reference_ready") is True
-    reference_ready = execution_ready and assets_reference_ready
-    local_preview_ready = execution_ready and not assets_reference_ready and local_asset_ready
+    complete_sensor_contract = {"rgb", "depth", "segmentation"}.issubset(modalities)
+    reference_ready = execution_ready and complete_sensor_contract and assets_reference_ready
+    local_preview_ready = execution_ready and local_asset_ready
     publication_tier = "reference" if reference_ready else "local_preview" if local_preview_ready else "rejected"
     readiness.update(
         {
@@ -340,7 +386,14 @@ def summarize_report(name: str, value: Any, path: str) -> dict[str, Any]:
     }
 
 
-def validate_source_gates(summaries: dict[str, Any], failures: list[dict[str, Any]], warnings: list[dict[str, Any]]) -> None:
+def validate_source_gates(
+    summaries: dict[str, Any],
+    failures: list[dict[str, Any]],
+    warnings: list[dict[str, Any]],
+    *,
+    required_modalities: set[str] | None = None,
+) -> None:
+    modalities = required_modalities or {"rgb", "depth", "segmentation"}
     for name in ("run_readiness", "verifier", "render_sync", "map_report", "asset_resolution", "sensor_state"):
         summary = summaries[name]
         if not summary.get("present"):
@@ -411,7 +464,11 @@ def validate_source_gates(summaries: dict[str, Any], failures: list[dict[str, An
     if assets.get("present") and assets.get("geometry_match") is False:
         failures.append(issue("F_ASSET_GEOMETRY_MISMATCH", "selected render asset does not match the solver container geometry"))
     sensor = summaries["sensor_state"]
-    if sensor.get("present") and (int(sensor.get("frame_count") or 0) <= 0 or int(sensor.get("view_count") or 0) <= 0 or not sensor.get("instance_segmentation")):
+    if sensor.get("present") and (
+        int(sensor.get("frame_count") or 0) <= 0
+        or int(sensor.get("view_count") or 0) <= 0
+        or ("segmentation" in modalities and not sensor.get("instance_segmentation"))
+    ):
         failures.append(issue("F_SENSOR_STATE_INVALID", "sensor_state lacks frames, views, or instance segmentation"))
 
 
@@ -436,7 +493,10 @@ def validate_media(
     ffprobe: str,
     failures: list[dict[str, Any]],
     warnings: list[dict[str, Any]],
+    *,
+    required_modalities: set[str] | None = None,
 ) -> dict[str, Any]:
+    modalities = required_modalities or {"rgb", "depth", "segmentation"}
     if not view_ids:
         failures.append(issue("F_VIEW_MISSING", "no canonical views were found"))
     views: dict[str, Any] = {}
@@ -444,19 +504,33 @@ def validate_media(
     for camera_id in view_ids:
         view_dir = run_dir / "views" / camera_id
         video = validate_video(view_dir / "rgb.mp4", run_dir, ffprobe, failures, warnings)
-        depth = validate_exr(view_dir / "depth.exr", run_dir, "depth", failures)
-        depth_pixel_check = validate_depth_pixels(view_dir, run_dir, failures)
-        depth["pixel_check"] = depth_pixel_check
-        if depth_pixel_check["status"] == "fail":
-            depth["status"] = "fail"
-        segmentation = validate_segmentation(view_dir, run_dir, failures)
-        pixel_check = validate_segmentation_pixels(view_dir, run_dir, failures)
-        segmentation["pixel_check"] = pixel_check
-        if pixel_check["status"] == "fail":
-            segmentation["status"] = "fail"
+        if "depth" in modalities:
+            depth = validate_exr(view_dir / "depth.exr", run_dir, "depth", failures)
+            depth_pixel_check = validate_depth_pixels(view_dir, run_dir, failures)
+            depth["pixel_check"] = depth_pixel_check
+            if depth_pixel_check["status"] == "fail":
+                depth["status"] = "fail"
+        else:
+            depth = {"status": "not_required", "reason": "execution_profile_does_not_require_depth"}
+        if "segmentation" in modalities:
+            segmentation = validate_segmentation(view_dir, run_dir, failures)
+            pixel_check = validate_segmentation_pixels(view_dir, run_dir, failures)
+            segmentation["pixel_check"] = pixel_check
+            if pixel_check["status"] == "fail":
+                segmentation["status"] = "fail"
+        else:
+            segmentation = {
+                "status": "not_required",
+                "reason": "execution_profile_does_not_require_segmentation",
+            }
         videos.append(video)
+        required_statuses = [video["status"]]
+        if "depth" in modalities:
+            required_statuses.append(depth["status"])
+        if "segmentation" in modalities:
+            required_statuses.append(segmentation["status"])
         views[camera_id] = {
-            "status": "pass" if video["status"] == depth["status"] == segmentation["status"] == "pass" else "fail",
+            "status": "pass" if all(status == "pass" for status in required_statuses) else "fail",
             "rgb": video,
             "depth": depth,
             "segmentation": segmentation,
@@ -564,7 +638,10 @@ def validate_sensor_sequences(
     view_ids: list[str],
     media: dict[str, Any],
     failures: list[dict[str, Any]],
+    *,
+    required_modalities: set[str] | None = None,
 ) -> dict[str, Any]:
+    modalities = required_modalities or {"rgb", "depth", "segmentation"}
     views: dict[str, Any] = {}
     for camera_id in view_ids:
         meta = read_optional_json(run_dir / "views" / camera_id / "meta.json")
@@ -572,6 +649,8 @@ def validate_sensor_sequences(
         rgb_count = int((((media.get("views") or {}).get(camera_id) or {}).get("rgb") or {}).get("frame_count") or 0)
         view_status = "pass"
         for modality in ("depth", "segmentation"):
+            if modality not in modalities:
+                continue
             count = int((evidence.get(modality) or {}).get("frame_count") or 0)
             if count <= 0:
                 failures.append(
@@ -596,6 +675,32 @@ def validate_sensor_sequences(
                 view_status = "fail"
         views[camera_id] = {"status": view_status, "rgb_frame_count": rgb_count, "evidence": evidence}
     return {"status": "pass" if views and all(row["status"] == "pass" for row in views.values()) else "fail", "views": views}
+
+
+def quality_contract_for_run(run_dir: Path) -> dict[str, Any]:
+    profile = read_optional_json(run_dir / "execution_profile.json")
+    render_config = read_optional_json(run_dir / "inputs" / "render_config.json")
+    profile_name = str(profile.get("name") or "")
+    actual_modalities = render_config.get("passes") if isinstance(render_config.get("passes"), list) else []
+    if profile_name in EXECUTION_PROFILES:
+        raw_modalities = [*execution_profile(profile_name).render_passes, *actual_modalities]
+        source = "registered_execution_profile+inputs/render_config.json"
+    else:
+        raw_modalities = ["rgb", "depth", "segmentation"]
+        source = "legacy_complete_sensor_default"
+    modalities = []
+    for value in raw_modalities:
+        modality = str(value).strip().casefold()
+        if modality and modality not in modalities:
+            modalities.append(modality)
+    if "rgb" not in modalities:
+        modalities.insert(0, "rgb")
+    return {
+        "execution_profile": profile_name or "legacy",
+        "required_modalities": modalities,
+        "complete_sensor_contract": {"rgb", "depth", "segmentation"}.issubset(modalities),
+        "source": source,
+    }
 
 
 def validate_exr(path: Path, run_dir: Path, modality: str, failures: list[dict[str, Any]]) -> dict[str, Any]:

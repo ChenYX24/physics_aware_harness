@@ -1414,6 +1414,62 @@ class RuntimeActorPlacementTests(unittest.TestCase):
             self.assertEqual(result["depth_type"], "view_z")
             self.assertEqual(result["stored_value_to_centimeter"], 10000.0)
 
+    def test_noncanonical_frame_cleanup_preserves_canonical_sensor_sequences(self) -> None:
+        from scripts.harness_local_ue_runner import cleanup_noncanonical_render_frames
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            native = run_dir / "logs" / "native_data"
+            source = native / "segmentation" / "front_static" / "frame_0000.exr"
+            raw = native / "segmentation_raw" / "front_static" / "frame_0000.exr"
+            depth = native / "depth_exr" / "front_static" / "frame_0000.exr"
+            rgb = native / "frames" / "frame_0000.png"
+            for path, payload in ((source, b"mask"), (raw, b"raw"), (depth, b"depth"), (rgb, b"rgb")):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(payload)
+            canonical = run_dir / "views" / "front_static" / "segmentation_frames" / "frame_0000.exr"
+            canonical.parent.mkdir(parents=True, exist_ok=True)
+            canonical.hardlink_to(source)
+            meta = run_dir / "views" / "front_static" / "meta.json"
+            meta.write_text(json.dumps({"segmentation_raw_frames": [str(raw)]}), encoding="utf-8")
+
+            report = cleanup_noncanonical_render_frames(
+                run_dir,
+                native_outputs=[native],
+                keep_render_frames=False,
+            )
+
+            self.assertEqual(report["status"], "pass")
+            self.assertTrue(report["canonical_sensor_sequences_retained"])
+            self.assertTrue(canonical.is_file())
+            self.assertEqual(canonical.read_bytes(), b"mask")
+            self.assertFalse((native / "segmentation").exists())
+            self.assertFalse((native / "segmentation_raw").exists())
+            self.assertFalse((native / "depth_exr").exists())
+            self.assertFalse((native / "frames").exists())
+            self.assertEqual(json.loads(meta.read_text())["segmentation_raw_frames"], [])
+
+    def test_noncanonical_frame_cleanup_honors_keep_switch(self) -> None:
+        from scripts.harness_local_ue_runner import cleanup_noncanonical_render_frames
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            native = run_dir / "logs" / "native_rgb"
+            frame = native / "frames" / "frame_0000.png"
+            frame.parent.mkdir(parents=True)
+            frame.write_bytes(b"rgb")
+
+            report = cleanup_noncanonical_render_frames(
+                run_dir,
+                native_outputs=[native],
+                keep_render_frames=True,
+            )
+
+            self.assertEqual(report["status"], "pass")
+            self.assertTrue(report["keep_render_frames"])
+            self.assertEqual(report["removed"], [])
+            self.assertTrue(frame.is_file())
+
     def test_ue_map_object_path_normalizes_to_package(self) -> None:
         from scripts.harness_local_ue_runner import canonical_game_package
 

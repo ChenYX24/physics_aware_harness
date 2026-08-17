@@ -1384,6 +1384,11 @@ def standardize_native_output(
             },
         },
     )
+    cleanup_noncanonical_render_frames(
+        run_dir,
+        native_outputs=[native_output, rgb_source],
+        keep_render_frames=os.environ.get("SIM_STUDIO_KEEP_RENDER_FRAMES", "0") == "1",
+    )
     if case_spec is not None and scene_spec is not None and render_config is not None:
         ArtifactManager(run_dir).finalize(
             run_id=run_dir.name,
@@ -1734,6 +1739,65 @@ def copy_native_pass_view(native_view: dict[str, Any] | None, view_dir: Path, an
         "palette_rgb8": native_view.get("palette_rgb8"),
         "raw_frames": native_view.get("raw_frames"),
     }
+
+
+def cleanup_noncanonical_render_frames(
+    run_dir: Path,
+    *,
+    native_outputs: list[Path],
+    keep_render_frames: bool,
+) -> dict[str, Any]:
+    run_dir = run_dir.resolve()
+    logs_root = (run_dir / "logs").resolve()
+    candidates: list[Path] = []
+    errors: list[dict[str, str]] = []
+    for raw_root in dict.fromkeys(Path(path) for path in native_outputs):
+        native_root = raw_root.resolve()
+        if not native_root.is_relative_to(logs_root):
+            errors.append({"path": str(raw_root), "error": "native_output_outside_run_logs"})
+            continue
+        for name in ("depth_exr", "segmentation", "segmentation_raw"):
+            candidates.append(native_root / name)
+        candidates.extend(sorted(native_root.glob("frames*")))
+
+    removed: list[dict[str, Any]] = []
+    if not keep_render_frames:
+        for path in dict.fromkeys(candidates):
+            if not path.is_dir() or path.is_symlink():
+                continue
+            files = [item for item in path.rglob("*") if item.is_file() and not item.is_symlink()]
+            size_bytes = sum(item.stat().st_size for item in files)
+            try:
+                shutil.rmtree(path)
+            except OSError as exc:
+                errors.append({"path": str(path), "error": str(exc)})
+                continue
+            removed.append(
+                {
+                    "path": path.relative_to(run_dir).as_posix(),
+                    "file_count": len(files),
+                    "nominal_size_bytes": size_bytes,
+                }
+            )
+        for meta_path in sorted((run_dir / "views").glob("*/meta.json")):
+            meta = read_optional_json(meta_path)
+            if not meta:
+                continue
+            meta["segmentation_raw_frames"] = []
+            meta["noncanonical_render_frames_retained"] = False
+            write_json(meta_path, meta)
+
+    report = {
+        "schema_version": "harness_render_frame_cleanup_v1",
+        "keep_render_frames": keep_render_frames,
+        "scope": "noncanonical_native_intermediates",
+        "canonical_sensor_sequences_retained": True,
+        "removed": removed,
+        "errors": errors,
+        "status": "pass" if not errors else "partial",
+    }
+    write_json(run_dir / "render_frame_cleanup.json", report)
+    return report
 
 
 def encode_sensor_preview(frame_dir: Path, output: Path, *, fps: int, modality: str) -> bool:

@@ -12,6 +12,7 @@ from harness.runtime.render_pass_contract import enforce_ue_render_passes, norma
 class ExecutionProfileTests(unittest.TestCase):
     def test_profiles_make_capture_cost_and_delivery_eligibility_explicit(self) -> None:
         smoke = execution_profile("smoke")
+        local_preview = execution_profile("local_preview")
         candidate = execution_profile("candidate")
         publish = execution_profile("publish")
 
@@ -25,11 +26,28 @@ class ExecutionProfileTests(unittest.TestCase):
         self.assertEqual(candidate.physics_hz, smoke.physics_hz)
         self.assertEqual(publish.physics_hz, smoke.physics_hz)
         self.assertFalse(smoke.complete_sensor_contract)
+        self.assertFalse(local_preview.complete_sensor_contract)
+        self.assertEqual(local_preview.views, ("front_static", "event_closeup"))
+        self.assertEqual(local_preview.render_passes, ("rgb",))
+        self.assertEqual((local_preview.width, local_preview.height), (1280, 720))
         self.assertTrue(candidate.complete_sensor_contract)
         self.assertEqual(len(candidate.views), 5)
         self.assertLess(candidate.width, publish.width)
         self.assertEqual(normalize_passes(smoke.render_passes), ["rgb"])
         self.assertEqual(enforce_ue_render_passes(smoke.render_passes), ["rgb", "depth", "segmentation"])
+
+    def test_local_preview_is_a_terminal_rgb_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report = write_execution_reports(
+                Path(tmp),
+                execution_profile("local_preview"),
+                wall_seconds=1.0,
+                status="pass",
+            )
+
+            self.assertEqual(report["artifact_eligibility"], "local_preview")
+            self.assertEqual(report["promotion"]["reason"], "terminal_local_preview")
+            self.assertIsNone(report["promotion"]["next_profile"])
 
     def test_efficiency_report_uses_native_timing_and_promotes_smoke_only_after_pass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

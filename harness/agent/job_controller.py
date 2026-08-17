@@ -230,6 +230,11 @@ class AgentJobController:
             raise ValueError("seed_case_spec cannot be combined with legacy generation mode")
         policy = generation_policy(mode)
         now = utc_now()
+        target_profile = (
+            "local_preview"
+            if publication_tier in {"diagnostic_only", "local_preview"}
+            else "candidate"
+        )
         manifest = JobManifest.from_dict(
             {
                 "schema_version": JOB_MANIFEST_SCHEMA_VERSION,
@@ -240,7 +245,7 @@ class AgentJobController:
                 "active_compilation_id": None,
                 "request_digest": stable_digest(request_data),
                 "intent_contract_digest": None,
-                "target": {"execution_profile": "candidate", "publication_tier": publication_tier},
+                "target": {"execution_profile": target_profile, "publication_tier": publication_tier},
                 "authorizations": auth,
                 "budget": normalized,
                 "usage": empty_usage(),
@@ -1720,7 +1725,11 @@ class AgentJobController:
         if stage == "smoke":
             return self._advance_run(manifest, profile_name="smoke")
         if stage == "candidate":
-            return self._advance_run(manifest, profile_name="candidate")
+            return self._advance_run(
+                manifest,
+                profile_name=str(manifest["target"]["execution_profile"]),
+                controller_stage="candidate",
+            )
         if stage == "quality_gate":
             return self._advance_quality(manifest)
         if stage == "evidence_bundle":
@@ -2378,7 +2387,14 @@ class AgentJobController:
             active_compilation_id=str(transaction["transaction_id"]),
         )
 
-    def _advance_run(self, manifest: dict[str, Any], *, profile_name: str) -> dict[str, Any]:
+    def _advance_run(
+        self,
+        manifest: dict[str, Any],
+        *,
+        profile_name: str,
+        controller_stage: str | None = None,
+    ) -> dict[str, Any]:
+        stage_name = controller_stage or profile_name
         attempt_id = manifest["current_attempt_id"]
         attempt_dir = self.store.attempt_dir(manifest["job_id"], attempt_id)
         case_spec = self._load_current_case_spec(manifest)
@@ -2387,9 +2403,9 @@ class AgentJobController:
         profile_fingerprint = stable_digest(
             {"execution": self._execution_fingerprint(case_spec.data, compilation), "profile": profile.__dict__}
         )
-        run_slot = attempt_dir / "runs" / profile_name
+        run_slot = attempt_dir / "runs" / stage_name
         gate_path = attempt_dir / "smoke_gate.json"
-        if profile_name == "smoke" and gate_path.is_file():
+        if stage_name == "smoke" and gate_path.is_file():
             prior = read_json(gate_path)
             prior_run = Path(str(prior.get("run_dir") or ""))
             if (
@@ -2417,7 +2433,7 @@ class AgentJobController:
             usage = copy.deepcopy(manifest["usage"])
             if usage["ue_launches"] >= manifest["budget"]["max_ue_launches"]:
                 result = failure_stage_result(
-                    stage=profile_name,
+                    stage=stage_name,
                     failure_code="ue_launch_budget_exhausted",
                     message="UE launch budget is exhausted",
                     job_id=manifest["job_id"],
@@ -2425,7 +2441,7 @@ class AgentJobController:
                 )
                 self._write_controller_stage_result(manifest, result)
                 return self._apply_stage_result(manifest, result)
-            self._record_controller_ue_launch(manifest, kind="runtime", stage=profile_name)
+            self._record_controller_ue_launch(manifest, kind="runtime", stage=stage_name)
             manifest = self._reconcile_ue_launch_usage(manifest)
         compilation.write(expected_run)
         started = self.hooks.monotonic()
@@ -2492,7 +2508,7 @@ class AgentJobController:
         )
         self._adopt_run_stage_results(run_dir, manifest["job_id"], attempt_id)
         passed = verifier.get("status") == "pass" and render_sync.get("status") == "pass"
-        if profile_name == "smoke":
+        if stage_name == "smoke":
             smoke_mode = self._smoke_mode(attempt_dir)
             gate = {
                 "schema_version": SMOKE_GATE_SCHEMA_VERSION,
@@ -2514,9 +2530,9 @@ class AgentJobController:
             result_path = run_dir / "stage_results" / ("verifier.json" if verifier.get("status") != "pass" else "render_sync.json")
             result = self._with_identity(read_json(result_path), manifest["job_id"], attempt_id)
             return self._apply_stage_result(manifest, result)
-        checkpoint_stage = profile_name
+        checkpoint_stage = stage_name
         self._checkpoint(manifest, checkpoint_stage, "completed", profile_fingerprint, [str(run_dir)])
-        if profile_name == "smoke":
+        if stage_name == "smoke":
             return self._update_manifest(manifest, current_stage="candidate")
         attempt = self.store.load_attempt(manifest["job_id"], attempt_id)
         attempt.update({"status": "candidate_passed", "updated_at": utc_now()})
@@ -2759,12 +2775,13 @@ class AgentJobController:
             row["ambiguity_id"] = f"ambiguity_{index:03d}_{stable_digest(row)[:12]}"
             ambiguities.append(row)
         assumptions = [dict(row) for row in expansion.get("assumptions") or [] if isinstance(row, Mapping)]
+        target_execution_profile = execution_profile(str(manifest["target"]["execution_profile"]))
         execution = {
             "backend_constraints": copy.deepcopy(case_spec.get("backend_constraints") or {}),
             "target_profile": manifest["target"]["execution_profile"],
             "publication_tier": manifest["target"]["publication_tier"],
             "duration_s": (case_spec.get("scene") or {}).get("duration_s"),
-            "resolution": [1920, 1080],
+            "resolution": [target_execution_profile.width, target_execution_profile.height],
         }
         declared_adjustments = self._project_allowed_adjustments(expansion, case_spec)
         hard_parameter_paths = {
