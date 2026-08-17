@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -279,6 +280,32 @@ class AgentJobController:
             manifest,
             current_leaf_stage_result=current_leaf_stage_result,
         )
+        effective_revision_policy = {
+            "available": False,
+            "allowed_adjustments": {"paths": [], "ranges": {}},
+            "message": "job has no current CaseSpec revision policy",
+        }
+        current_attempt_id = manifest.get("current_attempt_id")
+        intent_path = root / "request" / "intent_contract.json"
+        if current_attempt_id is not None and intent_path.is_file():
+            case_spec_path = self.store.attempt_dir(job_id, str(current_attempt_id)) / "case_spec.json"
+            if case_spec_path.is_file():
+                case_spec = read_json(case_spec_path)
+                intent = IntentContract.from_dict(read_json(intent_path)).to_dict()
+                allowed = self._effective_allowed_adjustments(intent)
+                if intent.get("schema_version") == INTENT_CONTRACT_SCHEMA_VERSION:
+                    allowed = self._overlay_allowed_adjustments(
+                        self._case_spec_revision_policy(
+                            case_spec,
+                            excluded_paths=self._native_hard_parameter_paths(job_id),
+                        ),
+                        allowed,
+                    )
+                effective_revision_policy = {
+                    "available": bool(allowed["paths"]),
+                    "allowed_adjustments": allowed,
+                    "message": "revisions may change only these bounded source CaseSpec leaves",
+                }
         return {
             "schema_version": "harness_agent_job_inspection_v1",
             "effective_config_digest": self.config.digest,
@@ -292,6 +319,7 @@ class AgentJobController:
                 current_leaf_stage_result=current_leaf_stage_result,
             ),
             "case_spec_contract_repair": case_spec_contract_repair,
+            "case_spec_revision_policy": effective_revision_policy,
             "configuration_recompile": self._configuration_recompile_eligibility(
                 manifest,
                 current_leaf_stage_result=current_leaf_stage_result,
@@ -2036,7 +2064,7 @@ class AgentJobController:
             for row in draft["parameter_analysis"]
             if row["requirement_level"] in {"soft", "inferred"}
         )
-        if contract["allowed_adjustments"]["paths"] != expected_adjustable:
+        if not set(expected_adjustable).issubset(contract["allowed_adjustments"]["paths"]):
             raise ValueError("native parameter analysis does not match a bounded CaseSpec leaf")
         contract["schema_version"] = INTENT_CONTRACT_SCHEMA_VERSION
         contract["source"] = "agent_native_submission_v1"
@@ -2056,6 +2084,22 @@ class AgentJobController:
         if not path.is_file():
             raise JobStoreError("generation policy is missing")
         return validate_generation_policy(read_json(path))
+
+    def _native_hard_parameter_paths(self, job_id: str) -> set[str]:
+        path = self.store.job_dir(job_id) / "request" / "native_generation_submission.json"
+        if not path.is_file():
+            return set()
+        try:
+            submission = read_json(path)
+        except (OSError, TypeError, ValueError):
+            return set()
+        draft = submission.get("intent_draft") if isinstance(submission, Mapping) else None
+        rows = draft.get("parameter_analysis") if isinstance(draft, Mapping) else None
+        return {
+            str(row.get("path") or "")
+            for row in rows or []
+            if isinstance(row, Mapping) and row.get("requirement_level") == "hard"
+        }
 
     def _load_frozen_native_context(
         self,
@@ -2684,7 +2728,16 @@ class AgentJobController:
             "duration_s": (case_spec.get("scene") or {}).get("duration_s"),
             "resolution": [1920, 1080],
         }
-        allowed_adjustments = self._project_allowed_adjustments(expansion, case_spec)
+        declared_adjustments = self._project_allowed_adjustments(expansion, case_spec)
+        hard_parameter_paths = {
+            str(row.get("path") or "")
+            for row in expansion.get("parameter_analysis") or []
+            if isinstance(row, Mapping) and row.get("requirement_level") == "hard"
+        }
+        allowed_adjustments = self._overlay_allowed_adjustments(
+            self._case_spec_revision_policy(case_spec, excluded_paths=hard_parameter_paths),
+            declared_adjustments,
+        )
         contract = {
             "schema_version": PROJECTED_INTENT_CONTRACT_SCHEMA_VERSION,
             "job_id": manifest["job_id"],
@@ -2761,6 +2814,28 @@ class AgentJobController:
                     or not minimum <= len(current) <= maximum
                 ):
                     continue
+            elif kind == "numeric_vector":
+                minimum, maximum = constraint.get("min"), constraint.get("max")
+                if (
+                    set(constraint) != {"kind", "min", "max"}
+                    or not cls._finite_numeric_vector(current, length=len(minimum) if isinstance(minimum, list) else 0)
+                    or not isinstance(minimum, list)
+                    or not isinstance(maximum, list)
+                    or not minimum
+                    or len(current) != len(minimum)
+                    or len(current) != len(maximum)
+                    or any(
+                        isinstance(bound, bool)
+                        or not isinstance(bound, (int, float))
+                        or not math.isfinite(float(bound))
+                        for bound in minimum + maximum
+                    )
+                    or any(
+                        low > value or value > high
+                        for value, low, high in zip(current, minimum, maximum)
+                    )
+                ):
+                    continue
             elif kind == "enum":
                 values = constraint.get("values")
                 if set(constraint) != {"kind", "values"} or not isinstance(values, list) or not values or current not in values:
@@ -2826,8 +2901,17 @@ class AgentJobController:
         changes = self._json_diff(parent_spec, case_spec.data)
         if not changes:
             raise JobStoreError("revision proposal does not change the source CaseSpec")
+        intent_allowed = self._effective_allowed_adjustments(intent)
+        if intent.get("schema_version") == INTENT_CONTRACT_SCHEMA_VERSION:
+            intent_allowed = self._overlay_allowed_adjustments(
+                self._case_spec_revision_policy(
+                    parent_spec,
+                    excluded_paths=self._native_hard_parameter_paths(manifest["job_id"]),
+                ),
+                intent_allowed,
+            )
         allowed = self._merge_allowed_adjustments(
-            self._effective_allowed_adjustments(intent),
+            intent_allowed,
             additional_allowed_adjustments,
         )
         self._validate_revision_changes(
@@ -4364,6 +4448,103 @@ class AgentJobController:
             rows[object_id] = row
         return rows
 
+    @classmethod
+    def _case_spec_revision_policy(
+        cls,
+        case_spec: Mapping[str, Any],
+        *,
+        excluded_paths: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Open bounded layout leaves without weakening task or execution identity."""
+        excluded = excluded_paths or set()
+        raw_bounds = (case_spec.get("scene") or {}).get("bounds_hint_m")
+        scene_bounds = (
+            [float(value) for value in raw_bounds]
+            if isinstance(raw_bounds, list)
+            and len(raw_bounds) == 3
+            and all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+                and float(value) > 0.0
+                for value in raw_bounds
+            )
+            else [20.0, 20.0, 20.0]
+        )
+        constraints: dict[str, Any] = {}
+        for obj in case_spec.get("objects") or []:
+            if not isinstance(obj, Mapping):
+                continue
+            object_id = str(obj.get("id") or "")
+            if not _CANONICAL_OBJECT_PATH_SEGMENT.fullmatch(object_id):
+                continue
+            initial = obj.get("initial_state") if isinstance(obj.get("initial_state"), Mapping) else {}
+            position = initial.get("position_m")
+            position_path = f"$.objects.{object_id}.initial_state.position_m"
+            if position_path not in excluded and cls._finite_numeric_vector(position, length=3):
+                limits = [
+                    max(scene_bounds[index], abs(float(position[index])))
+                    for index in range(3)
+                ]
+                constraints[position_path] = {
+                    "kind": "numeric_vector",
+                    "min": [-value for value in limits],
+                    "max": limits,
+                }
+            rotation = initial.get("rotation_deg")
+            rotation_path = f"$.objects.{object_id}.initial_state.rotation_deg"
+            if rotation_path not in excluded and cls._finite_numeric_vector(rotation, length=3):
+                constraints[rotation_path] = {
+                    "kind": "numeric_vector",
+                    "min": [-180.0, -180.0, -180.0],
+                    "max": [180.0, 180.0, 180.0],
+                }
+            physics = obj.get("physics") if isinstance(obj.get("physics"), Mapping) else {}
+            if str(physics.get("body_type") or "").casefold() not in {"static", "kinematic"}:
+                continue
+            geometry = obj.get("geometry") if isinstance(obj.get("geometry"), Mapping) else {}
+            size = geometry.get("approx_size_m")
+            size_path = f"$.objects.{object_id}.geometry.approx_size_m"
+            if size_path not in excluded and cls._finite_numeric_vector(size, length=3):
+                constraints[size_path] = {
+                    "kind": "numeric_vector",
+                    "min": [0.001, 0.001, 0.001],
+                    "max": [
+                        max(scene_bounds[index] * 2.0, float(size[index]))
+                        for index in range(3)
+                    ],
+                }
+        paths = sorted(constraints)
+        return {
+            "paths": paths,
+            "ranges": {path: constraints[path] for path in paths},
+        }
+
+    @staticmethod
+    def _finite_numeric_vector(value: Any, *, length: int) -> bool:
+        return bool(
+            isinstance(value, list)
+            and len(value) == length
+            and all(
+                isinstance(component, (int, float))
+                and not isinstance(component, bool)
+                and math.isfinite(float(component))
+                for component in value
+            )
+        )
+
+    @staticmethod
+    def _overlay_allowed_adjustments(
+        base: Mapping[str, Any],
+        override: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        ranges = copy.deepcopy(dict(base.get("ranges") or {}))
+        override_ranges = override.get("ranges") if isinstance(override.get("ranges"), Mapping) else {}
+        for path in override.get("paths") or []:
+            ranges[str(path)] = copy.deepcopy(override_ranges.get(str(path)))
+        paths = sorted(ranges)
+        return {"paths": paths, "ranges": {path: ranges[path] for path in paths}}
+
     @staticmethod
     def _merge_allowed_adjustments(
         base: Mapping[str, Any],
@@ -4415,6 +4596,24 @@ class AgentJobController:
             elif kind == "list":
                 if not isinstance(value, list) or not constraint["min_items"] <= len(value) <= constraint["max_items"]:
                     raise JobStoreError(f"revision value at {path} exceeds Intent Contract list range")
+            elif kind == "numeric_vector":
+                minimum = constraint.get("min")
+                maximum = constraint.get("max")
+                if (
+                    not isinstance(value, list)
+                    or not isinstance(minimum, list)
+                    or not isinstance(maximum, list)
+                    or len(value) != len(minimum)
+                    or len(value) != len(maximum)
+                    or any(
+                        isinstance(component, bool)
+                        or not isinstance(component, (int, float))
+                        or component < low
+                        or component > high
+                        for component, low, high in zip(value, minimum, maximum)
+                    )
+                ):
+                    raise JobStoreError(f"revision value at {path} exceeds Intent Contract numeric vector range")
             elif kind == "enum":
                 if value not in constraint["values"]:
                     raise JobStoreError(f"revision value at {path} is outside Intent Contract enum values")

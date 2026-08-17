@@ -190,6 +190,14 @@ class NativeGenerationTests(unittest.TestCase):
         intent = read_json(inspection["paths"]["intent_contract"])
         self.assertEqual(intent["schema_version"], "harness_intent_contract_v3")
         self.assertEqual(intent["source"], "agent_native_submission_v1")
+        self.assertIn(
+            "$.objects.cue_ball.initial_state.rotation_deg",
+            intent["allowed_adjustments"]["paths"],
+        )
+        self.assertEqual(
+            inspection["case_spec_revision_policy"]["allowed_adjustments"],
+            intent["allowed_adjustments"],
+        )
         self.assertEqual(
             {row["id"] for row in intent["hard_requirements"]},
             {"original_user_request", "contact_required"},
@@ -197,6 +205,27 @@ class NativeGenerationTests(unittest.TestCase):
         ack = read_json(inspection["paths"]["native_generation_ack"])
         self.assertEqual(ack["controller_observed"]["controller_model_invocations"], 0)
         self.assertEqual(ack["agent_reported"]["model_turn_count"], 4)
+
+    def test_hard_native_layout_parameter_is_not_opened_by_default_policy(self) -> None:
+        _, context = self._create_context("job_native_hard_layout")
+        submission = self._submission(context)
+        hard_path = "$.objects.cue_ball.initial_state.position_m"
+        submission["intent_draft"]["parameter_analysis"].append(
+            {
+                "path": hard_path,
+                "requirement_level": "hard",
+                "reason": "the user fixed the exact position",
+                "constraint": None,
+            }
+        )
+
+        self.controller.submit_native_generation(context["job_id"], submission)
+        inspection = self.controller.inspect(context["job_id"])
+
+        self.assertNotIn(
+            hard_path,
+            inspection["case_spec_revision_policy"]["allowed_adjustments"]["paths"],
+        )
 
     def test_submission_is_idempotent_but_changed_or_cross_job_content_is_rejected(self) -> None:
         _, context = self._create_context("job_native_idempotent")

@@ -1550,6 +1550,10 @@ FIELD-BY-FIELD INSTRUCTIONS
    rotation zero for a world-Z axis, use an absolute 90-degree roll for a world-Y axis, and an absolute
    90-degree pitch for a world-X axis. An object declared supported_by and initially at rest must begin in
    resolved surface contact at frame zero, not above the support with a gravity-settling gap. When the user
+   supplies or you generate an initial transform, its horizontal position and orientation are authoritative.
+   The compiler may resolve vertical surface contact explicitly declared by supported_by, but otherwise validates
+   overlaps and support footprints without straightening collision chains, separating bodies, or moving them
+   around obstacles. Encode curved and staged layouts directly with valid positions and rotations.
    explicitly requests an object's color, store normalized RGB in the object's top-level color_rgb and set
    top-level fixed_material_color=true; do not leave the color only in role or descriptive text. Use low restitution (normally <=0.1) unless a bounce is
    requested, and set physics.use_ccd=true for small or fast-moving collision bodies. Dynamic bodies use
@@ -1694,8 +1698,7 @@ rules: capabilities.required contains primary; backend constraints honor the exp
 asset-policy booleans authorize declared routes; behavior is an object; body_type is an enum; every
 relation, event, camera, and assertion reference exactly matches an objects[].id; every assertion has a
 registered type. asset_source_constraints in repair_constraints are hard and must be restored at the exact
-object asset acquisition paths named by validation_errors. For support_footprint_too_small, enlarge or reposition the named support so it contains
-the subject's full horizontal bounds. For
+object asset acquisition paths named by validation_errors. For
 solver_capability_mismatch, keep repair_constraints.requested_backend as the only allowed solver and never
 add a solver, renderer, or fallback to allowed_solvers. Replace unsupported requirements using the selected
 solver's row in case_spec_contract.backend_solver_capability_matrix. In particular, a genesis_sph rigid_sph

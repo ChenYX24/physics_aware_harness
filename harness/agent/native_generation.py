@@ -82,7 +82,7 @@ def build_native_generation_context(
                 "path": "canonical CaseSpec object leaf path",
                 "requirement_level": "hard, soft, or inferred",
                 "reason": "non-empty string",
-                "constraint": "null for hard; bounded numeric, list, or enum constraint otherwise",
+                "constraint": "null for hard; bounded numeric, numeric_vector, list, or enum constraint otherwise",
             },
         },
         "submission_contract": {
@@ -411,6 +411,23 @@ def _validate_constraint(raw: Any) -> None:
         minimum, maximum = raw["min_items"], raw["max_items"]
         if any(isinstance(value, bool) or not isinstance(value, int) for value in (minimum, maximum)) or minimum < 0 or minimum > maximum:
             raise ValueError("native list constraint is invalid")
+    elif kind == "numeric_vector":
+        minimum, maximum = raw.get("min"), raw.get("max")
+        if (
+            set(raw) != {"kind", "min", "max"}
+            or not isinstance(minimum, list)
+            or not isinstance(maximum, list)
+            or not minimum
+            or len(minimum) != len(maximum)
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                for value in minimum + maximum
+            )
+            or any(low > high for low, high in zip(minimum, maximum))
+        ):
+            raise ValueError("native numeric vector constraint is invalid")
     elif kind == "enum":
         values = raw.get("values")
         if set(raw) != {"kind", "values"} or not isinstance(values, list) or not values or any(isinstance(item, (dict, list)) for item in values):

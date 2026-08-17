@@ -2694,6 +2694,51 @@ class AgentJobControllerTests(unittest.TestCase):
             repair_layer="case_spec_source",
         )
 
+    def test_case_spec_revision_policy_opens_bounded_layout_fields_by_semantics(self) -> None:
+        case_spec = case_spec_v2_fixture()
+
+        policy = AgentJobController._case_spec_revision_policy(case_spec)
+
+        self.assertIn("$.objects.cue_ball.initial_state.position_m", policy["paths"])
+        self.assertIn("$.objects.cue_ball.initial_state.rotation_deg", policy["paths"])
+        self.assertIn("$.objects.floor.geometry.approx_size_m", policy["paths"])
+        self.assertNotIn("$.objects.cue_ball.geometry.approx_size_m", policy["paths"])
+        AgentJobController._validate_revision_changes(
+            [
+                {
+                    "path": "$.objects.cue_ball.initial_state.rotation_deg",
+                    "operation": "replace",
+                    "before": [0.0, 0.0, 0.0],
+                    "after": [0.0, 45.0, 0.0],
+                }
+            ],
+            policy,
+            repair_layer="case_spec_source",
+        )
+        with self.assertRaisesRegex(ValueError, "numeric vector range"):
+            AgentJobController._validate_revision_changes(
+                [
+                    {
+                        "path": "$.objects.cue_ball.initial_state.rotation_deg",
+                        "operation": "replace",
+                        "before": [0.0, 0.0, 0.0],
+                        "after": [0.0, 200.0, 0.0],
+                    }
+                ],
+                policy,
+                repair_layer="case_spec_source",
+            )
+
+    def test_case_spec_revision_policy_excludes_hard_parameter_paths(self) -> None:
+        path = "$.objects.cue_ball.initial_state.position_m"
+
+        policy = AgentJobController._case_spec_revision_policy(
+            case_spec_v2_fixture(),
+            excluded_paths={path},
+        )
+
+        self.assertNotIn(path, policy["paths"])
+
     def test_historical_provider_shape_failure_recovers_by_exact_allowed_adjustments(self) -> None:
         controller, _ = self.controller()
         invalid = case_spec_v2_fixture()
@@ -2825,7 +2870,15 @@ class AgentJobControllerTests(unittest.TestCase):
         blocked = controller.advance_until_blocked("job_intent_leaf_scope")
         intent = read_json(blocked["paths"]["intent_contract"])
         self.assertEqual(intent["schema_version"], "harness_intent_contract_v2")
-        self.assertEqual(intent["allowed_adjustments"], {"paths": [], "ranges": {}})
+        self.assertNotIn("$.scene.duration_s", intent["allowed_adjustments"]["paths"])
+        self.assertIn(
+            "$.objects.cue_ball.initial_state.position_m",
+            intent["allowed_adjustments"]["paths"],
+        )
+        self.assertIn(
+            "$.objects.cue_ball.initial_state.rotation_deg",
+            intent["allowed_adjustments"]["paths"],
+        )
         revised = copy.deepcopy(seed)
         revised["scene"]["duration_s"] = 2.2
         with self.assertRaisesRegex(ValueError, "allowed_adjustments"):

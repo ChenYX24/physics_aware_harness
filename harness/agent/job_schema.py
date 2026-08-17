@@ -307,6 +307,23 @@ def _validate_allowed_adjustments(value: Mapping[str, Any]) -> None:
                 or minimum > maximum
             ):
                 raise ValueError(f"allowed_adjustments list range for {path} is invalid")
+        elif kind == "numeric_vector":
+            minimum, maximum = constraint.get("min"), constraint.get("max")
+            if (
+                set(constraint) != {"kind", "min", "max"}
+                or not isinstance(minimum, list)
+                or not isinstance(maximum, list)
+                or not minimum
+                or len(minimum) != len(maximum)
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                    for value in minimum + maximum
+                )
+                or any(low > high for low, high in zip(minimum, maximum))
+            ):
+                raise ValueError(f"allowed_adjustments numeric vector range for {path} is invalid")
         elif kind == "enum":
             values = constraint.get("values")
             if (

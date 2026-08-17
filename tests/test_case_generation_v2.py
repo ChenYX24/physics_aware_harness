@@ -282,6 +282,7 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertIn("shape_hint is\n   exactly box, sphere, or cylinder", case_prompt)
         self.assertIn("Heading around world vertical Z belongs\n   in yaw", case_prompt)
         self.assertIn("rather than a mandatory route", case_prompt)
+        self.assertIn("without straightening collision chains", case_prompt)
         self.assertIn("positive pitch makes local +X downhill", case_prompt)
         self.assertIn("A cylinder's authored/analytic axis is local Z", case_prompt)
         self.assertIn("competing classes as must_not.category exclusions", case_prompt)
