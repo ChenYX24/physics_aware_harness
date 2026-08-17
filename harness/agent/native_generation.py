@@ -79,7 +79,11 @@ def build_native_generation_context(
             "requirement_shape": {"id": "unique non-empty string", "text": "non-empty string"},
             "ambiguity_shape": {"question": "non-empty string"},
             "parameter_analysis_shape": {
-                "path": "canonical CaseSpec object leaf path",
+                "path": (
+                    "exact CaseSpec leaf dot path, for example $.scene.duration_s or "
+                    "$.objects.domino_10.initial_state.rotation_deg; list entries use their exact id "
+                    "as a path segment; brackets, numeric indices, wildcards, selectors, and ranges are invalid"
+                ),
                 "requirement_level": "hard, soft, or inferred",
                 "reason": "non-empty string",
                 "constraint": "null for hard; bounded numeric, numeric_vector, list, or enum constraint otherwise",
@@ -375,12 +379,22 @@ def _validate_intent_draft(raw: Any) -> None:
         if not isinstance(analysis, list):
             raise ValueError("intent_draft.parameter_analysis must be a list")
         paths: set[str] = set()
-        for row in analysis:
+        for index, row in enumerate(analysis):
             if not isinstance(row, Mapping) or set(row) != {"path", "requirement_level", "reason", "constraint"}:
-                raise ValueError("native parameter analysis fields mismatch")
+                raise ValueError(
+                    f"intent_draft.parameter_analysis[{index}] must contain only path, "
+                    "requirement_level, reason, and constraint"
+                )
             path = str(row.get("path") or "")
-            if not re.fullmatch(r"\$\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", path) or path in paths:
-                raise ValueError("native parameter analysis paths must be unique canonical object paths")
+            field = f"intent_draft.parameter_analysis[{index}].path"
+            if not re.fullmatch(r"\$\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", path):
+                raise ValueError(
+                    f"{field}={path!r} must be an exact CaseSpec leaf dot path, for example "
+                    "$.scene.duration_s or $.objects.domino_10.initial_state.rotation_deg; "
+                    "brackets, numeric indices, wildcards, selectors, and ranges are invalid"
+                )
+            if path in paths:
+                raise ValueError(f"{field}={path!r} duplicates an earlier parameter_analysis path")
             paths.add(path)
             level = row.get("requirement_level")
             if level not in {"hard", "soft", "inferred"} or not str(row.get("reason") or "").strip():

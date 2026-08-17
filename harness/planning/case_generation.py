@@ -1000,7 +1000,10 @@ def _validate_parameter_analysis(expansion: Mapping[str, Any]) -> None:
             raise ValueError(f"{path} must contain path, requirement_level, reason, and constraint")
         case_path = row.get("path")
         if not isinstance(case_path, str) or not re.fullmatch(r"\$\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", case_path):
-            raise ValueError(f"{path}.path must be a canonical CaseSpec object path")
+            raise ValueError(
+                f"{path}.path={case_path!r} must be an exact CaseSpec leaf dot path; "
+                "brackets, numeric indices, wildcards, selectors, and ranges are invalid"
+            )
         if case_path in seen:
             raise ValueError(f"{path}.path must be unique")
         seen.add(case_path)
@@ -1429,8 +1432,10 @@ FIELD-BY-FIELD INSTRUCTIONS
 10. backend_constraints: an object describing required solver capabilities and the explicit requested
    backend, if any. Never contradict request.execution_constraints.requested_backend.
 11. parameter_analysis: an array mapping only concrete CaseSpec leaf paths to hard, soft, or inferred
-    requirements. Use canonical object paths such as $.scene.duration_s or
-    $.observation_requirements.cameras; never name an entire object subtree. A hard user requirement
+    requirements. Use exact dot paths such as $.scene.duration_s or $.observation_requirements.cameras;
+    list entries use their exact id as a path segment, for example
+    $.objects.domino_10.initial_state.rotation_deg. Do not use brackets, numeric indices, wildcards,
+    selectors, ranges, or an entire object subtree. A hard user requirement
     has constraint null and can never be auto-adjusted. Every soft/inferred numeric leaf requires an
     explicit numeric min/max constraint; list leaves require min_items/max_items; scalar alternatives
     require an enum values constraint. Do not classify an explicit user requirement as soft/inferred.
@@ -1483,7 +1488,10 @@ def _expansion_contract() -> dict[str, Any]:
             "allow_proxy": "boolean",
         },
         "parameter_analysis_shape": {
-            "path": "specific canonical CaseSpec leaf path",
+            "path": (
+                "exact CaseSpec leaf dot path, for example $.scene.duration_s or "
+                "$.objects.domino_10.initial_state.rotation_deg; list entries use exact ids"
+            ),
             "requirement_level": "hard, soft, or inferred",
             "reason": "non-empty provenance explanation",
             "constraint": "null for hard; otherwise numeric {kind,min,max}, list {kind,min_items,max_items}, or enum {kind,values}",

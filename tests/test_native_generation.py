@@ -94,6 +94,11 @@ class NativeGenerationTests(unittest.TestCase):
             any("event_sequence uses at least two explicit ordered pairs" in rule for rule in context["case_spec_contract"]["hard_rules"])
         )
         self.assertIn("pairs", context["case_spec_contract"]["field_shapes"]["verification_assertion"])
+        path_contract = context["intent_draft_contract"]["parameter_analysis_shape"]["path"]
+        self.assertIn("$.scene.duration_s", path_contract)
+        self.assertIn("$.objects.domino_10.initial_state.rotation_deg", path_contract)
+        self.assertIn("exact id", path_contract)
+        self.assertIn("numeric indices", path_contract)
 
     def test_native_submission_rejects_prose_in_builtin_procedural_shape(self) -> None:
         blocked, context = self._create_context("job_native_procedural_shape")
@@ -230,6 +235,47 @@ class NativeGenerationTests(unittest.TestCase):
             hard_path,
             inspection["case_spec_revision_policy"]["allowed_adjustments"]["paths"],
         )
+
+    def test_parameter_analysis_path_rejections_identify_the_exact_problem(self) -> None:
+        cases = [
+            (
+                "job_native_invalid_path_syntax",
+                lambda value: value["intent_draft"]["parameter_analysis"][0].__setitem__(
+                    "path", "$.objects[0].initial_state.position_m"
+                ),
+                [
+                    "intent_draft.parameter_analysis[0].path",
+                    "$.objects[0].initial_state.position_m",
+                    "numeric indices",
+                ],
+            ),
+            (
+                "job_native_duplicate_path",
+                lambda value: value["intent_draft"]["parameter_analysis"].append(
+                    copy.deepcopy(value["intent_draft"]["parameter_analysis"][0])
+                ),
+                [
+                    "intent_draft.parameter_analysis[1].path",
+                    "$.scene.duration_s",
+                    "duplicates an earlier",
+                ],
+            ),
+        ]
+        for job_id, mutate, message_parts in cases:
+            with self.subTest(job_id=job_id):
+                _, context = self._create_context(job_id)
+                submission = self._submission(context)
+                mutate(submission)
+
+                rejected = self.controller.submit_native_generation(job_id, submission)
+
+                result = rejected["submission_stage_result"]
+                self.assertEqual(
+                    result["failure_code"],
+                    "native_generation_parameter_constraint_invalid",
+                )
+                for part in message_parts:
+                    self.assertIn(part, result["message"])
 
     def test_submission_is_idempotent_but_changed_or_cross_job_content_is_rejected(self) -> None:
         _, context = self._create_context("job_native_idempotent")
@@ -369,6 +415,9 @@ class NativeGenerationTests(unittest.TestCase):
                     ],
                     expected_code,
                 )
+                if expected_code == "native_generation_parameter_constraint_invalid":
+                    self.assertIn("$.scene.missing_leaf", result["message"])
+                    self.assertIn("does not exist in the submitted CaseSpec", result["message"])
 
     def test_frozen_context_survives_current_contract_presentation_changes(self) -> None:
         blocked, context = self._create_context("job_native_frozen_contract")

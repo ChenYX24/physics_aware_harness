@@ -2076,8 +2076,15 @@ class AgentJobController:
         draft: Mapping[str, Any],
         case_spec: Mapping[str, Any],
     ) -> dict[str, Any]:
-        for row in draft["parameter_analysis"]:
-            self._case_spec_path_value(case_spec, str(row["path"]))
+        for index, row in enumerate(draft["parameter_analysis"]):
+            path = str(row["path"])
+            try:
+                self._case_spec_path_value(case_spec, path)
+            except KeyError as exc:
+                raise ValueError(
+                    f"intent_draft.parameter_analysis[{index}].path={path!r} does not exist "
+                    "in the submitted CaseSpec"
+                ) from exc
         expansion = {
             "ambiguities": copy.deepcopy(draft["ambiguities"]),
             "assumptions": copy.deepcopy(draft["soft_preferences"]),
@@ -2089,8 +2096,14 @@ class AgentJobController:
             for row in draft["parameter_analysis"]
             if row["requirement_level"] in {"soft", "inferred"}
         )
-        if not set(expected_adjustable).issubset(contract["allowed_adjustments"]["paths"]):
-            raise ValueError("native parameter analysis does not match a bounded CaseSpec leaf")
+        missing_adjustments = sorted(
+            set(expected_adjustable) - set(contract["allowed_adjustments"]["paths"])
+        )
+        if missing_adjustments:
+            raise ValueError(
+                "soft/inferred parameter_analysis paths must name bounded adjustable CaseSpec leaves; "
+                f"invalid paths: {missing_adjustments}"
+            )
         contract["schema_version"] = INTENT_CONTRACT_SCHEMA_VERSION
         contract["source"] = "agent_native_submission_v1"
         contract["hard_requirements"].extend(
@@ -2874,7 +2887,7 @@ class AgentJobController:
     @staticmethod
     def _case_spec_path_value(case_spec: Mapping[str, Any], path: str) -> Any:
         if not re.fullmatch(r"\$\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", path):
-            raise ValueError("CaseSpec path is not a canonical object path")
+            raise ValueError("CaseSpec path is not an exact dot path")
         value: Any = case_spec
         for component in path[2:].split("."):
             if isinstance(value, Mapping) and component in value:
