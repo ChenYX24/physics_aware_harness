@@ -2881,13 +2881,10 @@ def look_at_rotation(origin: unreal.Vector, target: unreal.Vector) -> unreal.Rot
 def runtime_rotator(rotation_degrees: list[float] | tuple[float, float, float] | None) -> unreal.Rotator:
     values = [float(value) for value in [*(rotation_degrees or [0.0, 0.0, 0.0]), 0.0, 0.0, 0.0][:3]]
     rotator = unreal.Rotator(0.0, 0.0, 0.0)
-    try:
-        rotator.pitch = values[0]
-        rotator.yaw = values[1]
-        rotator.roll = values[2]
-        return rotator
-    except Exception:
-        return unreal.Rotator(*values)
+    rotator.pitch = values[0]
+    rotator.yaw = values[1]
+    rotator.roll = values[2]
+    return rotator
 
 
 def spawn_static_mesh(label: str, mesh_path: str, location: unreal.Vector, scale: unreal.Vector, material_path: str | None = None, rotation=None):
@@ -9001,7 +8998,7 @@ def reset_runtime_actors_to_initial_state(actors: dict, runtime_scene: dict | No
         rotation = initial.get("rotation_degrees") or []
         try:
             actor.set_actor_location(unreal.Vector(*[float(value) for value in position_cm[:3]]), False, False)
-            actor.set_actor_rotation(unreal.Rotator(*[float(value) for value in rotation[:3]]), False)
+            actor.set_actor_rotation(runtime_rotator(rotation), False)
             reset_ids.append(str(actor_id))
         except Exception as exc:
             status.setdefault("errors", []).append(f"initial_state_reset:{actor_id}:{exc}")

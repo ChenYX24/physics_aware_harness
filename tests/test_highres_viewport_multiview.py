@@ -297,6 +297,72 @@ class HighresViewportMultiviewTests(unittest.TestCase):
         self.assertEqual(mapped, [[-52.0, 0.0, 0.0]])
         self.assertEqual(actor.rotation, ("named_pyr", -52.0, 0.0, 0.0))
 
+    def test_initial_state_reset_preserves_pitch_yaw_roll_semantics(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        functions = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name in {"runtime_rotator", "reset_runtime_actors_to_initial_state"}
+        ]
+
+        class Rotator:
+            # Unreal's Python positional constructor does not expose the
+            # CaseSpec [pitch, yaw, roll] order.
+            def __init__(self, roll=0.0, pitch=0.0, yaw=0.0) -> None:
+                self.pitch = pitch
+                self.yaw = yaw
+                self.roll = roll
+
+        class Component:
+            def __init__(self) -> None:
+                self.simulating = True
+
+            def set_simulate_physics(self, value) -> None:
+                self.simulating = bool(value)
+
+        class Actor:
+            def __init__(self) -> None:
+                self.component = Component()
+                self.location = None
+                self.rotation = None
+
+            def set_actor_location(self, value, *_args) -> None:
+                self.location = value
+
+            def set_actor_rotation(self, value, *_args) -> None:
+                self.rotation = value
+
+        unreal = types.SimpleNamespace(Rotator=Rotator, Vector=lambda *values: tuple(values))
+        namespace = {
+            "unreal": unreal,
+            "actor_runtime_component": lambda actor: actor.component,
+        }
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"), namespace)
+        actor = Actor()
+        actors = {
+            "domino_10": actor,
+            "runtime_initial_transforms": {
+                "domino_10": {
+                    "position_cm": [49.21, 43.61, 40.0],
+                    "rotation_degrees": [0.0, 25.74, 0.0],
+                }
+            },
+        }
+        status = {}
+
+        namespace["reset_runtime_actors_to_initial_state"](
+            actors,
+            {"static_objects": [], "dynamic_objects": [{"id": "domino_10"}]},
+            status,
+        )
+
+        self.assertEqual((actor.rotation.pitch, actor.rotation.yaw, actor.rotation.roll), (0.0, 25.74, 0.0))
+        self.assertEqual(actor.location, (49.21, 43.61, 40.0))
+        self.assertFalse(actor.component.simulating)
+        self.assertEqual(status["initial_state_reset_ids"], ["domino_10"])
+
     def test_geometry_collection_strain_is_gated_by_measured_incident_energy(self) -> None:
         source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
