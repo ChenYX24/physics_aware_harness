@@ -1552,8 +1552,8 @@ FIELD-BY-FIELD INSTRUCTIONS
    resolved surface contact at frame zero, not above the support with a gravity-settling gap. When the user
    supplies or you generate an initial transform, its horizontal position and orientation are authoritative.
    The compiler may resolve vertical surface contact explicitly declared by supported_by, but otherwise validates
-   overlaps and support footprints without straightening collision chains, separating bodies, or moving them
-   around obstacles. Encode curved and staged layouts directly with valid positions and rotations.
+   overlaps and support footprints without rearranging objects from expected relations, separating bodies, or
+   moving them around obstacles. Encode curved and staged layouts directly with valid positions and rotations.
    explicitly requests an object's color, store normalized RGB in the object's top-level color_rgb and set
    top-level fixed_material_color=true; do not leave the color only in role or descriptive text. Use low restitution (normally <=0.1) unless a bounce is
    requested, and set physics.use_ccd=true for small or fast-moving collision bodies. Dynamic bodies use
@@ -1641,28 +1641,21 @@ FIELD-BY-FIELD INSTRUCTIONS
     surface. Reserve collision/impacts for runtime propagation edges; plain contact is an initial/static
     scene relation and is not an ordered impact. Size every support surface so its horizontal footprint contains every supported object's full initial
     bounds plus at least 0.25 m margin, and ensure scene.bounds_hint_m contains all full object bounds.
-    For a collision chain, include enough support area for the staged objects and expected interaction path.
-    A declared collision order must include one collision/impacts relation for every intended adjacent pair
-    in the chain and must be physically reachable from the initial positions, velocities, gravity,
-    friction, and release times: keep intended targets close enough, aim the mover toward them, and do not
-    rely on equal-acceleration followers magically catching a leading body. Do not substitute several small
-    vertical drops when the request asks for an impact, transfer, cascade, or ramp collision process. For a
-    tabletop chain with initially resting passive targets, keep those targets at their supported poses with
-    zero initial velocity and delay the striker release by about 0.5-1.0 s so Chaos can establish resting
-    contact first. Unless the user explicitly requests a high-speed impact, choose the lowest useful tabletop
-    striker speed (normally about 0.8-1.5 m/s) rather than an unnecessarily fast launch. If the user explicitly
-    specifies an adjacent-pair surface clearance, write that nonnegative value as surface_gap_m on the matching
-    collision/impacts relation; never infer surface_gap_m from approximate positions. Unless spin, off-center
-    impact, or bounce is explicitly requested, choose compatible supported-body dimensions so the intended
-    horizontal contact line passes close to each body's center of mass. Do not raise box, cylinder, container,
-    or obstacle restitution merely to force propagation; use low friction, reachable spacing, and adequate
-    striker speed instead. When a release event's object is the source of one direct impacts relation, its
-    linear velocity must point from the source's initial position toward that impacts target.
+    Declare every expected future binary contact as a collision/impacts relation between its exact object IDs.
+    When the user requires an order, repeat those exact pairs in an event_sequence assertion; do not invent
+    next_in_chain, chain_order, or topple_order fields. Expected interactions must be physically reachable from
+    the authored positions, orientations, velocities, gravity, material parameters, and release times. If the
+    user explicitly specifies a pair's surface clearance, write that nonnegative value as surface_gap_m on the
+    matching collision/impacts relation; never infer surface_gap_m from approximate positions. When a release
+    event's object is the source of one direct impacts relation, its linear velocity must point from the source's
+    initial position toward that impacts target.
 12. expected_behavior: describe causal and observable outcomes without claiming success.
 13. observation_requirements: cameras use registered camera roles and exact target object IDs; modalities
     use registered values; signals name evidence required by the capability and assertions. Do not emit
     exact camera coordinates.
 14. verification_requirements: each assertion is an object with a registered type and exact object IDs.
+    event_sequence uses pairs=[[id_a,id_b],[id_b,id_c],...] with at least two explicit event pairs; a start/end
+    objects list does not express a sequence.
     Choose assertions that test the primary physical invariant. thresholds and time_window are global
     verifier configuration objects passed unchanged to the selected verifier. Use {} unless the selected
     capability contract or an explicit user requirement supplies a named numeric tolerance/window; do not
@@ -1880,7 +1873,8 @@ def case_spec_generation_contract() -> dict[str, Any]:
             "object_event": {"type": "string", "object": "exact object.id"},
             "verification_assertion": {
                 "type": "one verification_assertion enum string",
-                "objects": ["exact object.id", "exact object.id"],
+                "objects": "exact object IDs for a single-object or single-pair assertion",
+                "pairs": "event_sequence only: at least two ordered [exact object.id, exact object.id] pairs",
             },
             "camera": {"role": "one camera_role enum", "target_objects": ["exact object.id"]},
             "verification_requirements": {
@@ -1931,6 +1925,8 @@ def case_spec_generation_contract() -> dict[str, Any]:
             "capabilities must be an object and capabilities.required must contain exactly capabilities.primary",
             "every object behavior must be an object and every physics.body_type must use the body_type enum",
             "every relation, event, camera, and assertion object reference must exactly equal one declared object.id; never use a phrase",
+            "initial load-bearing support uses supported_by; expected future contacts use collision/impacts relations",
+            "event_sequence uses at least two explicit ordered pairs; never use start/end shorthand or next_in_chain, chain_order, or topple_order",
             "an explicitly requested collision surface clearance belongs in relation.surface_gap_m and must survive projection",
             "verification assertions use only generic state/event operators; object references must be exact declared IDs",
             "must and must_not are hard filters; preferences is soft ranking and cannot weaken a hard filter",

@@ -282,7 +282,7 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertIn("shape_hint is\n   exactly box, sphere, or cylinder", case_prompt)
         self.assertIn("Heading around world vertical Z belongs\n   in yaw", case_prompt)
         self.assertIn("rather than a mandatory route", case_prompt)
-        self.assertIn("without straightening collision chains", case_prompt)
+        self.assertIn("without rearranging objects from expected relations", case_prompt)
         self.assertIn("positive pitch makes local +X downhill", case_prompt)
         self.assertIn("A cylinder's authored/analytic axis is local Z", case_prompt)
         self.assertIn("competing classes as must_not.category exclusions", case_prompt)
@@ -292,8 +292,8 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertIn("set physics.enable_gravity=false only when the user explicitly requests", case_prompt)
         self.assertIn("must not add the unsupported\n   rigid_body solver capability", case_prompt)
         self.assertIn("write that nonnegative value as surface_gap_m", case_prompt)
-        self.assertIn("passes close to each body's center of mass", case_prompt)
-        self.assertIn("Do not raise box, cylinder, container", case_prompt)
+        self.assertIn("do not invent\n    next_in_chain, chain_order, or topple_order", case_prompt)
+        self.assertIn("at least two explicit event pairs", case_prompt)
         structure_example = client.calls[1]["payload"]["case_spec_contract"]["valid_structure_example_do_not_copy_values"]
         self.assertEqual(case_spec_v2_from_dict(structure_example).case_id, "example")
         rigid_sph_example = client.calls[1]["payload"]["case_spec_contract"][

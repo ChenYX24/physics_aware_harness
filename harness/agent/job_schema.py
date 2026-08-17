@@ -171,6 +171,22 @@ class JobManifest:
                 raise ValueError("blocker must contain non-empty code, message, and stage")
         if not isinstance(data["allowed_next_actions"], list) or any(not _nonempty(v) for v in data["allowed_next_actions"]):
             raise ValueError("allowed_next_actions must be a string list")
+        if data["usage"]["case_spec_revisions"] >= data["budget"]["max_case_spec_revisions"]:
+            data["allowed_next_actions"] = [
+                action
+                for action in data["allowed_next_actions"]
+                if action != "resume_with_revision"
+            ]
+        if (
+            isinstance(data.get("blocker"), Mapping)
+            and data["blocker"].get("code") == "ue_launch_budget_exhausted"
+            and data["usage"]["ue_launches"] >= data["budget"]["max_ue_launches"]
+        ):
+            data["allowed_next_actions"] = [
+                action
+                for action in data["allowed_next_actions"]
+                if action != "resume"
+            ]
         _timestamp(data["created_at"], "created_at")
         _timestamp(data["updated_at"], "updated_at")
         return cls(data)

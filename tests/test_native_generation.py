@@ -90,6 +90,10 @@ class NativeGenerationTests(unittest.TestCase):
         self.assertIsNone(pause_result["required_user_action"])
         self.assertIn("backend_stage_io", context["case_spec_contract"])
         self.assertIn("valid_structure_example_do_not_copy_values", context["case_spec_contract"])
+        self.assertTrue(
+            any("event_sequence uses at least two explicit ordered pairs" in rule for rule in context["case_spec_contract"]["hard_rules"])
+        )
+        self.assertIn("pairs", context["case_spec_contract"]["field_shapes"]["verification_assertion"])
 
     def test_native_submission_rejects_prose_in_builtin_procedural_shape(self) -> None:
         blocked, context = self._create_context("job_native_procedural_shape")

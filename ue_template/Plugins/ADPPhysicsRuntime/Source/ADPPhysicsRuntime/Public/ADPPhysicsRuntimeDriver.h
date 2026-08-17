@@ -28,6 +28,9 @@ struct ADPPHYSICSRUNTIME_API FADPDrivenBodyConfig
 	bool bCollisionEnabled = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ADP Physics")
+	FName ColliderKind = NAME_None;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ADP Physics")
 	float MassKg = 1.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ADP Physics")
@@ -149,7 +152,23 @@ public:
 		bool bSimulatePhysics);
 
 	UFUNCTION(BlueprintCallable, Category = "ADP Physics")
+	void RegisterBodyMetersWithCollider(
+		FName BodyId,
+		AActor* Actor,
+		FName ColliderKind,
+		float MassKg,
+		FVector InitialVelocityMetersPerSecond,
+		FVector InitialImpulseNewtonSeconds,
+		bool bEnableGravity,
+		float LinearDamping,
+		float AngularDamping,
+		bool bSimulatePhysics);
+
+	UFUNCTION(BlueprintCallable, Category = "ADP Physics")
 	void RegisterStaticBody(FName BodyId, AActor* Actor);
+
+	UFUNCTION(BlueprintCallable, Category = "ADP Physics")
+	void RegisterStaticBodyWithCollider(FName BodyId, AActor* Actor, FName ColliderKind);
 
 	UFUNCTION(BlueprintCallable, Category = "ADP Physics")
 	void StartCapture(float InSampleIntervalSeconds, int32 InMaxFrames, const FString& InOutputPath);

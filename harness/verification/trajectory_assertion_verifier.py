@@ -19,23 +19,27 @@ def verify_trajectory_assertions(
     if not assertions:
         assertions = [{"id": "trajectory_integrity", "type": "trajectory_integrity"}]
     results: list[dict[str, Any]] = []
+    first_failed_result: dict[str, Any] | None = None
     for index, assertion in enumerate(assertions):
         result = evaluate_assertion(assertion, trajectory)
         result["id"] = str(assertion.get("id") or f"assertion_{index}")
         results.append(result)
-        if not result["passed"]:
-            return (
-                "declared_assertion_failed",
-                {
-                    "object_id": str(result.get("object_id") or "trajectory"),
-                    "frame": int(result.get("frame") or trajectory[-1].get("frame") or 0),
-                    "time": result.get("time_s", trajectory[-1].get("time_s")),
-                    "metric": str(result["id"]),
-                    "value": result,
-                },
-                [{"type": "trajectory_assertions", "results": results}],
-            )
-    return None, None, [{"type": "trajectory_assertions", "results": results}]
+        if not result["passed"] and first_failed_result is None:
+            first_failed_result = result
+    evidence = [{"type": "trajectory_assertions", "results": results}]
+    if first_failed_result is not None:
+        return (
+            "declared_assertion_failed",
+            {
+                "object_id": str(first_failed_result.get("object_id") or "trajectory"),
+                "frame": int(first_failed_result.get("frame") or trajectory[-1].get("frame") or 0),
+                "time": first_failed_result.get("time_s", trajectory[-1].get("time_s")),
+                "metric": str(first_failed_result["id"]),
+                "value": first_failed_result,
+            },
+            evidence,
+        )
+    return None, None, evidence
 
 
 def trajectory_integrity_failure(trajectory: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -82,7 +86,16 @@ def evaluate_assertion(assertion: Mapping[str, Any], trajectory: list[dict[str, 
         passed = bool(pairs) and all(value is not None for value in observed) and all(
             int(before) < int(after) for before, after in zip(observed, observed[1:], strict=False)
         )
-        return {"type": assertion_type, "passed": passed, "pairs": pairs, "first_frames": observed}
+        return {
+            "type": assertion_type,
+            "passed": passed,
+            "pairs": pairs,
+            "first_frames": observed,
+            "pair_results": [
+                {"objects": pair, "first_frame": frame, "observed": frame is not None}
+                for pair, frame in zip(pairs, observed)
+            ],
+        }
     if assertion_type in {"state_delta", "state_value"}:
         object_id = str(assertion.get("object_id") or first(assertion.get("objects")) or "")
         field = str(assertion.get("field") or "position_m.z")

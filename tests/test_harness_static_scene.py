@@ -528,6 +528,81 @@ class StaticScenePlacementTests(unittest.TestCase):
         self.assertEqual(compiled, positions)
         self.assertEqual(layout["placement_adjustments"], [])
 
+    def test_rotated_box_sat_rejects_aabb_false_positive(self) -> None:
+        from harness.planning.static_scene_builder import build_static_scene_layout
+        from harness.verification.static_scene_verifier import verify_static_scene_layout
+
+        case = {
+            "case_id": "rotated_separated_boxes",
+            "capability_id": "rigid_body_dynamics",
+            "objects": [
+                {
+                    "id": "left",
+                    "role": "dynamic body",
+                    "shape": "box",
+                    "size_m": [0.06, 0.18, 0.4],
+                    "initial_position_m": [-1.225, 0.0, 0.205],
+                    "initial_rotation_deg": [10.0, 47.1, 0.0],
+                    "body_type": "dynamic",
+                    "collision_required": True,
+                    "collider": "box",
+                },
+                {
+                    "id": "right",
+                    "role": "dynamic body",
+                    "shape": "box",
+                    "size_m": [0.06, 0.18, 0.4],
+                    "initial_position_m": [-1.05, 0.1883, 0.2],
+                    "initial_rotation_deg": [0.0, 44.1, 0.0],
+                    "body_type": "dynamic",
+                    "collision_required": True,
+                    "collider": "box",
+                },
+            ],
+        }
+
+        layout = build_static_scene_layout(case)
+        report = verify_static_scene_layout(case, layout)
+
+        self.assertEqual(layout["overlap_pairs"], [])
+        self.assertEqual(report["checks"]["overlap_pair_count"], 0)
+        self.assertEqual(report["checks"]["overlap_narrow_phase"], "oriented_box_sat")
+        closest = report["checks"]["closest_oriented_box_pair"]
+        self.assertEqual(closest["object_ids"], ["left", "right"])
+        self.assertGreater(closest["signed_margin_m"], 0.15)
+        self.assertEqual(closest["tested_axis_count"], 15)
+
+    def test_rotated_box_sat_reports_true_overlap(self) -> None:
+        from harness.planning.static_scene_builder import build_static_scene_layout
+
+        case = {
+            "case_id": "rotated_overlapping_boxes",
+            "capability_id": "rigid_body_dynamics",
+            "objects": [
+                {
+                    "id": object_id,
+                    "role": "dynamic body",
+                    "shape": "box",
+                    "size_m": [0.2, 0.4, 0.6],
+                    "initial_position_m": position,
+                    "initial_rotation_deg": rotation,
+                    "body_type": "dynamic",
+                    "collision_required": True,
+                    "collider": "box",
+                }
+                for object_id, position, rotation in (
+                    ("left", [0.0, 0.0, 0.3], [15.0, 30.0, 5.0]),
+                    ("right", [0.05, 0.02, 0.3], [-10.0, -20.0, 8.0]),
+                )
+            ],
+        }
+
+        layout = build_static_scene_layout(case)
+
+        self.assertEqual(len(layout["overlap_pairs"]), 1)
+        self.assertEqual(layout["overlap_pairs"][0]["overlap_test"], "oriented_box_sat")
+        self.assertLess(layout["overlap_pairs"][0]["signed_margin_m"], 0.0)
+
     def test_static_scene_cli_writes_layout_and_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result = subprocess.run(

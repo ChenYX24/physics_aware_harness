@@ -53,6 +53,7 @@ def build_static_scene_layout(
         for relation in support_relations
         if relation.get("object_id") and relation.get("support_id")
     }
+    overlap_diagnostics: list[dict[str, Any]] = []
     overlap_pairs = find_overlap_pairs(
         nodes,
         support_map=effective_support_map,
@@ -61,6 +62,7 @@ def build_static_scene_layout(
             for relation in containment_relations
         },
         include_static_obstacles=True,
+        diagnostics=overlap_diagnostics,
     )
     return {
         "schema_version": SCENE_LAYOUT_SCHEMA_VERSION,
@@ -74,6 +76,7 @@ def build_static_scene_layout(
         "containment_relations": containment_relations,
         "placement_adjustments": placement_adjustments,
         "overlap_pairs": overlap_pairs,
+        "overlap_diagnostics": overlap_diagnostics,
         "physics_graph": {
             "nodes": [node["object_id"] for node in nodes if node.get("physics_graph_member")],
             "collision_edges": collision_edges,
@@ -332,6 +335,7 @@ def find_overlap_pairs(
     support_map: dict[str, Any] | None = None,
     allowed_overlap_pairs: set[frozenset[str]] | None = None,
     include_static_obstacles: bool = False,
+    diagnostics: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     pairs: list[dict[str, Any]] = []
     support_map = support_map if isinstance(support_map, dict) else {}
@@ -363,11 +367,35 @@ def find_overlap_pairs(
             ]
             axis_distances = [abs(left_pos[axis] - right_pos[axis]) for axis in range(3)]
             sphere_radii = sphere_pair_radii(left, right)
-            overlaps = (
-                distance < sum(sphere_radii) - 1e-4
-                if sphere_radii is not None
-                else all(axis_distances[axis] < axis_thresholds[axis] for axis in range(3))
+            broad_phase_overlap = all(
+                axis_distances[axis] < axis_thresholds[axis]
+                for axis in range(3)
             )
+            overlap_test = "axis_aligned_bounds"
+            detail: dict[str, Any] = {}
+            if sphere_radii is not None:
+                signed_margin = distance - sum(sphere_radii)
+                overlaps = signed_margin < -1e-4
+                overlap_test = "sphere_center_distance"
+                detail = {
+                    "signed_margin_m": round(signed_margin, 6),
+                    "tolerance_m": 0.0001,
+                }
+            elif broad_phase_overlap and box_pair(left, right):
+                sat = oriented_box_sat(left, right, tolerance_m=0.0001)
+                overlaps = bool(sat["overlaps"])
+                overlap_test = "oriented_box_sat"
+                detail = sat
+                if diagnostics is not None:
+                    diagnostics.append(
+                        {
+                            "object_ids": [left_id, right_id],
+                            "overlap_test": overlap_test,
+                            **detail,
+                        }
+                    )
+            else:
+                overlaps = broad_phase_overlap
             if overlaps:
                 pairs.append(
                     {
@@ -375,11 +403,8 @@ def find_overlap_pairs(
                         "distance_m": round(distance, 6),
                         "axis_distances_m": [round(value, 6) for value in axis_distances],
                         "axis_thresholds_m": [round(value, 6) for value in axis_thresholds],
-                        "overlap_test": (
-                            "sphere_center_distance"
-                            if sphere_radii is not None
-                            else "axis_aligned_bounds"
-                        ),
+                        "overlap_test": overlap_test,
+                        **detail,
                     }
                 )
     return pairs
@@ -419,6 +444,79 @@ def sphere_pair_radii(left: dict[str, Any], right: dict[str, Any]) -> tuple[floa
             return None
         radii.append(radius)
     return radii[0], radii[1]
+
+
+def box_pair(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    for node in (left, right):
+        physics = node.get("physics") if isinstance(node.get("physics"), dict) else {}
+        if str(physics.get("collider") or "").casefold() != "box":
+            return False
+    return True
+
+
+def oriented_box_sat(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    *,
+    tolerance_m: float,
+) -> dict[str, Any]:
+    left_axes = object_local_axes(left)
+    right_axes = object_local_axes(right)
+    left_extents = object_extents(left)
+    right_extents = object_extents(right)
+    center_delta = [
+        right_value - left_value
+        for left_value, right_value in zip(object_position(left), object_position(right))
+    ]
+    candidates: list[tuple[str, list[float]]] = [
+        *((f"left_axis_{index}", axis) for index, axis in enumerate(left_axes)),
+        *((f"right_axis_{index}", axis) for index, axis in enumerate(right_axes)),
+    ]
+    for left_index, left_axis in enumerate(left_axes):
+        for right_index, right_axis in enumerate(right_axes):
+            candidates.append(
+                (
+                    f"cross_{left_index}_{right_index}",
+                    [
+                        left_axis[1] * right_axis[2] - left_axis[2] * right_axis[1],
+                        left_axis[2] * right_axis[0] - left_axis[0] * right_axis[2],
+                        left_axis[0] * right_axis[1] - left_axis[1] * right_axis[0],
+                    ],
+                )
+            )
+    largest_gap = -math.inf
+    decisive_axis = ""
+    tested_axes = 0
+    for label, raw_axis in candidates:
+        norm = math.sqrt(sum(value * value for value in raw_axis))
+        if norm <= 1e-10:
+            continue
+        axis = [value / norm for value in raw_axis]
+        center_distance = abs(sum(center_delta[index] * axis[index] for index in range(3)))
+        left_radius = sum(
+            left_extents[local_axis]
+            * abs(sum(left_axes[local_axis][index] * axis[index] for index in range(3)))
+            for local_axis in range(3)
+        )
+        right_radius = sum(
+            right_extents[local_axis]
+            * abs(sum(right_axes[local_axis][index] * axis[index] for index in range(3)))
+            for local_axis in range(3)
+        )
+        gap = center_distance - left_radius - right_radius
+        tested_axes += 1
+        if gap > largest_gap:
+            largest_gap = gap
+            decisive_axis = label
+    if not math.isfinite(largest_gap):
+        largest_gap = math.inf
+    return {
+        "overlaps": largest_gap < -tolerance_m,
+        "signed_margin_m": round(largest_gap, 6),
+        "tolerance_m": tolerance_m,
+        "decisive_axis": decisive_axis,
+        "tested_axis_count": tested_axes,
+    }
 
 
 def conservative_world_extents(node: dict[str, Any]) -> list[float]:

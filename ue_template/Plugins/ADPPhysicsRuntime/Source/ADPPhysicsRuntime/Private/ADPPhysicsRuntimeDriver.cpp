@@ -27,6 +27,81 @@ TArray<TSharedPtr<FJsonValue>> RotatorToJsonArray(const FRotator& Rotator)
 	Values.Add(MakeShared<FJsonValueNumber>(Rotator.Roll));
 	return Values;
 }
+
+struct FADPOrientedBox
+{
+	FVector Center = FVector::ZeroVector;
+	FVector Axes[3] = {FVector::ForwardVector, FVector::RightVector, FVector::UpVector};
+	FVector Extents = FVector::ZeroVector;
+};
+
+bool BuildOrientedBox(AActor* Actor, FADPOrientedBox& OutBox)
+{
+	if (Actor == nullptr)
+	{
+		return false;
+	}
+	UPrimitiveComponent* Primitive = Actor->FindComponentByClass<UPrimitiveComponent>();
+	if (Primitive == nullptr)
+	{
+		return false;
+	}
+	const FTransform ComponentTransform = Primitive->GetComponentTransform();
+	const FBoxSphereBounds LocalBounds = Primitive->CalcBounds(FTransform::Identity);
+	const FVector Scale = ComponentTransform.GetScale3D().GetAbs();
+	OutBox.Center = ComponentTransform.TransformPosition(LocalBounds.Origin);
+	OutBox.Axes[0] = ComponentTransform.GetUnitAxis(EAxis::X);
+	OutBox.Axes[1] = ComponentTransform.GetUnitAxis(EAxis::Y);
+	OutBox.Axes[2] = ComponentTransform.GetUnitAxis(EAxis::Z);
+	OutBox.Extents = LocalBounds.BoxExtent * Scale;
+	return !OutBox.Extents.IsNearlyZero();
+}
+
+float ProjectedRadius(const FADPOrientedBox& Box, const FVector& Axis)
+{
+	return
+		Box.Extents.X * FMath::Abs(FVector::DotProduct(Box.Axes[0], Axis))
+		+ Box.Extents.Y * FMath::Abs(FVector::DotProduct(Box.Axes[1], Axis))
+		+ Box.Extents.Z * FMath::Abs(FVector::DotProduct(Box.Axes[2], Axis));
+}
+
+bool OrientedBoxSignedMargin(const FADPOrientedBox& A, const FADPOrientedBox& B, float& OutMarginCm)
+{
+	TArray<FVector, TInlineAllocator<15>> CandidateAxes;
+	for (int32 Axis = 0; Axis < 3; ++Axis)
+	{
+		CandidateAxes.Add(A.Axes[Axis]);
+		CandidateAxes.Add(B.Axes[Axis]);
+	}
+	for (int32 AxisA = 0; AxisA < 3; ++AxisA)
+	{
+		for (int32 AxisB = 0; AxisB < 3; ++AxisB)
+		{
+			CandidateAxes.Add(FVector::CrossProduct(A.Axes[AxisA], B.Axes[AxisB]));
+		}
+	}
+
+	const FVector CenterDelta = B.Center - A.Center;
+	float LargestGapCm = -TNumericLimits<float>::Max();
+	int32 TestedAxes = 0;
+	for (FVector Axis : CandidateAxes)
+	{
+		if (!Axis.Normalize())
+		{
+			continue;
+		}
+		const float CenterDistanceCm = FMath::Abs(FVector::DotProduct(CenterDelta, Axis));
+		const float GapCm = CenterDistanceCm - ProjectedRadius(A, Axis) - ProjectedRadius(B, Axis);
+		LargestGapCm = FMath::Max(LargestGapCm, GapCm);
+		++TestedAxes;
+	}
+	if (TestedAxes == 0 || !FMath::IsFinite(LargestGapCm))
+	{
+		return false;
+	}
+	OutMarginCm = LargestGapCm;
+	return true;
+}
 }
 
 AADPPhysicsRuntimeDriver::AADPPhysicsRuntimeDriver()
@@ -128,6 +203,34 @@ void AADPPhysicsRuntimeDriver::RegisterBodyMeters(
 		bSimulatePhysics);
 }
 
+void AADPPhysicsRuntimeDriver::RegisterBodyMetersWithCollider(
+	FName BodyId,
+	AActor* Actor,
+	FName ColliderKind,
+	float MassKg,
+	FVector InitialVelocityMetersPerSecond,
+	FVector InitialImpulseNewtonSeconds,
+	bool bEnableGravity,
+	float LinearDamping,
+	float AngularDamping,
+	bool bSimulatePhysics)
+{
+	RegisterBodyMeters(
+		BodyId,
+		Actor,
+		MassKg,
+		InitialVelocityMetersPerSecond,
+		InitialImpulseNewtonSeconds,
+		bEnableGravity,
+		LinearDamping,
+		AngularDamping,
+		bSimulatePhysics);
+	if (BodyConfigs.Num() > 0 && BodyConfigs.Last().BodyId == BodyId && BodyConfigs.Last().Actor.Get() == Actor)
+	{
+		BodyConfigs.Last().ColliderKind = ColliderKind;
+	}
+}
+
 void AADPPhysicsRuntimeDriver::RegisterStaticBody(FName BodyId, AActor* Actor)
 {
 	if (BodyId.IsNone() || Actor == nullptr)
@@ -143,6 +246,15 @@ void AADPPhysicsRuntimeDriver::RegisterStaticBody(FName BodyId, AActor* Actor)
 	Config.bEnableGravity = false;
 	Config.bCollisionEnabled = true;
 	BodyConfigs.Add(Config);
+}
+
+void AADPPhysicsRuntimeDriver::RegisterStaticBodyWithCollider(FName BodyId, AActor* Actor, FName ColliderKind)
+{
+	RegisterStaticBody(BodyId, Actor);
+	if (BodyConfigs.Num() > 0 && BodyConfigs.Last().BodyId == BodyId && BodyConfigs.Last().Actor.Get() == Actor)
+	{
+		BodyConfigs.Last().ColliderKind = ColliderKind;
+	}
 }
 
 void AADPPhysicsRuntimeDriver::StartCapture(float InSampleIntervalSeconds, int32 InMaxFrames, const FString& InOutputPath)
@@ -423,29 +535,34 @@ bool AADPPhysicsRuntimeDriver::ComputeBoundsContact(const FADPDrivenBodyConfig& 
 	{
 		return false;
 	}
-
-	FVector OriginA;
-	FVector ExtentA;
-	FVector OriginB;
-	FVector ExtentB;
-	ActorA->GetActorBounds(false, OriginA, ExtentA);
-	ActorB->GetActorBounds(false, OriginB, ExtentB);
-
-	const FVector AxisGaps(
-		FMath::Abs(OriginA.X - OriginB.X) - (ExtentA.X + ExtentB.X),
-		FMath::Abs(OriginA.Y - OriginB.Y) - (ExtentA.Y + ExtentB.Y),
-		FMath::Abs(OriginA.Z - OriginB.Z) - (ExtentA.Z + ExtentB.Z));
-	const float GapCm = FMath::Max3(AxisGaps.X, AxisGaps.Y, AxisGaps.Z);
-	if (GapCm > ContactToleranceCm)
+	const FName BoxColliderKind(TEXT("box"));
+	if (A.ColliderKind != BoxColliderKind || B.ColliderKind != BoxColliderKind)
 	{
 		return false;
 	}
+
+	FADPOrientedBox BoxA;
+	FADPOrientedBox BoxB;
+	float SignedMarginCm = 0.0f;
+	if (!BuildOrientedBox(ActorA, BoxA) || !BuildOrientedBox(ActorB, BoxB) || !OrientedBoxSignedMargin(BoxA, BoxB, SignedMarginCm))
+	{
+		return false;
+	}
+	if (SignedMarginCm > ContactToleranceCm)
+	{
+		return false;
+	}
+
+	const FVector AxisGaps(
+		FMath::Abs(BoxA.Center.X - BoxB.Center.X) - (ProjectedRadius(BoxA, FVector::ForwardVector) + ProjectedRadius(BoxB, FVector::ForwardVector)),
+		FMath::Abs(BoxA.Center.Y - BoxB.Center.Y) - (ProjectedRadius(BoxA, FVector::RightVector) + ProjectedRadius(BoxB, FVector::RightVector)),
+		FMath::Abs(BoxA.Center.Z - BoxB.Center.Z) - (ProjectedRadius(BoxA, FVector::UpVector) + ProjectedRadius(BoxB, FVector::UpVector)));
 
 	OutContact.FrameIndex = NextFrameIndex;
 	OutContact.TimeSeconds = ElapsedSeconds;
 	OutContact.BodyA = A.BodyId;
 	OutContact.BodyB = B.BodyId;
-	OutContact.GapCm = GapCm;
+	OutContact.GapCm = SignedMarginCm;
 	OutContact.AxisGapsCm = AxisGaps;
 	return true;
 }
@@ -492,12 +609,13 @@ FString AADPPhysicsRuntimeDriver::BuildCaptureJson() const
 			ContactObject->SetArrayField(TEXT("objects"), Bodies);
 			ContactObject->SetStringField(
 				TEXT("method"),
-				Contact.bNativeCollision ? TEXT("ue_on_component_hit") : TEXT("adp_cpp_runtime_bounds_overlap_or_near_contact"));
+				Contact.bNativeCollision ? TEXT("ue_on_component_hit") : TEXT("adp_cpp_runtime_oriented_box_sat"));
 			ContactObject->SetBoolField(TEXT("native_collision"), Contact.bNativeCollision);
 			ContactObject->SetNumberField(TEXT("normal_impulse_n_s"), Contact.NormalImpulseNs);
 			ContactObject->SetArrayField(TEXT("impact_point_cm"), VectorToJsonArray(Contact.ImpactPointCm));
 			ContactObject->SetArrayField(TEXT("impact_normal"), VectorToJsonArray(Contact.ImpactNormal));
 			ContactObject->SetNumberField(TEXT("gap_cm"), Contact.GapCm);
+			ContactObject->SetNumberField(TEXT("contact_tolerance_cm"), ContactToleranceCm);
 			TSharedRef<FJsonObject> AxisObject = MakeShared<FJsonObject>();
 			AxisObject->SetNumberField(TEXT("x"), Contact.AxisGapsCm.X);
 			AxisObject->SetNumberField(TEXT("y"), Contact.AxisGapsCm.Y);

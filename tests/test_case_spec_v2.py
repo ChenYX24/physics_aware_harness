@@ -13,6 +13,37 @@ from tests.case_spec_v2_fixture import case_spec_v2_fixture
 
 
 class CaseSpecV2Tests(unittest.TestCase):
+    def test_event_sequence_requires_multiple_explicit_events(self) -> None:
+        data = case_spec_v2_fixture()
+        data["verification_requirements"]["assertions"] = [
+            {"type": "event_sequence", "objects": ["cue_ball", "target_ball"]}
+        ]
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        self.assertIn(
+            "event_sequence_requires_multiple_events",
+            {issue.code for issue in context.exception.issues},
+        )
+
+    def test_event_sequence_pairs_validate_nested_object_references(self) -> None:
+        data = case_spec_v2_fixture()
+        data["verification_requirements"]["assertions"] = [
+            {
+                "type": "event_sequence",
+                "pairs": [
+                    ["cue_ball", "target_ball"],
+                    ["target_ball", "missing_body"],
+                ],
+            }
+        ]
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        self.assertIn("unknown_object_reference", {issue.code for issue in context.exception.issues})
+
     def test_agent_contract_requires_canonical_local_procedural_shape(self) -> None:
         data = case_spec_v2_fixture()
         subject = data["objects"][0]

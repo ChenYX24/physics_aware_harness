@@ -77,6 +77,7 @@ _CAPABILITY_CODES = {
 }
 _USER_ACTION_CODES = {
     "budget_exhausted",
+    "case_spec_revision_budget_exhausted",
     "candidate_budget_reserve_insufficient",
     "degraded_preview_only",
     "external_provider_authorization_missing",
@@ -403,6 +404,8 @@ def classify_failure(
         return _classification("blocked", "awaiting_agent_action", False, ["submit_native_generation", "cancel"])
     if code in _NATIVE_SUBMISSION_INVALID_CODES:
         return _classification("blocked", "agent_submission_invalid", False, ["submit_native_generation", "cancel"])
+    if code == "case_spec_revision_budget_exhausted":
+        return _classification("blocked", "blocked_user_action", False, ["inspect_artifacts", "cancel"])
     if code in _CAPABILITY_CODES or "capability" in code or "handoff_contract_unavailable" in code:
         return _classification("blocked", "capability_missing", False, ["open_development_issue", "cancel"])
     if code in _USER_ACTION_CODES or code.startswith("provider_input_") or "authorization" in code or "credits" in code:

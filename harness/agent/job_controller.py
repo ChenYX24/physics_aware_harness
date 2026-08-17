@@ -301,11 +301,26 @@ class AgentJobController:
                         ),
                         allowed,
                     )
+                remaining_revisions = max(
+                    0,
+                    int(manifest["budget"]["max_case_spec_revisions"])
+                    - int(manifest["usage"]["case_spec_revisions"]),
+                )
                 effective_revision_policy = {
-                    "available": bool(allowed["paths"]),
+                    "available": bool(allowed["paths"]) and remaining_revisions > 0,
                     "allowed_adjustments": allowed,
-                    "message": "revisions may change only these bounded source CaseSpec leaves",
+                    "message": (
+                        "revisions may change only these bounded source CaseSpec leaves"
+                        if remaining_revisions > 0
+                        else "CaseSpec revision budget is exhausted"
+                    ),
                 }
+                if remaining_revisions == 0 and case_spec_contract_repair.get("available") is True:
+                    case_spec_contract_repair = {
+                        **case_spec_contract_repair,
+                        "available": False,
+                        "message": "CaseSpec revision budget is exhausted",
+                    }
         return {
             "schema_version": "harness_agent_job_inspection_v1",
             "effective_config_digest": self.config.digest,
@@ -1008,6 +1023,16 @@ class AgentJobController:
             )
             if manifest["state"] not in {"blocked", "needs_user_decision", "paused_interrupted", "failed"}:
                 raise JobStoreError(f"job cannot be resumed from state {manifest['state']}")
+            if (
+                revised_case_spec is not None
+                and manifest["usage"]["case_spec_revisions"] >= manifest["budget"]["max_case_spec_revisions"]
+            ):
+                manifest, budget_result = self._block_case_spec_revision_budget(
+                    manifest,
+                    trigger_result=(leaf or {}).get("result"),
+                )
+                self._stage_event(manifest, "stage_blocked", "budget", result=budget_result)
+                return self.inspect(job_id)
             contract_revision = revised_case_spec is not None and contract_repair["available"] is True
             if (
                 manifest["state"] == "failed"
@@ -3171,6 +3196,74 @@ class AgentJobController:
             attempt_id=manifest.get("current_attempt_id"),
         )
 
+    def _case_spec_revision_budget_result(
+        self,
+        manifest: Mapping[str, Any],
+        *,
+        trigger_result: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        refs: list[dict[str, Any]] = []
+        if isinstance(trigger_result, Mapping):
+            if trigger_result.get("failure_code") == "case_spec_revision_budget_exhausted":
+                refs = [
+                    dict(ref)
+                    for ref in trigger_result.get("artifact_refs") or []
+                    if isinstance(ref, Mapping) and ref.get("role") == "trigger_stage_result"
+                ]
+            trigger_stage = str(trigger_result.get("stage") or manifest.get("current_stage") or "compile")
+            if not refs:
+                expected = StageResult.from_dict(trigger_result).to_dict()
+                matching_paths: list[Path] = []
+                for candidate in sorted(self._stage_artifact_root(manifest).rglob(f"stage_results/{trigger_stage}.json")):
+                    try:
+                        if StageResult.from_dict(read_json(candidate)).to_dict() == expected:
+                            matching_paths.append(candidate)
+                    except (OSError, TypeError, ValueError):
+                        continue
+                if matching_paths:
+                    trigger_path = matching_paths[0]
+                    refs.append(
+                        artifact_ref(
+                            "trigger_stage_result",
+                            str(trigger_path),
+                            str(trigger_result["schema_version"]) if trigger_result.get("schema_version") else None,
+                        )
+                    )
+        return build_stage_result(
+            stage="budget",
+            status="blocked",
+            failure_class="blocked_user_action",
+            failure_code="case_spec_revision_budget_exhausted",
+            failure_codes=["case_spec_revision_budget_exhausted"],
+            message="CaseSpec revision budget is exhausted; the current Job cannot create another revision",
+            retryable=False,
+            job_id=str(manifest["job_id"]),
+            attempt_id=manifest.get("current_attempt_id"),
+            artifact_refs=refs,
+            allowed_next_actions=["inspect_artifacts", "cancel"],
+            required_user_action={
+                "code": "case_spec_revision_budget_exhausted",
+                "message": "create a new Job if another CaseSpec revision is required",
+            },
+        )
+
+    def _block_case_spec_revision_budget(
+        self,
+        manifest: dict[str, Any],
+        *,
+        trigger_result: Mapping[str, Any] | None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        result = self._case_spec_revision_budget_result(manifest, trigger_result=trigger_result)
+        self._write_controller_stage_result(manifest, result)
+        updated = self._update_manifest(
+            manifest,
+            state="needs_user_decision",
+            current_stage="budget",
+            blocker={"code": result["failure_code"], "message": result["message"], "stage": "budget"},
+            allowed_next_actions=["inspect_artifacts", "cancel"],
+        )
+        return updated, result
+
     def _apply_stage_result(self, manifest: dict[str, Any], result: Mapping[str, Any]) -> dict[str, Any]:
         value = StageResult.from_dict(result).to_dict()
         if value["status"] == "completed":
@@ -3199,10 +3292,12 @@ class AgentJobController:
         if value["failure_class"] in {"blocked_user_action", "blocked_configuration"}:
             state = "needs_user_decision" if value["failure_code"] in {
                 "budget_exhausted",
+                "case_spec_revision_budget_exhausted",
                 "candidate_budget_reserve_insufficient",
                 "publication_tier_not_satisfied",
                 "degraded_preview_only",
                 "soft_deadline_reached",
+                "ue_launch_budget_exhausted",
             } else "blocked"
             actions = (
                 ["recompile_after_config", "cancel"]
@@ -3215,6 +3310,11 @@ class AgentJobController:
                 }
                 else ["resume", "cancel"]
             )
+            if value["failure_code"] in {
+                "case_spec_revision_budget_exhausted",
+                "ue_launch_budget_exhausted",
+            }:
+                actions = ["inspect_artifacts", "cancel"]
             return self._update_manifest(
                 manifest,
                 state=state,
@@ -3222,6 +3322,9 @@ class AgentJobController:
                 allowed_next_actions=actions,
             )
         if value["failure_class"] in {"case_spec_invalid", "verification_failed", "render_sync_failed", "quality_gate_failed"}:
+            if manifest["usage"]["case_spec_revisions"] >= manifest["budget"]["max_case_spec_revisions"]:
+                blocked, _ = self._block_case_spec_revision_budget(manifest, trigger_result=value)
+                return blocked
             return self._update_manifest(
                 manifest,
                 state="needs_user_decision",
@@ -3306,6 +3409,7 @@ class AgentJobController:
                 "quality_gate": 7,
                 "evidence_bundle": 8,
                 "semantic_review": 9,
+                "budget": 10,
             }
             _, selected = max(
                 candidates,

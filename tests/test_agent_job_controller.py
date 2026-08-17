@@ -2447,9 +2447,62 @@ class AgentJobControllerTests(unittest.TestCase):
 
         inspection = controller.advance_until_blocked("job_ue_budget")
 
-        self.assertEqual(inspection["job"]["state"], "blocked")
+        self.assertEqual(inspection["job"]["state"], "needs_user_decision")
         self.assertEqual(inspection["job"]["blocker"]["code"], "ue_launch_budget_exhausted")
+        self.assertEqual(inspection["job"]["allowed_next_actions"], ["inspect_artifacts", "cancel"])
         self.assertEqual(fake.execute_calls, [])
+
+    def test_revision_budget_exhaustion_preserves_trigger_and_blocks_stale_revision(self) -> None:
+        controller, _ = self.controller(SuccessfulHarness(fail_verifier=True))
+        controller.create(
+            self.request,
+            job_id="job_revision_budget",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+            budget={"max_case_spec_revisions": 1},
+        )
+
+        inspection = controller.advance_until_blocked("job_revision_budget")
+
+        self.assertEqual(inspection["job"]["state"], "needs_user_decision")
+        self.assertEqual(inspection["job"]["current_stage"], "budget")
+        self.assertEqual(inspection["job"]["blocker"]["code"], "case_spec_revision_budget_exhausted")
+        self.assertEqual(inspection["job"]["allowed_next_actions"], ["inspect_artifacts", "cancel"])
+        self.assertFalse(inspection["case_spec_revision_policy"]["available"])
+        root = Path(inspection["paths"]["job_root"])
+        budget_path = root / "attempts" / "attempt_001" / "stage_results" / "budget.json"
+        budget_result = read_json(budget_path)
+        self.assertEqual(budget_result["failure_code"], "case_spec_revision_budget_exhausted")
+        trigger_path = Path(budget_result["artifact_refs"][0]["path"])
+        self.assertTrue(trigger_path.is_file())
+        self.assertEqual(trigger_path.name, "verifier.json")
+
+        stale = read_json(root / "job_manifest.json")
+        stale["state"] = "needs_user_decision"
+        stale["current_stage"] = "verifier"
+        stale["blocker"] = {
+            "code": "declared_assertion_failed",
+            "message": "historical manifest still projects a revision",
+            "stage": "verifier",
+        }
+        stale["allowed_next_actions"] = ["resume_with_revision", "cancel"]
+        write_json(root / "job_manifest.json", stale)
+        stale_inspection = controller.inspect("job_revision_budget")
+        self.assertEqual(stale_inspection["job"]["allowed_next_actions"], ["cancel"])
+        revised = case_spec_v2_fixture()
+        revised["scene"]["duration_s"] = 2.5
+
+        rejected = controller.resume(
+            "job_revision_budget",
+            revised_case_spec=revised,
+            revision_reason="historical stale action",
+        )
+
+        self.assertEqual(rejected["job"]["blocker"]["code"], "case_spec_revision_budget_exhausted")
+        self.assertEqual(rejected["job"]["allowed_next_actions"], ["inspect_artifacts", "cancel"])
+        self.assertFalse((root / "attempts" / "attempt_002").exists())
+        rewritten_budget_result = read_json(budget_path)
+        self.assertEqual(Path(rewritten_budget_result["artifact_refs"][0]["path"]).name, "verifier.json")
 
     def test_paid_provider_checkpoint_is_counted_once_by_request_identity(self) -> None:
         controller, _ = self.controller(SuccessfulHarness(fail_verifier=True))
@@ -2507,12 +2560,15 @@ class AgentJobControllerTests(unittest.TestCase):
         over_limit = case_spec_v2_fixture()
         over_limit["scene"]["duration_s"] += 0.9
 
-        with self.assertRaisesRegex(ValueError, "revision budget is exhausted"):
-            controller.resume(
-                "job_revision_budget",
-                revised_case_spec=over_limit,
-                revision_reason="sixth revision",
-            )
+        rejected = controller.resume(
+            "job_revision_budget",
+            revised_case_spec=over_limit,
+            revision_reason="sixth revision",
+        )
+
+        self.assertEqual(rejected["job"]["blocker"]["code"], "case_spec_revision_budget_exhausted")
+        self.assertEqual(rejected["job"]["allowed_next_actions"], ["inspect_artifacts", "cancel"])
+        self.assertEqual(len(rejected["attempts"]), 5)
 
     def test_case_spec_revision_creates_new_immutable_attempt(self) -> None:
         controller, fake = self.controller(SuccessfulHarness(fail_verifier=True))

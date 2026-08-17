@@ -8571,8 +8571,13 @@ def start_cpp_runtime_driver(actors: dict, runtime_scene: dict | None, status: d
         actor = actors.get(actor_id)
         if not actor:
             continue
+        properties = obj.get("physics_properties") or {}
         try:
-            driver.register_static_body(ue_name(actor_id), actor)
+            driver.register_static_body_with_collider(
+                ue_name(actor_id),
+                actor,
+                ue_name(str(properties.get("collider") or "unknown").casefold()),
+            )
             cpp_status["registered_static"].append(actor_id)
         except Exception as exc:
             cpp_status["errors"].append(f"register_static:{actor_id}:{exc}")
@@ -8597,9 +8602,10 @@ def start_cpp_runtime_driver(actors: dict, runtime_scene: dict | None, status: d
         if properties.get("simulate_physics") in ("force_off", "force_off_until_release", "disabled"):
             simulate_body = False
         try:
-            driver.register_body_meters(
+            driver.register_body_meters_with_collider(
                 ue_name(actor_id),
                 actor,
+                ue_name(str(properties.get("collider") or "unknown").casefold()),
                 mass_kg,
                 velocity_m_s,
                 impulse_n_s,

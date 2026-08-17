@@ -18,11 +18,29 @@ def verify_static_scene_layout(case_spec: dict[str, Any], scene_layout: dict[str
             {},
         )
     nodes = scene_layout.get("object_nodes") if isinstance(scene_layout.get("object_nodes"), list) else []
+    overlap_diagnostics = [
+        item
+        for item in scene_layout.get("overlap_diagnostics") or []
+        if isinstance(item, dict)
+    ]
+    sat_diagnostics = [
+        item
+        for item in overlap_diagnostics
+        if item.get("overlap_test") == "oriented_box_sat"
+    ]
+    closest_sat_pair = min(
+        sat_diagnostics,
+        key=lambda item: float(item.get("signed_margin_m", float("inf"))),
+        default=None,
+    )
     checks = {
         "object_count": len(nodes),
         "physics_critical_count": sum(1 for node in nodes if isinstance(node, dict) and node.get("physics_critical")),
         "support_relation_count": len(scene_layout.get("support_relations") or []),
         "overlap_pair_count": len(scene_layout.get("overlap_pairs") or []),
+        "overlap_narrow_phase": "oriented_box_sat" if sat_diagnostics else None,
+        "oriented_box_sat_pair_count": len(sat_diagnostics),
+        "closest_oriented_box_pair": closest_sat_pair,
         "camera_count": len(((scene_layout.get("camera_plan") or {}).get("views") or [])),
     }
     duplicate = first_duplicate([str(node.get("object_id")) for node in nodes if isinstance(node, dict)])

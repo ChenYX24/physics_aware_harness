@@ -640,6 +640,13 @@ def collect_case_spec_v2_issues(
                     "unsupported_verification_assertion",
                     f"unsupported assertion type: {assertion_type}",
                 )
+            if assertion_type == "event_sequence":
+                _validate_event_sequence_assertion(
+                    assertion,
+                    f"/verification_requirements/assertions/{index}",
+                    known_objects,
+                    issues,
+                )
     observation = _mapping(data.get("observation_requirements"), "/observation_requirements", issues)
     cameras = observation.get("cameras")
     _validate_references(cameras, "/observation_requirements/cameras", known_objects, issues)
@@ -1289,6 +1296,49 @@ def _validate_references(
         for reference in references:
             if reference not in known_objects:
                 _issue(issues, f"{path}/{index}", "unknown_object_reference", f"unknown object id: {reference}")
+
+
+def _validate_event_sequence_assertion(
+    assertion: Mapping[str, Any],
+    path: str,
+    known_objects: set[str],
+    issues: list[ValidationIssue],
+) -> None:
+    pairs = assertion.get("pairs")
+    objects = assertion.get("objects")
+    if pairs is not None and objects is not None:
+        _issue(
+            issues,
+            path,
+            "ambiguous_event_sequence",
+            "event_sequence must use either pairs or objects, not both",
+        )
+        return
+    if pairs is not None:
+        if not isinstance(pairs, list) or len(pairs) < 2:
+            _issue(
+                issues,
+                f"{path}/pairs",
+                "event_sequence_requires_multiple_events",
+                "event_sequence.pairs must contain at least two ordered object pairs",
+            )
+            return
+        for index, pair in enumerate(pairs):
+            pair_path = f"{path}/pairs/{index}"
+            if not isinstance(pair, list) or len(pair) != 2 or any(not isinstance(value, str) or not value for value in pair):
+                _issue(issues, pair_path, "invalid_event_pair", "each event_sequence pair must contain exactly two object IDs")
+                continue
+            for reference in pair:
+                if reference not in known_objects:
+                    _issue(issues, pair_path, "unknown_object_reference", f"unknown object id: {reference}")
+        return
+    if not isinstance(objects, list) or len(objects) < 3:
+        _issue(
+            issues,
+            f"{path}/objects",
+            "event_sequence_requires_multiple_events",
+            "event_sequence.objects must contain at least three ordered object IDs",
+        )
 
 
 def _validate_relation_surface_gaps(relations: Any, issues: list[ValidationIssue]) -> None:

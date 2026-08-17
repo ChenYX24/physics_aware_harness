@@ -30,11 +30,29 @@ class TrajectoryAssertionVerifierTests(unittest.TestCase):
         self.assertEqual(len(evidence[0]["results"]), 2)
 
     def test_assertion_failure_is_reported_without_process_label(self) -> None:
-        failure, counterexample, _ = self.verify([
-            {"id": "x_limit", "type": "state_value", "object_id": "c", "field": "position_m.x", "reduction": "final", "operator": "<", "value": 1.0}
+        failure, counterexample, evidence = self.verify([
+            {"id": "x_limit", "type": "state_value", "object_id": "c", "field": "position_m.x", "reduction": "final", "operator": "<", "value": 1.0},
+            {"id": "missing_contact", "type": "event_exists", "objects": ["a", "c"]},
+            {"id": "present_contact", "type": "event_exists", "objects": ["a", "b"]},
         ])
         self.assertEqual(failure, "declared_assertion_failed")
         self.assertEqual(counterexample["metric"], "x_limit")
+        self.assertEqual(
+            [(row["id"], row["passed"]) for row in evidence[0]["results"]],
+            [("x_limit", False), ("missing_contact", False), ("present_contact", True)],
+        )
+
+    def test_event_sequence_reports_every_pair(self) -> None:
+        failure, _, evidence = self.verify([
+            {"id": "sequence", "type": "event_sequence", "pairs": [["a", "b"], ["a", "c"], ["b", "c"]]},
+        ])
+
+        self.assertEqual(failure, "declared_assertion_failed")
+        result = evidence[0]["results"][0]
+        self.assertEqual(
+            [(row["objects"], row["observed"]) for row in result["pair_results"]],
+            [(["a", "b"], True), (["a", "c"], False), (["b", "c"], True)],
+        )
 
 
 if __name__ == "__main__":
