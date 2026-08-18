@@ -397,7 +397,6 @@ void AADPPhysicsRuntimeDriver::PrepareBody(const FADPDrivenBodyConfig& Config)
 	{
 		Primitive->OnComponentHit.AddDynamic(this, &AADPPhysicsRuntimeDriver::HandleComponentHit);
 	}
-	Primitive->SetSimulatePhysics(false);
 	Primitive->SetEnableGravity(false);
 
 	if (Config.bDynamic && Config.MassKg > 0.0f)
@@ -407,6 +406,7 @@ void AADPPhysicsRuntimeDriver::PrepareBody(const FADPDrivenBodyConfig& Config)
 
 	Primitive->SetLinearDamping(Config.LinearDamping);
 	Primitive->SetAngularDamping(Config.AngularDamping);
+	Primitive->SetSimulatePhysics(Config.bDynamic && Config.bSimulatePhysics);
 }
 
 void AADPPhysicsRuntimeDriver::ActivateBody(const FADPDrivenBodyConfig& Config)
@@ -417,7 +417,6 @@ void AADPPhysicsRuntimeDriver::ActivateBody(const FADPDrivenBodyConfig& Config)
 		return;
 	}
 
-	Primitive->SetSimulatePhysics(Config.bDynamic && Config.bSimulatePhysics);
 	Primitive->SetEnableGravity(Config.bDynamic && Config.bEnableGravity);
 	if (Config.bDynamic && Config.bSimulatePhysics)
 	{

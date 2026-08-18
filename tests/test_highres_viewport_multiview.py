@@ -83,6 +83,21 @@ class HighresViewportMultiviewTests(unittest.TestCase):
             call_lines["start_prepared_cpp_runtime_driver"],
         )
 
+    def test_final_body_instance_is_not_recreated_after_constraint_binding(self) -> None:
+        source = (
+            ROOT
+            / "ue_template/Plugins/ADPPhysicsRuntime/Source/ADPPhysicsRuntime/Private/ADPPhysicsRuntimeDriver.cpp"
+        ).read_text(encoding="utf-8")
+        prepare = source.split("void AADPPhysicsRuntimeDriver::PrepareBody", 1)[1].split(
+            "void AADPPhysicsRuntimeDriver::ActivateBody", 1
+        )[0]
+        activate = source.split("void AADPPhysicsRuntimeDriver::ActivateBody", 1)[1].split(
+            "void AADPPhysicsRuntimeDriver::CaptureFrame", 1
+        )[0]
+
+        self.assertIn("SetSimulatePhysics", prepare)
+        self.assertNotIn("SetSimulatePhysics", activate)
+
     def test_constraint_scene_requires_successful_cpp_body_setup(self) -> None:
         source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
