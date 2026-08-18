@@ -26,6 +26,7 @@ from harness.core.case_spec_v2 import (
     CAMERA_ROLES,
     CASE_SPEC_V2_SCHEMA_VERSION,
     OBSERVATION_MODALITIES,
+    PROVIDER_HINTS_BY_ACQUISITION_ROUTE,
     REFERENCE_INPUT_USAGES,
     RESOURCE_KINDS,
     VERIFICATION_ASSERTION_TYPES,
@@ -1622,7 +1623,9 @@ FIELD-BY-FIELD INSTRUCTIONS
    route must fail rather than accept an excluded or semantically different class. acquisition.route is default,
    local_catalog, external_site, procedural_generation, or model_generation. Use required only when the
    user explicitly demanded that exact route and origin=user_explicit; otherwise use preferred. Required
-   routes have no fallback. For exact rule-based primitives, prefer procedural_generation and use only
+   routes have no fallback. provider_hint is null or an exact stable ID listed for that route in
+   case_spec_contract.enums.provider_hint_by_acquisition_route; never use a display name. For exact
+   rule-based primitives, prefer procedural_generation and use only
    the registered provider hints box_mesh_v1, sphere_mesh_v1, or cylinder_mesh_v1; alternatively leave
    provider_hint null so the Provider can infer it from shape_hint. Never invent a recipe ID. Use box for
    boxes/plates/walls, sphere for balls/spheres, and cylinder for rods/poles/columns/discs. When the user
@@ -1863,7 +1866,7 @@ def case_spec_generation_contract() -> dict[str, Any]:
                 "route": "one acquisition_route enum",
                 "requirement": "preferred or required",
                 "origin": "user_explicit, llm_inferred, or system_default",
-                "provider_hint": "string or null",
+                "provider_hint": "null or an exact ID from enums.provider_hint_by_acquisition_route[route]",
                 "source_uri_hint": "string or null",
                 "reference_inputs": [],
                 "fallback_order": [],
@@ -1931,6 +1934,10 @@ def case_spec_generation_contract() -> dict[str, Any]:
             ],
             "acquisition_requirement": ["preferred", "required"],
             "acquisition_origin": ["user_explicit", "llm_inferred", "system_default"],
+            "provider_hint_by_acquisition_route": {
+                route: sorted(provider_hints)
+                for route, provider_hints in sorted(PROVIDER_HINTS_BY_ACQUISITION_ROUTE.items())
+            },
             "reference_usage": [
                 *sorted(REFERENCE_INPUT_USAGES),
             ],
@@ -2123,7 +2130,7 @@ def _valid_rigid_sph_shape_example() -> dict[str, Any]:
                         "route": "model_generation",
                         "requirement": "required",
                         "origin": "user_explicit",
-                        "provider_hint": "named_provider",
+                        "provider_hint": "meshy",
                         "source_uri_hint": None,
                         "reference_inputs": [],
                         "fallback_order": [],

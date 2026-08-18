@@ -8,10 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from harness.assets.providers.local_procedural_mesh import (
-    GENERIC_PROVIDER_ALIASES,
-    RECIPE_BY_SHAPE,
-)
+from harness.assets.providers.local_procedural_mesh import RECIPE_BY_SHAPE
 from harness.core.capability import CapabilityStore, canonical_capability_id
 from harness.core.physics_contract import allowed_backends_for_scene
 from harness.core.runtime_case import RUNTIME_CASE_SCHEMA_VERSION, RuntimeCase
@@ -27,6 +24,13 @@ ACQUISITION_ROUTES = {
 }
 ACQUISITION_REQUIREMENTS = {"preferred", "required"}
 ACQUISITION_ORIGINS = {"user_explicit", "llm_inferred", "system_default"}
+PROVIDER_HINTS_BY_ACQUISITION_ROUTE = {
+    "default": frozenset(),
+    "local_catalog": frozenset(),
+    "external_site": frozenset({"poly_haven"}),
+    "procedural_generation": frozenset(RECIPE_BY_SHAPE.values()),
+    "model_generation": frozenset({"meshy"}),
+}
 REFERENCE_INPUT_USAGES = {
     "similarity_search",
     "generation_condition",
@@ -293,7 +297,6 @@ def validate_agent_case_spec_contract(data: Mapping[str, Any]) -> None:
 def collect_agent_case_spec_contract_issues(data: Mapping[str, Any]) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     recipe_shapes = {recipe: shape for shape, recipe in RECIPE_BY_SHAPE.items()}
-    supported_hints = set(recipe_shapes) | set(GENERIC_PROVIDER_ALIASES)
     for index, obj in enumerate(data.get("objects") or []):
         if not isinstance(obj, Mapping):
             continue
@@ -301,7 +304,17 @@ def collect_agent_case_spec_contract_issues(data: Mapping[str, Any]) -> list[Val
         shape = str(geometry.get("shape_hint") or "").strip().casefold()
         for request in asset_requests(obj.get("asset")):
             acquisition = request.get("acquisition") if isinstance(request.get("acquisition"), Mapping) else {}
-            if acquisition.get("route") != "procedural_generation":
+            route = str(acquisition.get("route") or "default")
+            provider_hint = str(acquisition.get("provider_hint") or "").strip()
+            registered_hints = PROVIDER_HINTS_BY_ACQUISITION_ROUTE.get(route, frozenset())
+            if provider_hint and provider_hint not in registered_hints:
+                _issue(
+                    issues,
+                    f"/objects/{index}/asset/acquisition/provider_hint",
+                    "unsupported_provider_hint",
+                    f"provider_hint for route={route} must be one of {sorted(registered_hints)} or null",
+                )
+            if route != "procedural_generation":
                 continue
             shape_path = f"/objects/{index}/geometry/shape_hint"
             if shape not in RECIPE_BY_SHAPE:
@@ -310,14 +323,6 @@ def collect_agent_case_spec_contract_issues(data: Mapping[str, Any]) -> list[Val
                     shape_path,
                     "procedural_shape_hint_not_canonical",
                     "built-in procedural generation requires shape_hint box, sphere, or cylinder",
-                )
-            provider_hint = str(acquisition.get("provider_hint") or "").strip().casefold()
-            if provider_hint and provider_hint not in supported_hints:
-                _issue(
-                    issues,
-                    f"/objects/{index}/asset/acquisition/provider_hint",
-                    "unsupported_procedural_provider_hint",
-                    "use box_mesh_v1, sphere_mesh_v1, cylinder_mesh_v1, a registered generic local provider, or null",
                 )
             expected_shape = recipe_shapes.get(provider_hint)
             if expected_shape is not None and shape in RECIPE_BY_SHAPE and shape != expected_shape:

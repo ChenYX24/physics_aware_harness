@@ -94,6 +94,9 @@ class NativeGenerationTests(unittest.TestCase):
             any("event_sequence uses at least two explicit ordered pairs" in rule for rule in context["case_spec_contract"]["hard_rules"])
         )
         self.assertIn("pairs", context["case_spec_contract"]["field_shapes"]["verification_assertion"])
+        provider_hints = context["case_spec_contract"]["enums"]["provider_hint_by_acquisition_route"]
+        self.assertEqual(provider_hints["external_site"], ["poly_haven"])
+        self.assertEqual(provider_hints["model_generation"], ["meshy"])
         object_fields = context["case_spec_contract"]["field_shapes"]["object"]
         self.assertIn("visible", object_fields["visual_representation"])
         collision_geometry = object_fields["physics"]["collision_geometry"]

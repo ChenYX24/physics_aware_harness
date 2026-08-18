@@ -136,6 +136,32 @@ class CaseSpecV2Tests(unittest.TestCase):
             {issue.code for issue in context.exception.issues},
         )
 
+    def test_agent_contract_requires_registered_provider_hint_for_route(self) -> None:
+        data = case_spec_v2_fixture()
+        acquisition = {
+            "route": "external_site",
+            "requirement": "required",
+            "origin": "user_explicit",
+            "provider_hint": "Poly Haven",
+            "source_uri_hint": "https://polyhaven.com/a/Barrel_02",
+            "reference_inputs": [],
+            "fallback_order": [],
+        }
+        data["objects"][0]["asset"] = {
+            "description": "required external asset",
+            "resource_kind": "mesh_3d",
+            "acquisition": acquisition,
+        }
+        parsed = case_spec_v2_from_dict(data)
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            validate_agent_case_spec_contract(parsed.data)
+
+        self.assertIn("unsupported_provider_hint", {issue.code for issue in context.exception.issues})
+
+        acquisition["provider_hint"] = "poly_haven"
+        validate_agent_case_spec_contract(case_spec_v2_from_dict(data).data)
+
     def test_agent_contract_rejects_recipe_and_geometry_type_conflicts(self) -> None:
         data = case_spec_v2_fixture()
         subject = data["objects"][0]
