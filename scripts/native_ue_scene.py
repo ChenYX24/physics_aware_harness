@@ -3141,7 +3141,7 @@ def spawn_runtime_constraints_in_game_world(actors: dict, runtime_scene: dict, s
 def require_final_constraint_body_setup(runtime_scene: dict, status: dict) -> None:
     if not runtime_scene.get("constraints"):
         return
-    if bool((status.get("cpp_runtime_driver") or {}).get("started")):
+    if bool((status.get("cpp_runtime_driver") or {}).get("prepared")):
         return
     raise RuntimeError(
         "F_RUNTIME_CONSTRAINT_BINDING_FAILED: C++ runtime driver did not establish final PIE body state"
@@ -8977,17 +8977,18 @@ def apply_runtime_initial_angular_velocity(actor_id: str, actor, properties: dic
     status.setdefault("errors", []).append(f"initial_angular_velocity:{actor_id}:{errors[-3:]}")
 
 
-def start_cpp_runtime_driver(actors: dict, runtime_scene: dict | None, status: dict, max_frames: int) -> bool:
+def prepare_cpp_runtime_driver(actors: dict, runtime_scene: dict | None, status: dict, max_frames: int) -> bool:
     controls = actors.get("physics_controls") or runtime_physics_controls(runtime_scene)
     cpp_status = status.setdefault("cpp_runtime_driver", {
         "enabled": False,
+        "prepared": False,
         "started": False,
         "output_path": str(OUTPUT_DIR / "cpp_physics_capture.json"),
         "registered_dynamic": [],
         "registered_static": [],
         "errors": [],
     })
-    if cpp_status.get("started"):
+    if cpp_status.get("prepared") or cpp_status.get("started"):
         return True
     if not bool(controls.get("simulate_physics")):
         cpp_status["errors"].append("simulate_physics=false")
@@ -9102,36 +9103,55 @@ def start_cpp_runtime_driver(actors: dict, runtime_scene: dict | None, status: d
         capture_frames = int(timebase["raw_capture_frame_count"])
         output_path = str(OUTPUT_DIR / "cpp_physics_capture.json")
         cpp_status["output_path"] = output_path
-        driver.start_capture(sample_interval, capture_frames, output_path)
+        prepared = bool(driver.prepare_capture(sample_interval, capture_frames, output_path))
+        if not prepared:
+            cpp_status["errors"].append("prepare_capture:false")
+            return False
         try:
             driver.set_manual_stepping_enabled(True)
             cpp_status["manual_stepping_enabled"] = True
         except Exception as manual_exc:
             cpp_status.setdefault("errors", []).append(f"set_manual_stepping:{manual_exc}")
             cpp_status["manual_stepping_enabled"] = False
-        cpp_status["started"] = True
+        cpp_status["prepared"] = True
         cpp_status["sample_interval_s"] = sample_interval
         cpp_status["max_frames"] = capture_frames
         cpp_status["timebase"] = timebase
+        return True
+    except Exception as exc:
+        cpp_status["errors"].append(f"prepare_capture:{exc}")
+        return False
+
+
+def start_prepared_cpp_runtime_driver(actors: dict, runtime_scene: dict | None, status: dict) -> bool:
+    cpp_status = status.get("cpp_runtime_driver") or {}
+    if cpp_status.get("started"):
+        return True
+    driver = actors.get("adp_physics_runtime_driver")
+    if not cpp_status.get("prepared") or not driver or not runtime_scene:
+        cpp_status.setdefault("errors", []).append("prepared_driver_unavailable")
+        return False
+    try:
+        if not bool(driver.start_prepared_capture()):
+            cpp_status.setdefault("errors", []).append("start_prepared_capture:false")
+            return False
+        cpp_status["started"] = True
         for obj in runtime_scene.get("dynamic_objects") or []:
             actor_id = obj.get("id")
             actor = actors.get(actor_id)
             properties = obj.get("physics_properties") or {}
+            velocity_m_s = vector_from_sequence(properties.get("initial_velocity_m_s"), 1.0)
+            cpp_status.setdefault("applied_initial_velocity_cm_s", []).append(
+                {
+                    "id": actor_id,
+                    "velocity_cm_s": [
+                        round(velocity_m_s.x * 100.0, 4),
+                        round(velocity_m_s.y * 100.0, 4),
+                        round(velocity_m_s.z * 100.0, 4),
+                    ],
+                }
+            )
             if actor:
-                component = actor_runtime_component(actor)
-                velocity_m_s = vector_from_sequence(properties.get("initial_velocity_m_s"), 1.0)
-                if component:
-                    try:
-                        component.wake_all_rigid_bodies()
-                        component.set_physics_linear_velocity(unreal.Vector(velocity_m_s.x * 100.0, velocity_m_s.y * 100.0, velocity_m_s.z * 100.0), False, "")
-                        cpp_status.setdefault("applied_initial_velocity_cm_s", []).append(
-                            {
-                                "id": actor_id,
-                                "velocity_cm_s": [round(velocity_m_s.x * 100.0, 4), round(velocity_m_s.y * 100.0, 4), round(velocity_m_s.z * 100.0, 4)],
-                            }
-                        )
-                    except Exception as velocity_exc:
-                        cpp_status.setdefault("errors", []).append(f"apply_initial_velocity:{actor_id}:{velocity_exc}")
                 apply_runtime_initial_angular_velocity(actor_id, actor, properties, status)
         status["initial_impulses_applied"] = True
         status["initial_impulses"] = [
@@ -9141,8 +9161,29 @@ def start_cpp_runtime_driver(actors: dict, runtime_scene: dict | None, status: d
         ]
         return True
     except Exception as exc:
-        cpp_status["errors"].append(f"start_capture:{exc}")
+        cpp_status.setdefault("errors", []).append(f"start_prepared_capture:{exc}")
         return False
+
+
+def initialize_cpp_runtime_driver(actors: dict, runtime_scene: dict | None, status: dict, max_frames: int) -> bool:
+    cpp_status = status.get("cpp_runtime_driver") or {}
+    if cpp_status.get("started"):
+        return True
+    if not prepare_cpp_runtime_driver(actors, runtime_scene, status, max_frames):
+        return False
+    if runtime_scene and runtime_scene.get("constraints"):
+        require_final_constraint_body_setup(runtime_scene, status)
+        if not spawn_runtime_constraints_in_game_world(actors, runtime_scene, status):
+            raise RuntimeError("F_RUNTIME_CONSTRAINT_BINDING_FAILED: final PIE constraint creation failed")
+    if start_prepared_cpp_runtime_driver(actors, runtime_scene, status):
+        return True
+    if runtime_scene and runtime_scene.get("constraints"):
+        raise RuntimeError("F_RUNTIME_CONSTRAINT_BINDING_FAILED: constrained bodies did not activate")
+    return False
+
+
+def start_cpp_runtime_driver(actors: dict, runtime_scene: dict | None, status: dict, max_frames: int) -> bool:
+    return initialize_cpp_runtime_driver(actors, runtime_scene, status, max_frames)
 
 
 def cpp_capture_to_runtime_trajectory(capture: dict, actors: dict, runtime_scene: dict | None, scene_origin: unreal.Vector) -> tuple[list[dict], list[dict], list[dict], dict]:
@@ -10132,14 +10173,11 @@ def start_highres_viewport_capture(
             return
         if actors.get("gasp_locomotion"):
             physics_status["interaction_driver"] = "gasp_character_movement_and_delayed_release"
-        elif not start_cpp_runtime_driver(actors, runtime_scene, physics_status, len(trajectory)):
+        elif not initialize_cpp_runtime_driver(actors, runtime_scene, physics_status, len(trajectory)):
             if runtime_scene.get("constraints"):
                 require_final_constraint_body_setup(runtime_scene, physics_status)
             apply_initial_physics_impulses(actors, runtime_scene, physics_status)
         if runtime_scene.get("constraints"):
-            require_final_constraint_body_setup(runtime_scene, physics_status)
-            if not spawn_runtime_constraints_in_game_world(actors, runtime_scene, physics_status):
-                raise RuntimeError("F_RUNTIME_CONSTRAINT_BINDING_FAILED: final PIE constraint creation failed")
             if not update_runtime_binding_snapshot():
                 raise RuntimeError("F_RUNTIME_CONSTRAINT_BINDING_FAILED: post-body-setup initialization failed")
         first_frame = trajectory[min(state["frame_index"], len(trajectory) - 1)] if trajectory else {"frame": 0, "time": 0.0, "objects": {}}

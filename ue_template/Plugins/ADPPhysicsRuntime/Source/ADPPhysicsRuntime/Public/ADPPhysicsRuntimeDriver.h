@@ -175,6 +175,12 @@ public:
 	void StartCapture(float InSampleIntervalSeconds, int32 InMaxFrames, const FString& InOutputPath);
 
 	UFUNCTION(BlueprintCallable, Category = "ADP Physics")
+	bool PrepareCapture(float InSampleIntervalSeconds, int32 InMaxFrames, const FString& InOutputPath);
+
+	UFUNCTION(BlueprintCallable, Category = "ADP Physics")
+	bool StartPreparedCapture();
+
+	UFUNCTION(BlueprintCallable, Category = "ADP Physics")
 	void SetManualSteppingEnabled(bool bEnabled);
 
 	UFUNCTION(BlueprintCallable, Category = "ADP Physics")
@@ -214,7 +220,8 @@ private:
 		const FHitResult& Hit);
 
 	void CaptureManualFrame(float DeltaSeconds);
-	void ConfigureBody(const FADPDrivenBodyConfig& Config);
+	void PrepareBody(const FADPDrivenBodyConfig& Config);
+	void ActivateBody(const FADPDrivenBodyConfig& Config);
 	void CaptureFrame();
 	UPrimitiveComponent* FindPrimitiveComponent(AActor* Actor) const;
 	FName FindBodyId(AActor* Actor) const;
@@ -231,4 +238,5 @@ private:
 	TArray<FADPContactSample> PendingNativeContacts;
 	bool bManualSteppingEnabled = false;
 	bool bTickingWorldFromDriver = false;
+	bool bBodiesPrepared = false;
 };

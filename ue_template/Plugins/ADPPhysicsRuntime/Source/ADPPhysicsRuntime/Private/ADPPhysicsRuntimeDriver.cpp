@@ -147,6 +147,7 @@ void AADPPhysicsRuntimeDriver::ResetDriver()
 	MaxFrames = 1;
 	bCapturing = false;
 	bCaptureComplete = false;
+	bBodiesPrepared = false;
 }
 
 void AADPPhysicsRuntimeDriver::RegisterBody(
@@ -262,6 +263,14 @@ void AADPPhysicsRuntimeDriver::RegisterStaticBodyWithCollider(FName BodyId, AAct
 
 void AADPPhysicsRuntimeDriver::StartCapture(float InSampleIntervalSeconds, int32 InMaxFrames, const FString& InOutputPath)
 {
+	if (PrepareCapture(InSampleIntervalSeconds, InMaxFrames, InOutputPath))
+	{
+		StartPreparedCapture();
+	}
+}
+
+bool AADPPhysicsRuntimeDriver::PrepareCapture(float InSampleIntervalSeconds, int32 InMaxFrames, const FString& InOutputPath)
+{
 	CapturedFrames.Reset();
 	PendingNativeContacts.Reset();
 	OutputPath = InOutputPath;
@@ -274,10 +283,24 @@ void AADPPhysicsRuntimeDriver::StartCapture(float InSampleIntervalSeconds, int32
 
 	for (const FADPDrivenBodyConfig& Config : BodyConfigs)
 	{
-		ConfigureBody(Config);
+		PrepareBody(Config);
 	}
+	bBodiesPrepared = BodyConfigs.Num() > 0;
+	return bBodiesPrepared;
+}
 
+bool AADPPhysicsRuntimeDriver::StartPreparedCapture()
+{
+	if (!bBodiesPrepared || bCapturing)
+	{
+		return false;
+	}
+	for (const FADPDrivenBodyConfig& Config : BodyConfigs)
+	{
+		ActivateBody(Config);
+	}
 	bCapturing = true;
+	return true;
 }
 
 void AADPPhysicsRuntimeDriver::SetManualSteppingEnabled(bool bEnabled)
@@ -357,7 +380,7 @@ void AADPPhysicsRuntimeDriver::CaptureManualFrame(float DeltaSeconds)
 	}
 }
 
-void AADPPhysicsRuntimeDriver::ConfigureBody(const FADPDrivenBodyConfig& Config)
+void AADPPhysicsRuntimeDriver::PrepareBody(const FADPDrivenBodyConfig& Config)
 {
 	UPrimitiveComponent* Primitive = FindPrimitiveComponent(Config.Actor.Get());
 	if (Primitive == nullptr)
@@ -374,8 +397,8 @@ void AADPPhysicsRuntimeDriver::ConfigureBody(const FADPDrivenBodyConfig& Config)
 	{
 		Primitive->OnComponentHit.AddDynamic(this, &AADPPhysicsRuntimeDriver::HandleComponentHit);
 	}
-	Primitive->SetSimulatePhysics(Config.bDynamic && Config.bSimulatePhysics);
-	Primitive->SetEnableGravity(Config.bDynamic && Config.bEnableGravity);
+	Primitive->SetSimulatePhysics(false);
+	Primitive->SetEnableGravity(false);
 
 	if (Config.bDynamic && Config.MassKg > 0.0f)
 	{
@@ -384,15 +407,26 @@ void AADPPhysicsRuntimeDriver::ConfigureBody(const FADPDrivenBodyConfig& Config)
 
 	Primitive->SetLinearDamping(Config.LinearDamping);
 	Primitive->SetAngularDamping(Config.AngularDamping);
+}
 
+void AADPPhysicsRuntimeDriver::ActivateBody(const FADPDrivenBodyConfig& Config)
+{
+	UPrimitiveComponent* Primitive = FindPrimitiveComponent(Config.Actor.Get());
+	if (Primitive == nullptr)
+	{
+		return;
+	}
+
+	Primitive->SetSimulatePhysics(Config.bDynamic && Config.bSimulatePhysics);
+	Primitive->SetEnableGravity(Config.bDynamic && Config.bEnableGravity);
 	if (Config.bDynamic && Config.bSimulatePhysics)
 	{
-		Primitive->WakeAllRigidBodies();
 		Primitive->SetPhysicsLinearVelocity(Config.InitialVelocityCmPerSec, false, NAME_None);
 		if (!Config.InitialImpulseKgCmPerSec.IsNearlyZero())
 		{
 			Primitive->AddImpulse(Config.InitialImpulseKgCmPerSec, NAME_None, false);
 		}
+		Primitive->WakeAllRigidBodies();
 	}
 }
 

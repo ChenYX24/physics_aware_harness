@@ -92,6 +92,7 @@ bool UADPPhysicsRuntimeLibrary::InitializePhysicsConstraint(UPhysicsConstraintCo
 	{
 		ConstraintComponent->RegisterComponentWithWorld(ConstraintComponent->GetWorld());
 	}
+	ConstraintComponent->UpdateConstraintFrames();
 	ConstraintComponent->TermComponentConstraint();
 	ConstraintComponent->InitComponentConstraint();
 	return ConstraintComponent->IsRegistered()

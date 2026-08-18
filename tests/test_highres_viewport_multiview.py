@@ -54,26 +54,33 @@ class HighresViewportMultiviewTests(unittest.TestCase):
             <= called
         )
 
-    def test_runtime_constraint_creation_follows_final_body_setup(self) -> None:
+    def test_runtime_constraint_creation_precedes_body_activation(self) -> None:
         source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
         function = next(
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name == "start_visible_physics_input"
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "initialize_cpp_runtime_driver"
         )
         call_lines = {
             node.func.id: node.lineno
             for node in ast.walk(function)
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
-            and node.func.id in {"start_cpp_runtime_driver", "spawn_runtime_constraints_in_game_world"}
+            and node.func.id in {
+                "prepare_cpp_runtime_driver",
+                "spawn_runtime_constraints_in_game_world",
+                "start_prepared_cpp_runtime_driver",
+            }
         }
 
         self.assertLess(
-            call_lines["start_cpp_runtime_driver"],
+            call_lines["prepare_cpp_runtime_driver"],
             call_lines["spawn_runtime_constraints_in_game_world"],
+        )
+        self.assertLess(
+            call_lines["spawn_runtime_constraints_in_game_world"],
+            call_lines["start_prepared_cpp_runtime_driver"],
         )
 
     def test_constraint_scene_requires_successful_cpp_body_setup(self) -> None:
@@ -91,11 +98,11 @@ class HighresViewportMultiviewTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "F_RUNTIME_CONSTRAINT_BINDING_FAILED"):
             namespace["require_final_constraint_body_setup"](
                 {"constraints": [{"constraint_id": "joint"}]},
-                {"cpp_runtime_driver": {"started": False}},
+                {"cpp_runtime_driver": {"prepared": False}},
             )
         namespace["require_final_constraint_body_setup"](
             {"constraints": [{"constraint_id": "joint"}]},
-            {"cpp_runtime_driver": {"started": True}},
+            {"cpp_runtime_driver": {"prepared": True}},
         )
         namespace["require_final_constraint_body_setup"]({}, {})
 
