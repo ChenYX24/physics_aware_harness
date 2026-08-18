@@ -76,6 +76,29 @@ class HighresViewportMultiviewTests(unittest.TestCase):
             call_lines["spawn_runtime_constraints_in_game_world"],
         )
 
+    def test_constraint_scene_requires_successful_cpp_body_setup(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "require_final_constraint_body_setup"
+        )
+        namespace = {}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+
+        with self.assertRaisesRegex(RuntimeError, "F_RUNTIME_CONSTRAINT_BINDING_FAILED"):
+            namespace["require_final_constraint_body_setup"](
+                {"constraints": [{"constraint_id": "joint"}]},
+                {"cpp_runtime_driver": {"started": False}},
+            )
+        namespace["require_final_constraint_body_setup"](
+            {"constraints": [{"constraint_id": "joint"}]},
+            {"cpp_runtime_driver": {"started": True}},
+        )
+        namespace["require_final_constraint_body_setup"]({}, {})
+
     def test_runtime_component_registration_falls_back_to_live_owner(self) -> None:
         source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))

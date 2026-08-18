@@ -3138,6 +3138,16 @@ def spawn_runtime_constraints_in_game_world(actors: dict, runtime_scene: dict, s
     return bool(status["constraint_binding_complete"])
 
 
+def require_final_constraint_body_setup(runtime_scene: dict, status: dict) -> None:
+    if not runtime_scene.get("constraints"):
+        return
+    if bool((status.get("cpp_runtime_driver") or {}).get("started")):
+        return
+    raise RuntimeError(
+        "F_RUNTIME_CONSTRAINT_BINDING_FAILED: C++ runtime driver did not establish final PIE body state"
+    )
+
+
 def component_scale(component):
     return component.get_editor_property("relative_scale3d")
 
@@ -10111,6 +10121,8 @@ def start_highres_viewport_capture(
         if not physics_enabled or state["physics_impulse_applied"]:
             return
         if analytic_contact_solver_enabled(actors, runtime_scene):
+            if runtime_scene.get("constraints"):
+                require_final_constraint_body_setup(runtime_scene, physics_status)
             solver_source = analytic_solver_source(actors, runtime_scene)
             physics_status[solver_source] = {"enabled": True, "started": True}
             state["physics_impulse_applied"] = True
@@ -10121,8 +10133,11 @@ def start_highres_viewport_capture(
         if actors.get("gasp_locomotion"):
             physics_status["interaction_driver"] = "gasp_character_movement_and_delayed_release"
         elif not start_cpp_runtime_driver(actors, runtime_scene, physics_status, len(trajectory)):
+            if runtime_scene.get("constraints"):
+                require_final_constraint_body_setup(runtime_scene, physics_status)
             apply_initial_physics_impulses(actors, runtime_scene, physics_status)
         if runtime_scene.get("constraints"):
+            require_final_constraint_body_setup(runtime_scene, physics_status)
             if not spawn_runtime_constraints_in_game_world(actors, runtime_scene, physics_status):
                 raise RuntimeError("F_RUNTIME_CONSTRAINT_BINDING_FAILED: final PIE constraint creation failed")
             if not update_runtime_binding_snapshot():
