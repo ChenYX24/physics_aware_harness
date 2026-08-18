@@ -22,7 +22,7 @@ class Vector:
 
 
 class HighresViewportMultiviewTests(unittest.TestCase):
-    def test_runtime_constraint_is_created_from_final_pie_body_components(self) -> None:
+    def test_runtime_constraint_is_bound_by_registered_cpp_driver(self) -> None:
         source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
         rebind = next(
@@ -48,11 +48,8 @@ class HighresViewportMultiviewTests(unittest.TestCase):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
         }
 
-        self.assertNotIn("configure_runtime_constraint", rebound_calls)
-        self.assertTrue(
-            {"configure_runtime_constraint", "initialize_runtime_constraint", "runtime_constraint_bindings_verified"}
-            <= called
-        )
+        self.assertNotIn("spawn_runtime_constraints_in_game_world", rebound_calls)
+        self.assertIn("binder", called)
 
     def test_runtime_constraint_creation_precedes_body_activation(self) -> None:
         source = ROOT / "scripts" / "native_ue_scene.py"
@@ -145,86 +142,18 @@ class HighresViewportMultiviewTests(unittest.TestCase):
 
         self.assertTrue(namespace["runtime_component_registered"](Component()))
 
-    def test_runtime_constraint_initializer_uses_plugin_physics_state_entrypoint(self) -> None:
-        source = ROOT / "scripts" / "native_ue_scene.py"
-        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
-        function = next(
-            node
-            for node in tree.body
-            if isinstance(node, ast.FunctionDef)
-            and node.name == "initialize_runtime_constraint"
-        )
-        calls = []
-        library = types.SimpleNamespace(
-            initialize_physics_constraint=lambda component: calls.append(component) or True,
-        )
-        namespace = {"unreal": types.SimpleNamespace(ADPPhysicsRuntimeLibrary=library)}
-        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
-        component = object()
-
-        self.assertTrue(namespace["initialize_runtime_constraint"](component))
-        self.assertEqual(calls, [component])
-
-    def test_runtime_plugin_exposes_constraint_physics_state_initialization(self) -> None:
+    def test_runtime_driver_owns_constraint_binding_and_readback(self) -> None:
         plugin = ROOT / "ue_template" / "Plugins" / "ADPPhysicsRuntime" / "Source" / "ADPPhysicsRuntime"
-        header = (plugin / "Public" / "ADPPhysicsRuntimeLibrary.h").read_text(encoding="utf-8")
-        implementation = (plugin / "Private" / "ADPPhysicsRuntimeLibrary.cpp").read_text(encoding="utf-8")
+        header = (plugin / "Public" / "ADPPhysicsRuntimeDriver.h").read_text(encoding="utf-8")
+        implementation = (plugin / "Private" / "ADPPhysicsRuntimeDriver.cpp").read_text(encoding="utf-8")
 
-        self.assertIn("SpawnPhysicsConstraintActor(UObject* WorldContextObject)", header)
+        self.assertIn("APhysicsConstraintActor* BindConstraint(", header)
+        self.assertIn("FindRegisteredPrimitive(BodyAId)", implementation)
+        self.assertIn("FindRegisteredPrimitive(BodyBId)", implementation)
         self.assertIn("World->SpawnActor<APhysicsConstraintActor>", implementation)
-        self.assertIn("InitializePhysicsConstraint(UPhysicsConstraintComponent* ConstraintComponent)", header)
-        self.assertIn("ConstraintComponent->TermComponentConstraint();", implementation)
-        self.assertIn("ConstraintComponent->InitComponentConstraint();", implementation)
-        self.assertIn("ConstraintInstance.IsValidConstraintInstance()", implementation)
-
-    def test_generic_constraint_maps_local_axes_to_ue_constraint_axes(self) -> None:
-        source = ROOT / "scripts" / "native_ue_scene.py"
-        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
-        functions = [
-            node for node in tree.body
-            if isinstance(node, ast.FunctionDef)
-            and node.name in {"constraint_motion_enum", "configure_runtime_constraint"}
-        ]
-
-        class Motion:
-            LCM_LOCKED = "linear_locked"
-            LCM_LIMITED = "linear_limited"
-            LCM_FREE = "linear_free"
-            ACM_LOCKED = "angular_locked"
-            ACM_LIMITED = "angular_limited"
-            ACM_FREE = "angular_free"
-
-        fake_unreal = types.SimpleNamespace(
-            LinearConstraintMotion=Motion,
-            AngularConstraintMotion=Motion,
-            ConstraintFrame=types.SimpleNamespace(FRAME1="frame1", FRAME2="frame2"),
-            Name=lambda value: value,
-            Vector=lambda *values: values,
-        )
-        namespace = {"unreal": fake_unreal}
-        exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"), namespace)
-
-        class Component:
-            def __init__(self):
-                self.calls = {}
-
-            def __getattr__(self, name):
-                return lambda *args: self.calls.setdefault(name, []).append(args)
-
-        component = Component()
-        binding = {
-            "frame_a": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
-            "frame_b": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
-            "linear_motion": {"x": "locked", "y": "locked", "z": "locked"},
-            "angular_motion": {"x": "free", "y": "limited", "z": "locked"},
-            "angular_limits_deg": {"y": 35.0},
-            "collision_enabled": False,
-        }
-        namespace["configure_runtime_constraint"](component, binding, object(), object())
-
-        self.assertEqual(component.calls["set_angular_twist_limit"][0], ("angular_free", 0.0))
-        self.assertEqual(component.calls["set_angular_swing1_limit"][0], ("angular_locked", 0.0))
-        self.assertEqual(component.calls["set_angular_swing2_limit"][0], ("angular_limited", 35.0))
+        self.assertIn("Component->TermComponentConstraint();", implementation)
+        self.assertIn("Component->InitComponentConstraint();", implementation)
+        self.assertIn("Instance.IsValidConstraintInstance()", implementation)
 
     def test_runtime_binding_snapshot_refresh_replaces_pre_registration_state(self) -> None:
         source = ROOT / "scripts" / "native_ue_scene.py"

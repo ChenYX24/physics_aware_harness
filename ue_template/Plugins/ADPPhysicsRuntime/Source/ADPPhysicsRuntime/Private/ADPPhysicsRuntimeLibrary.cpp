@@ -3,8 +3,6 @@
 #include "ADPPhysicsRuntimeDriver.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
-#include "PhysicsEngine/PhysicsConstraintActor.h"
-#include "PhysicsEngine/PhysicsConstraintComponent.h"
 
 #if WITH_EDITOR
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -55,48 +53,6 @@ AADPPhysicsRuntimeDriver* UADPPhysicsRuntimeLibrary::SpawnPhysicsRuntimeDriver(U
 	}
 #endif
 	return Driver;
-}
-
-APhysicsConstraintActor* UADPPhysicsRuntimeLibrary::SpawnPhysicsConstraintActor(UObject* WorldContextObject)
-{
-	UWorld* World = nullptr;
-	if (GEngine != nullptr && WorldContextObject != nullptr)
-	{
-		World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::ReturnNull);
-	}
-	if (World == nullptr && WorldContextObject != nullptr)
-	{
-		World = WorldContextObject->GetWorld();
-	}
-	if (World == nullptr)
-	{
-		return nullptr;
-	}
-
-	FActorSpawnParameters Params;
-	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-	return World->SpawnActor<APhysicsConstraintActor>(
-		APhysicsConstraintActor::StaticClass(),
-		FVector::ZeroVector,
-		FRotator::ZeroRotator,
-		Params);
-}
-
-bool UADPPhysicsRuntimeLibrary::InitializePhysicsConstraint(UPhysicsConstraintComponent* ConstraintComponent)
-{
-	if (ConstraintComponent == nullptr || ConstraintComponent->GetWorld() == nullptr)
-	{
-		return false;
-	}
-	if (!ConstraintComponent->IsRegistered())
-	{
-		ConstraintComponent->RegisterComponentWithWorld(ConstraintComponent->GetWorld());
-	}
-	ConstraintComponent->UpdateConstraintFrames();
-	ConstraintComponent->TermComponentConstraint();
-	ConstraintComponent->InitComponentConstraint();
-	return ConstraintComponent->IsRegistered()
-		&& ConstraintComponent->ConstraintInstance.IsValidConstraintInstance();
 }
 
 #if WITH_EDITOR

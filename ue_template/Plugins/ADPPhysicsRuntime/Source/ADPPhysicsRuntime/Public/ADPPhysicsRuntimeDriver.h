@@ -4,6 +4,9 @@
 #include "GameFramework/Actor.h"
 #include "ADPPhysicsRuntimeDriver.generated.h"
 
+class APhysicsConstraintActor;
+class UPrimitiveComponent;
+
 USTRUCT(BlueprintType)
 struct ADPPHYSICSRUNTIME_API FADPDrivenBodyConfig
 {
@@ -14,6 +17,9 @@ struct ADPPHYSICSRUNTIME_API FADPDrivenBodyConfig
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ADP Physics")
 	TObjectPtr<AActor> Actor = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UPrimitiveComponent> PrimitiveComponent = nullptr;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ADP Physics")
 	bool bDynamic = true;
@@ -177,6 +183,27 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "ADP Physics")
 	bool PrepareCapture(float InSampleIntervalSeconds, int32 InMaxFrames, const FString& InOutputPath);
 
+	UFUNCTION(BlueprintCallable, Category = "ADP Physics|Constraints")
+	APhysicsConstraintActor* BindConstraint(
+		FName ConstraintId,
+		FName BodyAId,
+		FName BodyBId,
+		FVector FrameAPositionCm,
+		FVector FrameAPrimaryAxis,
+		FVector FrameASecondaryAxis,
+		FVector FrameBPositionCm,
+		FVector FrameBPrimaryAxis,
+		FVector FrameBSecondaryAxis,
+		FName LinearXMotion,
+		FName LinearYMotion,
+		FName LinearZMotion,
+		float LinearLimitCm,
+		FName AngularXMotion,
+		FName AngularYMotion,
+		FName AngularZMotion,
+		FVector AngularLimitsDegrees,
+		bool bCollisionEnabled);
+
 	UFUNCTION(BlueprintCallable, Category = "ADP Physics")
 	bool StartPreparedCapture();
 
@@ -211,6 +238,9 @@ public:
 	bool bCaptureComplete = false;
 
 private:
+	UPROPERTY(Transient)
+	TMap<FName, TObjectPtr<APhysicsConstraintActor>> ConstraintActors;
+
 	UFUNCTION()
 	void HandleComponentHit(
 		UPrimitiveComponent* HitComponent,
@@ -224,6 +254,7 @@ private:
 	void ActivateBody(const FADPDrivenBodyConfig& Config);
 	void CaptureFrame();
 	UPrimitiveComponent* FindPrimitiveComponent(AActor* Actor) const;
+	UPrimitiveComponent* FindRegisteredPrimitive(FName BodyId) const;
 	FName FindBodyId(AActor* Actor) const;
 	bool ComputeBoundsContact(const FADPDrivenBodyConfig& A, const FADPDrivenBodyConfig& B, FADPContactSample& OutContact) const;
 	FString BuildCaptureJson() const;

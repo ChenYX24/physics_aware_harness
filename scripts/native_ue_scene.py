@@ -2976,84 +2976,6 @@ def constrained_runtime_components(component) -> list:
     return [value for value in values if value and hasattr(value, "get_owner")]
 
 
-def runtime_constraint_bindings_verified(component, body_a_component, body_b_component) -> bool:
-    actual = constrained_runtime_components(component)
-    if len(actual) != 2:
-        return False
-    expected = (body_a_component, body_b_component)
-    for actual_component, expected_component in zip(actual, expected):
-        if actual_component is expected_component or actual_component == expected_component:
-            continue
-        try:
-            if actual_component.get_owner() == expected_component.get_owner():
-                continue
-        except Exception:
-            pass
-        return False
-    return True
-
-
-def initialize_runtime_constraint(component) -> bool:
-    library = getattr(unreal, "ADPPhysicsRuntimeLibrary", None)
-    if library is None:
-        unreal.load_class(None, "/Script/ADPPhysicsRuntime.ADPPhysicsRuntimeLibrary")
-        library = getattr(unreal, "ADPPhysicsRuntimeLibrary", None)
-    initializer = getattr(library, "initialize_physics_constraint", None) if library else None
-    if not callable(initializer):
-        raise RuntimeError("ADPPhysicsRuntime constraint initializer is unavailable")
-    return bool(initializer(component))
-
-
-def constraint_motion_enum(motion: str, *, angular: bool):
-    enum_class = unreal.AngularConstraintMotion if angular else unreal.LinearConstraintMotion
-    prefix = "ACM" if angular else "LCM"
-    return getattr(enum_class, f"{prefix}_{str(motion).upper()}")
-
-
-def configure_runtime_constraint(component, binding: dict, body_a_component, body_b_component) -> None:
-    component.set_constrained_components(
-        body_a_component,
-        unreal.Name(""),
-        body_b_component,
-        unreal.Name(""),
-    )
-    frames = (
-        (unreal.ConstraintFrame.FRAME1, binding["frame_a"]),
-        (unreal.ConstraintFrame.FRAME2, binding["frame_b"]),
-    )
-    for frame_id, frame in frames:
-        position = frame["position_m"]
-        primary = frame["primary_axis"]
-        secondary = frame["secondary_axis"]
-        component.set_constraint_reference_position(
-            frame_id,
-            unreal.Vector(*[float(value) * 100.0 for value in position]),
-        )
-        component.set_constraint_reference_orientation(
-            frame_id,
-            unreal.Vector(*[float(value) for value in primary]),
-            unreal.Vector(*[float(value) for value in secondary]),
-        )
-    linear_limit_cm = float(binding.get("linear_limit_m") or 0.0) * 100.0
-    component.set_linear_x_limit(constraint_motion_enum(binding["linear_motion"]["x"], angular=False), linear_limit_cm)
-    component.set_linear_y_limit(constraint_motion_enum(binding["linear_motion"]["y"], angular=False), linear_limit_cm)
-    component.set_linear_z_limit(constraint_motion_enum(binding["linear_motion"]["z"], angular=False), linear_limit_cm)
-    angular_limits = binding.get("angular_limits_deg") or {}
-    component.set_angular_twist_limit(
-        constraint_motion_enum(binding["angular_motion"]["x"], angular=True),
-        float(angular_limits.get("x") or 0.0),
-    )
-    component.set_angular_swing1_limit(
-        constraint_motion_enum(binding["angular_motion"]["z"], angular=True),
-        float(angular_limits.get("z") or 0.0),
-    )
-    component.set_angular_swing2_limit(
-        constraint_motion_enum(binding["angular_motion"]["y"], angular=True),
-        float(angular_limits.get("y") or 0.0),
-    )
-    component.set_disable_collision(not bool(binding["collision_enabled"]))
-
-
 def runtime_constraint_binding_details(runtime_scene: dict) -> dict:
     details = {}
     for binding in runtime_scene.get("constraints") or []:
@@ -3083,43 +3005,52 @@ def spawn_runtime_constraints_in_game_world(actors: dict, runtime_scene: dict, s
         return True
     if actors.get("constraint_actors"):
         raise RuntimeError("runtime constraints may only be created once after body setup")
-    library = getattr(unreal, "ADPPhysicsRuntimeLibrary", None)
-    if library is None:
-        unreal.load_class(None, "/Script/ADPPhysicsRuntime.ADPPhysicsRuntimeLibrary")
-        library = getattr(unreal, "ADPPhysicsRuntimeLibrary", None)
-    spawner = getattr(library, "spawn_physics_constraint_actor", None) if library else None
-    if not callable(spawner):
-        raise RuntimeError("ADPPhysicsRuntime constraint actor spawner is unavailable")
+    driver = actors.get("adp_physics_runtime_driver")
+    binder = getattr(driver, "bind_constraint", None) if driver else None
+    if not callable(binder):
+        raise RuntimeError("ADPPhysicsRuntime Driver constraint binder is unavailable")
 
     constraint_actors = {}
     details = actors.get("constraint_binding_details") or {}
     configured = []
     failures = []
-    world = actors.get("physics_game_world")
     for binding in bindings:
         constraint_id = str(binding.get("constraint_id") or "")
         body_a_id = str((binding.get("body_a") or {}).get("object_id") or "")
         body_b_id = str((binding.get("body_b") or {}).get("object_id") or "")
-        body_a_component = actor_runtime_component(actors.get(body_a_id))
-        body_b_component = actor_runtime_component(actors.get(body_b_id))
         detail = details.get(constraint_id)
         try:
-            if not constraint_id or not world or not body_a_component or not body_b_component:
-                raise RuntimeError("final PIE body component is unavailable")
-            actor = spawner(world)
-            component = physics_constraint_component(actor) if actor else None
-            if not component:
-                raise RuntimeError("PIE constraint component is unavailable")
-            actor.set_actor_label(f"native_phenomena_demo_constraint_{constraint_id}")
-            configure_runtime_constraint(component, binding, body_a_component, body_b_component)
-            initialized = initialize_runtime_constraint(component)
-            verified = initialized and runtime_constraint_bindings_verified(
-                component,
-                body_a_component,
-                body_b_component,
+            if not constraint_id or not body_a_id or not body_b_id:
+                raise RuntimeError("constraint body id is unavailable")
+            frame_a = binding["frame_a"]
+            frame_b = binding["frame_b"]
+            angular_limits = binding.get("angular_limits_deg") or {}
+            actor = binder(
+                ue_name(constraint_id),
+                ue_name(body_a_id),
+                ue_name(body_b_id),
+                unreal.Vector(*[float(value) * 100.0 for value in frame_a["position_m"]]),
+                unreal.Vector(*[float(value) for value in frame_a["primary_axis"]]),
+                unreal.Vector(*[float(value) for value in frame_a["secondary_axis"]]),
+                unreal.Vector(*[float(value) * 100.0 for value in frame_b["position_m"]]),
+                unreal.Vector(*[float(value) for value in frame_b["primary_axis"]]),
+                unreal.Vector(*[float(value) for value in frame_b["secondary_axis"]]),
+                ue_name(binding["linear_motion"]["x"]),
+                ue_name(binding["linear_motion"]["y"]),
+                ue_name(binding["linear_motion"]["z"]),
+                float(binding.get("linear_limit_m") or 0.0) * 100.0,
+                ue_name(binding["angular_motion"]["x"]),
+                ue_name(binding["angular_motion"]["y"]),
+                ue_name(binding["angular_motion"]["z"]),
+                unreal.Vector(
+                    float(angular_limits.get("x") or 0.0),
+                    float(angular_limits.get("y") or 0.0),
+                    float(angular_limits.get("z") or 0.0),
+                ),
+                bool(binding["collision_enabled"]),
             )
-            if not verified:
-                raise RuntimeError("PIE constraint initialization did not retain final body bindings")
+            if not actor:
+                raise RuntimeError("Driver rejected constraint binding or readback")
             constraint_actors[constraint_id] = actor
             configured.append(constraint_id)
             if isinstance(detail, dict):

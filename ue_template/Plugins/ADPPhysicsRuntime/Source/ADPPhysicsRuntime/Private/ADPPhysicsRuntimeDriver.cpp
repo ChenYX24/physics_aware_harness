@@ -5,6 +5,8 @@
 #include "Engine/World.h"
 #include "JsonObjectConverter.h"
 #include "Misc/FileHelper.h"
+#include "PhysicsEngine/PhysicsConstraintActor.h"
+#include "PhysicsEngine/PhysicsConstraintComponent.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 
@@ -102,6 +104,24 @@ bool OrientedBoxSignedMargin(const FADPOrientedBox& A, const FADPOrientedBox& B,
 	OutMarginCm = LargestGapCm;
 	return true;
 }
+
+bool ParseLinearMotion(FName Name, ELinearConstraintMotion& OutMotion)
+{
+	const FString Value = Name.ToString().ToLower();
+	if (Value == TEXT("locked")) { OutMotion = LCM_Locked; return true; }
+	if (Value == TEXT("limited")) { OutMotion = LCM_Limited; return true; }
+	if (Value == TEXT("free")) { OutMotion = LCM_Free; return true; }
+	return false;
+}
+
+bool ParseAngularMotion(FName Name, EAngularConstraintMotion& OutMotion)
+{
+	const FString Value = Name.ToString().ToLower();
+	if (Value == TEXT("locked")) { OutMotion = ACM_Locked; return true; }
+	if (Value == TEXT("limited")) { OutMotion = ACM_Limited; return true; }
+	if (Value == TEXT("free")) { OutMotion = ACM_Free; return true; }
+	return false;
+}
 }
 
 AADPPhysicsRuntimeDriver::AADPPhysicsRuntimeDriver()
@@ -137,6 +157,14 @@ void AADPPhysicsRuntimeDriver::Tick(float DeltaSeconds)
 
 void AADPPhysicsRuntimeDriver::ResetDriver()
 {
+	for (const TPair<FName, TObjectPtr<APhysicsConstraintActor>>& Entry : ConstraintActors)
+	{
+		if (Entry.Value != nullptr)
+		{
+			Entry.Value->Destroy();
+		}
+	}
+	ConstraintActors.Reset();
 	BodyConfigs.Reset();
 	CapturedFrames.Reset();
 	PendingNativeContacts.Reset();
@@ -169,6 +197,7 @@ void AADPPhysicsRuntimeDriver::RegisterBody(
 	FADPDrivenBodyConfig Config;
 	Config.BodyId = BodyId;
 	Config.Actor = Actor;
+	Config.PrimitiveComponent = FindPrimitiveComponent(Actor);
 	Config.bDynamic = true;
 	Config.bSimulatePhysics = bSimulatePhysics;
 	Config.bEnableGravity = bEnableGravity;
@@ -244,6 +273,7 @@ void AADPPhysicsRuntimeDriver::RegisterStaticBody(FName BodyId, AActor* Actor)
 	FADPDrivenBodyConfig Config;
 	Config.BodyId = BodyId;
 	Config.Actor = Actor;
+	Config.PrimitiveComponent = FindPrimitiveComponent(Actor);
 	Config.bDynamic = false;
 	Config.bSimulatePhysics = false;
 	Config.bEnableGravity = false;
@@ -287,6 +317,113 @@ bool AADPPhysicsRuntimeDriver::PrepareCapture(float InSampleIntervalSeconds, int
 	}
 	bBodiesPrepared = BodyConfigs.Num() > 0;
 	return bBodiesPrepared;
+}
+
+APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
+	FName ConstraintId,
+	FName BodyAId,
+	FName BodyBId,
+	FVector FrameAPositionCm,
+	FVector FrameAPrimaryAxis,
+	FVector FrameASecondaryAxis,
+	FVector FrameBPositionCm,
+	FVector FrameBPrimaryAxis,
+	FVector FrameBSecondaryAxis,
+	FName LinearXMotion,
+	FName LinearYMotion,
+	FName LinearZMotion,
+	float LinearLimitCm,
+	FName AngularXMotion,
+	FName AngularYMotion,
+	FName AngularZMotion,
+	FVector AngularLimitsDegrees,
+	bool bCollisionEnabled)
+{
+	UWorld* World = GetWorld();
+	if (!bBodiesPrepared || World == nullptr || ConstraintId.IsNone() || ConstraintActors.Contains(ConstraintId))
+	{
+		return nullptr;
+	}
+	UPrimitiveComponent* BodyA = FindRegisteredPrimitive(BodyAId);
+	UPrimitiveComponent* BodyB = FindRegisteredPrimitive(BodyBId);
+	ELinearConstraintMotion LinearX;
+	ELinearConstraintMotion LinearY;
+	ELinearConstraintMotion LinearZ;
+	EAngularConstraintMotion AngularX;
+	EAngularConstraintMotion AngularY;
+	EAngularConstraintMotion AngularZ;
+	if (BodyA == nullptr || BodyB == nullptr
+		|| !ParseLinearMotion(LinearXMotion, LinearX)
+		|| !ParseLinearMotion(LinearYMotion, LinearY)
+		|| !ParseLinearMotion(LinearZMotion, LinearZ)
+		|| !ParseAngularMotion(AngularXMotion, AngularX)
+		|| !ParseAngularMotion(AngularYMotion, AngularY)
+		|| !ParseAngularMotion(AngularZMotion, AngularZ))
+	{
+		return nullptr;
+	}
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	APhysicsConstraintActor* ConstraintActor = World->SpawnActor<APhysicsConstraintActor>(
+		APhysicsConstraintActor::StaticClass(), FVector::ZeroVector, FRotator::ZeroRotator, Params);
+	UPhysicsConstraintComponent* Component = ConstraintActor != nullptr ? ConstraintActor->GetConstraintComp() : nullptr;
+	if (Component == nullptr)
+	{
+		if (ConstraintActor != nullptr)
+		{
+			ConstraintActor->Destroy();
+		}
+		return nullptr;
+	}
+#if WITH_EDITOR
+	ConstraintActor->SetActorLabel(FString::Printf(TEXT("native_phenomena_demo_constraint_%s"), *ConstraintId.ToString()));
+#endif
+	Component->SetConstrainedComponents(BodyA, NAME_None, BodyB, NAME_None);
+	Component->SetConstraintReferencePosition(EConstraintFrame::Frame1, FrameAPositionCm);
+	Component->SetConstraintReferenceOrientation(EConstraintFrame::Frame1, FrameAPrimaryAxis, FrameASecondaryAxis);
+	Component->SetConstraintReferencePosition(EConstraintFrame::Frame2, FrameBPositionCm);
+	Component->SetConstraintReferenceOrientation(EConstraintFrame::Frame2, FrameBPrimaryAxis, FrameBSecondaryAxis);
+	Component->SetLinearXLimit(LinearX, LinearLimitCm);
+	Component->SetLinearYLimit(LinearY, LinearLimitCm);
+	Component->SetLinearZLimit(LinearZ, LinearLimitCm);
+	Component->SetAngularTwistLimit(AngularX, AngularLimitsDegrees.X);
+	Component->SetAngularSwing1Limit(AngularZ, AngularLimitsDegrees.Z);
+	Component->SetAngularSwing2Limit(AngularY, AngularLimitsDegrees.Y);
+	Component->SetDisableCollision(!bCollisionEnabled);
+	Component->TermComponentConstraint();
+	Component->InitComponentConstraint();
+
+	UPrimitiveComponent* ActualBodyA = nullptr;
+	UPrimitiveComponent* ActualBodyB = nullptr;
+	FName ActualBoneA;
+	FName ActualBoneB;
+	Component->GetConstrainedComponents(ActualBodyA, ActualBoneA, ActualBodyB, ActualBoneB);
+	const FConstraintInstance& Instance = Component->ConstraintInstance;
+	const auto FrameMatches = [](const FTransform& Actual, const FVector& Position, const FVector& Primary, const FVector& Secondary)
+	{
+		return Actual.GetTranslation().Equals(Position, 0.01f)
+			&& Actual.GetUnitAxis(EAxis::X).Equals(Primary.GetSafeNormal(), 0.001f)
+			&& Actual.GetUnitAxis(EAxis::Y).Equals(Secondary.GetSafeNormal(), 0.001f);
+	};
+	const bool bVerified = ActualBodyA == BodyA
+		&& ActualBodyB == BodyB
+		&& Instance.IsValidConstraintInstance()
+		&& Instance.GetLinearXMotion() == LinearX
+		&& Instance.GetLinearYMotion() == LinearY
+		&& Instance.GetLinearZMotion() == LinearZ
+		&& Instance.GetAngularTwistMotion() == AngularX
+		&& Instance.GetAngularSwing1Motion() == AngularZ
+		&& Instance.GetAngularSwing2Motion() == AngularY
+		&& FrameMatches(Instance.GetRefFrame(EConstraintFrame::Frame1), FrameAPositionCm, FrameAPrimaryAxis, FrameASecondaryAxis)
+		&& FrameMatches(Instance.GetRefFrame(EConstraintFrame::Frame2), FrameBPositionCm, FrameBPrimaryAxis, FrameBSecondaryAxis);
+	if (!bVerified)
+	{
+		ConstraintActor->Destroy();
+		return nullptr;
+	}
+	ConstraintActors.Add(ConstraintId, ConstraintActor);
+	return ConstraintActor;
 }
 
 bool AADPPhysicsRuntimeDriver::StartPreparedCapture()
@@ -382,7 +519,7 @@ void AADPPhysicsRuntimeDriver::CaptureManualFrame(float DeltaSeconds)
 
 void AADPPhysicsRuntimeDriver::PrepareBody(const FADPDrivenBodyConfig& Config)
 {
-	UPrimitiveComponent* Primitive = FindPrimitiveComponent(Config.Actor.Get());
+	UPrimitiveComponent* Primitive = Config.PrimitiveComponent.Get();
 	if (Primitive == nullptr)
 	{
 		return;
@@ -411,7 +548,7 @@ void AADPPhysicsRuntimeDriver::PrepareBody(const FADPDrivenBodyConfig& Config)
 
 void AADPPhysicsRuntimeDriver::ActivateBody(const FADPDrivenBodyConfig& Config)
 {
-	UPrimitiveComponent* Primitive = FindPrimitiveComponent(Config.Actor.Get());
+	UPrimitiveComponent* Primitive = Config.PrimitiveComponent.Get();
 	if (Primitive == nullptr)
 	{
 		return;
@@ -450,7 +587,7 @@ void AADPPhysicsRuntimeDriver::CaptureFrame()
 		Transform.LocationCm = Actor->GetActorLocation();
 		Transform.RotationDegrees = Actor->GetActorRotation();
 
-		UPrimitiveComponent* Primitive = FindPrimitiveComponent(Actor);
+		UPrimitiveComponent* Primitive = Config.PrimitiveComponent.Get();
 		if (Primitive != nullptr)
 		{
 			Transform.VelocityCmPerSec = Primitive->GetPhysicsLinearVelocity(NAME_None);
@@ -551,7 +688,23 @@ UPrimitiveComponent* AADPPhysicsRuntimeDriver::FindPrimitiveComponent(AActor* Ac
 	{
 		return nullptr;
 	}
+	if (UPrimitiveComponent* RootPrimitive = Cast<UPrimitiveComponent>(Actor->GetRootComponent()))
+	{
+		return RootPrimitive;
+	}
 	return Actor->FindComponentByClass<UPrimitiveComponent>();
+}
+
+UPrimitiveComponent* AADPPhysicsRuntimeDriver::FindRegisteredPrimitive(FName BodyId) const
+{
+	for (const FADPDrivenBodyConfig& Config : BodyConfigs)
+	{
+		if (Config.BodyId == BodyId)
+		{
+			return Config.PrimitiveComponent.Get();
+		}
+	}
+	return nullptr;
 }
 
 FName AADPPhysicsRuntimeDriver::FindBodyId(AActor* Actor) const
