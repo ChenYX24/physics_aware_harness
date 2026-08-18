@@ -154,6 +154,14 @@ class HighresViewportMultiviewTests(unittest.TestCase):
         self.assertIn("Component->TermComponentConstraint();", implementation)
         self.assertIn("Component->InitComponentConstraint();", implementation)
         self.assertIn("Instance.IsValidConstraintInstance()", implementation)
+        self.assertLess(
+            implementation.index("Component->TermComponentConstraint();"),
+            implementation.index("Component->SetConstraintReferencePosition(EConstraintFrame::Frame1"),
+        )
+        self.assertLess(
+            implementation.index("Component->SetDisableCollision(!bCollisionEnabled);"),
+            implementation.index("Component->InitComponentConstraint();"),
+        )
 
     def test_runtime_binding_snapshot_refresh_replaces_pre_registration_state(self) -> None:
         source = ROOT / "scripts" / "native_ue_scene.py"

@@ -380,6 +380,7 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 	ConstraintActor->SetActorLabel(FString::Printf(TEXT("native_phenomena_demo_constraint_%s"), *ConstraintId.ToString()));
 #endif
 	Component->SetConstrainedComponents(BodyA, NAME_None, BodyB, NAME_None);
+	Component->TermComponentConstraint();
 	Component->SetConstraintReferencePosition(EConstraintFrame::Frame1, FrameAPositionCm);
 	Component->SetConstraintReferenceOrientation(EConstraintFrame::Frame1, FrameAPrimaryAxis, FrameASecondaryAxis);
 	Component->SetConstraintReferencePosition(EConstraintFrame::Frame2, FrameBPositionCm);
@@ -391,7 +392,6 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 	Component->SetAngularSwing1Limit(AngularZ, AngularLimitsDegrees.Z);
 	Component->SetAngularSwing2Limit(AngularY, AngularLimitsDegrees.Y);
 	Component->SetDisableCollision(!bCollisionEnabled);
-	Component->TermComponentConstraint();
 	Component->InitComponentConstraint();
 
 	UPrimitiveComponent* ActualBodyA = nullptr;
