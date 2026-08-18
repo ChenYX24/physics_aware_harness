@@ -2935,6 +2935,10 @@ def actor_runtime_component(actor):
     return None
 
 
+def component_scale(component):
+    return component.get_editor_property("relative_scale3d")
+
+
 def actor_skeletal_component_with_socket(actor, socket_name: str):
     try:
         components = actor.get_components_by_class(unreal.SkeletalMeshComponent)
@@ -4885,13 +4889,7 @@ def normalize_runtime_actor(actor, obj: dict) -> tuple[unreal.Vector, unreal.Vec
             component = actor_runtime_component(actor)
             if not component:
                 return origin, extent
-            try:
-                scale = component.get_component_scale()
-            except Exception:
-                try:
-                    scale = component.get_editor_property("relative_scale3d")
-                except Exception:
-                    scale = unreal.Vector(1.0, 1.0, 1.0)
+            scale = component_scale(component)
             component.set_world_scale3d(unreal.Vector(scale.x * factor, scale.y * factor, scale.z * factor))
         origin, extent = actor_bounds(actor)
     return origin, extent
@@ -6325,7 +6323,7 @@ def setup_scene(runtime_scene: dict | None = None):
 
     def record_runtime_actor_detail(obj_id: str, actor, origin: unreal.Vector, extent: unreal.Vector) -> None:
         try:
-            scale = actor.static_mesh_component.get_component_scale()
+            scale = component_scale(actor.static_mesh_component)
         except Exception:
             scale = unreal.Vector(1.0, 1.0, 1.0)
         location = actor.get_actor_location()
@@ -6534,7 +6532,7 @@ def setup_scene(runtime_scene: dict | None = None):
             location = physics_actor.get_actor_location()
             rotation = physics_actor.get_actor_rotation()
             collision_origin, _ = actor_bounds(physics_actor)
-            component_scale = collision_component.get_component_scale() if collision_component else unreal.Vector(0.0, 0.0, 0.0)
+            collision_scale = component_scale(collision_component) if collision_component else unreal.Vector(0.0, 0.0, 0.0)
             collision_geometry = properties.get("collision_geometry") if isinstance(properties.get("collision_geometry"), dict) else None
             binding_metadata = registered_binding_metadata(render_actor)
             collision_mesh_path = component_mesh_path(collision_component) if physics_detail.get("collision_enabled") else None
@@ -6619,7 +6617,7 @@ def setup_scene(runtime_scene: dict | None = None):
                 "collision_geometry": (
                     {
                         "shape": actual_collision_shape,
-                        "size_m": [abs(component_scale.x), abs(component_scale.y), abs(component_scale.z)],
+                        "size_m": [abs(collision_scale.x), abs(collision_scale.y), abs(collision_scale.z)],
                         "local_center_offset_m": actual_local_offset_m,
                         "world_center_m": actual_world_center_m,
                     }
@@ -6707,7 +6705,7 @@ def setup_scene(runtime_scene: dict | None = None):
             if required_x <= abs(extent.x) * 1.02 and required_y <= abs(extent.y) * 1.02:
                 return origin, extent
             try:
-                scale = component.get_component_scale()
+                scale = component_scale(component)
             except Exception:
                 scale = unreal.Vector(1.0, 1.0, 1.0)
             component.set_world_scale3d(

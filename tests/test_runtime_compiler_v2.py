@@ -30,6 +30,51 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RuntimeCompilerV2Tests(unittest.TestCase):
+    def test_ue_runtime_failure_artifacts_preserve_runtime_phase(self) -> None:
+        from types import SimpleNamespace
+
+        from harness.runtime.ue_backend import write_failed_ue_artifacts
+
+        camera_plan = {
+            "scene_bounds": {"center": [0.0, 0.0, 0.0], "extent": [1.0, 1.0, 1.0]},
+            "views": [{"camera_id": "front", "role": "front_static"}],
+        }
+        report = {
+            "failure_code": "F_UE_NATIVE_SCRIPT_EXCEPTION",
+            "failure_message": "native script failed",
+            "failure_category": "runtime_failure",
+            "phase": "runtime",
+            "whether_real_ue_invoked": True,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run_dir = root / "run"
+            output_dir = run_dir / "ue_output"
+            output_dir.mkdir(parents=True)
+            write_failed_ue_artifacts(
+                run_dir,
+                output_dir,
+                SimpleNamespace(case_id="case", capability_id="rigid_body_dynamics"),
+                "case_ue",
+                report,
+                camera_plan,
+                ["rgb"],
+                1,
+            )
+            manifest = read_json(run_dir / "render_pass_manifest.json")
+
+        self.assertEqual(manifest["source"], "ue_runtime_failure")
+
+    def test_ue_backend_exception_exposes_stable_failure_code(self) -> None:
+        error = UEBackendUnavailable(
+            "native script failed",
+            Path("/tmp/run"),
+            "F_UE_NATIVE_SCRIPT_EXCEPTION",
+            {},
+        )
+
+        self.assertEqual(error.code, "F_UE_NATIVE_SCRIPT_EXCEPTION")
+
     def test_map_compile_config_enters_transaction_identity_and_scene_spec(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

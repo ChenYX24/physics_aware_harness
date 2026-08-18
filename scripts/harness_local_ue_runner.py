@@ -135,7 +135,7 @@ def main() -> int:
         pass_results[pass_mode] = proc_result
         append_runner_log(run_dir, pass_mode, proc_result)
         if proc_result["status"] == "timeout":
-            write_json(run_dir / "local_ue_runner_report.json", fail_report("F6_RUNTIME_OR_RENDER_FAILURE", f"UE {pass_mode} pass timed out after {proc_result['timeout']}s", pass_results=pass_results))
+            write_json(run_dir / "local_ue_runner_report.json", fail_report("F6_RUNTIME_OR_RENDER_FAILURE", f"UE {pass_mode} pass timed out after {proc_result['timeout']}s", native_ue_invoked=True, pass_results=pass_results))
             return 2
         if proc_result["status"] == "failed":
             classified = classify_native_pass_failure(native_output, pass_mode)
@@ -144,6 +144,7 @@ def main() -> int:
                 fail_report(
                     classified["failure_code"],
                     classified["failure_message"] or f"UE {pass_mode} pass exited with {proc_result['returncode']}",
+                    native_ue_invoked=True,
                     command=command,
                     pass_results=pass_results,
                     pass_mode=pass_mode,
@@ -181,6 +182,7 @@ def main() -> int:
                     fail_report(
                         "F_SEGMENTATION_QUANTIZATION_FAILED",
                         str(quantization.get("error") or "Instance segmentation palette quantization failed."),
+                        native_ue_invoked=True,
                         pass_results=pass_results,
                     ),
                 )
@@ -1064,6 +1066,11 @@ def classify_native_pass_failure(native_output: Path, pass_mode: str) -> dict[st
             "failure_code": "F_ASSET_RUNTIME_BINDING_INVALID",
             "failure_message": "UE runner tried to load a non-mesh class or invalid asset path as a renderable runtime asset. Keep Blueprint/class paths separate from StaticMesh asset paths.",
         }
+    if "LogPython: Error: Traceback" in process_text or "Python script executed with errors" in process_text:
+        return {
+            "failure_code": "F_UE_NATIVE_SCRIPT_EXCEPTION",
+            "failure_message": "UE native Python scene execution raised an exception.",
+        }
     if pass_mode in {"rgb", "combined"} and "timeout waiting for" in error_text and "frames/frame_" in error_text:
         return {
             "failure_code": "F_RGB_HIGHRES_VIEWPORT_UNAVAILABLE",
@@ -1212,7 +1219,7 @@ def standardize_native_output(
     )
     missing = [str(path) for path in dict.fromkeys(required_paths) if not path.exists() or path.stat().st_size == 0]
     if missing:
-        return fail_report("F6_RUNTIME_OR_RENDER_FAILURE", f"Native UE output missing: {missing}")
+        return fail_report("F6_RUNTIME_OR_RENDER_FAILURE", f"Native UE output missing: {missing}", native_ue_invoked=True)
     shutil.copyfile(trajectory_path, run_dir / "trajectory.json")
     fracture_events_path = rgb_source / "fracture_events.json"
     if fracture_events_path.is_file():
@@ -1998,13 +2005,13 @@ def extract_contacts(trajectory: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return contacts
 
 
-def fail_report(code: str, message: str, **extra: Any) -> dict[str, Any]:
+def fail_report(code: str, message: str, *, native_ue_invoked: bool = False, **extra: Any) -> dict[str, Any]:
     return {
         "schema_version": "harness_local_ue_runner_report.v1",
         "status": "failed",
         "failure_code": code,
         "failure_message": message,
-        "native_ue_invoked": code.startswith("F6"),
+        "native_ue_invoked": native_ue_invoked,
         **extra,
     }
 

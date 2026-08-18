@@ -31,6 +31,7 @@ class UEBackendUnavailable(RuntimeError):
         super().__init__(message)
         self.run_dir = run_dir
         self.failure_type = failure_type
+        self.code = failure_type
         self.report = report
 
 
@@ -140,6 +141,8 @@ class UEBackend:
             raise UEBackendUnavailable(report["failure_message"], run_dir, str(report["failure_code"]), report)
 
         report = invoke_real_ue_runner(case, run_dir, output_dir, scene_spec, preflight, requested_views=ue_requested_views, render_passes=ue_render_passes)
+        preflight["whether_real_ue_invoked"] = bool(report.get("whether_real_ue_invoked"))
+        write_json(run_dir / "ue_preflight_report.json", preflight)
         write_json(run_dir / "ue_backend_report.json", report)
         if report.get("status") != "completed":
             write_failed_ue_artifacts(run_dir, output_dir, case, run_id, report, camera_plan=camera_plan, render_passes=ue_render_passes, requested_view_count=len(ue_requested_views))
@@ -267,9 +270,10 @@ def write_failed_ue_artifacts(
             "reason": reason,
         },
     )
+    failure_source = f"ue_{str(report.get('phase') or 'runtime').strip().casefold()}_failure"
     write_json(
         run_dir / "render_pass_manifest.json",
-        write_render_contract_artifacts(run_dir, backend="ue", case_id=case.case_id, camera_plan=camera_plan, render_passes=render_passes, allow_placeholders=False, source="ue_preflight_failure"),
+        write_render_contract_artifacts(run_dir, backend="ue", case_id=case.case_id, camera_plan=camera_plan, render_passes=render_passes, allow_placeholders=False, source=failure_source),
     )
     render_sync = check_render_sync(run_dir, require_depth="depth" in set(render_passes), require_segmentation="segmentation" in set(render_passes), write=True)
     observability = verify_render_observability(run_dir, require_multiview=requested_view_count > 1, require_depth="depth" in set(render_passes), min_view_count=requested_view_count)

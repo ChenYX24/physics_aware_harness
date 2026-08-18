@@ -86,6 +86,51 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual(len(physics_lines), 2)
         self.assertTrue(all(snapshot < physics for snapshot, physics in zip(snapshot_lines, physics_lines, strict=True)))
 
+    def test_native_ue_reads_component_scale_from_ue57_property(self) -> None:
+        import ast
+
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "component_scale"
+        )
+        namespace = {}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+
+        class Component:
+            def get_editor_property(self, name):
+                self.requested_property = name
+                return [0.5, 0.6, 0.7]
+
+        component = Component()
+        self.assertEqual(namespace["component_scale"](component), [0.5, 0.6, 0.7])
+        self.assertEqual(component.requested_property, "relative_scale3d")
+
+    def test_native_python_exception_precedes_missing_rgb_classification(self) -> None:
+        from scripts.harness_local_ue_runner import classify_native_pass_failure
+
+        with tempfile.TemporaryDirectory() as temporary:
+            native_output = Path(temporary)
+            (native_output / "ue_process_stdout.log").write_text(
+                "LogPython: Error: Traceback (most recent call last):\n"
+                "LogEditorPythonExecuter: Error: Python script executed with errors\n",
+                encoding="utf-8",
+            )
+            result = classify_native_pass_failure(native_output, "rgb")
+
+        self.assertEqual(result["failure_code"], "F_UE_NATIVE_SCRIPT_EXCEPTION")
+
+    def test_failed_native_pass_records_actual_ue_invocation(self) -> None:
+        from scripts.harness_local_ue_runner import fail_report
+
+        report = fail_report(
+            "F_UE_NATIVE_SCRIPT_EXCEPTION",
+            "native script failed",
+            native_ue_invoked=True,
+        )
+
+        self.assertTrue(report["native_ue_invoked"])
+
     def test_fracture_energy_matrix_changes_only_speed_and_expected_outcome(self) -> None:
         matrix_dir = ROOT / "cases" / "fracture" / "steel_ball_board_energy_matrix"
         cases = [json.loads(path.read_text(encoding="utf-8")) for path in sorted(matrix_dir.glob("*.json"))]
