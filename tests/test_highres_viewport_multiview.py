@@ -22,24 +22,58 @@ class Vector:
 
 
 class HighresViewportMultiviewTests(unittest.TestCase):
-    def test_runtime_constraint_is_rebound_to_pie_body_components(self) -> None:
+    def test_runtime_constraint_is_created_from_final_pie_body_components(self) -> None:
         source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
-        function = next(
+        rebind = next(
             node
             for node in tree.body
             if isinstance(node, ast.FunctionDef)
             and node.name == "rebind_runtime_actors_to_simulation_world"
         )
+        create = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "spawn_runtime_constraints_in_game_world"
+        )
+        rebound_calls = {
+            node.func.id
+            for node in ast.walk(rebind)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
         called = {
             node.func.id
-            for node in ast.walk(function)
+            for node in ast.walk(create)
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
         }
 
+        self.assertNotIn("configure_runtime_constraint", rebound_calls)
         self.assertTrue(
             {"configure_runtime_constraint", "initialize_runtime_constraint", "runtime_constraint_bindings_verified"}
             <= called
+        )
+
+    def test_runtime_constraint_creation_follows_final_body_setup(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "start_visible_physics_input"
+        )
+        call_lines = {
+            node.func.id: node.lineno
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in {"start_cpp_runtime_driver", "spawn_runtime_constraints_in_game_world"}
+        }
+
+        self.assertLess(
+            call_lines["start_cpp_runtime_driver"],
+            call_lines["spawn_runtime_constraints_in_game_world"],
         )
 
     def test_runtime_component_registration_falls_back_to_live_owner(self) -> None:
@@ -91,6 +125,8 @@ class HighresViewportMultiviewTests(unittest.TestCase):
         header = (plugin / "Public" / "ADPPhysicsRuntimeLibrary.h").read_text(encoding="utf-8")
         implementation = (plugin / "Private" / "ADPPhysicsRuntimeLibrary.cpp").read_text(encoding="utf-8")
 
+        self.assertIn("SpawnPhysicsConstraintActor(UObject* WorldContextObject)", header)
+        self.assertIn("World->SpawnActor<APhysicsConstraintActor>", implementation)
         self.assertIn("InitializePhysicsConstraint(UPhysicsConstraintComponent* ConstraintComponent)", header)
         self.assertIn("ConstraintComponent->TermComponentConstraint();", implementation)
         self.assertIn("ConstraintComponent->InitComponentConstraint();", implementation)

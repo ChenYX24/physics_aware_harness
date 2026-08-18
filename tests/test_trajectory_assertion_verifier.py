@@ -73,7 +73,9 @@ class TrajectoryAssertionVerifierTests(unittest.TestCase):
         case_spec = constrained_runtime_case()
         constrained_trajectory = [
             constraint_frame(0, 0.0, [0.0, 0.0, -1.0]),
-            constraint_frame(1, 0.1, [0.08, 0.0, -1.0]),
+            constraint_frame(1, 0.01, [0.004, 0.0, -1.0]),
+            constraint_frame(2, 0.02, [0.009, 0.0, -1.0]),
+            constraint_frame(3, 0.03, [0.018, 0.0, -1.0]),
         ]
 
         failure, counterexample, evidence = verify_trajectory_assertions(case_spec, constrained_trajectory)
@@ -81,6 +83,7 @@ class TrajectoryAssertionVerifierTests(unittest.TestCase):
         self.assertEqual(failure, "F_RUNTIME_CONSTRAINT_ENFORCEMENT_FAILED")
         self.assertEqual(counterexample["metric"], "constraint_linear_residual_m")
         self.assertEqual(counterexample["value"]["constraint_id"], "anchor_joint")
+        self.assertEqual(counterexample["frame"], 3)
         self.assertFalse(evidence[0]["results"][0]["passed"])
 
 

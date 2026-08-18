@@ -3054,26 +3054,12 @@ def configure_runtime_constraint(component, binding: dict, body_a_component, bod
     component.set_disable_collision(not bool(binding["collision_enabled"]))
 
 
-def spawn_runtime_constraints(editor, runtime_scene: dict, runtime_actors: dict, scene_origin):
-    constraint_actors = {}
+def runtime_constraint_binding_details(runtime_scene: dict) -> dict:
     details = {}
     for binding in runtime_scene.get("constraints") or []:
         constraint_id = str(binding.get("constraint_id") or "")
-        body_a_id = str((binding.get("body_a") or {}).get("object_id") or "")
-        body_b_id = str((binding.get("body_b") or {}).get("object_id") or "")
-        body_a_component = actor_runtime_component(runtime_actors.get(body_a_id))
-        body_b_component = actor_runtime_component(runtime_actors.get(body_b_id))
-        if not constraint_id or not body_a_component or not body_b_component:
-            raise RuntimeError(
-                f"F_RUNTIME_CONSTRAINT_BINDING_FAILED: constraint={constraint_id}, body_a={body_a_id}, body_b={body_b_id}"
-            )
-        actor = editor.spawn_actor_from_class(unreal.PhysicsConstraintActor, scene_origin)
-        actor.set_actor_label(f"native_phenomena_demo_constraint_{constraint_id}")
-        component = physics_constraint_component(actor)
-        if not component:
-            raise RuntimeError(f"F_RUNTIME_CONSTRAINT_BINDING_FAILED: constraint component missing for {constraint_id}")
-        configure_runtime_constraint(component, binding, body_a_component, body_b_component)
-        constraint_actors[constraint_id] = actor
+        if not constraint_id:
+            continue
         details[constraint_id] = {
             "constraint_id": constraint_id,
             "body_a": binding["body_a"],
@@ -3087,7 +3073,69 @@ def spawn_runtime_constraints(editor, runtime_scene: dict, runtime_actors: dict,
             "collision_enabled": binding["collision_enabled"],
             "configuration_applied": False,
         }
-    return constraint_actors, details
+    return details
+
+
+def spawn_runtime_constraints_in_game_world(actors: dict, runtime_scene: dict, status: dict) -> bool:
+    bindings = runtime_scene.get("constraints") or []
+    if not bindings:
+        status["constraint_binding_complete"] = True
+        return True
+    if actors.get("constraint_actors"):
+        raise RuntimeError("runtime constraints may only be created once after body setup")
+    library = getattr(unreal, "ADPPhysicsRuntimeLibrary", None)
+    if library is None:
+        unreal.load_class(None, "/Script/ADPPhysicsRuntime.ADPPhysicsRuntimeLibrary")
+        library = getattr(unreal, "ADPPhysicsRuntimeLibrary", None)
+    spawner = getattr(library, "spawn_physics_constraint_actor", None) if library else None
+    if not callable(spawner):
+        raise RuntimeError("ADPPhysicsRuntime constraint actor spawner is unavailable")
+
+    constraint_actors = {}
+    details = actors.get("constraint_binding_details") or {}
+    configured = []
+    failures = []
+    world = actors.get("physics_game_world")
+    for binding in bindings:
+        constraint_id = str(binding.get("constraint_id") or "")
+        body_a_id = str((binding.get("body_a") or {}).get("object_id") or "")
+        body_b_id = str((binding.get("body_b") or {}).get("object_id") or "")
+        body_a_component = actor_runtime_component(actors.get(body_a_id))
+        body_b_component = actor_runtime_component(actors.get(body_b_id))
+        detail = details.get(constraint_id)
+        try:
+            if not constraint_id or not world or not body_a_component or not body_b_component:
+                raise RuntimeError("final PIE body component is unavailable")
+            actor = spawner(world)
+            component = physics_constraint_component(actor) if actor else None
+            if not component:
+                raise RuntimeError("PIE constraint component is unavailable")
+            actor.set_actor_label(f"native_phenomena_demo_constraint_{constraint_id}")
+            configure_runtime_constraint(component, binding, body_a_component, body_b_component)
+            initialized = initialize_runtime_constraint(component)
+            verified = initialized and runtime_constraint_bindings_verified(
+                component,
+                body_a_component,
+                body_b_component,
+            )
+            if not verified:
+                raise RuntimeError("PIE constraint initialization did not retain final body bindings")
+            constraint_actors[constraint_id] = actor
+            configured.append(constraint_id)
+            if isinstance(detail, dict):
+                detail["configuration_applied"] = True
+        except Exception as exc:
+            failures.append(constraint_id)
+            if isinstance(detail, dict):
+                detail["configuration_applied"] = False
+            status.setdefault("errors", []).append(f"constraint_bind_failed:{constraint_id}:{exc}")
+
+    actors["constraint_actors"] = constraint_actors
+    status["constraint_binding_phase"] = "post_body_setup_pie"
+    status["configured_constraint_ids"] = configured
+    status["constraint_binding_failures"] = failures
+    status["constraint_binding_complete"] = not failures and len(configured) == len(bindings)
+    return bool(status["constraint_binding_complete"])
 
 
 def component_scale(component):
@@ -7000,12 +7048,8 @@ def setup_scene(runtime_scene: dict | None = None):
             record_runtime_actor_physics(obj["id"], physics_detail)
             record_runtime_actor_detail(obj["id"], actor, origin, extent)
             write_progress_marker("setup_scene_spawn_dynamic_done", obj.get("id"))
-        constraint_actors, constraint_binding_details = spawn_runtime_constraints(
-            editor,
-            runtime_scene,
-            runtime_actors,
-            scene_origin,
-        )
+        constraint_actors = {}
+        constraint_binding_details = runtime_constraint_binding_details(runtime_scene)
         physics_details_by_id = {
             str(item.get("id") or ""): item
             for item in chaos_runtime["actors"]
@@ -9315,15 +9359,8 @@ def rebind_runtime_actors_to_simulation_world(
         actor_id: f"native_phenomena_visual_{actor_id}"
         for actor_id in visual_actors
     }
-    wanted_constraints = {
-        str(item.get("constraint_id")): f"native_phenomena_demo_constraint_{item.get('constraint_id')}"
-        for item in (runtime_scene.get("constraints") or [])
-        if item.get("constraint_id")
-    }
-    constraint_actors = actors.get("constraint_actors") or {}
     rebound = []
     rebound_visuals = []
-    rebound_constraints = []
     actor_classes = [unreal.Actor]
     for world in worlds:
         world_actors = []
@@ -9353,13 +9390,6 @@ def rebind_runtime_actors_to_simulation_world(
             if match:
                 visual_actors[actor_id] = match
                 rebound_visuals.append(actor_id)
-        for constraint_id, label in wanted_constraints.items():
-            match = label_map.get(label)
-            if not match:
-                match = next((actor for actor_label, actor in label_map.items() if actor_label.startswith(label)), None)
-            if match:
-                constraint_actors[constraint_id] = match
-                rebound_constraints.append(constraint_id)
         capture_actor = label_map.get("native_phenomena_demo_capture_camera")
         if capture_actor:
             capture_component = getattr(capture_actor, "capture_component2d", None)
@@ -9381,51 +9411,6 @@ def rebind_runtime_actors_to_simulation_world(
             status["rebound_world"] = str(world)
             break
     status["rebound_actor_ids"] = sorted(set(rebound))
-    actors["constraint_actors"] = constraint_actors
-    status["rebound_constraint_ids"] = sorted(set(rebound_constraints))
-    missing_constraints = sorted(set(wanted_constraints) - set(rebound_constraints))
-    status["missing_constraint_ids"] = missing_constraints
-    constraint_bindings = {
-        str(item.get("constraint_id")): item
-        for item in (runtime_scene.get("constraints") or [])
-        if item.get("constraint_id")
-    }
-    constraint_details = actors.get("constraint_binding_details") or {}
-    configured_constraints = []
-    constraint_binding_failures = []
-    for constraint_id in sorted(set(rebound_constraints)):
-        binding = constraint_bindings.get(constraint_id)
-        constraint_actor = constraint_actors.get(constraint_id)
-        body_a_id = str(((binding or {}).get("body_a") or {}).get("object_id") or "")
-        body_b_id = str(((binding or {}).get("body_b") or {}).get("object_id") or "")
-        component = physics_constraint_component(constraint_actor) if constraint_actor else None
-        body_a_component = actor_runtime_component(actors.get(body_a_id))
-        body_b_component = actor_runtime_component(actors.get(body_b_id))
-        detail = constraint_details.get(constraint_id)
-        if not binding or not component or not body_a_component or not body_b_component:
-            constraint_binding_failures.append(constraint_id)
-            if isinstance(detail, dict):
-                detail["configuration_applied"] = False
-            continue
-        try:
-            configure_runtime_constraint(component, binding, body_a_component, body_b_component)
-            initialized = initialize_runtime_constraint(component)
-            verified = initialized and runtime_constraint_bindings_verified(component, body_a_component, body_b_component)
-        except Exception as exc:
-            verified = False
-            if record_failure:
-                status.setdefault("errors", []).append(f"constraint_bind_failed:{constraint_id}:{exc}")
-        if isinstance(detail, dict):
-            detail["configuration_applied"] = verified
-        if verified:
-            configured_constraints.append(constraint_id)
-        else:
-            constraint_binding_failures.append(constraint_id)
-    status["configured_constraint_ids"] = configured_constraints
-    status["constraint_binding_failures"] = constraint_binding_failures
-    status["constraint_binding_complete"] = not missing_constraints and not constraint_binding_failures
-    if missing_constraints and record_failure:
-        status.setdefault("errors", []).append(f"constraint_rebind_missing:{missing_constraints}")
     initialize_gasp_locomotion(actors, runtime_scene, status)
     status["rebound_visual_actor_ids"] = sorted(set(rebound_visuals))
     missing_visuals = sorted(set(wanted_visuals) - set(rebound_visuals))
@@ -10138,14 +10123,9 @@ def start_highres_viewport_capture(
         elif not start_cpp_runtime_driver(actors, runtime_scene, physics_status, len(trajectory)):
             apply_initial_physics_impulses(actors, runtime_scene, physics_status)
         if runtime_scene.get("constraints"):
-            rebind_runtime_actors_to_simulation_world(
-                actors,
-                runtime_scene,
-                physics_status,
-                timeout_s=0.0,
-                record_failure=True,
-            )
-            if not physics_status.get("constraint_binding_complete") or not update_runtime_binding_snapshot():
+            if not spawn_runtime_constraints_in_game_world(actors, runtime_scene, physics_status):
+                raise RuntimeError("F_RUNTIME_CONSTRAINT_BINDING_FAILED: final PIE constraint creation failed")
+            if not update_runtime_binding_snapshot():
                 raise RuntimeError("F_RUNTIME_CONSTRAINT_BINDING_FAILED: post-body-setup initialization failed")
         first_frame = trajectory[min(state["frame_index"], len(trajectory) - 1)] if trajectory else {"frame": 0, "time": 0.0, "objects": {}}
         runner_ids = [obj.get("id") for obj in (runtime_scene.get("dynamic_objects") or []) if obj.get("behavior") == "third_person_runner"] if runtime_scene else []
@@ -10515,16 +10495,12 @@ def start_highres_viewport_capture(
                         summary["physics_capture"].update(physics_status)
                         write_summary(summary)
                 if not state["physics_ready"] and now - state["physics_wait_started"] > 12.0:
-                    if runtime_scene.get("constraints") and not physics_status.get("constraint_binding_complete"):
-                        failure_code = "F_RUNTIME_CONSTRAINT_BINDING_FAILED"
-                        timeout_reason = "constraint_binding_incomplete"
-                    else:
-                        failure_code = "F_RUNTIME_BINDING_MISMATCH"
-                        timeout_reason = (
-                            "component_registration_incomplete"
-                            if physics_status.get("game_world_count", 0) > 0
-                            else "no_pie_game_world"
-                        )
+                    failure_code = "F_RUNTIME_BINDING_MISMATCH"
+                    timeout_reason = (
+                        "component_registration_incomplete"
+                        if physics_status.get("game_world_count", 0) > 0
+                        else "no_pie_game_world"
+                    )
                     physics_status.setdefault("errors", []).append(f"{failure_code}:{timeout_reason}")
                     summary["physics_capture"].update(physics_status)
                     state["errors"].append(
