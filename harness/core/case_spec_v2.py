@@ -817,12 +817,8 @@ def compile_case_spec_v2_runtime(case_spec: CaseSpecV2) -> RuntimeCase:
     if collision_surface_gaps:
         expected["collision_surface_gaps_m"] = collision_surface_gaps
     support_map = _support_map(data.get("relations") or [])
-    for object_id, support_id in _initial_contact_support_map(
-        data.get("objects") or [],
-        data.get("relations") or [],
-    ).items():
-        support_map.setdefault(object_id, support_id)
-    if support_map and "support" not in expected:
+    expected.pop("support", None)
+    if support_map:
         expected["support"] = support_map
     assertions = [item for item in (data.get("verification_requirements") or {}).get("assertions", []) if isinstance(item, dict)]
     verification_rules = [str(item.get("type")) for item in assertions if item.get("type")]
@@ -1128,77 +1124,9 @@ def _support_map(relations: Iterable[Any]) -> dict[str, str]:
         target = relation.get("target")
         if not source or not target:
             continue
-        if relation_type in {"support", "supported_by", "rests_on", "on"}:
+        if relation_type == "supported_by":
             result[str(source)] = str(target)
-        elif relation_type == "supports":
-            result[str(target)] = str(source)
     return result
-
-
-def _initial_contact_support_map(objects: Iterable[Any], relations: Iterable[Any]) -> dict[str, str]:
-    """Project a nearby stationary dynamic-to-static contact as initial support.
-
-    V2 historically allowed ``contact`` for a body initially resting on an
-    inclined surface.  Preserve that meaning without treating future contacts
-    (for example a falling body and the floor) as support.
-    """
-    by_id = {
-        str(obj.get("id")): obj
-        for obj in objects
-        if isinstance(obj, Mapping) and obj.get("id")
-    }
-    result: dict[str, str] = {}
-    for relation in relations:
-        if not isinstance(relation, Mapping) or str(relation.get("type") or "").casefold() != "contact":
-            continue
-        source_id = str(relation.get("source") or "")
-        target_id = str(relation.get("target") or "")
-        source = by_id.get(source_id)
-        target = by_id.get(target_id)
-        if source is None or target is None:
-            continue
-        source_physics = source.get("physics") if isinstance(source.get("physics"), Mapping) else {}
-        target_physics = target.get("physics") if isinstance(target.get("physics"), Mapping) else {}
-        if str(source_physics.get("body_type") or "dynamic").casefold() != "dynamic":
-            continue
-        if str(target_physics.get("body_type") or "dynamic").casefold() not in {"static", "kinematic"}:
-            continue
-        initial = source.get("initial_state") if isinstance(source.get("initial_state"), Mapping) else {}
-        velocity = initial.get("linear_velocity_m_s")
-        if isinstance(velocity, list) and any(abs(float(value)) > 1e-9 for value in velocity):
-            continue
-        if _is_near_initial_support(source, target):
-            result[source_id] = target_id
-    return result
-
-
-def _is_near_initial_support(subject: Mapping[str, Any], support: Mapping[str, Any]) -> bool:
-    subject_geometry = subject.get("geometry") if isinstance(subject.get("geometry"), Mapping) else {}
-    support_geometry = support.get("geometry") if isinstance(support.get("geometry"), Mapping) else {}
-    subject_initial = subject.get("initial_state") if isinstance(subject.get("initial_state"), Mapping) else {}
-    support_initial = support.get("initial_state") if isinstance(support.get("initial_state"), Mapping) else {}
-    subject_size = subject_geometry.get("approx_size_m")
-    support_size = support_geometry.get("approx_size_m")
-    subject_position = subject_initial.get("position_m")
-    support_position = support_initial.get("position_m")
-    if not all(_is_finite_vec3(value) for value in (subject_size, support_size, subject_position, support_position)):
-        return False
-    subject_half = [float(value) / 2.0 for value in subject_size]
-    support_half = [float(value) / 2.0 for value in support_size]
-    delta = [float(subject_position[index]) - float(support_position[index]) for index in range(3)]
-    rotation = support_initial.get("rotation_deg")
-    pitch = math.radians(float(rotation[0])) if _is_finite_vec3(rotation) else 0.0
-    tangent = [math.cos(pitch), 0.0, -math.sin(pitch)]
-    normal = [math.sin(pitch), 0.0, math.cos(pitch)]
-    tangent_coordinate = sum(delta[index] * tangent[index] for index in range(3))
-    if abs(tangent_coordinate) > support_half[0] + 0.05:
-        return False
-    if abs(delta[1]) > support_half[1] + 0.05:
-        return False
-    normal_radius = sum(abs(normal[index]) * subject_half[index] for index in range(3))
-    gap = sum(delta[index] * normal[index] for index in range(3)) - support_half[2] - normal_radius
-    tolerance = max(0.05, min(subject_half) * 0.75)
-    return abs(gap) <= tolerance
 
 
 def _validate_asset_request(

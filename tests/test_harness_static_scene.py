@@ -210,10 +210,7 @@ class StaticScenePlacementTests(unittest.TestCase):
         report = verify_static_scene_layout(case, layout)
 
         self.assertEqual(report["status"], "pass", report)
-        self.assertEqual(
-            {row["object_id"]: row["status"] for row in layout["support_relations"]},
-            {"anchor": "free_body_allowed", "payload": "free_body_allowed"},
-        )
+        self.assertEqual(layout["support_relations"], [])
 
     def test_newton_cradle_anchors_and_balls_are_valid_suspended_bodies(self) -> None:
         from harness.assets.asset_resolver import resolve_asset_intents
@@ -225,12 +222,57 @@ class StaticScenePlacementTests(unittest.TestCase):
         report = verify_static_scene_layout(case, layout)
 
         self.assertEqual(report["status"], "pass", report)
-        self.assertTrue(all(row["status"] == "above_support" for row in layout["support_relations"]))
+        self.assertEqual(layout["support_relations"], [])
+
+    def test_only_explicit_support_relations_are_validated(self) -> None:
+        from harness.planning.static_scene_builder import build_static_scene_layout
+
+        case = {
+            "case_id": "explicit_support_only",
+            "capability_id": "rigid_body_dynamics",
+            "objects": [
+                {
+                    "id": "table_block",
+                    "role": "dynamic block",
+                    "shape": "box",
+                    "size_m": [0.2, 0.2, 0.2],
+                    "initial_position_m": [0.0, 0.0, 0.15],
+                    "body_type": "dynamic",
+                    "collision_required": True,
+                },
+                {
+                    "id": "pendulum_ball",
+                    "role": "pendulum bob",
+                    "shape": "sphere",
+                    "size_m": [0.2, 0.2, 0.2],
+                    "initial_position_m": [-1.4, 0.0, 1.5],
+                    "body_type": "dynamic",
+                    "collision_required": True,
+                },
+                {
+                    "id": "table_top",
+                    "role": "support",
+                    "shape": "box",
+                    "size_m": [2.0, 1.0, 0.1],
+                    "initial_position_m": [0.0, 0.0, 0.05],
+                    "body_type": "static",
+                    "collision_required": True,
+                },
+            ],
+            "expected_physics": {"support": {"table_block": "table_top"}},
+        }
+
+        layout = build_static_scene_layout(case)
+
+        self.assertEqual(len(layout["support_relations"]), 1)
+        self.assertEqual(layout["support_relations"][0]["object_id"], "table_block")
+        self.assertEqual(layout["support_relations"][0]["support_id"], "table_top")
 
     def test_inclined_ramp_uses_surface_normal_for_support_gap(self) -> None:
         from harness.planning.static_scene_builder import build_static_scene_layout
 
         case = self.load_case("cases/rigid_motion/ramp_roll_slide/v001_friction_regime_ofat/medium_friction_partial_roll.json")
+        case["expected_physics"]["support"] = "ramp"
         layout = build_static_scene_layout(case)
 
         relation = next(row for row in layout["support_relations"] if row["object_id"] == "ramp_subject")

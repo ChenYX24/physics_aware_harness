@@ -592,21 +592,21 @@ class CaseSpecV2Tests(unittest.TestCase):
     def test_support_relations_project_to_explicit_runtime_support_map(self) -> None:
         data = case_spec_v2_fixture()
         data["relations"].append({"type": "supported_by", "source": "cue_ball", "target": "floor"})
-        data["relations"].append({"type": "supports", "source": "floor", "target": "target_ball"})
         projection = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data))
         self.assertEqual(
             projection.data["expected_physics"]["support"],
-            {"cue_ball": "floor", "target_ball": "floor"},
+            {"cue_ball": "floor"},
         )
 
-    def test_nearby_stationary_contact_projects_as_support_not_collision_edge(self) -> None:
+    def test_plain_contact_does_not_project_as_support(self) -> None:
         data = case_spec_v2_fixture()
         data["objects"][0]["initial_state"]["linear_velocity_m_s"] = [0.0, 0.0, 0.0]
         data["relations"].append({"type": "contact", "source": "cue_ball", "target": "floor"})
+        data["expected_behavior"]["support"] = {"cue_ball": "floor"}
 
         projection = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data)).data
 
-        self.assertEqual(projection["expected_physics"]["support"]["cue_ball"], "floor")
+        self.assertNotIn("support", projection["expected_physics"])
         self.assertEqual(
             projection["expected_physics"]["collision_graph"],
             [["cue_ball", "target_ball"]],

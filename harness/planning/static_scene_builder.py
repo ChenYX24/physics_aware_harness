@@ -124,24 +124,27 @@ def asset_rows_by_object_id(asset_resolution: dict[str, Any] | None) -> dict[str
 def infer_support_relations(case_spec: dict[str, Any], nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     expected = case_spec.get("expected_physics") or {}
     by_id = {node["object_id"]: node for node in nodes}
-    support_nodes = [node for node in nodes if is_support_node(node)]
     relations: list[dict[str, Any]] = []
     for node in nodes:
-        if not node.get("physics_critical") or not requires_support_relation(node):
+        if (
+            not node.get("physics_critical")
+            or not is_dynamic_body(node)
+            or not has_declared_support(node, expected)
+        ):
             continue
-        support_id = support_id_for_node(node, expected, support_nodes)
+        support_id = support_id_for_node(node, expected)
         support_node = by_id.get(support_id) if support_id else None
         relations.append(
             support_relation(
                 node,
                 support_node,
-                require_contact=has_declared_support(node, expected),
+                require_contact=True,
             )
         )
     return relations
 
 
-def support_id_for_node(node: dict[str, Any], expected: dict[str, Any], support_nodes: list[dict[str, Any]]) -> str | None:
+def support_id_for_node(node: dict[str, Any], expected: dict[str, Any]) -> str | None:
     object_id = str(node.get("object_id"))
     support = expected.get("support")
     if isinstance(support, dict):
@@ -150,24 +153,16 @@ def support_id_for_node(node: dict[str, Any], expected: dict[str, Any], support_
             return str(value)
     if isinstance(support, str):
         return support
-    contact_surface = expected.get("contact_surface")
-    if isinstance(contact_surface, dict):
-        value = contact_surface.get(object_id) or contact_surface.get("default")
-        if value:
-            return str(value)
-    if isinstance(contact_surface, str):
-        return contact_surface
-    return str(support_nodes[0]["object_id"]) if support_nodes else None
+    return None
 
 
 def has_declared_support(node: dict[str, Any], expected: dict[str, Any]) -> bool:
     object_id = str(node.get("object_id"))
-    for key in ("support", "contact_surface"):
-        declaration = expected.get(key)
-        if isinstance(declaration, str):
-            return bool(declaration)
-        if isinstance(declaration, dict) and (object_id in declaration or "default" in declaration):
-            return True
+    declaration = expected.get("support")
+    if isinstance(declaration, str):
+        return bool(declaration)
+    if isinstance(declaration, dict) and (object_id in declaration or "default" in declaration):
+        return True
     return False
 
 
@@ -178,7 +173,7 @@ def support_relation(
     require_contact: bool = False,
 ) -> dict[str, Any]:
     if support_node is None:
-        if allows_free_initial_motion(node):
+        if allows_free_initial_motion(node) and not require_contact:
             return {
                 "object_id": node["object_id"],
                 "support_id": None,
@@ -237,15 +232,7 @@ def support_footprint_axes(support_node: dict[str, Any]) -> tuple[list[list[floa
     return (object_local_axes(support_node)[:2], support_extents[:2])
 
 
-def is_support_node(node: dict[str, Any]) -> bool:
-    physics = node.get("physics") if isinstance(node.get("physics"), dict) else {}
-    body_type = str(physics.get("body_type") or "").casefold()
-    if body_type in {"static", "kinematic"} and physics.get("collision_required") is True:
-        return True
-    return is_support_role(str(node.get("role")))
-
-
-def requires_support_relation(node: dict[str, Any]) -> bool:
+def is_dynamic_body(node: dict[str, Any]) -> bool:
     physics = node.get("physics") if isinstance(node.get("physics"), dict) else {}
     body_type = str(physics.get("body_type") or "").casefold()
     if body_type:
