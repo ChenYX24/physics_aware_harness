@@ -54,6 +54,87 @@ class TrajectoryAssertionVerifierTests(unittest.TestCase):
             [(["a", "b"], True), (["a", "c"], False), (["b", "c"], True)],
         )
 
+    def test_rigid_constraint_residual_passes_before_declared_assertions(self) -> None:
+        case_spec = constrained_runtime_case()
+        constrained_trajectory = [
+            constraint_frame(0, 0.0, [0.0, 0.0, -1.0]),
+            constraint_frame(1, 0.1, [0.005, 0.0, -1.0]),
+        ]
+
+        failure, _, evidence = verify_trajectory_assertions(case_spec, constrained_trajectory)
+
+        self.assertIsNone(failure)
+        self.assertEqual(
+            [item["type"] for item in evidence],
+            ["rigid_constraint_residuals", "trajectory_assertions"],
+        )
+
+    def test_rigid_constraint_drift_is_a_runtime_enforcement_failure(self) -> None:
+        case_spec = constrained_runtime_case()
+        constrained_trajectory = [
+            constraint_frame(0, 0.0, [0.0, 0.0, -1.0]),
+            constraint_frame(1, 0.1, [0.08, 0.0, -1.0]),
+        ]
+
+        failure, counterexample, evidence = verify_trajectory_assertions(case_spec, constrained_trajectory)
+
+        self.assertEqual(failure, "F_RUNTIME_CONSTRAINT_ENFORCEMENT_FAILED")
+        self.assertEqual(counterexample["metric"], "constraint_linear_residual_m")
+        self.assertEqual(counterexample["value"]["constraint_id"], "anchor_joint")
+        self.assertFalse(evidence[0]["results"][0]["passed"])
+
+
+def constrained_runtime_case() -> dict:
+    return {
+        "objects": [
+            {
+                "id": "anchor",
+                "body_type": "static",
+                "initial_position_m": [0.0, 0.0, 0.0],
+                "initial_rotation_deg": [0.0, 0.0, 0.0],
+            },
+            {
+                "id": "rod",
+                "body_type": "dynamic",
+                "initial_position_m": [0.0, 0.0, -1.0],
+                "initial_rotation_deg": [0.0, 0.0, 0.0],
+            },
+        ],
+        "constraints": [
+            {
+                "id": "anchor_joint",
+                "body_a": "anchor",
+                "body_b": "rod",
+                "frame_a": {
+                    "position_m": [0.0, 0.0, 0.0],
+                    "primary_axis": [1.0, 0.0, 0.0],
+                    "secondary_axis": [0.0, 1.0, 0.0],
+                },
+                "frame_b": {
+                    "position_m": [0.0, 0.0, 1.0],
+                    "primary_axis": [1.0, 0.0, 0.0],
+                    "secondary_axis": [0.0, 1.0, 0.0],
+                },
+                "linear_motion": {"x": "locked", "y": "locked", "z": "locked"},
+                "linear_limit_m": None,
+            }
+        ],
+        "verification_assertions": [{"id": "integrity", "type": "trajectory_integrity"}],
+    }
+
+
+def constraint_frame(frame: int, time_s: float, rod_position: list[float]) -> dict:
+    return {
+        "frame": frame,
+        "time_s": time_s,
+        "objects": {
+            "rod": {
+                "position_m": rod_position,
+                "rotation_deg": [0.0, 0.0, 0.0],
+            }
+        },
+    }
+
 
 if __name__ == "__main__":
     unittest.main()

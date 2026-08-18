@@ -12,6 +12,7 @@ from harness.assets.providers.local_procedural_mesh import RECIPE_BY_SHAPE
 from harness.core.capability import CapabilityStore, canonical_capability_id
 from harness.core.physics_contract import allowed_backends_for_scene
 from harness.core.runtime_case import RUNTIME_CASE_SCHEMA_VERSION, RuntimeCase
+from harness.core.scene_layout import rotate_local_vector_ue
 
 
 CASE_SPEC_V2_SCHEMA_VERSION = "harness_case_spec_v2"
@@ -59,6 +60,17 @@ VERIFICATION_ASSERTION_TYPES = {
     "state_value",
     "trajectory_integrity",
 }
+AGENT_RELATION_TYPES = {
+    "cascade_collision",
+    "collision",
+    "contact",
+    "contact_order",
+    "hits",
+    "impacts",
+    "supported_by",
+}
+CONSTRAINT_FRAME_POSITION_TOLERANCE_M = 0.002
+CONSTRAINT_FRAME_AXIS_TOLERANCE_DEG = 0.1
 LICENSE_TIERS = {"local_preview", "reference"}
 BODY_TYPES = {"dynamic", "static", "kinematic"}
 COLLISION_GEOMETRY_SHAPES = {"box", "sphere", "cylinder"}
@@ -350,6 +362,20 @@ def collect_agent_case_spec_contract_issues(data: Mapping[str, Any]) -> list[Val
                     "procedural_geometry_type_mismatch",
                     "asset.must.geometry_type must match geometry.shape_hint",
                 )
+    for index, relation in enumerate(data.get("relations") or []):
+        if not isinstance(relation, Mapping):
+            continue
+        relation_type = _canonical_relation_type(relation.get("type"))
+        if relation_type not in AGENT_RELATION_TYPES:
+            _issue(
+                issues,
+                f"/relations/{index}/type",
+                "unsupported_agent_relation_type",
+                (
+                    f"must be one of {sorted(AGENT_RELATION_TYPES)}; "
+                    "mechanical connections belong only in top-level constraints"
+                ),
+            )
     return issues
 
 
@@ -1977,6 +2003,11 @@ def _validate_rigid_constraints(
         for obj in objects
         if isinstance(obj, Mapping)
     }
+    initial_transforms = {
+        str(obj.get("id") or ""): _constraint_object_initial_transform(obj)
+        for obj in objects
+        if isinstance(obj, Mapping)
+    }
     constraint_ids: list[str] = []
     allowed_fields = {
         "id",
@@ -2039,6 +2070,14 @@ def _validate_rigid_constraints(
                 _issue(issues, f"{frame_path}/secondary_axis", "constraint_axis_not_unit", "must be a unit vector")
             if primary and secondary and not math.isclose(sum(a * b for a, b in zip(primary, secondary)), 0.0, abs_tol=1e-6):
                 _issue(issues, frame_path, "constraint_axes_not_orthogonal", "primary_axis and secondary_axis must be orthogonal")
+        if body_a in initial_transforms and body_b in initial_transforms:
+            _validate_constraint_initial_frames(
+                constraint,
+                initial_transforms[body_a],
+                initial_transforms[body_b],
+                path,
+                issues,
+            )
         linear = _validate_constraint_motion(constraint.get("linear_motion"), f"{path}/linear_motion", motion_values, issues)
         angular = _validate_constraint_motion(constraint.get("angular_motion"), f"{path}/angular_motion", motion_values, issues)
         linear_limited = any(value == "limited" for value in linear.values())
@@ -2065,6 +2104,82 @@ def _validate_rigid_constraints(
     duplicates = sorted({value for value in constraint_ids if constraint_ids.count(value) > 1})
     if duplicates:
         _issue(issues, "/constraints", "duplicate_constraint_ids", f"duplicate ids: {', '.join(duplicates)}")
+
+
+def _constraint_object_initial_transform(
+    obj: Mapping[str, Any],
+) -> tuple[list[float], list[float]] | None:
+    initial = obj.get("initial_state") if isinstance(obj.get("initial_state"), Mapping) else {}
+    position = initial.get("position_m", [0.0, 0.0, 0.0])
+    rotation = initial.get("rotation_deg", [0.0, 0.0, 0.0])
+    if not _is_finite_vec3(position) or not _is_finite_vec3(rotation):
+        return None
+    return [float(value) for value in position], [float(value) for value in rotation]
+
+
+def _validate_constraint_initial_frames(
+    constraint: Mapping[str, Any],
+    transform_a: tuple[list[float], list[float]] | None,
+    transform_b: tuple[list[float], list[float]] | None,
+    path: str,
+    issues: list[ValidationIssue],
+) -> None:
+    if transform_a is None or transform_b is None:
+        return
+    frames: list[tuple[list[float], list[list[float]]]] = []
+    for frame_name, transform in (("frame_a", transform_a), ("frame_b", transform_b)):
+        frame = constraint.get(frame_name)
+        if not isinstance(frame, Mapping):
+            return
+        position = frame.get("position_m")
+        primary = frame.get("primary_axis")
+        secondary = frame.get("secondary_axis")
+        if not all(_is_finite_vec3(value) for value in (position, primary, secondary)):
+            return
+        object_position, object_rotation = transform
+        world_position_offset = rotate_local_vector_ue(
+            [float(value) for value in position],
+            object_rotation,
+        )
+        world_position = [
+            object_position[axis] + world_position_offset[axis]
+            for axis in range(3)
+        ]
+        local_axes = [
+            [float(value) for value in primary],
+            [float(value) for value in secondary],
+        ]
+        world_axes = [rotate_local_vector_ue(axis, object_rotation) for axis in local_axes]
+        frames.append((world_position, world_axes))
+    position_gap = math.dist(frames[0][0], frames[1][0])
+    if position_gap > CONSTRAINT_FRAME_POSITION_TOLERANCE_M:
+        _issue(
+            issues,
+            path,
+            "constraint_frame_position_mismatch",
+            (
+                f"initial world frame origins differ by {position_gap:.6f} m; "
+                f"maximum is {CONSTRAINT_FRAME_POSITION_TOLERANCE_M:.6f} m"
+            ),
+        )
+    minimum_dot = math.cos(math.radians(CONSTRAINT_FRAME_AXIS_TOLERANCE_DEG))
+    for axis_name, axis_a, axis_b in zip(
+        ("primary_axis", "secondary_axis"),
+        frames[0][1],
+        frames[1][1],
+        strict=True,
+    ):
+        dot = sum(left * right for left, right in zip(axis_a, axis_b, strict=True))
+        if dot < minimum_dot:
+            _issue(
+                issues,
+                path,
+                "constraint_frame_axis_mismatch",
+                (
+                    f"initial world {axis_name} directions differ by more than "
+                    f"{CONSTRAINT_FRAME_AXIS_TOLERANCE_DEG:.3f} degrees (dot={dot:.6f})"
+                ),
+            )
 
 
 def _validate_constraint_motion(

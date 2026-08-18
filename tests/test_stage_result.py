@@ -359,6 +359,20 @@ class StageResultAdapterTests(unittest.TestCase):
                 self.assertNotIn("revise_case_spec", result["allowed_next_actions"])
                 self.assertIn("open_development_issue", result["allowed_next_actions"])
 
+    def test_constraint_enforcement_failure_is_a_harness_defect(self) -> None:
+        result = stage_result_from_verifier_report(
+            {
+                "schema_version": "harness_verifier_report_v1",
+                "status": "fail",
+                "failure_type": "F_RUNTIME_CONSTRAINT_ENFORCEMENT_FAILED",
+                "first_failure": {"value": {"residual_m": 0.62}},
+            }
+        )
+
+        self.assertEqual(result["failure_class"], "harness_bug")
+        self.assertNotIn("revise_case_spec", result["allowed_next_actions"])
+        self.assertIn("open_development_issue", result["allowed_next_actions"])
+
 
 if __name__ == "__main__":
     unittest.main()

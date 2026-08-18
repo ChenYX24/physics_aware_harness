@@ -112,6 +112,9 @@ class NativeGenerationTests(unittest.TestCase):
         self.assertTrue(any("separate hidden source=none collision object" in rule for rule in hard_rules))
         self.assertTrue(any("every constrained dynamic body requires" in rule for rule in hard_rules))
         self.assertTrue(any("connected pair" in rule for rule in hard_rules))
+        self.assertTrue(any("same initial world joint frame" in rule for rule in hard_rules))
+        self.assertTrue(any("never emit fixed_to" in rule for rule in hard_rules))
+        self.assertNotIn("fixed_to", context["case_spec_contract"]["enums"]["relation_type"])
         path_contract = context["intent_draft_contract"]["parameter_analysis_shape"]["path"]
         self.assertIn("$.scene.duration_s", path_contract)
         self.assertIn("$.objects.domino_10.initial_state.rotation_deg", path_contract)

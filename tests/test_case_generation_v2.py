@@ -286,6 +286,8 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertIn("separate source=none, visible=false", case_prompt)
         self.assertIn("Every constrained dynamic body must keep physics.collision_required=true", case_prompt)
         self.assertIn("connected pair", case_prompt)
+        self.assertIn("the two world frame origins and corresponding primary/secondary axes must", case_prompt)
+        self.assertIn("Never emit fixed_to, hinged_to, attached_to", case_prompt)
         self.assertIn("visual_representation.visible is a boolean", case_prompt)
         self.assertIn("Heading around world vertical Z belongs\n   in yaw", case_prompt)
         self.assertIn("rather than a mandatory route", case_prompt)

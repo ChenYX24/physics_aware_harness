@@ -80,6 +80,39 @@ class CaseSpecV2Tests(unittest.TestCase):
             {issue.code for issue in context.exception.issues},
         )
 
+    def test_rigid_constraint_rejects_distinct_initial_world_frames(self) -> None:
+        data = case_spec_v2_fixture()
+        data["backend_constraints"]["required_solver_capabilities"].append("rigid_constraints")
+        data["backend_constraints"]["allowed_solvers"] = ["ue"]
+        data["constraints"] = [
+            {
+                "id": "cue_pivot",
+                "body_a": "cue_ball",
+                "body_b": "floor",
+                "frame_a": {
+                    "position_m": [0.0, 0.0, 0.0],
+                    "primary_axis": [0.0, 1.0, 0.0],
+                    "secondary_axis": [0.0, 0.0, 1.0],
+                },
+                "frame_b": {
+                    "position_m": [0.0, 0.0, 0.09],
+                    "primary_axis": [1.0, 0.0, 0.0],
+                    "secondary_axis": [0.0, 0.0, 1.0],
+                },
+                "linear_motion": {"x": "locked", "y": "locked", "z": "locked"},
+                "angular_motion": {"x": "free", "y": "locked", "z": "locked"},
+                "angular_limits_deg": {},
+                "collision_enabled": False,
+            }
+        ]
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        codes = {issue.code for issue in context.exception.issues}
+        self.assertIn("constraint_frame_position_mismatch", codes)
+        self.assertIn("constraint_frame_axis_mismatch", codes)
+
     def test_rigid_constraint_rejects_implicit_frames_and_capability(self) -> None:
         data = case_spec_v2_fixture()
         data["constraints"] = [
@@ -256,6 +289,19 @@ class CaseSpecV2Tests(unittest.TestCase):
 
         acquisition["provider_hint"] = "poly_haven"
         validate_agent_case_spec_contract(case_spec_v2_from_dict(data).data)
+
+    def test_agent_contract_rejects_mechanical_relations(self) -> None:
+        data = case_spec_v2_fixture()
+        data["relations"].append({"type": "hinged_to", "source": "cue_ball", "target": "floor"})
+        parsed = case_spec_v2_from_dict(data)
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            validate_agent_case_spec_contract(parsed.data)
+
+        self.assertIn(
+            "unsupported_agent_relation_type",
+            {issue.code for issue in context.exception.issues},
+        )
 
     def test_agent_contract_rejects_recipe_and_geometry_type_conflicts(self) -> None:
         data = case_spec_v2_fixture()

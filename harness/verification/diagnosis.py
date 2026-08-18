@@ -9,6 +9,7 @@ REPAIR_SUGGESTIONS = {
     "F5_passive_precontact_motion": "将 passive object 初始速度清零，并检查 runtime 是否在 contact 前施加了速度。",
     "F6_unexplained_motion_after_render": "检查是否存在 keyframe/visual-only animation 伪造物理运动。",
     "F7_runtime_artifact_incomplete": "补齐 summary、readiness、render pass manifest、trajectory/contact sidecars。",
+    "F_RUNTIME_CONSTRAINT_ENFORCEMENT_FAILED": "检查约束残差、运行时刚体状态和求解器约束执行；不要用布局修订掩盖运行时漂移。",
 }
 
 

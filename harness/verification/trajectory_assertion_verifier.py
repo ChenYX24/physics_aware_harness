@@ -3,6 +3,11 @@ from __future__ import annotations
 import math
 from typing import Any, Mapping
 
+from harness.core.scene_layout import rotate_local_vector_ue
+
+
+RUNTIME_CONSTRAINT_LINEAR_TOLERANCE_M = 0.01
+
 
 def verify_trajectory_assertions(
     case_spec: Mapping[str, Any],
@@ -11,6 +16,9 @@ def verify_trajectory_assertions(
     integrity_failure = trajectory_integrity_failure(trajectory)
     if integrity_failure is not None:
         return "trajectory_state_invalid", integrity_failure, []
+    constraint_failure, constraint_evidence = verify_rigid_constraint_residuals(case_spec, trajectory)
+    if constraint_failure is not None:
+        return "F_RUNTIME_CONSTRAINT_ENFORCEMENT_FAILED", constraint_failure, constraint_evidence
     assertions = [
         item
         for item in case_spec.get("verification_assertions") or []
@@ -26,7 +34,7 @@ def verify_trajectory_assertions(
         results.append(result)
         if not result["passed"] and first_failed_result is None:
             first_failed_result = result
-    evidence = [{"type": "trajectory_assertions", "results": results}]
+    evidence = [*constraint_evidence, {"type": "trajectory_assertions", "results": results}]
     if first_failed_result is not None:
         return (
             "declared_assertion_failed",
@@ -40,6 +48,175 @@ def verify_trajectory_assertions(
             evidence,
         )
     return None, None, evidence
+
+
+def verify_rigid_constraint_residuals(
+    case_spec: Mapping[str, Any],
+    trajectory: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    constraints = [
+        item
+        for item in case_spec.get("constraints") or []
+        if isinstance(item, Mapping)
+    ]
+    if not constraints:
+        return None, []
+    objects = {
+        str(item.get("id") or ""): item
+        for item in case_spec.get("objects") or []
+        if isinstance(item, Mapping) and item.get("id")
+    }
+    results: list[dict[str, Any]] = []
+    first_failure: dict[str, Any] | None = None
+    for constraint in constraints:
+        constraint_id = str(constraint.get("id") or "constraint")
+        body_a = str(constraint.get("body_a") or "")
+        body_b = str(constraint.get("body_b") or "")
+        maxima = {axis: 0.0 for axis in ("x", "y", "z")}
+        worst_samples: dict[str, dict[str, Any]] = {}
+        result = {
+            "constraint_id": constraint_id,
+            "body_a": body_a,
+            "body_b": body_b,
+            "passed": True,
+            "linear_tolerance_m": RUNTIME_CONSTRAINT_LINEAR_TOLERANCE_M,
+            "max_residual_m": maxima,
+        }
+        for frame_index, frame in enumerate(trajectory):
+            frame_objects = frame.get("objects") if isinstance(frame.get("objects"), Mapping) else {}
+            pose_a = _constraint_body_pose(objects.get(body_a), frame_objects.get(body_a))
+            pose_b = _constraint_body_pose(objects.get(body_b), frame_objects.get(body_b))
+            if pose_a is None or pose_b is None:
+                missing_body = body_a if pose_a is None else body_b
+                sample = {
+                    "object_id": constraint_id,
+                    "frame": int(frame.get("frame", frame_index)),
+                    "time": frame.get("time_s", frame.get("time")),
+                    "metric": "constraint_body_state_missing",
+                    "value": {"constraint_id": constraint_id, "body_id": missing_body},
+                }
+                result["passed"] = False
+                result["failure"] = sample["value"]
+                if first_failure is None:
+                    first_failure = sample
+                break
+            world_frame_a = _constraint_world_frame(pose_a, constraint.get("frame_a"))
+            world_frame_b = _constraint_world_frame(pose_b, constraint.get("frame_b"))
+            if world_frame_a is None or world_frame_b is None:
+                sample = {
+                    "object_id": constraint_id,
+                    "frame": int(frame.get("frame", frame_index)),
+                    "time": frame.get("time_s", frame.get("time")),
+                    "metric": "constraint_frame_invalid",
+                    "value": {"constraint_id": constraint_id},
+                }
+                result["passed"] = False
+                result["failure"] = sample["value"]
+                if first_failure is None:
+                    first_failure = sample
+                break
+            origin_a, axes_a = world_frame_a
+            origin_b, _ = world_frame_b
+            delta = [origin_b[index] - origin_a[index] for index in range(3)]
+            motion = constraint.get("linear_motion") if isinstance(constraint.get("linear_motion"), Mapping) else {}
+            linear_limit = float(constraint.get("linear_limit_m") or 0.0)
+            for axis_name, world_axis in zip(("x", "y", "z"), axes_a, strict=True):
+                mode = str(motion.get(axis_name) or "free")
+                if mode == "free":
+                    continue
+                residual = abs(sum(delta[index] * world_axis[index] for index in range(3)))
+                if residual > maxima[axis_name]:
+                    maxima[axis_name] = residual
+                    worst_samples[axis_name] = {
+                        "frame": int(frame.get("frame", frame_index)),
+                        "time_s": frame.get("time_s", frame.get("time")),
+                    }
+                allowed = RUNTIME_CONSTRAINT_LINEAR_TOLERANCE_M + (
+                    linear_limit if mode == "limited" else 0.0
+                )
+                if residual <= allowed:
+                    continue
+                sample_value = {
+                    "constraint_id": constraint_id,
+                    "body_a": body_a,
+                    "body_b": body_b,
+                    "axis": axis_name,
+                    "motion": mode,
+                    "residual_m": round(residual, 6),
+                    "allowed_m": round(allowed, 6),
+                }
+                result["passed"] = False
+                result["failure"] = sample_value
+                if first_failure is None:
+                    first_failure = {
+                        "object_id": constraint_id,
+                        "frame": int(frame.get("frame", frame_index)),
+                        "time": frame.get("time_s", frame.get("time")),
+                        "metric": "constraint_linear_residual_m",
+                        "value": sample_value,
+                    }
+        result["max_residual_m"] = {
+            axis: round(value, 6) for axis, value in maxima.items()
+        }
+        result["worst_samples"] = worst_samples
+        results.append(result)
+    return first_failure, [{"type": "rigid_constraint_residuals", "results": results}]
+
+
+def _constraint_body_pose(
+    declared: Mapping[str, Any] | None,
+    state: Any,
+) -> tuple[list[float], list[float]] | None:
+    if declared is None:
+        return None
+    if isinstance(state, Mapping):
+        position = _first_vector(state, "position_m", "position")
+        rotation = _first_vector(state, "rotation_deg", "rotation_degrees", "rotation")
+        if position is not None and rotation is not None:
+            return position, rotation
+        return None
+    if str(declared.get("body_type") or "") != "static":
+        return None
+    position = _first_vector(declared, "initial_position_m", "position_m", "position")
+    rotation = _first_vector(declared, "initial_rotation_deg", "rotation_deg", "rotation_degrees")
+    if position is None or rotation is None:
+        return None
+    return position, rotation
+
+
+def _constraint_world_frame(
+    pose: tuple[list[float], list[float]],
+    raw_frame: Any,
+) -> tuple[list[float], list[list[float]]] | None:
+    if not isinstance(raw_frame, Mapping):
+        return None
+    frame = raw_frame
+    position, rotation = pose
+    local_position = _first_vector(frame, "position_m")
+    primary = _first_vector(frame, "primary_axis")
+    secondary = _first_vector(frame, "secondary_axis")
+    if local_position is None or primary is None or secondary is None:
+        return None
+    world_offset = rotate_local_vector_ue(local_position, rotation)
+    world_primary = rotate_local_vector_ue(primary, rotation)
+    world_secondary = rotate_local_vector_ue(secondary, rotation)
+    world_tertiary = [
+        world_primary[1] * world_secondary[2] - world_primary[2] * world_secondary[1],
+        world_primary[2] * world_secondary[0] - world_primary[0] * world_secondary[2],
+        world_primary[0] * world_secondary[1] - world_primary[1] * world_secondary[0],
+    ]
+    return (
+        [position[index] + world_offset[index] for index in range(3)],
+        [world_primary, world_secondary, world_tertiary],
+    )
+
+
+def _first_vector(value: Mapping[str, Any], *keys: str) -> list[float] | None:
+    for key in keys:
+        candidate = value.get(key)
+        if finite_vector(candidate) and len(candidate) == 3:
+            return [float(item) for item in candidate]
+    return None
 
 
 def trajectory_integrity_failure(trajectory: list[dict[str, Any]]) -> dict[str, Any] | None:

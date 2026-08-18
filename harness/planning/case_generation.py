@@ -20,6 +20,7 @@ from harness.core.harness_config import EffectiveHarnessConfig, endpoint_identit
 from harness.core.stage_result import artifact_ref, build_stage_result, failure_stage_result, write_stage_result
 from harness.core.case_spec_v2 import (
     ACQUISITION_ROUTES,
+    AGENT_RELATION_TYPES,
     ASSET_MUST_FIELDS,
     ASSET_MUST_NOT_FIELDS,
     BACKEND_SOLVER_CAPABILITIES,
@@ -1654,7 +1655,9 @@ FIELD-BY-FIELD INSTRUCTIONS
 11. constraints: use this array only when two rigid bodies need a physical joint. Declare two exact body
     IDs, an explicit local frame on each body, x/y/z linear and angular motion as locked, limited, or free,
     limits only for limited axes, and whether the two bodies collide. Angular x is rotation around each
-    frame's primary axis. Every constrained dynamic body must keep physics.collision_required=true so the
+    frame's primary axis. Transform both local frame positions and axes by their objects' initial UE
+    [pitch,yaw,roll] transforms: the two world frame origins and corresponding primary/secondary axes must
+    match at the authored initial state. Every constrained dynamic body must keep physics.collision_required=true so the
     backend can create its rigid-body physics state; use constraint.collision_enabled=false only to disable
     collision between the connected pair. Require the rigid_constraints solver capability. Do not infer frames
     from semantic relations and do not emit springs, damping, drives, motors, break thresholds, or named workflow presets.
@@ -1667,7 +1670,10 @@ FIELD-BY-FIELD INSTRUCTIONS
     {"type":"release","object":exact_id,"time_s":nonnegative_number}; put the post-release launch velocity
     on that event as "linear_velocity_m_s":[x,y,z] (and optional "angular_velocity_rad_s":[x,y,z]), while the
     object's initial_state velocity remains zero during the hold. Until release time the runtime holds the object
-    at its declared initial transform. Never use phrases such as "box with floor" as a reference.
+    at its declared initial transform. Relation types are limited to the registered semantic types in
+    case_spec_contract.enums.relation_type. Never emit fixed_to, hinged_to, attached_to, or another mechanical
+    connection relation; top-level constraints are the only mechanical truth. Never use phrases such as
+    "box with floor" as a reference.
     Use supported_by, not plain contact, for every dynamic object that initially rests on a load-bearing
     surface. Reserve collision/impacts for runtime propagation edges; plain contact is an initial/static
     scene relation and is not an ordered impact. Size every support surface so its horizontal footprint contains every supported object's full initial
@@ -1840,6 +1846,10 @@ def case_spec_generation_contract() -> dict[str, Any]:
                     "secondary_axis": "orthogonal unit local vector",
                 },
                 "frame_b": "same shape as frame_a, expressed in body_b local coordinates",
+                "initial_frame_consistency": (
+                    "after applying each body's initial UE [pitch,yaw,roll] transform, frame origins and "
+                    "corresponding primary/secondary axes must describe the same world joint frame"
+                ),
                 "linear_motion": {"x": "locked, limited, or free", "y": "locked, limited, or free", "z": "locked, limited, or free"},
                 "linear_limit_m": "positive shared limit, present exactly when any linear axis is limited",
                 "angular_motion": {"x": "locked, limited, or free around primary axis", "y": "locked, limited, or free around secondary axis", "z": "locked, limited, or free around the derived third axis"},
@@ -1980,6 +1990,7 @@ def case_spec_generation_contract() -> dict[str, Any]:
             "camera_role": sorted(CAMERA_ROLES),
             "observation_modality": sorted(OBSERVATION_MODALITIES),
             "verification_assertion": sorted(VERIFICATION_ASSERTION_TYPES),
+            "relation_type": sorted(AGENT_RELATION_TYPES),
             "local_procedural_recipe": ["box_mesh_v1", "sphere_mesh_v1", "cylinder_mesh_v1"],
         },
         "backend_solver_capability_matrix": {
@@ -1998,7 +2009,8 @@ def case_spec_generation_contract() -> dict[str, Any]:
             "every object behavior must be an object and every physics.body_type must use the body_type enum",
             "every relation, event, camera, and assertion object reference must exactly equal one declared object.id; never use a phrase",
             "physical joints are declared only in top-level constraints; relations are semantic and never configure a runtime joint",
-            "constraints require the rigid_constraints solver capability and explicit local frames; never infer frames or encode a named hinge/fixed workflow",
+            "relations use only the registered semantic relation_type enum; never emit fixed_to, hinged_to, attached_to, or another mechanical connection relation",
+            "constraints require the rigid_constraints solver capability and explicit local frames whose transformed origins and corresponding axes form the same initial world joint frame; never infer frames or encode a named hinge/fixed workflow",
             "every constrained dynamic body requires physics.collision_required=true to create a rigid-body physics state; constraint.collision_enabled=false only disables collision between the connected pair",
             "constraints support only passive 6-DOF axis locking/limits and inter-body collision; do not emit springs, damping, drives, motors, or break thresholds",
             "initial load-bearing support uses supported_by; expected future contacts use collision/impacts relations",
