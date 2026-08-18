@@ -435,12 +435,17 @@ class RuntimeActorPlacementTests(unittest.TestCase):
             placement["actor_bindings"][0]["ue_class"],
             "/Game/DD_Vehicles_Advanced/Blueprints/garage/BP_BoardDestructible.BP_BoardDestructible_C",
         )
-        self.assertEqual(static[0]["asset_kind"], "blueprint")
+        self.assertEqual(static[0]["asset_kind"], "static_mesh")
+        self.assertEqual(static[0]["params"]["visual_asset_kind"], "blueprint")
+        self.assertEqual(
+            static[0]["params"]["visual_ue5_path"],
+            "/Game/DD_Vehicles_Advanced/Blueprints/garage/BP_BoardDestructible.BP_BoardDestructible",
+        )
         self.assertEqual(static[0]["params"]["fracture_response"]["impactor_id"], "striker")
-        self.assertEqual(static[0]["class_name"], "Blueprint")
+        self.assertEqual(static[0]["class_name"], "StaticMesh")
         self.assertEqual(
             static[0]["ue5_path"],
-            "/Game/DD_Vehicles_Advanced/Blueprints/garage/BP_BoardDestructible.BP_BoardDestructible",
+            "/Engine/BasicShapes/Cube.Cube",
         )
 
     def test_geometry_collection_can_compile_an_intact_visual_shell(self) -> None:
@@ -723,7 +728,17 @@ class RuntimeActorPlacementTests(unittest.TestCase):
                         "physics_graph_member": True,
                         "transform": {"position_m": [0.0, 0.0, 0.09]},
                         "bounds": {"extents_m": [0.09, 0.09, 0.09]},
-                        "physics": {"collider": "sphere", "collision_profile": "PhysicsActor"},
+                        "physics": {
+                            "collider": "sphere",
+                            "collision_profile": "PhysicsActor",
+                            "collision_geometry": {
+                                "shape": "sphere",
+                                "size_m": [0.18, 0.18, 0.18],
+                                "local_center_offset_m": [0.0, 0.0, 0.0],
+                                "world_center_m": [0.0, 0.0, 0.09],
+                                "source": "analytic_sphere",
+                            },
+                        },
                         "asset_binding": {
                             "selected_asset_id": "game_props_decorative_sm_8ball",
                             "selected_asset_ue_path": "/Game/Props/Decorative/SM_8Ball.SM_8Ball",
@@ -739,6 +754,75 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual(binding["physics"]["collision_geometry_source"], "analytic_sphere")
         self.assertEqual(binding["physics"]["collision_geometry_verification"], "runtime_controlled")
 
+    def test_static_selected_asset_and_hidden_collision_proxy_are_orthogonal(self) -> None:
+        from harness.runtime.actor_placement import compile_runtime_actor_placement
+        from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement
+
+        node = {
+            "object_id": "table",
+            "role": "support",
+            "shape": "box",
+            "physics_critical": True,
+            "transform": {"position_m": [0.0, 0.0, 0.55], "rotation_deg": [0.0, 0.0, 0.0]},
+            "bounds": {
+                "extents_m": [1.2, 0.55, 0.48],
+                "local_center_offset_m": [0.0, 0.0, -0.48],
+            },
+            "visual_representation": {"source": "asset", "visible": True},
+            "physics": {
+                "body_type": "static",
+                "collision_required": True,
+                "collider": "box",
+                "collision_profile": "BlockAll",
+                "collision_geometry": {
+                    "shape": "box",
+                    "size_m": [2.4, 1.1, 0.06],
+                    "local_center_offset_m": [0.0, 0.0, -0.03],
+                    "world_center_m": [0.0, 0.0, 0.52],
+                    "source": "declared",
+                },
+            },
+            "asset_binding": {
+                "selected_asset_id": "painted_table",
+                "selected_asset_ue_path": "/Game/Provider/SM_Table.SM_Table",
+                "sha256": "abc123",
+            },
+        }
+        placement = compile_runtime_actor_placement(
+            {"case_id": "table"},
+            {"case_id": "table", "object_nodes": [node]},
+        )
+        binding = placement["actor_bindings"][0]
+        dynamic, static = runtime_objects_from_actor_placement(
+            placement,
+            {"case_id": "table", "objects": [{"id": "table"}]},
+        )
+
+        self.assertEqual(dynamic, [])
+        self.assertEqual(binding["asset"]["runtime_usage"], "visual_proxy")
+        self.assertEqual(binding["transform"]["position_m"], [0.0, 0.0, 0.52])
+        self.assertEqual(binding["visual_representation"]["local_bounds_center_from_collision_m"], [0.0, 0.0, -0.44999999999999996])
+        self.assertEqual(static[0]["ue5_path"], "/Engine/BasicShapes/Cube.Cube")
+        self.assertEqual(static[0]["scale"], [2.4, 1.1, 0.06])
+        self.assertEqual(static[0]["params"]["visual_ue5_path"], "/Game/Provider/SM_Table.SM_Table")
+        self.assertTrue(static[0]["params"]["visible"])
+
+        hidden_node = deepcopy(node)
+        hidden_node["object_id"] = "hidden_proxy"
+        hidden_node["visual_representation"]["visible"] = False
+        hidden = compile_runtime_actor_placement(
+            {"case_id": "hidden"},
+            {"case_id": "hidden", "object_nodes": [hidden_node]},
+        )
+        _, hidden_static = runtime_objects_from_actor_placement(
+            hidden,
+            {"case_id": "hidden", "objects": [{"id": "hidden_proxy"}]},
+        )
+        self.assertEqual(hidden["actor_bindings"][0]["asset"]["runtime_usage"], "analytic_proxy")
+        self.assertFalse(hidden_static[0]["params"]["visible"])
+        self.assertNotIn("visual_ue5_path", hidden_static[0]["params"])
+        self.assertTrue(hidden_static[0]["physics_properties"]["collision_enabled"])
+
     def test_declared_box_collider_overrides_unverified_selected_asset_collision(self) -> None:
         from harness.runtime.actor_placement import compile_runtime_actor_placement
         from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement, ue_path_for_binding
@@ -752,7 +836,17 @@ class RuntimeActorPlacementTests(unittest.TestCase):
                     "role": "passive_target",
                     "shape": "box",
                     "physics_critical": True,
-                    "physics": {"collider": "box", "collision_profile": "PhysicsActor"},
+                    "physics": {
+                        "collider": "box",
+                        "collision_profile": "PhysicsActor",
+                        "collision_geometry": {
+                            "shape": "box",
+                            "size_m": [0.5, 0.5, 0.5],
+                            "local_center_offset_m": [0.0, 0.0, 0.0],
+                            "world_center_m": [0.0, 0.0, 0.0],
+                            "source": "analytic_box",
+                        },
+                    },
                     "asset_binding": {"selected_asset_ue_path": "/Game/Props/SM_Box.SM_Box"},
                 }],
             },
@@ -787,7 +881,17 @@ class RuntimeActorPlacementTests(unittest.TestCase):
                     "role": "passive_target",
                     "shape": "cylinder",
                     "physics_critical": True,
-                    "physics": {"collider": "cylinder", "collision_profile": "PhysicsActor"},
+                    "physics": {
+                        "collider": "cylinder",
+                        "collision_profile": "PhysicsActor",
+                        "collision_geometry": {
+                            "shape": "cylinder",
+                            "size_m": [0.5, 0.5, 0.5],
+                            "local_center_offset_m": [0.0, 0.0, 0.0],
+                            "world_center_m": [0.0, 0.0, 0.0],
+                            "source": "analytic_cylinder",
+                        },
+                    },
                     "asset_binding": {
                         "selected_asset_ue_path": "/Game/Provider/SM_Bottle.SM_Bottle",
                         "preserve_authored_scale": True,
@@ -814,7 +918,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         native_source = (ROOT / "scripts" / "native_ue_scene.py").read_text(encoding="utf-8")
         self.assertIn("physics_origin, _ = actor_bounds(physics_actor)", native_source)
         self.assertIn("visual_origin, _ = actor_bounds(visual)", native_source)
-        self.assertIn("center_delta = physics_origin - visual_origin", native_source)
+        self.assertIn("center_delta = physics_origin + world_offset - visual_origin", native_source)
         self.assertIn(
             'obj.get("initial_position_m", [0.0, 0.0, 0.0]),\n                z_offset_cm=0.0,\n                origin=scene_origin,',
             native_source,
@@ -891,7 +995,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertTrue(all(obj["ue5_path"] == "/Engine/BasicShapes/Cube.Cube" for obj in dynamic + static))
         self.assertTrue(
             all(
-                obj["physics_properties"]["collision_geometry_source"] == "analytic_box"
+                obj["physics_properties"]["collision_geometry_source"] == "compiled_default"
                 for obj in dynamic + static
             )
         )
@@ -901,7 +1005,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
                 for obj in dynamic + static
             )
         )
-        self.assertEqual(static[0]["params"]["support_top_m"], 0.0)
+        self.assertNotIn("support_top_m", static[0]["params"])
         self.assertEqual(dynamic[0]["rotation_degrees"], [0.0, -20.0, 0.0])
         self.assertTrue(all(obj.get("rotation_degrees") == [0.0, 0.0, 0.0] for obj in dynamic[1:]))
         self.assertTrue(all(obj["physics_properties"]["initial_velocity_m_s"] == [0.0, 0.0, 0.0] for obj in dynamic))

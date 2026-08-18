@@ -1102,6 +1102,15 @@ def validate_solver_execution(
 
     if not runtime_path or not isinstance(runtime, dict):
         violations.append("runtime_scene_missing")
+    runtime_bindings = validate_runtime_binding_snapshot(runtime, summary)
+    if runtime_bindings["status"] != "pass":
+        failures.append(
+            issue(
+                "F_RUNTIME_BINDING_MISMATCH",
+                "compiled actor bindings do not match the pre-simulation UE component snapshot",
+                mismatches=runtime_bindings["mismatches"],
+            )
+        )
     controls = runtime.get("physics_controls") if isinstance(runtime.get("physics_controls"), dict) else {}
     precomputed = runtime.get("precomputed_trajectory")
     if precomputed:
@@ -1379,7 +1388,138 @@ def validate_solver_execution(
             else None
         ),
         "violations": violations,
+        "runtime_bindings": runtime_bindings,
     }
+
+
+def validate_runtime_binding_snapshot(runtime: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any]:
+    expected_objects = [
+        item
+        for item in [
+            *(runtime.get("static_objects") or []),
+            *(runtime.get("dynamic_objects") or []),
+        ]
+        if isinstance(item, dict) and item.get("id")
+    ]
+    snapshot = summary.get("runtime_binding_snapshot") if isinstance(summary.get("runtime_binding_snapshot"), dict) else {}
+    actual_by_id = {
+        str(item.get("object_id")): item
+        for item in snapshot.get("objects") or []
+        if isinstance(item, dict) and item.get("object_id")
+    }
+    mismatches: list[dict[str, Any]] = []
+    residuals: dict[str, dict[str, Any]] = {}
+    if snapshot.get("capture_phase") != "pre_simulation":
+        mismatches.append({"object_id": None, "field": "capture_phase", "expected": "pre_simulation", "actual": snapshot.get("capture_phase")})
+    expected_ids = {str(item["id"]) for item in expected_objects}
+    actual_ids = set(actual_by_id)
+    for missing_id in sorted(expected_ids - actual_ids):
+        mismatches.append({"object_id": missing_id, "field": "snapshot", "expected": "present", "actual": "missing"})
+    for unexpected_id in sorted(actual_ids - expected_ids):
+        mismatches.append({"object_id": unexpected_id, "field": "snapshot", "expected": "absent", "actual": "present"})
+    for expected in expected_objects:
+        object_id = str(expected["id"])
+        actual = actual_by_id.get(object_id)
+        if not actual:
+            continue
+        params = expected.get("params") if isinstance(expected.get("params"), dict) else {}
+        physics = expected.get("physics_properties") if isinstance(expected.get("physics_properties"), dict) else {}
+        expected_geometry = physics.get("collision_geometry") if isinstance(physics.get("collision_geometry"), dict) else None
+        actual_geometry = actual.get("collision_geometry") if isinstance(actual.get("collision_geometry"), dict) else None
+        object_residuals: dict[str, Any] = {}
+        compare_binding_value(mismatches, object_id, "asset.render_mesh_path", params.get("expected_render_mesh_path"), ((actual.get("asset") or {}).get("render_mesh_path")))
+        compare_binding_value(mismatches, object_id, "asset.collision_mesh_path", params.get("expected_collision_mesh_path"), ((actual.get("asset") or {}).get("collision_mesh_path")))
+        compare_binding_value(mismatches, object_id, "asset.asset_id", params.get("expected_asset_id"), ((actual.get("asset") or {}).get("asset_id")))
+        compare_binding_value(mismatches, object_id, "asset.sha256", params.get("expected_asset_sha256"), ((actual.get("asset") or {}).get("sha256")))
+        compare_binding_value(mismatches, object_id, "asset.binding_metadata_registered", True, ((actual.get("asset") or {}).get("binding_metadata_registered")))
+        expected_visible = params.get("visible") is not False
+        compare_binding_value(mismatches, object_id, "visible", expected_visible, actual.get("visible"))
+        compare_binding_value(mismatches, object_id, "mesh_component.registered", True, ((actual.get("mesh_component") or {}).get("registered")))
+        compare_binding_value(mismatches, object_id, "mesh_component.visible", expected_visible, ((actual.get("mesh_component") or {}).get("visible")))
+        compare_binding_value(mismatches, object_id, "mesh_component.participates_in_rendering", expected_visible, ((actual.get("mesh_component") or {}).get("participates_in_rendering")))
+        compare_binding_value(mismatches, object_id, "collision_enabled", bool(physics.get("collision_enabled")), actual.get("collision_enabled"))
+        compare_binding_value(mismatches, object_id, "simulate_physics", bool(physics.get("simulate_physics")), actual.get("simulate_physics"))
+        object_residuals["position_m"] = compare_binding_vector(
+            mismatches,
+            object_id,
+            "world_transform.position_m",
+            expected.get("initial_position_m"),
+            ((actual.get("world_transform") or {}).get("position_m")),
+            tolerance=1e-4,
+        )
+        object_residuals["rotation_deg"] = compare_binding_vector(
+            mismatches,
+            object_id,
+            "world_transform.rotation_deg",
+            expected.get("rotation_degrees") or [0.0, 0.0, 0.0],
+            ((actual.get("world_transform") or {}).get("rotation_deg")),
+            tolerance=1e-3,
+        )
+        if expected_geometry is None:
+            compare_binding_value(mismatches, object_id, "collision_geometry", None, actual_geometry)
+        else:
+            if actual_geometry is None:
+                mismatches.append({"object_id": object_id, "field": "collision_geometry", "expected": expected_geometry, "actual": None})
+            else:
+                compare_binding_value(mismatches, object_id, "collision_geometry.shape", expected_geometry.get("shape"), actual_geometry.get("shape"))
+                object_residuals["collision_size_m"] = compare_binding_vector(
+                    mismatches, object_id, "collision_geometry.size_m", expected_geometry.get("size_m"), actual_geometry.get("size_m"), tolerance=1e-4
+                )
+                object_residuals["collision_local_center_offset_m"] = compare_binding_vector(
+                    mismatches, object_id, "collision_geometry.local_center_offset_m", expected_geometry.get("local_center_offset_m"), actual_geometry.get("local_center_offset_m"), tolerance=1e-6
+                )
+                object_residuals["collision_world_center_m"] = compare_binding_vector(
+                    mismatches, object_id, "collision_geometry.world_center_m", expected_geometry.get("world_center_m"), actual_geometry.get("world_center_m"), tolerance=1e-4
+                )
+        residuals[object_id] = object_residuals
+    return {
+        "schema_version": "harness_runtime_binding_quality_v1",
+        "status": "fail" if mismatches else "pass",
+        "expected_object_count": len(expected_objects),
+        "actual_object_count": len(actual_by_id),
+        "residuals": residuals,
+        "mismatches": mismatches,
+    }
+
+
+def compare_binding_value(
+    mismatches: list[dict[str, Any]],
+    object_id: str,
+    field: str,
+    expected: Any,
+    actual: Any,
+) -> None:
+    if expected != actual:
+        mismatches.append({"object_id": object_id, "field": field, "expected": expected, "actual": actual})
+
+
+def compare_binding_vector(
+    mismatches: list[dict[str, Any]],
+    object_id: str,
+    field: str,
+    expected: Any,
+    actual: Any,
+    *,
+    tolerance: float,
+) -> float | None:
+    if not isinstance(expected, (list, tuple)) or not isinstance(actual, (list, tuple)) or len(expected) < 3 or len(actual) < 3:
+        mismatches.append({"object_id": object_id, "field": field, "expected": expected, "actual": actual})
+        return None
+    try:
+        residual = max(abs(float(expected[index]) - float(actual[index])) for index in range(3))
+    except (TypeError, ValueError):
+        mismatches.append({"object_id": object_id, "field": field, "expected": expected, "actual": actual})
+        return None
+    if residual > tolerance:
+        mismatches.append({
+            "object_id": object_id,
+            "field": field,
+            "expected": list(expected[:3]),
+            "actual": list(actual[:3]),
+            "residual": residual,
+            "tolerance": tolerance,
+        })
+    return residual
 
 
 def vectors_close(left: Any, right: Any, *, tolerance: float = 1e-5) -> bool:

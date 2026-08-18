@@ -13,6 +13,52 @@ from tests.case_spec_v2_fixture import case_spec_v2_fixture
 
 
 class CaseSpecV2Tests(unittest.TestCase):
+    def test_collision_geometry_and_visibility_project_without_rescaling(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["visual_representation"] = {"source": "asset", "visible": False}
+        data["objects"][0]["physics"]["collision_geometry"] = {
+            "shape": "box",
+            "size_m": [1.2, 0.8, 0.06],
+            "local_center_offset_m": [0.0, 0.0, -0.03],
+        }
+
+        case = case_spec_v2_from_dict(data)
+        runtime = compile_case_spec_v2_runtime(case)
+        subject = runtime.data["objects"][0]
+
+        self.assertEqual(subject["visual_representation"], {"source": "asset", "visible": False})
+        self.assertEqual(
+            subject["collision_geometry"],
+            {
+                "shape": "box",
+                "size_m": [1.2, 0.8, 0.06],
+                "local_center_offset_m": [0.0, 0.0, -0.03],
+            },
+        )
+
+    def test_collision_geometry_shape_dimensions_and_collision_flag_are_strict(self) -> None:
+        invalid_declarations = [
+            ({"shape": "sphere", "size_m": [0.2, 0.21, 0.2]}, "invalid_sphere_collision_size"),
+            ({"shape": "cylinder", "size_m": [0.2, 0.21, 0.5]}, "invalid_cylinder_collision_size"),
+            ({"shape": "capsule", "size_m": [0.2, 0.2, 0.5]}, "invalid_collision_geometry_shape"),
+        ]
+        for declaration, expected_code in invalid_declarations:
+            with self.subTest(expected_code=expected_code):
+                data = case_spec_v2_fixture()
+                data["objects"][0]["physics"]["collision_geometry"] = declaration
+                with self.assertRaises(CaseSpecV2ValidationError) as context:
+                    case_spec_v2_from_dict(data)
+                self.assertIn(expected_code, {issue.code for issue in context.exception.issues})
+
+        data = case_spec_v2_fixture()
+        data["objects"][0]["physics"].update({
+            "collision_required": False,
+            "collision_geometry": {"shape": "sphere", "size_m": [0.2, 0.2, 0.2]},
+        })
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("collision_geometry_without_collision", {issue.code for issue in context.exception.issues})
+
     def test_event_sequence_requires_multiple_explicit_events(self) -> None:
         data = case_spec_v2_fixture()
         data["verification_requirements"]["assertions"] = [

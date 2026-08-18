@@ -47,6 +47,13 @@ def build_object_node(
     collision_required = obj.get("collision_required")
     if collision_required is None:
         collision_required = False if state_kind == "particle" else True if collision else None
+    declared_collision_geometry = (
+        obj.get("collision_geometry")
+        if isinstance(obj.get("collision_geometry"), dict)
+        else None
+    )
+    if declared_collision_geometry is not None and collision_required is None:
+        collision_required = True
     mass = obj.get("mass_kg")
     if mass is None and isinstance(selected_asset, dict):
         mass = selected_asset.get("mass_kg")
@@ -90,6 +97,28 @@ def build_object_node(
         shape = selected_asset.get("shape") or selected_asset.get("collider")
     if shape is None:
         shape = "box"
+    collision_geometry = resolved_collision_geometry(
+        declared_collision_geometry,
+        collider=collider,
+        shape=str(shape),
+        extents=extents,
+        object_position_m=position,
+        object_rotation_deg=rotation,
+        visual_bounds=bounds,
+        collision_enabled=collision_required is not False and state_kind != "particle",
+    )
+    if collision_geometry is not None:
+        collider = collision_geometry["shape"]
+    visual_representation = (
+        obj.get("visual_representation")
+        if isinstance(obj.get("visual_representation"), dict)
+        else {}
+    )
+    visual_center_offset = [
+        0.0,
+        0.0,
+        (float(bounds["bottom_z"]) + float(bounds["top_z"])) / 2.0 - position[2],
+    ]
     return {
         "object_id": intent.object_id,
         "role": intent.role,
@@ -107,6 +136,11 @@ def build_object_node(
             "bounding_radius_m": radius,
             "bottom_z": bounds["bottom_z"],
             "top_z": bounds["top_z"],
+            "local_center_offset_m": round_vec(visual_center_offset),
+        },
+        "visual_representation": {
+            "source": str(visual_representation.get("source") or "asset"),
+            "visible": visual_representation.get("visible") is not False,
         },
         "physics": {
             "state_kind": state_kind,
@@ -114,6 +148,7 @@ def build_object_node(
             "collision_required": collision_required,
             "mass_kg": mass,
             "collider": collider,
+            "collision_geometry": collision_geometry,
             "collision_profile": collision_profile,
             "material": material,
             "linear_damping": obj.get("linear_damping"),
@@ -165,6 +200,74 @@ def build_object_node(
             "runtime_binding_requirements": asset_row.get("runtime_binding_requirements", []) if asset_row else [],
         },
     }
+
+
+def resolved_collision_geometry(
+    declared: dict[str, Any] | None,
+    *,
+    collider: Any,
+    shape: str,
+    extents: list[float],
+    object_position_m: list[float],
+    object_rotation_deg: list[float],
+    visual_bounds: dict[str, float],
+    collision_enabled: bool,
+) -> dict[str, Any] | None:
+    if not collision_enabled:
+        return None
+    if declared is not None:
+        collision_shape = str(declared.get("shape") or "box")
+        size_m = vec3(declared.get("size_m"))
+        local_offset = vec3(declared.get("local_center_offset_m"))
+        source = "declared"
+    else:
+        collision_shape = canonical_collision_shape(collider or shape)
+        if collision_shape == "sphere":
+            diameter = 2.0 * max(extents)
+            size_m = [diameter, diameter, diameter]
+        elif collision_shape == "cylinder":
+            diameter = 2.0 * max(extents[0], extents[1])
+            size_m = [diameter, diameter, 2.0 * extents[2]]
+        else:
+            size_m = [2.0 * value for value in extents]
+        local_offset = [
+            0.0,
+            0.0,
+            (float(visual_bounds["bottom_z"]) + float(visual_bounds["top_z"])) / 2.0
+            - object_position_m[2],
+        ]
+        source = "compiled_default"
+    world_offset = rotate_local_vector_ue(local_offset, object_rotation_deg)
+    world_center = [object_position_m[index] + world_offset[index] for index in range(3)]
+    return {
+        "shape": collision_shape,
+        "size_m": round_vec(size_m),
+        "local_center_offset_m": round_vec(local_offset),
+        "world_center_m": round_vec(world_center),
+        "source": source,
+    }
+
+
+def canonical_collision_shape(value: Any) -> str:
+    normalized = str(value or "box").casefold()
+    if "sphere" in normalized:
+        return "sphere"
+    if "cylinder" in normalized:
+        return "cylinder"
+    return "box"
+
+
+def rotate_local_vector_ue(vector: list[float], rotation_deg: list[float]) -> list[float]:
+    pitch, yaw, roll = [math.radians(float(value)) for value in [*rotation_deg, 0.0, 0.0, 0.0][:3]]
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    cr, sr = math.cos(roll), math.sin(roll)
+    axes = [
+        [cy * cp, sy * cp, -sp],
+        [cy * sp * sr - sy * cr, sy * sp * sr + cy * cr, cp * sr],
+        [cy * sp * cr + sy * sr, sy * sp * cr - cy * sr, cp * cr],
+    ]
+    return [sum(axes[axis][component] * vector[axis] for axis in range(3)) for component in range(3)]
 
 
 def declared_state_kind(obj: dict[str, Any]) -> str:

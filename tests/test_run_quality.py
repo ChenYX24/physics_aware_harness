@@ -34,6 +34,22 @@ class RunQualityTests(unittest.TestCase):
             self.assertTrue(readiness["physics_ready"])
             self.assertEqual(readiness["physics_provenance"]["status"], "pass")
 
+    def test_runtime_binding_mismatch_is_a_direct_hard_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_run(Path(tmp))
+            summary_path = run_dir / "logs" / "native_data" / "summary.json"
+            summary = self.read_json(summary_path)
+            summary["runtime_binding_snapshot"]["objects"][0]["collision_geometry"]["size_m"] = [0.4, 0.4, 0.4]
+            self.write_json(summary_path, summary)
+
+            with self.mock_ffprobe():
+                report = evaluate_run(run_dir, write=False)
+
+            failures = {item["code"]: item for item in report["hard_gate"]["failures"]}
+            self.assertIn("F_RUNTIME_BINDING_MISMATCH", failures)
+            mismatch_fields = {item["field"] for item in failures["F_RUNTIME_BINDING_MISMATCH"]["mismatches"]}
+            self.assertIn("collision_geometry.size_m", mismatch_fields)
+
     def test_local_preview_requires_rgb_but_not_depth_or_segmentation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = self.make_run(Path(tmp))
@@ -745,7 +761,25 @@ class RunQualityTests(unittest.TestCase):
                     {
                         "id": "ball_a",
                         "initial_position_m": [0.0, 0.0, 0.0],
-                        "physics_properties": {"initial_velocity_m_s": [1.0, 0.0, 0.0]},
+                        "rotation_degrees": [0.0, 0.0, 0.0],
+                        "params": {
+                            "visible": True,
+                            "expected_render_mesh_path": "/Engine/BasicShapes/Sphere.Sphere",
+                            "expected_collision_mesh_path": "/Engine/BasicShapes/Sphere.Sphere",
+                            "expected_asset_id": None,
+                            "expected_asset_sha256": None,
+                        },
+                        "physics_properties": {
+                            "initial_velocity_m_s": [1.0, 0.0, 0.0],
+                            "collision_enabled": True,
+                            "simulate_physics": True,
+                            "collision_geometry": {
+                                "shape": "sphere",
+                                "size_m": [0.2, 0.2, 0.2],
+                                "local_center_offset_m": [0.0, 0.0, 0.0],
+                                "world_center_m": [0.0, 0.0, 0.0],
+                            },
+                        },
                     }
                 ],
                 "precomputed_trajectory": [],
@@ -759,6 +793,38 @@ class RunQualityTests(unittest.TestCase):
                 "studio_runtime_scene": {"path": str(run_dir / "studio_runtime_scene.json")},
                 "runtime_initial_transforms": {
                     "ball_a": {"position_cm": [0.0, 0.0, 0.0], "rotation_degrees": [0.0, 0.0, 0.0]}
+                },
+                "runtime_binding_snapshot": {
+                    "schema_version": "harness_ue_runtime_binding_snapshot_v1",
+                    "capture_phase": "pre_simulation",
+                    "objects": [{
+                        "object_id": "ball_a",
+                        "world_transform": {
+                            "position_m": [0.0, 0.0, 0.0],
+                            "rotation_deg": [0.0, 0.0, 0.0],
+                        },
+                        "asset": {
+                            "render_mesh_path": "/Engine/BasicShapes/Sphere.Sphere",
+                            "collision_mesh_path": "/Engine/BasicShapes/Sphere.Sphere",
+                            "asset_id": None,
+                            "sha256": None,
+                            "binding_metadata_registered": True,
+                        },
+                        "mesh_component": {
+                            "registered": True,
+                            "visible": True,
+                            "participates_in_rendering": True,
+                        },
+                        "visible": True,
+                        "collision_enabled": True,
+                        "simulate_physics": True,
+                        "collision_geometry": {
+                            "shape": "sphere",
+                            "size_m": [0.2, 0.2, 0.2],
+                            "local_center_offset_m": [0.0, 0.0, 0.0],
+                            "world_center_m": [0.0, 0.0, 0.0],
+                        },
+                    }],
                 },
                 "chaos_runtime": {
                     "controls": {

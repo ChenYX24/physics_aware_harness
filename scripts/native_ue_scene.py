@@ -3010,16 +3010,18 @@ def sync_runtime_visuals(actors: dict) -> None:
         try:
             visual.set_actor_location(physics_actor.get_actor_location(), False, False)
             visual.set_actor_rotation(physics_actor.get_actor_rotation(), False)
-            # Provider meshes commonly keep an authored pivot at their base or
-            # at an arbitrary modelling origin.  The controlled collision mesh
-            # is centred on the CaseSpec pose, so copying actor transforms alone
-            # makes the visible mesh orbit vertically as the rigid body rotates.
-            # Re-centre the rendered bounds after applying the current rotation;
-            # this preserves authored scale/materials while keeping visual and
-            # collision geometry on the same physical body every frame.
+            # The visual bounds center may intentionally differ from the
+            # declared collision center. Apply that compiled local offset after
+            # rotation; do not infer alignment from either mesh's bounds.
             physics_origin, _ = actor_bounds(physics_actor)
             visual_origin, _ = actor_bounds(visual)
-            center_delta = physics_origin - visual_origin
+            local_offset = (actors.get("visual_center_offsets_cm") or {}).get(actor_id) or [0.0, 0.0, 0.0]
+            local_vector = unreal.Vector(*[float(value) for value in local_offset[:3]])
+            try:
+                world_offset = physics_actor.get_actor_transform().transform_vector_no_scale(local_vector)
+            except Exception:
+                world_offset = local_vector
+            center_delta = physics_origin + world_offset - visual_origin
             visual.set_actor_location(visual.get_actor_location() + center_delta, False, False)
         except Exception:
             pass
@@ -4871,7 +4873,7 @@ def runtime_desired_extent_cm(obj: dict) -> float:
 def normalize_runtime_actor(actor, obj: dict) -> tuple[unreal.Vector, unreal.Vector]:
     origin, extent = actor_bounds(actor)
     params = obj.get("params") if isinstance(obj.get("params"), dict) else {}
-    if params.get("preserve_authored_scale") is True:
+    if params.get("preserve_authored_scale") is True or params.get("compiled_collision_geometry") is True:
         return origin, extent
     current_extent = max_axis(extent)
     if current_extent > 0.01:
@@ -6369,6 +6371,7 @@ def setup_scene(runtime_scene: dict | None = None):
     if runtime_scene:
         runtime_actors = {}
         runtime_visual_actors = {}
+        runtime_visual_center_offsets_cm = {}
         runtime_actor_bounds = {}
         runtime_pose_registrations = {}
         runtime_initial_transforms = {}
@@ -6409,7 +6412,8 @@ def setup_scene(runtime_scene: dict | None = None):
                 if not (
                     isinstance(visual_scale, list) and len(visual_scale) >= 3
                 ) and not (obj.get("params") or {}).get("preserve_visual_authored_scale"):
-                    normalize_runtime_actor(visual, obj)
+                    visual_params = {**(obj.get("params") or {}), "compiled_collision_geometry": False}
+                    normalize_runtime_actor(visual, {**obj, "params": visual_params})
                 visual.set_actor_enable_collision(False)
                 component = actor_runtime_component(visual)
                 if component:
@@ -6428,12 +6432,20 @@ def setup_scene(runtime_scene: dict | None = None):
                         pass
                     component.set_simulate_physics(False)
                 explicit_visual_appearance = apply_explicit_runtime_visual_appearance(obj, visual, materials)
+                register_binding_metadata(obj, visual)
                 collision_component = actor_runtime_component(physics_actor)
                 if collision_component:
                     collision_component.set_visibility(False, True)
                     collision_component.set_hidden_in_game(True, True)
                 runtime_visual_actors[str(obj["id"])] = visual
-                sync_runtime_visuals({**runtime_actors, str(obj["id"]): physics_actor, "visual_actors": runtime_visual_actors})
+                local_offset_m = (obj.get("params") or {}).get("visual_local_bounds_center_from_collision_m") or [0.0, 0.0, 0.0]
+                runtime_visual_center_offsets_cm[str(obj["id"])] = [float(value) * 100.0 for value in local_offset_m[:3]]
+                sync_runtime_visuals({
+                    **runtime_actors,
+                    str(obj["id"]): physics_actor,
+                    "visual_actors": runtime_visual_actors,
+                    "visual_center_offsets_cm": runtime_visual_center_offsets_cm,
+                })
                 for entry in spawned_assets:
                     if entry.get("label") == obj["id"]:
                         entry["collision_mesh"] = entry.get("mesh")
@@ -6443,6 +6455,178 @@ def setup_scene(runtime_scene: dict | None = None):
                         break
             except Exception as exc:
                 write_progress_marker("runtime_visual_fallback", f"{obj.get('id')}:{exc}")
+
+        def apply_compiled_visibility(obj: dict, physics_actor) -> None:
+            if (obj.get("params") or {}).get("visible") is not False:
+                return
+            physics_actor.set_actor_hidden_in_game(True)
+            try:
+                physics_actor.set_is_temporarily_hidden_in_editor(True)
+            except Exception:
+                pass
+            component = actor_runtime_component(physics_actor)
+            if component:
+                component.set_visibility(False, True)
+                component.set_hidden_in_game(True, True)
+
+        def register_binding_metadata(obj: dict, actor) -> None:
+            params = obj.get("params") if isinstance(obj.get("params"), dict) else {}
+            tags = []
+            for key, value in (
+                ("asset_id", params.get("expected_asset_id")),
+                ("sha256", params.get("expected_asset_sha256")),
+            ):
+                if value is not None:
+                    tags.append(unreal.Name(f"harness.{key}={value}"))
+            try:
+                actor.set_editor_property("tags", tags)
+            except Exception:
+                pass
+
+        def registered_binding_metadata(actor) -> dict:
+            result = {"asset_id": None, "sha256": None}
+            try:
+                tags = actor.get_editor_property("tags") or []
+            except Exception:
+                tags = []
+            for raw_tag in tags:
+                tag = str(raw_tag)
+                for key in result:
+                    prefix = f"harness.{key}="
+                    if tag.startswith(prefix):
+                        result[key] = tag[len(prefix):]
+            return result
+
+        def component_mesh_path(component) -> str | None:
+            if not component:
+                return None
+            for property_name in ("static_mesh", "skeletal_mesh", "skeletal_mesh_asset"):
+                try:
+                    asset = component.get_editor_property(property_name)
+                except Exception:
+                    asset = None
+                if asset:
+                    try:
+                        return str(asset.get_path_name())
+                    except Exception:
+                        return str(asset)
+            return None
+
+        def component_registered(component) -> bool:
+            if not component:
+                return False
+            try:
+                return bool(component.is_registered())
+            except Exception:
+                try:
+                    return bool(component.get_editor_property("registered"))
+                except Exception:
+                    return False
+
+        def runtime_binding_snapshot_for(obj: dict, physics_actor, physics_detail: dict) -> dict:
+            object_id = str(obj.get("id") or "")
+            params = obj.get("params") if isinstance(obj.get("params"), dict) else {}
+            properties = obj.get("physics_properties") if isinstance(obj.get("physics_properties"), dict) else {}
+            visual_actor = runtime_visual_actors.get(object_id)
+            render_actor = visual_actor or physics_actor
+            render_component = actor_runtime_component(render_actor)
+            collision_component = actor_runtime_component(physics_actor)
+            location = physics_actor.get_actor_location()
+            rotation = physics_actor.get_actor_rotation()
+            collision_origin, _ = actor_bounds(physics_actor)
+            component_scale = collision_component.get_component_scale() if collision_component else unreal.Vector(0.0, 0.0, 0.0)
+            collision_geometry = properties.get("collision_geometry") if isinstance(properties.get("collision_geometry"), dict) else None
+            binding_metadata = registered_binding_metadata(render_actor)
+            collision_mesh_path = component_mesh_path(collision_component) if physics_detail.get("collision_enabled") else None
+            actual_world_center_m = [
+                (collision_origin.x - scene_origin.x) / 100.0,
+                (collision_origin.y - scene_origin.y) / 100.0,
+                (collision_origin.z - scene_origin.z) / 100.0,
+            ]
+            declared_object_position_m = params.get("declared_object_position_m") or actual_world_center_m
+            world_offset_m = [
+                actual_world_center_m[index] - float(declared_object_position_m[index])
+                for index in range(3)
+            ]
+            pitch, yaw, roll = [math.radians(value) for value in (rotation.pitch, rotation.yaw, rotation.roll)]
+            cp, sp, cy, sy, cr, sr = math.cos(pitch), math.sin(pitch), math.cos(yaw), math.sin(yaw), math.cos(roll), math.sin(roll)
+            local_axes = [
+                [cy * cp, sy * cp, -sp],
+                [cy * sp * sr - sy * cr, sy * sp * sr + cy * cr, cp * sr],
+                [cy * sp * cr + sy * sr, sy * sp * cr - cy * sr, cp * cr],
+            ]
+            actual_local_offset_m = [
+                sum(world_offset_m[component] * local_axes[axis][component] for component in range(3))
+                for axis in range(3)
+            ]
+            actual_collision_shape = {
+                "/Engine/BasicShapes/Cube.Cube": "box",
+                "/Engine/BasicShapes/Sphere.Sphere": "sphere",
+                "/Engine/BasicShapes/Cylinder.Cylinder": "cylinder",
+            }.get(collision_mesh_path)
+            visible = params.get("visible") is not False
+            render_registered = component_registered(render_component)
+            try:
+                component_visible = bool(render_component.is_visible()) if render_component else False
+            except Exception:
+                try:
+                    component_visible = bool(render_component.get_editor_property("visible")) if render_component else False
+                except Exception:
+                    component_visible = False
+            try:
+                actor_hidden = bool(render_actor.get_actor_hidden_in_game())
+            except Exception:
+                try:
+                    actor_hidden = bool(render_actor.get_editor_property("hidden"))
+                except Exception:
+                    actor_hidden = False
+            try:
+                component_hidden = bool(render_component.get_editor_property("hidden_in_game")) if render_component else True
+            except Exception:
+                component_hidden = False
+            participates_in_rendering = component_visible and not component_hidden and not actor_hidden
+            return {
+                "object_id": object_id,
+                "capture_phase": "pre_simulation",
+                "world_transform": {
+                    "position_m": [
+                        (location.x - scene_origin.x) / 100.0,
+                        (location.y - scene_origin.y) / 100.0,
+                        (location.z - scene_origin.z) / 100.0,
+                    ],
+                    "rotation_deg": [rotation.pitch, rotation.yaw, rotation.roll],
+                },
+                "asset": {
+                    "static_mesh_path": component_mesh_path(render_component),
+                    "render_mesh_path": component_mesh_path(render_component) if visible else None,
+                    "collision_mesh_path": collision_mesh_path,
+                    "asset_id": binding_metadata.get("asset_id"),
+                    "sha256": binding_metadata.get("sha256"),
+                    "binding_metadata_registered": binding_metadata == {
+                        "asset_id": params.get("expected_asset_id"),
+                        "sha256": params.get("expected_asset_sha256"),
+                    },
+                },
+                "mesh_component": {
+                    "registered": render_registered,
+                    "visible": component_visible,
+                    "hidden_in_game": component_hidden,
+                    "participates_in_rendering": participates_in_rendering,
+                },
+                "visible": participates_in_rendering,
+                "collision_enabled": bool(physics_detail.get("collision_enabled")),
+                "simulate_physics": bool(physics_detail.get("simulate_physics")),
+                "collision_geometry": (
+                    {
+                        "shape": actual_collision_shape,
+                        "size_m": [abs(component_scale.x), abs(component_scale.y), abs(component_scale.z)],
+                        "local_center_offset_m": actual_local_offset_m,
+                        "world_center_m": actual_world_center_m,
+                    }
+                    if collision_geometry is not None and physics_detail.get("collision_enabled")
+                    else None
+                ),
+            }
 
         def is_runtime_support_surface(obj):
             params = obj.get("params") if isinstance(obj.get("params"), dict) else {}
@@ -6535,24 +6719,6 @@ def setup_scene(runtime_scene: dict | None = None):
             )
             return actor_bounds(actor)
 
-        def align_runtime_support_top(obj, actor, origin, extent):
-            """Keep the CaseSpec support z semantic (top surface), independent of mesh pivot."""
-            support_top_m = (obj.get("params") or {}).get("support_top_m")
-            if support_top_m is None:
-                return origin, extent
-            desired_top_cm = scene_origin.z + float(support_top_m) * 100.0
-            current_top_cm = origin.z + extent.z
-            delta_cm = desired_top_cm - current_top_cm
-            if abs(delta_cm) <= 0.01:
-                return origin, extent
-            location = actor.get_actor_location()
-            actor.set_actor_location(
-                unreal.Vector(location.x, location.y, location.z + delta_cm),
-                False,
-                False,
-            )
-            return actor_bounds(actor)
-
         if STAGE_HELPERS and lighting_enabled(lighting_controls, "stage_helpers") and selected_map.get("name") == "StudioRuntimeBlank":
             stage_helper_actors = spawn_runtime_stage_helpers(editor, runtime_scene, scene_origin, materials)
         if (
@@ -6569,6 +6735,7 @@ def setup_scene(runtime_scene: dict | None = None):
                 obj.get("initial_position_m", [0.0, 0.0, 0.0]),
                 obj.get("rotation_degrees", [0.0, 0.0, 0.0]),
             )
+            register_binding_metadata(obj, actor)
             runtime_actors[obj["id"]] = actor
             origin, extent = normalize_runtime_actor(actor, obj)
             desired_position = ue_vec_from_meters(
@@ -6583,8 +6750,6 @@ def setup_scene(runtime_scene: dict | None = None):
                 runtime_pose_registrations,
             )
             origin, extent = maybe_fit_support_to_dynamic_plan(obj, actor, origin, extent)
-            if is_runtime_support_surface(obj):
-                origin, extent = align_runtime_support_top(obj, actor, origin, extent)
             runtime_actor_bounds[obj["id"]] = {"origin": [origin.x, origin.y, origin.z], "extent": [extent.x, extent.y, extent.z]}
             if obj.get("behavior") in {"domino_tip", "friction_slide"}:
                 location = actor.get_actor_location()
@@ -6596,6 +6761,11 @@ def setup_scene(runtime_scene: dict | None = None):
                 support_surfaces.append({"id": obj.get("id"), "origin": origin, "extent": extent})
             record_runtime_initial_transform(obj["id"], actor)
             physics_detail = configure_runtime_physics(actor, obj, "static", physics_controls)
+            add_runtime_visual(obj, actor)
+            apply_compiled_visibility(obj, actor)
+            if str(obj["id"]) in runtime_visual_actors:
+                physics_detail["collision_mesh"] = str(obj.get("ue5_path") or "")
+                physics_detail["visual_mesh"] = str((obj.get("params") or {}).get("visual_ue5_path") or "")
             chaos_runtime["actors"].append(physics_detail)
             record_runtime_actor_physics(obj["id"], physics_detail)
             record_runtime_actor_detail(obj["id"], actor, origin, extent)
@@ -6607,6 +6777,7 @@ def setup_scene(runtime_scene: dict | None = None):
                 obj.get("initial_position_m", [0.0, 0.0, 0.0]),
                 obj.get("rotation_degrees", [0.0, 0.0, 0.0]),
             )
+            register_binding_metadata(obj, actor)
             runtime_actors[obj["id"]] = actor
             origin, extent = normalize_runtime_actor(actor, obj)
             runtime_actor_bounds[obj["id"]] = {"origin": [origin.x, origin.y, origin.z], "extent": [extent.x, extent.y, extent.z]}
@@ -6640,6 +6811,7 @@ def setup_scene(runtime_scene: dict | None = None):
             record_runtime_initial_transform(obj["id"], actor)
             physics_detail = configure_runtime_physics(actor, obj, "dynamic", physics_controls)
             add_runtime_visual(obj, actor)
+            apply_compiled_visibility(obj, actor)
             if str(obj["id"]) in runtime_visual_actors:
                 physics_detail["collision_mesh"] = str(obj.get("ue5_path") or "")
                 physics_detail["visual_mesh"] = str((obj.get("params") or {}).get("visual_ue5_path") or "")
@@ -6647,6 +6819,27 @@ def setup_scene(runtime_scene: dict | None = None):
             record_runtime_actor_physics(obj["id"], physics_detail)
             record_runtime_actor_detail(obj["id"], actor, origin, extent)
             write_progress_marker("setup_scene_spawn_dynamic_done", obj.get("id"))
+        physics_details_by_id = {
+            str(item.get("id") or ""): item
+            for item in chaos_runtime["actors"]
+            if isinstance(item, dict) and item.get("id")
+        }
+        runtime_binding_snapshot = {
+            "schema_version": "harness_ue_runtime_binding_snapshot_v1",
+            "capture_phase": "pre_simulation",
+            "objects": [
+                runtime_binding_snapshot_for(
+                    obj,
+                    runtime_actors[str(obj["id"])],
+                    physics_details_by_id.get(str(obj["id"]), {}),
+                )
+                for obj in [
+                    *(runtime_scene.get("static_objects") or []),
+                    *(runtime_scene.get("dynamic_objects") or []),
+                ]
+                if str(obj.get("id") or "") in runtime_actors
+            ],
+        }
         write_progress_marker("setup_scene_runtime_actors_done", f"count={len(runtime_actors)}")
         write_progress_marker("setup_scene_runtime_camera_pose_start")
         camera_location, camera_target, camera_extent = runtime_camera_pose(runtime_scene, runtime_actors, selected_map, scene_origin, editor)
@@ -6699,6 +6892,7 @@ def setup_scene(runtime_scene: dict | None = None):
         return {
             **runtime_actors,
             "visual_actors": runtime_visual_actors,
+            "visual_center_offsets_cm": runtime_visual_center_offsets_cm,
             "capture": capture,
             "capture_comp": capture_comp,
             "render_target": render_target,
@@ -6717,6 +6911,7 @@ def setup_scene(runtime_scene: dict | None = None):
             "runtime_pose_registrations": runtime_pose_registrations,
             "runtime_ground_offsets": runtime_ground_offsets,
             "runtime_initial_transforms": runtime_initial_transforms,
+            "runtime_binding_snapshot": runtime_binding_snapshot,
             "chaos_runtime": chaos_runtime,
             "physics_controls": physics_controls,
             "camera_pose": {
@@ -9562,6 +9757,7 @@ def start_highres_viewport_capture(
         "runtime_pose_registrations": actors.get("runtime_pose_registrations", {}),
         "runtime_ground_offsets": actors.get("runtime_ground_offsets", {}),
         "runtime_initial_transforms": actors.get("runtime_initial_transforms", {}),
+        "runtime_binding_snapshot": actors.get("runtime_binding_snapshot", {}),
         "chaos_runtime": actors.get("chaos_runtime", {}),
         "removed_map_actors": actors.get("removed_map_actors", []),
         "background_stage_actors": actors.get("background_stage_actors", []),
@@ -10296,6 +10492,7 @@ def main():
         "runtime_pose_registrations": actors.get("runtime_pose_registrations", {}),
         "runtime_ground_offsets": actors.get("runtime_ground_offsets", {}),
         "runtime_initial_transforms": actors.get("runtime_initial_transforms", {}),
+        "runtime_binding_snapshot": actors.get("runtime_binding_snapshot", {}),
         "chaos_runtime": actors.get("chaos_runtime", {}),
         "removed_map_actors": actors.get("removed_map_actors", []),
         "background_stage_actors": actors.get("background_stage_actors", []),

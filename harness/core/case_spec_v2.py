@@ -57,6 +57,7 @@ VERIFICATION_ASSERTION_TYPES = {
 }
 LICENSE_TIERS = {"local_preview", "reference"}
 BODY_TYPES = {"dynamic", "static", "kinematic"}
+COLLISION_GEOMETRY_SHAPES = {"box", "sphere", "cylinder"}
 GEOMETRY_SCALE_POLICIES = {"preserve_authored", "fit_uniform_to_approx_size"}
 BACKEND_SOLVERS = {"fallback", "genesis_fem", "genesis_sph", "taichi_cloth", "ue"}
 BACKEND_SOLVER_CAPABILITIES = {
@@ -248,6 +249,7 @@ def normalize_case_spec_v2(data: Mapping[str, Any]) -> dict[str, Any]:
         representation = obj.setdefault("visual_representation", {})
         if isinstance(representation, dict):
             representation.setdefault("source", "asset")
+            representation.setdefault("visible", True)
         asset = obj.get("asset")
         for request in asset_requests(asset):
             acquisition = request.setdefault("acquisition", {})
@@ -538,6 +540,67 @@ def collect_case_spec_v2_issues(
                 _issue(issues, f"{path}/physics/collision_required", "invalid_type", "must be boolean")
             if physics.get("use_ccd") is not None and not isinstance(physics.get("use_ccd"), bool):
                 _issue(issues, f"{path}/physics/use_ccd", "invalid_type", "must be boolean")
+            collision_geometry = physics.get("collision_geometry")
+            if collision_geometry is not None:
+                collision_geometry = _mapping(
+                    collision_geometry,
+                    f"{path}/physics/collision_geometry",
+                    issues,
+                )
+                unknown_collision_fields = sorted(
+                    str(key)
+                    for key in collision_geometry
+                    if str(key) not in {"shape", "size_m", "local_center_offset_m"}
+                )
+                if unknown_collision_fields:
+                    _issue(
+                        issues,
+                        f"{path}/physics/collision_geometry",
+                        "unknown_collision_geometry_fields",
+                        f"unsupported fields: {', '.join(unknown_collision_fields)}",
+                    )
+                collision_shape = str(collision_geometry.get("shape") or "")
+                if collision_shape not in COLLISION_GEOMETRY_SHAPES:
+                    _issue(
+                        issues,
+                        f"{path}/physics/collision_geometry/shape",
+                        "invalid_collision_geometry_shape",
+                        f"must be one of {sorted(COLLISION_GEOMETRY_SHAPES)}",
+                    )
+                collision_size = _positive_vec3(
+                    collision_geometry.get("size_m"),
+                    f"{path}/physics/collision_geometry/size_m",
+                    issues,
+                )
+                if collision_geometry.get("local_center_offset_m") is not None:
+                    _finite_vec3(
+                        collision_geometry.get("local_center_offset_m"),
+                        f"{path}/physics/collision_geometry/local_center_offset_m",
+                        issues,
+                    )
+                if collision_shape == "sphere" and collision_size and not _components_equal(collision_size):
+                    _issue(
+                        issues,
+                        f"{path}/physics/collision_geometry/size_m",
+                        "invalid_sphere_collision_size",
+                        "sphere requires x=y=z and the value is its diameter",
+                    )
+                if collision_shape == "cylinder" and collision_size and not math.isclose(
+                    collision_size[0], collision_size[1], rel_tol=0.0, abs_tol=1e-9
+                ):
+                    _issue(
+                        issues,
+                        f"{path}/physics/collision_geometry/size_m",
+                        "invalid_cylinder_collision_size",
+                        "cylinder requires x=y as its diameter and z as its height",
+                    )
+                if physics.get("collision_required") is False:
+                    _issue(
+                        issues,
+                        f"{path}/physics/collision_geometry",
+                        "collision_geometry_without_collision",
+                        "collision_geometry cannot be declared when collision_required is false",
+                    )
         initial = _mapping(obj.get("initial_state"), f"{path}/initial_state", issues, required=False)
         for field in ("position_m", "rotation_deg", "linear_velocity_m_s", "angular_velocity_rad_s"):
             if initial.get(field) is not None:
@@ -567,6 +630,13 @@ def collect_case_spec_v2_issues(
                 f"{path}/visual_representation/source",
                 "invalid_visual_representation_source",
                 "must be asset, solver_generated, or none",
+            )
+        if not isinstance(representation.get("visible"), bool):
+            _issue(
+                issues,
+                f"{path}/visual_representation/visible",
+                "invalid_type",
+                "must be boolean",
             )
         if representation_source == "solver_generated" and not isinstance(obj.get("solver"), Mapping):
             _issue(
@@ -826,6 +896,13 @@ def visual_representation_source(obj: Mapping[str, Any]) -> str:
     return str(representation.get("source") or "asset")
 
 
+def visual_representation_visible(obj: Mapping[str, Any]) -> bool:
+    representation = obj.get("visual_representation")
+    if not isinstance(representation, Mapping):
+        return True
+    return representation.get("visible") is not False
+
+
 def stable_case_spec_digest(data: Mapping[str, Any]) -> str:
     payload = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -851,7 +928,10 @@ def _project_object(
         "initial_rotation_deg": _vec3_or_default(initial.get("rotation_deg"), [0.0, 0.0, 0.0]),
         "initial_velocity_m_s": _vec3_or_default(initial.get("linear_velocity_m_s"), [0.0, 0.0, 0.0]),
         "asset_query": str(primary.get("description") or obj.get("role") or obj.get("id") or "asset"),
-        "visual_representation": {"source": visual_representation_source(obj)},
+        "visual_representation": {
+            "source": visual_representation_source(obj),
+            "visible": visual_representation_visible(obj),
+        },
     }
     for appearance_field in ("color_rgb", "fixed_material_color"):
         if obj.get(appearance_field) is not None:
@@ -885,6 +965,16 @@ def _project_object(
         projected["body_type"] = body_type
     if physics.get("collision_required") is not None:
         projected["collision_required"] = bool(physics["collision_required"])
+    if isinstance(physics.get("collision_geometry"), Mapping):
+        collision_geometry = physics["collision_geometry"]
+        projected["collision_geometry"] = {
+            "shape": str(collision_geometry.get("shape") or ""),
+            "size_m": [float(value) for value in collision_geometry.get("size_m") or []],
+            "local_center_offset_m": _vec3_or_default(
+                collision_geometry.get("local_center_offset_m"),
+                [0.0, 0.0, 0.0],
+            ),
+        }
     if (
         "use_ccd" not in projected
         and body_type == "dynamic"
@@ -2022,6 +2112,10 @@ def _positive_vec3(value: Any, path: str, issues: list[ValidationIssue]) -> list
         _issue(issues, path, "invalid_vector", "all components must be positive")
         return []
     return values
+
+
+def _components_equal(values: list[float], *, tolerance: float = 1e-9) -> bool:
+    return all(math.isclose(values[0], value, rel_tol=0.0, abs_tol=tolerance) for value in values[1:])
 
 
 def _validate_initial_kinetic_energy(

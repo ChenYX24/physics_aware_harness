@@ -16,6 +16,85 @@ class StaticScenePlacementTests(unittest.TestCase):
     def load_case(self, relative_path: str) -> dict:
         return json.loads((ROOT / relative_path).read_text(encoding="utf-8"))
 
+    def test_declared_collision_offset_rotates_with_object_and_drives_preflight(self) -> None:
+        from harness.planning.static_scene_builder import build_static_scene_layout
+
+        case = {
+            "case_id": "rotated_collision_offset",
+            "capability_id": "rigid_body_dynamics",
+            "objects": [
+                {
+                    "id": "offset_box",
+                    "role": "dynamic body",
+                    "shape": "box",
+                    "size_m": [4.0, 4.0, 4.0],
+                    "initial_position_m": [0.0, 0.0, 0.0],
+                    "initial_rotation_deg": [0.0, 90.0, 0.0],
+                    "body_type": "dynamic",
+                    "collision_required": True,
+                    "collision_geometry": {
+                        "shape": "box",
+                        "size_m": [0.2, 0.2, 0.2],
+                        "local_center_offset_m": [1.0, 0.0, 0.0],
+                    },
+                },
+                {
+                    "id": "target",
+                    "role": "dynamic body",
+                    "shape": "box",
+                    "size_m": [0.2, 0.2, 0.2],
+                    "initial_position_m": [0.0, 1.05, 0.0],
+                    "body_type": "dynamic",
+                    "collision_required": True,
+                    "collision_geometry": {
+                        "shape": "box",
+                        "size_m": [0.2, 0.2, 0.2],
+                        "local_center_offset_m": [0.0, 0.0, 0.0],
+                    },
+                },
+            ],
+        }
+
+        layout = build_static_scene_layout(case)
+        offset_geometry = layout["object_nodes"][0]["physics"]["collision_geometry"]
+        overlap = layout["overlap_pairs"][0]
+
+        self.assertEqual(offset_geometry["world_center_m"], [0.0, 1.0, 0.0])
+        self.assertEqual(overlap["world_collision_centers_m"], [[0.0, 1.0, 0.0], [0.0, 1.05, 0.0]])
+        self.assertAlmostEqual(overlap["penetration_depth_m"], 0.15, places=6)
+        self.assertEqual(overlap["tolerance_m"], 0.002)
+        self.assertEqual(len(overlap["minimum_translation_axis"]), 3)
+
+    def test_initial_preflight_has_no_static_or_visibility_exemption(self) -> None:
+        from harness.planning.static_scene_builder import build_static_scene_layout
+
+        objects = []
+        for object_id, visible in (("hidden_static", False), ("visible_static", True)):
+            objects.append({
+                "id": object_id,
+                "role": "support",
+                "shape": "box",
+                "size_m": [1.0, 1.0, 1.0],
+                "initial_position_m": [0.0, 0.0, 0.0],
+                "body_type": "static",
+                "collision_required": True,
+                "visual_representation": {"source": "asset", "visible": visible},
+                "collision_geometry": {
+                    "shape": "box",
+                    "size_m": [0.2, 0.2, 0.2],
+                    "local_center_offset_m": [0.0, 0.0, 0.0],
+                },
+            })
+
+        layout = build_static_scene_layout({
+            "case_id": "static_hidden_overlap",
+            "capability_id": "rigid_body_dynamics",
+            "objects": objects,
+        })
+
+        self.assertEqual(len(layout["overlap_pairs"]), 1)
+        self.assertEqual(layout["overlap_pairs"][0]["object_ids"], ["hidden_static", "visible_static"])
+
     def test_billiards_case_builds_valid_static_scene_layout(self) -> None:
         from harness.assets.asset_resolver import resolve_asset_intents
         from harness.planning.static_scene_builder import build_static_scene_layout

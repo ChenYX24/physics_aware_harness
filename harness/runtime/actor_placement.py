@@ -57,6 +57,12 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
     role = str(node.get("role") or "")
     physics = node.get("physics") if isinstance(node.get("physics"), dict) else {}
     asset_binding = node.get("asset_binding") if isinstance(node.get("asset_binding"), dict) else {}
+    visual_representation = (
+        node.get("visual_representation")
+        if isinstance(node.get("visual_representation"), dict)
+        else {}
+    )
+    visible = visual_representation.get("visible") is not False
     physics_critical = bool(node.get("physics_critical"))
     is_support = is_support_role(role)
     is_field = str(node.get("shape") or "").casefold() in {"fixed_point", "constraint"}
@@ -70,9 +76,20 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
         and (physics.get("proxy") or asset_binding.get("fallback_reason"))
     )
     ue_path = asset_binding.get("selected_asset_ue_path")
-    collider = str(physics.get("collider") or node.get("shape") or "box").casefold()
+    collision_geometry = (
+        physics.get("collision_geometry")
+        if isinstance(physics.get("collision_geometry"), dict)
+        else None
+    )
+    collider = str((collision_geometry or {}).get("shape") or physics.get("collider") or node.get("shape") or "box").casefold()
     collision_required = physics.get("collision_required")
-    collision_enabled = bool(physics_critical and state_kind == "rigid" and not is_field and collision_required is not False)
+    collision_enabled = bool(
+        physics_critical
+        and state_kind == "rigid"
+        and not is_field
+        and collision_required is not False
+        and collision_geometry is not None
+    )
     analytic_primitive = (
         "sphere"
         if "sphere" in collider
@@ -88,14 +105,14 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
     controlled_analytic_collision = bool(
         collision_enabled
         and not required_asset_unresolved
-        and (not ue_path or analytic_primitive is not None)
+        and analytic_primitive is not None
     )
     collision_geometry_source = (
         "none"
         if not collision_enabled
         else "unbound_required_asset"
         if required_asset_unresolved and not ue_path
-        else f"analytic_{analytic_primitive or collider}"
+        else str((collision_geometry or {}).get("source") or f"analytic_{analytic_primitive or collider}")
         if controlled_analytic_collision
         else "selected_asset"
     )
@@ -103,13 +120,24 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
         "unbound_required_asset"
         if required_asset_unresolved and not ue_path
         else "visual_proxy"
-        if ue_path and controlled_analytic_collision and simulate_physics
+        if visible and ue_path and controlled_analytic_collision
         else "analytic_proxy"
         if controlled_analytic_collision
         else "collision_and_visual"
         if ue_path
         else "analytic_proxy"
     )
+    object_transform = node.get("transform") or {}
+    collision_transform = dict(object_transform)
+    if collision_geometry is not None:
+        collision_transform["position_m"] = collision_geometry.get("world_center_m")
+        collision_transform["scale"] = [1.0, 1.0, 1.0]
+    visual_center_offset = (node.get("bounds") or {}).get("local_center_offset_m") or [0.0, 0.0, 0.0]
+    collision_center_offset = (collision_geometry or {}).get("local_center_offset_m") or [0.0, 0.0, 0.0]
+    relative_visual_center_offset = [
+        float(visual_center_offset[index]) - float(collision_center_offset[index])
+        for index in range(3)
+    ]
     return {
         "object_id": object_id,
         "runtime_actor_id": runtime_actor_id(object_id),
@@ -118,8 +146,14 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
         "physics_critical": physics_critical,
         "physics_graph_member": bool(node.get("physics_graph_member")),
         "ue_class": ue_class_for(node, is_field=is_field),
-        "transform": node.get("transform") or {},
+        "transform": collision_transform,
+        "declared_object_transform": object_transform,
         "bounds": node.get("bounds") or {},
+        "visual_representation": {
+            "source": str(visual_representation.get("source") or "asset"),
+            "visible": visible,
+            "local_bounds_center_from_collision_m": relative_visual_center_offset,
+        },
         "asset": {
             "selected_asset_id": asset_binding.get("selected_asset_id"),
             "ue_path": ue_path,
@@ -153,6 +187,7 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
             "collision_enabled": collision_enabled,
             "mass_kg": physics.get("mass_kg"),
             "collider": physics.get("collider"),
+            "collision_geometry": collision_geometry,
             "collision_geometry_source": collision_geometry_source,
             "collision_geometry_verification": (
                 "not_applicable"

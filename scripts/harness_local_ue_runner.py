@@ -423,6 +423,12 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
         transform = binding.get("transform") if isinstance(binding.get("transform"), dict) else {}
         bounds = binding.get("bounds") if isinstance(binding.get("bounds"), dict) else {}
         asset = binding.get("asset") if isinstance(binding.get("asset"), dict) else {}
+        visual_representation = (
+            binding.get("visual_representation")
+            if isinstance(binding.get("visual_representation"), dict)
+            else {}
+        )
+        visible = visual_representation.get("visible") is not False
         fit_dynamic_plan = case_object.get("fit_dynamic_plan")
         params = {
             "runtime_actor_id": binding.get("runtime_actor_id"),
@@ -440,6 +446,19 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
             "visual_material_path": case_object.get("visual_material_path"),
             "intact_visual_material_path": case_object.get("intact_visual_material_path"),
             "intact_visual_scale": case_object.get("intact_visual_scale"),
+            "visible": visible,
+            "visual_local_bounds_center_from_collision_m": visual_representation.get(
+                "local_bounds_center_from_collision_m"
+            ) or [0.0, 0.0, 0.0],
+            "expected_asset_id": asset.get("selected_asset_id"),
+            "expected_asset_sha256": asset.get("sha256"),
+            "expected_visual_mesh_path": asset.get("ue_path") if visible else None,
+            "declared_object_position_m": list(
+                ((binding.get("declared_object_transform") or {}).get("position_m"))
+                or transform.get("position_m")
+                or [0.0, 0.0, 0.0]
+            ),
+            "compiled_collision_geometry": isinstance(physics.get("collision_geometry"), dict),
         }
         preserve_authored_scale = asset.get("preserve_authored_scale") is True
         instance_scale = asset.get("instance_scale")
@@ -463,14 +482,11 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
             params["preserve_visual_authored_scale"] = True
         elif preserve_authored_scale and runtime_usage == "visual_proxy":
             params["preserve_visual_authored_scale"] = True
-        role = str(binding.get("role") or "").casefold()
         runtime_scale = scale_for_binding(binding)
         if case_object.get("constraint_anchor_id"):
             # A body with an explicit constraint anchor must not be moved by
             # generic support fitting.
             params["fit_dynamic_plan"] = False
-        if any(token in role for token in ("support", "floor", "ground", "table", "surface")):
-            params["support_top_m"] = bounds.get("top_z")
         for key in (
             "release_time_s",
             "release_position_m",
@@ -505,12 +521,9 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
         if intact_visual_path:
             params["visual_ue5_path"] = intact_visual_path
             params["visual_asset_kind"] = str(case_object.get("intact_visual_asset_kind") or "static_mesh")
-        if (
-            physics.get("simulate_physics")
-            and runtime_usage == "visual_proxy"
-            and is_runtime_mesh_path(visual_path)
-        ):
+        if visible and not intact_visual_path and runtime_usage == "visual_proxy" and is_runtime_mesh_path(visual_path):
             params["visual_ue5_path"] = visual_path
+            params["visual_asset_kind"] = runtime_asset_kind(asset.get("asset_kind"))
             params["visual_collision_profile"] = "NoCollision"
             params["visual_simulate_physics"] = False
         runtime_physics = {
@@ -526,6 +539,7 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
             "collider": physics.get("collider"),
             "collision_geometry_source": physics.get("collision_geometry_source"),
             "collision_geometry_verification": physics.get("collision_geometry_verification"),
+            "collision_geometry": physics.get("collision_geometry"),
             "material": physics.get("material"),
             "static_friction": material.get("static_friction"),
             "dynamic_friction": material.get("dynamic_friction"),
@@ -534,6 +548,12 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
             "kinematic": bool(physics.get("kinematic")),
         }
         runtime_path = ue_path_for_binding(binding)
+        params["expected_render_mesh_path"] = (
+            str(params.get("visual_ue5_path") or runtime_path)
+            if visible
+            else None
+        )
+        params["expected_collision_mesh_path"] = runtime_path if physics.get("collision_enabled") else None
         runtime_kind = "static_mesh" if runtime_path.startswith("/Engine/BasicShapes/") else runtime_asset_kind(asset.get("asset_kind"))
         actor = runtime_object(
             object_id,
@@ -558,12 +578,14 @@ def ue_path_for_binding(binding: dict[str, Any]) -> str:
     ue_path = str(asset.get("ue_path") or "")
     physics = binding.get("physics") if isinstance(binding.get("physics"), dict) else {}
     collider = str(physics.get("collider") or "").casefold()
+    collision_geometry = physics.get("collision_geometry") if isinstance(physics.get("collision_geometry"), dict) else {}
+    collision_shape = str(collision_geometry.get("shape") or "").casefold()
     collision_geometry_source = str(physics.get("collision_geometry_source") or "").casefold()
-    if collision_geometry_source == "analytic_sphere":
+    if collision_shape == "sphere" or collision_geometry_source == "analytic_sphere":
         return "/Engine/BasicShapes/Sphere.Sphere"
-    if collision_geometry_source == "analytic_box":
+    if collision_shape == "box" or collision_geometry_source == "analytic_box":
         return "/Engine/BasicShapes/Cube.Cube"
-    if collision_geometry_source == "analytic_cylinder":
+    if collision_shape == "cylinder" or collision_geometry_source == "analytic_cylinder":
         return "/Engine/BasicShapes/Cylinder.Cylinder"
     if is_runtime_mesh_path(ue_path):
         return ue_path
@@ -587,6 +609,13 @@ def is_runtime_mesh_path(ue_path: str) -> bool:
 
 
 def scale_for_binding(binding: dict[str, Any]) -> list[float]:
+    physics = binding.get("physics") if isinstance(binding.get("physics"), dict) else {}
+    collision_geometry = physics.get("collision_geometry") if isinstance(physics.get("collision_geometry"), dict) else {}
+    collision_size = collision_geometry.get("size_m")
+    if isinstance(collision_size, list) and len(collision_size) >= 3:
+        # UE basic primitives are one meter across at scale 1.0, so the
+        # declared full dimensions are the exact component scale.
+        return [float(value) for value in collision_size[:3]]
     asset = binding.get("asset") if isinstance(binding.get("asset"), dict) else {}
     instance_scale = asset.get("instance_scale")
     if (
@@ -616,6 +645,11 @@ def positive_scale3(value: Any) -> bool:
 
 
 def desired_extent_cm_for_binding(binding: dict[str, Any]) -> float | None:
+    physics = binding.get("physics") if isinstance(binding.get("physics"), dict) else {}
+    collision_geometry = physics.get("collision_geometry") if isinstance(physics.get("collision_geometry"), dict) else {}
+    collision_size = collision_geometry.get("size_m")
+    if isinstance(collision_size, list) and len(collision_size) >= 3:
+        return max(float(value) for value in collision_size[:3]) * 50.0
     bounds = binding.get("bounds") if isinstance(binding.get("bounds"), dict) else {}
     extents = bounds.get("extents_m")
     if isinstance(extents, list) and len(extents) >= 3:

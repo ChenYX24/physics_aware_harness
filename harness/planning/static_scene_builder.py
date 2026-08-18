@@ -9,6 +9,7 @@ from harness.core.scene_layout import (
     build_object_node,
     is_support_role,
     object_position,
+    round_vec,
 )
 from harness.runtime.camera_planner import camera_plan_from_case_spec, camera_plan_to_dict
 
@@ -48,20 +49,9 @@ def build_static_scene_layout(
         )
     )
     support_relations = infer_support_relations(case_spec, nodes)
-    effective_support_map = {
-        str(relation["object_id"]): str(relation["support_id"])
-        for relation in support_relations
-        if relation.get("object_id") and relation.get("support_id")
-    }
     overlap_diagnostics: list[dict[str, Any]] = []
     overlap_pairs = find_overlap_pairs(
         nodes,
-        support_map=effective_support_map,
-        allowed_overlap_pairs={
-            frozenset((str(relation["object_id"]), str(relation["container_id"])))
-            for relation in containment_relations
-        },
-        include_static_obstacles=True,
         diagnostics=overlap_diagnostics,
     )
     return {
@@ -205,6 +195,12 @@ def translate_node_bounds(node: dict[str, Any], delta: list[float]) -> None:
     for key in ("bottom_z", "top_z"):
         if bounds.get(key) is not None:
             bounds[key] = round(float(bounds[key]) + delta[2], 6)
+    geometry = (node.get("physics") or {}).get("collision_geometry") or {}
+    center = geometry.get("world_center_m")
+    if isinstance(center, list) and len(center) >= 3:
+        geometry["world_center_m"] = round_vec(
+            [float(center[index]) + float(delta[index]) for index in range(3)]
+        )
 
 
 def support_id_for_node(node: dict[str, Any], expected: dict[str, Any], support_nodes: list[dict[str, Any]]) -> str | None:
@@ -332,77 +328,37 @@ def inclined_surface_gap(node: dict[str, Any], support_node: dict[str, Any]) -> 
 def find_overlap_pairs(
     nodes: list[dict[str, Any]],
     *,
-    support_map: dict[str, Any] | None = None,
-    allowed_overlap_pairs: set[frozenset[str]] | None = None,
-    include_static_obstacles: bool = False,
     diagnostics: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     pairs: list[dict[str, Any]] = []
-    support_map = support_map if isinstance(support_map, dict) else {}
-    allowed_overlap_pairs = allowed_overlap_pairs or set()
     collidable = [
         node
         for node in nodes
-        if node.get("physics_critical")
-        and (include_static_obstacles or not is_support_role(str(node.get("role"))))
+        if collision_enabled(node)
     ]
     for index, left in enumerate(collidable):
         for right in collidable[index + 1 :]:
-            if is_static_collidable(left) and is_static_collidable(right):
-                continue
             left_id = str(left.get("object_id") or "")
             right_id = str(right.get("object_id") or "")
-            if support_map.get(left_id) == right_id or support_map.get(right_id) == left_id:
-                continue
-            if frozenset((left_id, right_id)) in allowed_overlap_pairs:
-                continue
-            left_pos = object_position(left)
-            right_pos = object_position(right)
+            left_pos = collision_center(left)
+            right_pos = collision_center(right)
             distance = math.dist(left_pos, right_pos)
-            left_extents = conservative_world_extents(left)
-            right_extents = conservative_world_extents(right)
-            axis_thresholds = [
-                max(left_extents[axis] + right_extents[axis] - 1e-4, 0.001)
-                for axis in range(3)
-            ]
-            axis_distances = [abs(left_pos[axis] - right_pos[axis]) for axis in range(3)]
-            sphere_radii = sphere_pair_radii(left, right)
-            broad_phase_overlap = all(
-                axis_distances[axis] < axis_thresholds[axis]
-                for axis in range(3)
-            )
-            overlap_test = "axis_aligned_bounds"
-            detail: dict[str, Any] = {}
-            if sphere_radii is not None:
-                signed_margin = distance - sum(sphere_radii)
-                overlaps = signed_margin < -1e-4
-                overlap_test = "sphere_center_distance"
-                detail = {
-                    "signed_margin_m": round(signed_margin, 6),
-                    "tolerance_m": 0.0001,
-                }
-            elif broad_phase_overlap and box_pair(left, right):
-                sat = oriented_box_sat(left, right, tolerance_m=0.0001)
-                overlaps = bool(sat["overlaps"])
-                overlap_test = "oriented_box_sat"
-                detail = sat
-                if diagnostics is not None:
-                    diagnostics.append(
-                        {
-                            "object_ids": [left_id, right_id],
-                            "overlap_test": overlap_test,
-                            **detail,
-                        }
-                    )
-            else:
-                overlaps = broad_phase_overlap
+            detail = collision_pair_penetration(left, right, tolerance_m=0.002)
+            overlaps = bool(detail["overlaps"])
+            overlap_test = str(detail["overlap_test"])
+            if diagnostics is not None:
+                diagnostics.append(
+                    {
+                        "object_ids": [left_id, right_id],
+                        **detail,
+                    }
+                )
             if overlaps:
                 pairs.append(
                     {
                         "object_ids": [left["object_id"], right["object_id"]],
                         "distance_m": round(distance, 6),
-                        "axis_distances_m": [round(value, 6) for value in axis_distances],
-                        "axis_thresholds_m": [round(value, 6) for value in axis_thresholds],
+                        "world_collision_centers_m": [round_vec(left_pos), round_vec(right_pos)],
                         "overlap_test": overlap_test,
                         **detail,
                     }
@@ -410,134 +366,334 @@ def find_overlap_pairs(
     return pairs
 
 
-def is_static_collidable(node: dict[str, Any]) -> bool:
+def collision_enabled(node: dict[str, Any]) -> bool:
     physics = node.get("physics") if isinstance(node.get("physics"), dict) else {}
     return bool(
-        str(physics.get("body_type") or "").casefold() in {"static", "kinematic"}
+        node.get("physics_critical")
+        and physics.get("state_kind") != "particle"
         and physics.get("collision_required") is not False
-        and node.get("physics_critical")
+        and isinstance(physics.get("collision_geometry"), dict)
     )
 
 
-def nodes_overlap_conservative(left: dict[str, Any], right: dict[str, Any]) -> bool:
-    left_position = object_position(left)
-    right_position = object_position(right)
-    left_extents = conservative_world_extents(left)
-    right_extents = conservative_world_extents(right)
-    return all(
-        abs(left_position[axis] - right_position[axis])
-        < left_extents[axis] + right_extents[axis] - 1e-4
-        for axis in range(3)
-    )
+def collision_center(node: dict[str, Any]) -> list[float]:
+    geometry = (node.get("physics") or {}).get("collision_geometry") or {}
+    center = geometry.get("world_center_m")
+    return [float(value) for value in center[:3]] if isinstance(center, list) and len(center) >= 3 else object_position(node)
 
 
-def sphere_pair_radii(left: dict[str, Any], right: dict[str, Any]) -> tuple[float, float] | None:
-    radii: list[float] = []
-    for node in (left, right):
-        physics = node.get("physics") if isinstance(node.get("physics"), dict) else {}
-        shape = str(node.get("shape") or "").casefold()
-        collider = str(physics.get("collider") or "").casefold()
-        if "sphere" not in shape and collider != "sphere":
-            return None
-        radius = max(object_extents(node))
-        if radius <= 0.0:
-            return None
-        radii.append(radius)
-    return radii[0], radii[1]
+def collision_shape(node: dict[str, Any]) -> str:
+    geometry = (node.get("physics") or {}).get("collision_geometry") or {}
+    return str(geometry.get("shape") or "box").casefold()
 
 
-def box_pair(left: dict[str, Any], right: dict[str, Any]) -> bool:
-    for node in (left, right):
-        physics = node.get("physics") if isinstance(node.get("physics"), dict) else {}
-        if str(physics.get("collider") or "").casefold() != "box":
-            return False
-    return True
-
-
-def oriented_box_sat(
+def collision_pair_penetration(
     left: dict[str, Any],
     right: dict[str, Any],
     *,
     tolerance_m: float,
 ) -> dict[str, Any]:
+    left_shape = collision_shape(left)
+    right_shape = collision_shape(right)
+    if left_shape == right_shape == "sphere":
+        return sphere_sphere_penetration(left, right, tolerance_m=tolerance_m)
+    if {left_shape, right_shape} == {"sphere", "box"}:
+        return sphere_box_penetration(left, right, tolerance_m=tolerance_m)
+    if {left_shape, right_shape} == {"sphere", "cylinder"}:
+        return sphere_cylinder_penetration(left, right, tolerance_m=tolerance_m)
+    return convex_axis_penetration(left, right, tolerance_m=tolerance_m)
+
+
+def sphere_sphere_penetration(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    *,
+    tolerance_m: float,
+) -> dict[str, Any]:
+    delta = vector_subtract(collision_center(right), collision_center(left))
+    distance = vector_length(delta)
+    signed_margin = distance - object_extents(left)[0] - object_extents(right)[0]
+    axis = normalize_vector(delta) if distance > 1e-12 else [1.0, 0.0, 0.0]
+    return penetration_detail(
+        signed_margin,
+        axis,
+        tolerance_m=tolerance_m,
+        overlap_test="sphere_center_distance",
+        decisive_axis="center_line",
+        tested_axis_count=1,
+    )
+
+
+def sphere_box_penetration(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    *,
+    tolerance_m: float,
+) -> dict[str, Any]:
+    sphere = left if collision_shape(left) == "sphere" else right
+    box = right if sphere is left else left
+    sphere_center = collision_center(sphere)
+    box_center = collision_center(box)
+    box_axes = object_local_axes(box)
+    box_extents = object_extents(box)
+    relative = vector_subtract(sphere_center, box_center)
+    local = [dot_product(relative, axis) for axis in box_axes]
+    closest_local = [max(-box_extents[index], min(box_extents[index], local[index])) for index in range(3)]
+    closest_world = [
+        box_center[component]
+        + sum(closest_local[axis] * box_axes[axis][component] for axis in range(3))
+        for component in range(3)
+    ]
+    separation = vector_subtract(closest_world, sphere_center)
+    separation_length = vector_length(separation)
+    radius = object_extents(sphere)[0]
+    if separation_length > 1e-12:
+        signed_margin = separation_length - radius
+        axis = normalize_vector(separation)
+        decisive_axis = "sphere_to_closest_box_point"
+    else:
+        clearances = [box_extents[index] - abs(local[index]) for index in range(3)]
+        nearest_axis = min(range(3), key=lambda index: clearances[index])
+        sign = 1.0 if local[nearest_axis] >= 0.0 else -1.0
+        axis = [sign * value for value in box_axes[nearest_axis]]
+        signed_margin = -(radius + clearances[nearest_axis])
+        decisive_axis = f"box_inner_face_{nearest_axis}"
+    if sphere is right:
+        axis = [-value for value in axis]
+    return penetration_detail(
+        signed_margin,
+        axis,
+        tolerance_m=tolerance_m,
+        overlap_test="sphere_oriented_box_closest_point",
+        decisive_axis=decisive_axis,
+        tested_axis_count=1,
+    )
+
+
+def sphere_cylinder_penetration(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    *,
+    tolerance_m: float,
+) -> dict[str, Any]:
+    sphere = left if collision_shape(left) == "sphere" else right
+    cylinder = right if sphere is left else left
+    sphere_center = collision_center(sphere)
+    cylinder_center = collision_center(cylinder)
+    cylinder_axis = object_local_axes(cylinder)[2]
+    relative = vector_subtract(sphere_center, cylinder_center)
+    axial = dot_product(relative, cylinder_axis)
+    radial = vector_subtract(relative, [axial * value for value in cylinder_axis])
+    radial_length = vector_length(radial)
+    radius, half_height = object_extents(cylinder)[0], object_extents(cylinder)[2]
+    clamped_axial = max(-half_height, min(half_height, axial))
+    clamped_radial = (
+        [value * min(1.0, radius / radial_length) for value in radial]
+        if radial_length > 1e-12
+        else [0.0, 0.0, 0.0]
+    )
+    closest = [
+        cylinder_center[index] + clamped_axial * cylinder_axis[index] + clamped_radial[index]
+        for index in range(3)
+    ]
+    separation = vector_subtract(closest, sphere_center)
+    separation_length = vector_length(separation)
+    sphere_radius = object_extents(sphere)[0]
+    if separation_length > 1e-12:
+        signed_margin = separation_length - sphere_radius
+        axis = normalize_vector(separation)
+        decisive_axis = "sphere_to_closest_cylinder_point"
+    else:
+        radial_clearance = radius - radial_length
+        cap_clearance = half_height - abs(axial)
+        if radial_clearance <= cap_clearance:
+            axis = normalize_vector(radial) if radial_length > 1e-12 else object_local_axes(cylinder)[0]
+            signed_margin = -(sphere_radius + radial_clearance)
+            decisive_axis = "cylinder_inner_side"
+        else:
+            sign = 1.0 if axial >= 0.0 else -1.0
+            axis = [sign * value for value in cylinder_axis]
+            signed_margin = -(sphere_radius + cap_clearance)
+            decisive_axis = "cylinder_inner_cap"
+    if sphere is right:
+        axis = [-value for value in axis]
+    return penetration_detail(
+        signed_margin,
+        axis,
+        tolerance_m=tolerance_m,
+        overlap_test="sphere_oriented_cylinder_closest_point",
+        decisive_axis=decisive_axis,
+        tested_axis_count=1,
+    )
+
+
+def convex_axis_penetration(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    *,
+    tolerance_m: float,
+) -> dict[str, Any]:
+    center_delta = vector_subtract(collision_center(right), collision_center(left))
+    candidates: list[tuple[str, list[float]]] = []
+    left_shape = collision_shape(left)
+    right_shape = collision_shape(right)
     left_axes = object_local_axes(left)
     right_axes = object_local_axes(right)
-    left_extents = object_extents(left)
-    right_extents = object_extents(right)
-    center_delta = [
-        right_value - left_value
-        for left_value, right_value in zip(object_position(left), object_position(right))
-    ]
-    candidates: list[tuple[str, list[float]]] = [
-        *((f"left_axis_{index}", axis) for index, axis in enumerate(left_axes)),
-        *((f"right_axis_{index}", axis) for index, axis in enumerate(right_axes)),
-    ]
-    for left_index, left_axis in enumerate(left_axes):
-        for right_index, right_axis in enumerate(right_axes):
-            candidates.append(
-                (
-                    f"cross_{left_index}_{right_index}",
-                    [
-                        left_axis[1] * right_axis[2] - left_axis[2] * right_axis[1],
-                        left_axis[2] * right_axis[0] - left_axis[0] * right_axis[2],
-                        left_axis[0] * right_axis[1] - left_axis[1] * right_axis[0],
-                    ],
-                )
-            )
+    if left_shape == "box":
+        candidates.extend((f"left_axis_{index}", axis) for index, axis in enumerate(left_axes))
+    if right_shape == "box":
+        candidates.extend((f"right_axis_{index}", axis) for index, axis in enumerate(right_axes))
+    if left_shape == "cylinder":
+        candidates.append(("left_cylinder_axis", left_axes[2]))
+    if right_shape == "cylinder":
+        candidates.append(("right_cylinder_axis", right_axes[2]))
+    for left_index, left_axis in enumerate(left_axes if left_shape in {"box", "cylinder"} else []):
+        for right_index, right_axis in enumerate(right_axes if right_shape in {"box", "cylinder"} else []):
+            candidates.append((f"cross_{left_index}_{right_index}", cross_product(left_axis, right_axis)))
+    if left_shape == "sphere" or right_shape == "sphere":
+        candidates.append(("center_line", center_delta))
+    # Cylinder side normals are continuous. Directions from its axis to the
+    # other primitive's oriented vertices cover the finite box/cylinder
+    # feature pairs without replacing the declared cylinder by a box.
+    if left_shape == "cylinder":
+        candidates.extend(
+            cylinder_radial_candidates(left, right, label="left")
+        )
+    if right_shape == "cylinder":
+        candidates.extend(
+            cylinder_radial_candidates(right, left, label="right")
+        )
     largest_gap = -math.inf
     decisive_axis = ""
+    decisive_vector = [1.0, 0.0, 0.0]
     tested_axes = 0
     for label, raw_axis in candidates:
-        norm = math.sqrt(sum(value * value for value in raw_axis))
-        if norm <= 1e-10:
+        axis = normalize_vector(raw_axis)
+        if vector_length(axis) <= 1e-12:
             continue
-        axis = [value / norm for value in raw_axis]
-        center_distance = abs(sum(center_delta[index] * axis[index] for index in range(3)))
-        left_radius = sum(
-            left_extents[local_axis]
-            * abs(sum(left_axes[local_axis][index] * axis[index] for index in range(3)))
-            for local_axis in range(3)
-        )
-        right_radius = sum(
-            right_extents[local_axis]
-            * abs(sum(right_axes[local_axis][index] * axis[index] for index in range(3)))
-            for local_axis in range(3)
-        )
-        gap = center_distance - left_radius - right_radius
+        center_distance = abs(dot_product(center_delta, axis))
+        gap = center_distance - shape_projection_radius(left, axis) - shape_projection_radius(right, axis)
         tested_axes += 1
         if gap > largest_gap:
             largest_gap = gap
             decisive_axis = label
+            decisive_vector = axis if dot_product(center_delta, axis) >= 0.0 else [-value for value in axis]
     if not math.isfinite(largest_gap):
         largest_gap = math.inf
+    return penetration_detail(
+        largest_gap,
+        decisive_vector,
+        tolerance_m=tolerance_m,
+        overlap_test=(
+            "oriented_box_sat"
+            if left_shape == right_shape == "box"
+            else "declared_convex_shape_sat"
+        ),
+        decisive_axis=decisive_axis,
+        tested_axis_count=tested_axes,
+    )
+
+
+def cylinder_radial_candidates(
+    cylinder: dict[str, Any],
+    other: dict[str, Any],
+    *,
+    label: str,
+) -> list[tuple[str, list[float]]]:
+    cylinder_center = collision_center(cylinder)
+    cylinder_axis = object_local_axes(cylinder)[2]
+    points = oriented_vertices(other) if collision_shape(other) == "box" else [collision_center(other)]
+    candidates: list[tuple[str, list[float]]] = []
+    for index, point in enumerate(points):
+        delta = vector_subtract(point, cylinder_center)
+        radial = vector_subtract(delta, [dot_product(delta, cylinder_axis) * value for value in cylinder_axis])
+        candidates.append((f"{label}_radial_{index}", radial))
+    return candidates
+
+
+def oriented_vertices(node: dict[str, Any]) -> list[list[float]]:
+    center = collision_center(node)
+    axes = object_local_axes(node)
+    extents = object_extents(node)
+    return [
+        [
+            center[component]
+            + sum(signs[axis] * extents[axis] * axes[axis][component] for axis in range(3))
+            for component in range(3)
+        ]
+        for signs in (
+            (-1.0, -1.0, -1.0), (-1.0, -1.0, 1.0), (-1.0, 1.0, -1.0), (-1.0, 1.0, 1.0),
+            (1.0, -1.0, -1.0), (1.0, -1.0, 1.0), (1.0, 1.0, -1.0), (1.0, 1.0, 1.0),
+        )
+    ]
+
+
+def shape_projection_radius(node: dict[str, Any], axis: list[float]) -> float:
+    extents = object_extents(node)
+    shape = collision_shape(node)
+    if shape == "sphere":
+        return extents[0]
+    axes = object_local_axes(node)
+    if shape == "cylinder":
+        axial = min(1.0, abs(dot_product(axis, axes[2])))
+        return extents[2] * axial + extents[0] * math.sqrt(max(0.0, 1.0 - axial * axial))
+    return sum(extents[index] * abs(dot_product(axis, axes[index])) for index in range(3))
+
+
+def penetration_detail(
+    signed_margin: float,
+    axis: list[float],
+    *,
+    tolerance_m: float,
+    overlap_test: str,
+    decisive_axis: str,
+    tested_axis_count: int,
+) -> dict[str, Any]:
+    overlaps = signed_margin < -tolerance_m
     return {
-        "overlaps": largest_gap < -tolerance_m,
-        "signed_margin_m": round(largest_gap, 6),
+        "overlaps": overlaps,
+        "signed_margin_m": round(signed_margin, 6),
+        "penetration_depth_m": round(max(0.0, -signed_margin), 6),
+        "minimum_translation_axis": round_vec(axis),
         "tolerance_m": tolerance_m,
         "decisive_axis": decisive_axis,
-        "tested_axis_count": tested_axes,
+        "tested_axis_count": tested_axis_count,
+        "overlap_test": overlap_test,
     }
 
 
-def conservative_world_extents(node: dict[str, Any]) -> list[float]:
-    local_extents = object_extents(node)
-    world_extents = [
-        projected_object_radius(node, [1.0 if axis == index else 0.0 for axis in range(3)])
-        for index in range(3)
+def dot_product(left: list[float], right: list[float]) -> float:
+    return sum(left[index] * right[index] for index in range(3))
+
+
+def cross_product(left: list[float], right: list[float]) -> list[float]:
+    return [
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
     ]
-    # Native UE contact sidecars historically reported unrotated component
-    # bounds.  The maximum keeps preflight conservative until those artifacts
-    # and the runtime collider share the same oriented-bounds implementation.
-    return [max(local_extents[index], world_extents[index]) for index in range(3)]
+
+
+def vector_subtract(left: list[float], right: list[float]) -> list[float]:
+    return [left[index] - right[index] for index in range(3)]
+
+
+def vector_length(value: list[float]) -> float:
+    return math.sqrt(dot_product(value, value))
+
+
+def normalize_vector(value: list[float]) -> list[float]:
+    length = vector_length(value)
+    return [component / length for component in value] if length > 1e-12 else [0.0, 0.0, 0.0]
 
 
 def projected_object_radius(node: dict[str, Any], direction: list[float]) -> float:
     extents = object_extents(node)
     axes = object_local_axes(node)
-    shape = str(node.get("shape") or "").casefold()
-    if "sphere" in shape:
+    shape = collision_shape(node)
+    if shape == "sphere":
         return max(extents)
-    if "cylinder" in shape:
+    if shape == "cylinder":
         axial_alignment = abs(sum(direction[index] * axes[2][index] for index in range(3)))
         axial_alignment = min(1.0, max(0.0, axial_alignment))
         radial_alignment = math.sqrt(max(0.0, 1.0 - axial_alignment * axial_alignment))
@@ -563,6 +719,10 @@ def object_local_axes(node: dict[str, Any]) -> list[list[float]]:
 
 
 def object_extents(node: dict[str, Any]) -> list[float]:
+    geometry = (node.get("physics") or {}).get("collision_geometry") or {}
+    size_m = geometry.get("size_m")
+    if isinstance(size_m, list) and len(size_m) >= 3:
+        return [float(size_m[0]) / 2.0, float(size_m[1]) / 2.0, float(size_m[2]) / 2.0]
     extents = (node.get("bounds") or {}).get("extents_m") or [0.0, 0.0, 0.0]
     if not isinstance(extents, list):
         return [0.0, 0.0, 0.0]
