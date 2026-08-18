@@ -5670,6 +5670,29 @@ def spawn_runtime_stage_helpers(editor, runtime_scene: dict, scene_origin: unrea
     return helpers
 
 
+def runtime_binding_pose_position(actor_location, bounds_center, pose_anchor: str | None):
+    return bounds_center if pose_anchor == "bounds_center" else actor_location
+
+
+def runtime_binding_snapshot_registered(snapshot: dict) -> bool:
+    objects = snapshot.get("objects") if isinstance(snapshot, dict) else None
+    return bool(objects) and all(
+        isinstance(item, dict)
+        and bool((item.get("mesh_component") or {}).get("registered"))
+        for item in objects
+    )
+
+
+def refresh_runtime_binding_snapshot(actors: dict, summary: dict) -> dict:
+    capture = actors.get("capture_runtime_binding_snapshot")
+    if not callable(capture):
+        raise RuntimeError("runtime binding snapshot capture is unavailable")
+    snapshot = capture(actors)
+    actors["runtime_binding_snapshot"] = snapshot
+    summary["runtime_binding_snapshot"] = snapshot
+    return snapshot
+
+
 def setup_scene(runtime_scene: dict | None = None):
     write_progress_marker("setup_scene_start", f"runtime_scene={bool(runtime_scene)}")
     if runtime_scene and runtime_scene.get("case_type") != "llm_object_graph":
@@ -6564,6 +6587,8 @@ def setup_scene(runtime_scene: dict | None = None):
             }.get(collision_mesh_path)
             visible = params.get("visible") is not False
             render_registered = component_registered(render_component)
+            pose_anchor = str(params.get("pose_anchor") or "actor_origin")
+            pose_position = runtime_binding_pose_position(location, collision_origin, pose_anchor)
             try:
                 component_visible = bool(render_component.is_visible()) if render_component else False
             except Exception:
@@ -6588,10 +6613,16 @@ def setup_scene(runtime_scene: dict | None = None):
                 "capture_phase": "pre_simulation",
                 "world_transform": {
                     "position_m": [
+                        (pose_position.x - scene_origin.x) / 100.0,
+                        (pose_position.y - scene_origin.y) / 100.0,
+                        (pose_position.z - scene_origin.z) / 100.0,
+                    ],
+                    "actor_origin_position_m": [
                         (location.x - scene_origin.x) / 100.0,
                         (location.y - scene_origin.y) / 100.0,
                         (location.z - scene_origin.z) / 100.0,
                     ],
+                    "pose_anchor": pose_anchor,
                     "rotation_deg": [rotation.pitch, rotation.yaw, rotation.roll],
                 },
                 "asset": {
@@ -6822,21 +6853,29 @@ def setup_scene(runtime_scene: dict | None = None):
             for item in chaos_runtime["actors"]
             if isinstance(item, dict) and item.get("id")
         }
+
+        def capture_runtime_binding_snapshot(actor_bindings: dict) -> dict:
+            return {
+                "schema_version": "harness_ue_runtime_binding_snapshot_v1",
+                "capture_phase": "pre_simulation",
+                "objects": [
+                    runtime_binding_snapshot_for(
+                        obj,
+                        actor_bindings[str(obj["id"])],
+                        physics_details_by_id.get(str(obj["id"]), {}),
+                    )
+                    for obj in [
+                        *(runtime_scene.get("static_objects") or []),
+                        *(runtime_scene.get("dynamic_objects") or []),
+                    ]
+                    if str(obj.get("id") or "") in actor_bindings
+                ],
+            }
+
         runtime_binding_snapshot = {
             "schema_version": "harness_ue_runtime_binding_snapshot_v1",
-            "capture_phase": "pre_simulation",
-            "objects": [
-                runtime_binding_snapshot_for(
-                    obj,
-                    runtime_actors[str(obj["id"])],
-                    physics_details_by_id.get(str(obj["id"]), {}),
-                )
-                for obj in [
-                    *(runtime_scene.get("static_objects") or []),
-                    *(runtime_scene.get("dynamic_objects") or []),
-                ]
-                if str(obj.get("id") or "") in runtime_actors
-            ],
+            "capture_phase": "component_registration_pending",
+            "objects": [],
         }
         write_progress_marker("setup_scene_runtime_actors_done", f"count={len(runtime_actors)}")
         write_progress_marker("setup_scene_runtime_camera_pose_start")
@@ -6910,6 +6949,7 @@ def setup_scene(runtime_scene: dict | None = None):
             "runtime_ground_offsets": runtime_ground_offsets,
             "runtime_initial_transforms": runtime_initial_transforms,
             "runtime_binding_snapshot": runtime_binding_snapshot,
+            "capture_runtime_binding_snapshot": capture_runtime_binding_snapshot,
             "chaos_runtime": chaos_runtime,
             "physics_controls": physics_controls,
             "camera_pose": {
@@ -9696,6 +9736,8 @@ def start_highres_viewport_capture(
         "physics_ready": not physics_enabled,
         "physics_wait_started": time.perf_counter(),
         "physics_last_rebind_attempt": 0.0,
+        "runtime_binding_snapshot_ready": False,
+        "runtime_binding_wait_started": time.perf_counter(),
         "physics_impulse_applied": False,
         "initial_impulse_start_frame": initial_impulse_start_frame,
         "actual_trajectory": [],
@@ -9810,6 +9852,12 @@ def start_highres_viewport_capture(
         "probe_stable": RENDER_FIRST_FRAME_STABILITY_SAMPLES <= 1,
     }
     write_summary(summary)
+
+    def update_runtime_binding_snapshot() -> bool:
+        snapshot = refresh_runtime_binding_snapshot(actors, summary)
+        ready = runtime_binding_snapshot_registered(snapshot)
+        state["runtime_binding_snapshot_ready"] = ready
+        return ready
 
     def maybe_apply_deferred_impulse() -> None:
         if not physics_enabled or not state["physics_ready"] or state["physics_impulse_applied"]:
@@ -10202,17 +10250,42 @@ def start_highres_viewport_capture(
                     if physics_status.get("game_world_count", 0) > 0 and physics_status.get("rebound_actor_ids"):
                         set_simulation_world_paused(actors, physics_status, True)
                         reset_runtime_actors_to_initial_state(actors, runtime_scene, physics_status)
-                        state["physics_ready"] = True
-                        start_visible_physics_input()
+                        if update_runtime_binding_snapshot():
+                            state["physics_ready"] = True
+                            start_visible_physics_input()
                         summary["physics_capture"].update(physics_status)
                         write_summary(summary)
                 if not state["physics_ready"] and now - state["physics_wait_started"] > 12.0:
-                    physics_status.setdefault("errors", []).append("physics_ready_timeout:no_pie_game_world")
+                    timeout_reason = (
+                        "component_registration_incomplete"
+                        if physics_status.get("game_world_count", 0) > 0
+                        else "no_pie_game_world"
+                    )
+                    physics_status.setdefault("errors", []).append(f"physics_ready_timeout:{timeout_reason}")
                     state["physics_ready"] = True
                     summary["physics_capture"].update(physics_status)
-                    state["errors"].append({"frame": state.get("frame_index"), "error": "physics_ready_timeout:no_pie_game_world"})
+                    state["errors"].append(
+                        {
+                            "frame": state.get("frame_index"),
+                            "error": f"physics_ready_timeout:{timeout_reason}",
+                        }
+                    )
                     write_summary(summary)
                 return
+            if not state["runtime_binding_snapshot_ready"]:
+                if update_runtime_binding_snapshot():
+                    write_summary(summary)
+                elif time.perf_counter() - state["runtime_binding_wait_started"] > 12.0:
+                    state["runtime_binding_snapshot_ready"] = True
+                    state["errors"].append(
+                        {
+                            "frame": state.get("frame_index"),
+                            "error": "runtime_binding_timeout:component_registration_incomplete",
+                        }
+                    )
+                    write_summary(summary)
+                else:
+                    return
             if state.get("gasp_tick_pending") is not None:
                 pending_frame = int(state["gasp_tick_pending"])
                 world = actors.get("physics_game_world")

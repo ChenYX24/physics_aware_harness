@@ -22,6 +22,78 @@ class Vector:
 
 
 class HighresViewportMultiviewTests(unittest.TestCase):
+    def test_runtime_binding_snapshot_refresh_replaces_pre_registration_state(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        functions = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name in {
+                "refresh_runtime_binding_snapshot",
+                "runtime_binding_snapshot_registered",
+            }
+        ]
+        namespace = {}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"), namespace)
+        snapshots = [
+            {
+                "capture_phase": "pre_simulation",
+                "objects": [{"mesh_component": {"registered": False}}],
+            },
+            {
+                "capture_phase": "pre_simulation",
+                "objects": [{"mesh_component": {"registered": True}}],
+            },
+        ]
+        actors = {
+            "runtime_binding_snapshot": {
+                "capture_phase": "component_registration_pending",
+                "objects": [],
+            },
+            "capture_runtime_binding_snapshot": lambda _actors: snapshots.pop(0),
+        }
+        summary = {"runtime_binding_snapshot": actors["runtime_binding_snapshot"]}
+
+        first = namespace["refresh_runtime_binding_snapshot"](actors, summary)
+        self.assertFalse(namespace["runtime_binding_snapshot_registered"](first))
+        second = namespace["refresh_runtime_binding_snapshot"](actors, summary)
+
+        self.assertTrue(namespace["runtime_binding_snapshot_registered"](second))
+        self.assertIs(actors["runtime_binding_snapshot"], second)
+        self.assertIs(summary["runtime_binding_snapshot"], second)
+
+    def test_runtime_binding_position_respects_pose_anchor(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "runtime_binding_pose_position"
+        )
+        namespace = {}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+        actor_origin = object()
+        bounds_center = object()
+
+        self.assertIs(
+            namespace["runtime_binding_pose_position"](
+                actor_origin,
+                bounds_center,
+                "bounds_center",
+            ),
+            bounds_center,
+        )
+        self.assertIs(
+            namespace["runtime_binding_pose_position"](
+                actor_origin,
+                bounds_center,
+                "actor_origin",
+            ),
+            actor_origin,
+        )
+
     def test_existing_static_and_stationary_map_lights_are_normalized_to_movable(self) -> None:
         source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
@@ -749,6 +821,14 @@ class HighresViewportMultiviewTests(unittest.TestCase):
                 callbacks[0](1 / 24)
             return {"ticks": 0}
 
+        def refresh_binding_snapshot(_actors, summary):
+            snapshot = {
+                "capture_phase": "pre_simulation",
+                "objects": [{"mesh_component": {"registered": True}}],
+            }
+            summary["runtime_binding_snapshot"] = snapshot
+            return snapshot
+
         namespace = {
             "Path": Path,
             "time": time,
@@ -780,6 +860,8 @@ class HighresViewportMultiviewTests(unittest.TestCase):
             "runtime_timebase": lambda *_: {"fps": 24, "frame_count": 2},
             "physics_capture_enabled": lambda *_: True,
             "start_editor_physics_capture": lambda *_: {"enabled": True},
+            "refresh_runtime_binding_snapshot": refresh_binding_snapshot,
+            "runtime_binding_snapshot_registered": lambda *_: True,
             "runtime_physics_controls": lambda *_: {},
             "int_control": lambda value, default, *_: default if value is None else int(value),
             "configure_clean_highres_viewport": lambda: {
