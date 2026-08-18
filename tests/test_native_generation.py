@@ -103,10 +103,13 @@ class NativeGenerationTests(unittest.TestCase):
         self.assertEqual(collision_geometry["shape"], "box, sphere, or cylinder")
         self.assertIn("full dimensions", collision_geometry["size_m"])
         self.assertIn("object-local meters", collision_geometry["local_center_offset_m"])
+        self.assertIn("must not assume an unresolved asset mesh origin", collision_geometry["local_center_offset_m"])
         hard_rules = context["case_spec_contract"]["hard_rules"]
         self.assertTrue(any("sole collision truth" in rule for rule in hard_rules))
         self.assertTrue(any("controls rendering only" in rule for rule in hard_rules))
         self.assertTrue(any("qualified imported asset BodySetup" in rule for rule in hard_rules))
+        self.assertTrue(any("never guess collision_geometry.local_center_offset_m" in rule for rule in hard_rules))
+        self.assertTrue(any("separate hidden source=none collision object" in rule for rule in hard_rules))
         path_contract = context["intent_draft_contract"]["parameter_analysis_shape"]["path"]
         self.assertIn("$.scene.duration_s", path_contract)
         self.assertIn("$.objects.domino_10.initial_state.rotation_deg", path_contract)

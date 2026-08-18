@@ -282,6 +282,8 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertIn("shape_hint is\n   exactly box, sphere, or cylinder", case_prompt)
         self.assertIn("Once declared, collision_geometry is the\n   collision truth", case_prompt)
         self.assertIn("qualified imported asset\n   BodySetup", case_prompt)
+        self.assertIn("Never guess local_center_offset_m for an asset whose exact mesh origin is not known", case_prompt)
+        self.assertIn("separate source=none, visible=false", case_prompt)
         self.assertIn("visual_representation.visible is a boolean", case_prompt)
         self.assertIn("Heading around world vertical Z belongs\n   in yaw", case_prompt)
         self.assertIn("rather than a mandatory route", case_prompt)

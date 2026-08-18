@@ -1574,7 +1574,11 @@ FIELD-BY-FIELD INSTRUCTIONS
    collision truth. It cannot coexist with collision_required=false. Do not invent mesh or compound shapes.
    When visual_representation.source=asset and collision_geometry is omitted, the qualified imported asset
    BodySetup is the collision source. When source=none and collision_required=true, collision_geometry is
-   required. Never request an implicit bounds-derived collision fallback.
+   required. Never guess local_center_offset_m for an asset whose exact mesh origin is not known in the
+   current context. Omit collision_geometry to use its qualified BodySetup. If a simple analytic collision
+   surface must be independent of that unknown asset origin, model it as a separate source=none, visible=false
+   object with an explicit world transform, and set collision_required=false on the visible asset. Never request
+   an implicit bounds-derived collision fallback.
 8. solver_scene and object.solver: use these only when the selected backend needs explicit generic
    solver primitives beyond rigid-body fields. For a coupled particle/rigid scene, set
    solver_scene.type="rigid_sph" and declare initialization, measurements, and numeric assertions there.
@@ -1801,7 +1805,8 @@ def case_spec_generation_contract() -> dict[str, Any]:
                         ),
                         "local_center_offset_m": (
                             "optional finite [x,y,z] in object-local meters; defaults zero, rotates with the object, "
-                            "and is not rescaled by the visual asset instance scale"
+                            "is not rescaled by the visual asset instance scale, and must not assume an unresolved "
+                            "asset mesh origin"
                         ),
                     },
                     "material": "object",
@@ -1978,6 +1983,7 @@ def case_spec_generation_contract() -> dict[str, Any]:
             "visual_representation.visible controls rendering only; collision is controlled by physics declarations and the selected collision binding",
             "declared physics.collision_geometry is the sole collision truth and supports only box, sphere, or cylinder; it cannot coexist with collision_required=false",
             "source=none with collision_required=true requires explicit collision_geometry; source=asset without collision_geometry uses the qualified imported asset BodySetup and never a bounds-derived fallback",
+            "never guess collision_geometry.local_center_offset_m when the asset mesh origin is not known in the current context; use qualified BodySetup or a separate hidden source=none collision object with an explicit world transform",
             "one logical rigid_sph body owns both its visual asset request and simplified solver collision; never split them into visual/collision object IDs",
             "a genesis_sph rigid_sph scene requires particle_dynamics, particle_cache, and surface_mesh_cache; rigid_body is an object role, not a genesis_sph solver capability",
         ],
