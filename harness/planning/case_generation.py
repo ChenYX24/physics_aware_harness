@@ -1558,11 +1558,10 @@ FIELD-BY-FIELD INSTRUCTIONS
    released body on the corresponding high end. A cylinder's authored/analytic axis is local Z: leave
    rotation zero for a world-Z axis, use an absolute 90-degree roll for a world-Y axis, and an absolute
    90-degree pitch for a world-X axis. An object declared supported_by and initially at rest must begin in
-   resolved surface contact at frame zero, not above the support with a gravity-settling gap. When the user
-   supplies or you generate an initial transform, its horizontal position and orientation are authoritative.
-   The compiler may resolve vertical surface contact explicitly declared by supported_by, but otherwise validates
-   overlaps and support footprints without rearranging objects from expected relations, separating bodies, or
-   moving them around obstacles. Encode curved and staged layouts directly with valid positions and rotations.
+   resolved surface contact at frame zero, not above the support with a gravity-settling gap. Every authored
+   initial transform is authoritative. The compiler validates supported_by against the final collision geometry
+   and reports any gap, penetration, or footprint error; it never moves an object to satisfy the relation.
+   Encode curved and staged layouts directly with valid positions and rotations.
    explicitly requests an object's color, store normalized RGB in the object's top-level color_rgb and set
    top-level fixed_material_color=true; do not leave the color only in role or descriptive text. Use low restitution (normally <=0.1) unless a bounce is
    requested, and set physics.use_ccd=true for small or fast-moving collision bodies. Dynamic bodies use

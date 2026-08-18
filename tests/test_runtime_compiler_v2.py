@@ -245,7 +245,7 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
             self.assertEqual(stage_result["failure_class"], "capability_missing")
             self.assertEqual(stage_result["failure_code"], "unsupported_backend")
 
-    def test_model_generated_solver_frame_registers_to_resolved_visual_bounds(self) -> None:
+    def test_model_generated_solver_frame_registration_preserves_authored_transform(self) -> None:
         case = {
             "solver_scene": {
                 "type": "rigid_sph",
@@ -359,7 +359,7 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
         self.assertAlmostEqual(mug["solver"]["motion"]["pivot_local_m"][2], 0.045)
         self.assertAlmostEqual(water["solver"]["initial_volume"]["radius_m"], 0.04 * radial_scale)
         self.assertAlmostEqual(water["solver"]["initial_volume"]["position_m"][2], -0.005)
-        self.assertAlmostEqual(mug["solver"]["transform"]["position_m"][2], 0.106715 / 2.0)
+        self.assertEqual(mug["solver"]["transform"]["position_m"], [0.0, 0.0, 0.0])
         self.assertEqual(mug["initial_position_m"], mug["solver"]["transform"]["position_m"])
         registration = mug["solver"]["collision"]["geometry_registration"]
         self.assertEqual(registration["status"], "verified")

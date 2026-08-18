@@ -714,7 +714,6 @@ def bind_resolved_solver_assets(
             "bbox_m": copy.deepcopy(bbox_m),
         }
     register_model_generated_solver_frames(case_spec, selected_by_object)
-    align_model_generated_supported_bodies(case_spec, selected_by_object)
     try:
         from harness.runtime.rigid_sph_scene import compile_rigid_sph_scene
 
@@ -792,56 +791,6 @@ def register_model_generated_solver_frames(
         collision["fit_method"] = registration["method"]
         asset = obj.get("asset") if isinstance(obj.get("asset"), dict) else {}
         asset["geometry_registration"] = copy.deepcopy(registration)
-
-
-def align_model_generated_supported_bodies(
-    case_spec: dict[str, Any],
-    selected_by_object: Mapping[str, Mapping[str, Any]],
-) -> None:
-    expected = case_spec.get("expected_physics") if isinstance(case_spec.get("expected_physics"), dict) else {}
-    support_map = expected.get("support") if isinstance(expected.get("support"), dict) else {}
-    objects = [obj for obj in case_spec.get("objects") or [] if isinstance(obj, dict)]
-    by_id = {str(obj.get("id") or ""): obj for obj in objects}
-    for object_id, support_id in support_map.items():
-        obj = by_id.get(str(object_id))
-        support = by_id.get(str(support_id))
-        selected = selected_by_object.get(str(object_id))
-        if obj is None or support is None or not isinstance(selected, Mapping):
-            continue
-        if str(selected.get("source_kind") or "") != "model_generation":
-            continue
-        bbox_m = selected.get("bbox_size_m") or selected.get("effective_size_m") or selected.get("authored_size_m")
-        if not _positive_vec3_values(bbox_m):
-            continue
-        support_solver = support.get("solver") if isinstance(support.get("solver"), dict) else {}
-        support_collision = support_solver.get("collision") if isinstance(support_solver.get("collision"), dict) else {}
-        if support_collision.get("type") != "plane" or not _finite_vec3_values(support_collision.get("normal")):
-            continue
-        normal = [float(value) for value in support_collision["normal"]]
-        if abs(normal[0]) > 1e-6 or abs(normal[1]) > 1e-6 or normal[2] <= 0.0:
-            continue
-        support_top_z = float((support_collision.get("position_m") or [0.0, 0.0, 0.0])[2])
-        solver = obj.get("solver") if isinstance(obj.get("solver"), dict) else {}
-        transform = solver.get("transform") if isinstance(solver.get("transform"), dict) else {}
-        if not _finite_vec3_values(transform.get("position_m")):
-            continue
-        position = [float(value) for value in transform["position_m"]]
-        original_z = position[2]
-        position[2] = support_top_z + float(bbox_m[2]) / 2.0
-        transform["position_m"] = position
-        if _finite_vec3_values(obj.get("initial_position_m")):
-            initial_position = [float(value) for value in obj["initial_position_m"]]
-            initial_position[2] = position[2]
-            obj["initial_position_m"] = initial_position
-        registration = {
-            "status": "verified",
-            "method": "resolved_visual_bounds_supported_by_plane_v1",
-            "support_id": str(support_id),
-            "original_center_z_m": original_z,
-            "registered_center_z_m": position[2],
-        }
-        asset = obj.get("asset") if isinstance(obj.get("asset"), dict) else {}
-        asset["support_registration"] = registration
 
 
 def _finite_vec3_values(value: Any) -> bool:

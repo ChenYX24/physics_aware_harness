@@ -285,7 +285,7 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertIn("visual_representation.visible is a boolean", case_prompt)
         self.assertIn("Heading around world vertical Z belongs\n   in yaw", case_prompt)
         self.assertIn("rather than a mandatory route", case_prompt)
-        self.assertIn("without rearranging objects from expected relations", case_prompt)
+        self.assertIn("it never moves an object to satisfy the relation", case_prompt)
         self.assertIn("positive pitch makes local +X downhill", case_prompt)
         self.assertIn("A cylinder's authored/analytic axis is local Z", case_prompt)
         self.assertIn("competing classes as must_not.category exclusions", case_prompt)

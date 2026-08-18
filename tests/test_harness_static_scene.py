@@ -260,117 +260,136 @@ class StaticScenePlacementTests(unittest.TestCase):
         self.assertEqual(relation["status"], "outside_support_footprint")
         self.assertLess(relation["horizontal_margin_m"][0], 0.0)
 
-    def test_v2_explicit_support_snap_uses_resolved_inclined_geometry(self) -> None:
-        from harness.planning.static_scene_builder import align_v2_explicit_supports, support_relation
+    def test_declared_support_uses_collision_offsets_without_rewriting_transform(self) -> None:
+        from harness.planning.static_scene_builder import build_static_scene_layout
 
-        subject = {
-            "object_id": "barrel",
-            "role": "dynamic barrel",
-            "shape": "cylinder",
-            "transform": {"position_m": [1.0, 0.0, 0.49]},
-            "bounds": {"extents_m": [0.28, 0.28, 0.44], "bottom_z": 0.05, "top_z": 0.93},
-            "physics": {"body_type": "dynamic"},
-        }
-        ramp = {
-            "object_id": "ramp",
-            "role": "static inclined ramp",
-            "shape": "box",
-            "transform": {"position_m": [2.445, 0.0, 0.52], "rotation_deg": [-12.0, 0.0, 0.0]},
-            "bounds": {"extents_m": [2.5, 1.0, 0.05], "bottom_z": 0.47, "top_z": 0.57},
-            "physics": {"body_type": "static"},
-        }
         case = {
-            "v2_projection": {"source_schema_version": "harness_case_spec_v2"},
-            "expected_physics": {"support": {"barrel": "ramp"}},
+            "case_id": "collision_offset_support",
+            "capability_id": "rigid_body_dynamics",
+            "objects": [
+                {
+                    "id": "barrel",
+                    "role": "dynamic barrel",
+                    "shape": "box",
+                    "size_m": [1.0, 1.0, 1.0],
+                    "initial_position_m": [0.0, 0.0, 1.294],
+                    "body_type": "dynamic",
+                    "collision_required": True,
+                    "collision_geometry": {
+                        "shape": "box",
+                        "size_m": [0.4, 0.4, 0.488],
+                        "local_center_offset_m": [0.0, 0.0, -0.25],
+                    },
+                },
+                {
+                    "id": "table",
+                    "role": "support",
+                    "shape": "box",
+                    "size_m": [2.0, 2.0, 1.0],
+                    "initial_position_m": [0.0, 0.0, 0.55],
+                    "body_type": "static",
+                    "collision_required": True,
+                    "collision_geometry": {
+                        "shape": "box",
+                        "size_m": [2.0, 2.0, 0.1],
+                        "local_center_offset_m": [0.0, 0.0, 0.2],
+                    },
+                },
+            ],
+            "expected_physics": {"support": {"barrel": "table"}},
         }
-        adjustments = align_v2_explicit_supports(case, [subject, ramp])
-        self.assertEqual(len(adjustments), 1)
-        self.assertEqual(support_relation(subject, ramp)["status"], "contact_at_rest")
 
-    def test_v2_explicit_support_snap_does_not_add_a_settling_gap(self) -> None:
-        from harness.planning.static_scene_builder import align_v2_explicit_supports
+        layout = build_static_scene_layout(case)
+        barrel = next(node for node in layout["object_nodes"] if node["object_id"] == "barrel")
+        relation = layout["support_relations"][0]
 
-        ball = {
-            "object_id": "ball",
-            "transform": {"position_m": [0.0, 0.0, 0.06]},
-            "bounds": {"extents_m": [0.057, 0.057, 0.057], "bottom_z": 0.003, "top_z": 0.117},
-            "physics": {"body_type": "dynamic", "collision_required": True},
-        }
-        table = {
-            "object_id": "table",
-            "transform": {"position_m": [0.0, 0.0, -0.025]},
-            "bounds": {"extents_m": [1.4, 0.7, 0.025], "bottom_z": -0.05, "top_z": 0.0},
-            "physics": {"body_type": "static", "collision_required": True},
-        }
+        self.assertEqual(barrel["transform"]["position_m"], [0.0, 0.0, 1.294])
+        self.assertEqual(layout["placement_adjustments"], [])
+        self.assertEqual(relation["status"], "contact_at_rest")
+        self.assertEqual(relation["signed_surface_gap_m"], 0.0)
+        self.assertEqual(relation["suggested_translation_m"], [0.0, 0.0, 0.0])
+
+    def test_declared_support_reports_penetration_without_repairing_it(self) -> None:
+        from harness.planning.static_scene_builder import build_static_scene_layout
+
         case = {
-            "v2_projection": {"source_schema_version": "harness_case_spec_v2"},
-            "expected_physics": {"support": {"ball": "table"}},
+            "case_id": "penetrating_support",
+            "capability_id": "rigid_body_dynamics",
+            "objects": [
+                {
+                    "id": "body",
+                    "role": "dynamic body",
+                    "shape": "box",
+                    "size_m": [0.5, 0.5, 0.5],
+                    "initial_position_m": [0.0, 0.0, 0.2],
+                    "body_type": "dynamic",
+                    "collision_required": True,
+                    "collision_geometry": {"shape": "box", "size_m": [0.5, 0.5, 0.5]},
+                },
+                {
+                    "id": "support",
+                    "role": "support",
+                    "shape": "box",
+                    "size_m": [2.0, 2.0, 0.1],
+                    "initial_position_m": [0.0, 0.0, 0.0],
+                    "body_type": "static",
+                    "collision_required": True,
+                    "collision_geometry": {"shape": "box", "size_m": [2.0, 2.0, 0.1]},
+                },
+            ],
+            "expected_physics": {"support": {"body": "support"}},
         }
 
-        adjustments = align_v2_explicit_supports(case, [ball, table])
+        layout = build_static_scene_layout(case)
+        body = next(node for node in layout["object_nodes"] if node["object_id"] == "body")
+        relation = layout["support_relations"][0]
 
-        self.assertEqual(ball["transform"]["position_m"][2], 0.057)
-        self.assertEqual(ball["bounds"]["bottom_z"], 0.0)
-        self.assertEqual(adjustments[0]["clearance_m"], 0.0)
+        self.assertEqual(body["transform"]["position_m"], [0.0, 0.0, 0.2])
+        self.assertEqual(layout["placement_adjustments"], [])
+        self.assertEqual(relation["status"], "penetrating_support")
+        self.assertEqual(relation["signed_surface_gap_m"], -0.1)
+        self.assertEqual(relation["suggested_translation_m"], [0.0, 0.0, 0.1])
 
-    def test_v2_static_support_transform_is_not_rewritten_by_single_support_snap(self) -> None:
-        from harness.planning.static_scene_builder import align_v2_explicit_supports
+    def test_declared_support_gap_fails_static_validation_without_repair(self) -> None:
+        from harness.planning.static_scene_builder import build_static_scene_layout
+        from harness.verification.static_scene_verifier import verify_static_scene_layout
 
-        ramp = {
-            "object_id": "ramp",
-            "role": "static inclined ramp",
-            "shape": "box",
-            "transform": {"position_m": [-2.4, 0.0, 0.74], "rotation_deg": [15.0, 0.0, 0.0]},
-            "bounds": {"extents_m": [2.5, 0.5, 0.1], "bottom_z": 0.64, "top_z": 0.84},
-            "physics": {"body_type": "static", "collision_required": True},
-        }
-        ground = {
-            "object_id": "ground",
-            "role": "ground",
-            "shape": "box",
-            "transform": {"position_m": [0.0, 0.0, 0.0]},
-            "bounds": {"extents_m": [10.0, 10.0, 0.05], "bottom_z": -0.05, "top_z": 0.05},
-            "physics": {"body_type": "static", "collision_required": True},
-        }
         case = {
-            "v2_projection": {"source_schema_version": "harness_case_spec_v2"},
-            "expected_physics": {"support": {"ramp": "ground"}},
+            "case_id": "unsupported_gap",
+            "capability_id": "rigid_body_dynamics",
+            "objects": [
+                {
+                    "id": "body",
+                    "role": "dynamic body",
+                    "shape": "box",
+                    "size_m": [0.2, 0.2, 0.2],
+                    "initial_position_m": [0.0, 0.0, 0.4],
+                    "body_type": "dynamic",
+                    "collision_required": True,
+                    "collision_geometry": {"shape": "box", "size_m": [0.2, 0.2, 0.2]},
+                },
+                {
+                    "id": "support",
+                    "role": "support",
+                    "shape": "box",
+                    "size_m": [2.0, 2.0, 0.1],
+                    "initial_position_m": [0.0, 0.0, 0.0],
+                    "body_type": "static",
+                    "collision_required": True,
+                    "collision_geometry": {"shape": "box", "size_m": [2.0, 2.0, 0.1]},
+                },
+            ],
+            "expected_physics": {"support": {"body": "support"}},
         }
 
-        adjustments = align_v2_explicit_supports(case, [ramp, ground])
+        layout = build_static_scene_layout(case)
+        report = verify_static_scene_layout(case, layout)
+        relation = layout["support_relations"][0]
 
-        self.assertEqual(adjustments, [])
-        self.assertEqual(ramp["transform"]["position_m"], [-2.4, 0.0, 0.74])
-
-    def test_v2_support_snap_does_not_rewrite_horizontal_authored_position(self) -> None:
-        from harness.planning.static_scene_builder import align_v2_explicit_supports, support_relation
-
-        subject = {
-            "object_id": "heavy_cylinder",
-            "role": "20 kg metal rolling weight",
-            "shape": "cylinder",
-            "transform": {"position_m": [-2.493, 0.0, 1.5355]},
-            "bounds": {"extents_m": [0.300322, 0.317071, 0.307039], "bottom_z": 1.228461, "top_z": 1.842539},
-            "physics": {"body_type": "dynamic", "collision_required": True},
-        }
-        ramp = {
-            "object_id": "ramp",
-            "role": "inclined plane for rolling",
-            "shape": "box",
-            "transform": {"position_m": [0.0, 0.0, 0.6953], "rotation_deg": [15.0, 0.0, 0.0]},
-            "bounds": {"extents_m": [2.75, 1.0, 0.05], "bottom_z": 0.6453, "top_z": 0.7453},
-            "physics": {"body_type": "static", "collision_required": True},
-        }
-        case = {
-            "v2_projection": {"source_schema_version": "harness_case_spec_v2"},
-            "expected_physics": {"support": {"heavy_cylinder": "ramp"}},
-        }
-
-        adjustments = align_v2_explicit_supports(case, [subject, ramp])
-
-        self.assertEqual(support_relation(subject, ramp)["status"], "outside_support_footprint")
-        self.assertEqual(subject["transform"]["position_m"][0], -2.493)
-        self.assertFalse(any(row["type"] == "explicit_support_footprint_fit" for row in adjustments))
+        self.assertEqual(relation["status"], "unsupported_gap")
+        self.assertEqual(relation["suggested_translation_m"], [0.0, 0.0, -0.25])
+        self.assertEqual(report["failure_type"], "F3_invalid_initial_physics_state")
+        self.assertEqual(report["first_failure"]["metric"], "invalid_support_relation")
 
     def test_v2_layout_does_not_move_body_outside_support(self) -> None:
         from harness.planning.static_scene_builder import build_static_scene_layout

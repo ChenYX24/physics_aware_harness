@@ -120,7 +120,7 @@ contradictory_asset_constraints
 - 只作用于 V2 `sequential_contact_propagation` 的简单、连续、有向动态链。
 - 第一条边确定主要水平传播轴和正负方向；第一驱动物体到第一个目标的 authored launch gap 可以保留。
 - 从第二条边开始，使用 Asset Resolve 后的 `effective_size_m` / 保守 collider extents。如果后继反向、主要沿横轴，或表面间隙大于链条小间距，则把后继放在前驱之后，表面 clearance 使用现有约 `0.005 m`。
-- 同轴修正只改变水平位置；Z 仍由现有 support snap 重新贴合支撑面。
+- 同轴修正只改变水平位置；支撑关系仅验证 CaseSpec 已声明的 Z，不改写变换。
 - 分支、环或不能确定方向的图不要猜测；保持 fail-closed/验证失败。
 - 修正后重新运行 overlap、support 和 static scene checks。
 

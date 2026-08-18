@@ -14,6 +14,9 @@ from harness.core.scene_layout import (
 from harness.runtime.camera_planner import camera_plan_from_case_spec, camera_plan_to_dict
 
 
+SUPPORT_CONTACT_TOLERANCE_M = 0.002
+
+
 def build_static_scene_layout(
     case_spec: dict[str, Any],
     *,
@@ -34,7 +37,6 @@ def build_static_scene_layout(
         for obj in objects
     ]
     containment_relations = declared_containment_relations(objects)
-    placement_adjustments = align_v2_explicit_supports(case_spec, nodes)
     expected_physics = case_spec.get("expected_physics") or {}
     collision_edges = normalize_edges(expected_physics.get("collision_graph") or expected_physics.get("contact_order") or [])
     compiled_camera_plan = (
@@ -64,7 +66,7 @@ def build_static_scene_layout(
         "object_nodes": nodes,
         "support_relations": support_relations,
         "containment_relations": containment_relations,
-        "placement_adjustments": placement_adjustments,
+        "placement_adjustments": [],
         "overlap_pairs": overlap_pairs,
         "overlap_diagnostics": overlap_diagnostics,
         "physics_graph": {
@@ -129,78 +131,14 @@ def infer_support_relations(case_spec: dict[str, Any], nodes: list[dict[str, Any
             continue
         support_id = support_id_for_node(node, expected, support_nodes)
         support_node = by_id.get(support_id) if support_id else None
-        relations.append(support_relation(node, support_node))
-    return relations
-
-
-def align_v2_explicit_supports(case_spec: dict[str, Any], nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Snap explicitly supported bodies to resolved support geometry."""
-    expected = case_spec.get("expected_physics") if isinstance(case_spec.get("expected_physics"), dict) else {}
-    support_map = expected.get("support") if isinstance(expected.get("support"), dict) else {}
-    if not support_map:
-        return []
-    by_id = {str(node.get("object_id")): node for node in nodes}
-    adjustments: list[dict[str, Any]] = []
-    # An explicit support relation describes a body already resting at frame
-    # zero.  Adding an air gap here creates an unintended gravity-drop event.
-    clearance_m = 0.0
-    for object_id, support_id in support_map.items():
-        node = by_id.get(str(object_id))
-        support = by_id.get(str(support_id))
-        if node is None or support is None:
-            continue
-        physics = node.get("physics") if isinstance(node.get("physics"), dict) else {}
-        if str(physics.get("body_type") or "").casefold() != "dynamic":
-            # Static/kinematic supports may intentionally touch multiple other
-            # supports (for example both ends of an inclined ramp). Their
-            # authored CaseSpec transform is authoritative; a one-support snap
-            # would flatten or translate the complete structure.
-            continue
-        gap = inclined_surface_gap(node, support)
-        normal_z = 1.0
-        if gap is None:
-            gap = round(
-                float((node.get("bounds") or {}).get("bottom_z", 0.0))
-                - float((support.get("bounds") or {}).get("top_z", 0.0)),
-                6,
+        relations.append(
+            support_relation(
+                node,
+                support_node,
+                require_contact=has_declared_support(node, expected),
             )
-        else:
-            pitch = math.radians(float(((support.get("transform") or {}).get("rotation_deg") or [0.0])[0]))
-            normal_z = math.cos(pitch)
-        if abs(normal_z) < 1e-6:
-            continue
-        delta_z = (clearance_m - gap) / normal_z
-        if abs(delta_z) > 1e-6:
-            transform = node.setdefault("transform", {})
-            position = object_position(node)
-            position[2] = round(position[2] + delta_z, 6)
-            transform["position_m"] = position
-            translate_node_bounds(node, [0.0, 0.0, delta_z])
-            adjustments.append(
-                {
-                    "object_id": str(object_id),
-                    "support_id": str(support_id),
-                    "type": "explicit_support_surface_snap",
-                    "delta_z_m": round(delta_z, 6),
-                    "clearance_m": clearance_m,
-                }
-            )
-    return adjustments
-
-
-def translate_node_bounds(node: dict[str, Any], delta: list[float]) -> None:
-    bounds = node.setdefault("bounds", {})
-    if abs(delta[2]) <= 1e-12:
-        return
-    for key in ("bottom_z", "top_z"):
-        if bounds.get(key) is not None:
-            bounds[key] = round(float(bounds[key]) + delta[2], 6)
-    geometry = (node.get("physics") or {}).get("collision_geometry") or {}
-    center = geometry.get("world_center_m")
-    if isinstance(center, list) and len(center) >= 3:
-        geometry["world_center_m"] = round_vec(
-            [float(center[index]) + float(delta[index]) for index in range(3)]
         )
+    return relations
 
 
 def support_id_for_node(node: dict[str, Any], expected: dict[str, Any], support_nodes: list[dict[str, Any]]) -> str | None:
@@ -222,7 +160,23 @@ def support_id_for_node(node: dict[str, Any], expected: dict[str, Any], support_
     return str(support_nodes[0]["object_id"]) if support_nodes else None
 
 
-def support_relation(node: dict[str, Any], support_node: dict[str, Any] | None) -> dict[str, Any]:
+def has_declared_support(node: dict[str, Any], expected: dict[str, Any]) -> bool:
+    object_id = str(node.get("object_id"))
+    for key in ("support", "contact_surface"):
+        declaration = expected.get(key)
+        if isinstance(declaration, str):
+            return bool(declaration)
+        if isinstance(declaration, dict) and (object_id in declaration or "default" in declaration):
+            return True
+    return False
+
+
+def support_relation(
+    node: dict[str, Any],
+    support_node: dict[str, Any] | None,
+    *,
+    require_contact: bool = False,
+) -> dict[str, Any]:
     if support_node is None:
         if allows_free_initial_motion(node):
             return {
@@ -238,18 +192,15 @@ def support_relation(node: dict[str, Any], support_node: dict[str, Any] | None) 
             "vertical_gap_m": None,
         }
     footprint_margins = support_footprint_margins(node, support_node)
-    gap = inclined_surface_gap(node, support_node)
-    if gap is None:
-        bottom = float((node.get("bounds") or {}).get("bottom_z", 0.0))
-        support_top = float((support_node.get("bounds") or {}).get("top_z", 0.0))
-        gap = round(bottom - support_top, 6)
-    if any(margin < -0.01 for margin in footprint_margins):
+    normal = object_local_axes(support_node)[2]
+    gap = support_surface_gap(node, support_node, normal)
+    if any(margin < -SUPPORT_CONTACT_TOLERANCE_M for margin in footprint_margins):
         status = "outside_support_footprint"
-    elif gap < -0.01:
+    elif gap < -SUPPORT_CONTACT_TOLERANCE_M:
         status = "penetrating_support"
-    elif abs(gap) <= 0.01:
+    elif abs(gap) <= SUPPORT_CONTACT_TOLERANCE_M:
         status = "contact_at_rest"
-    elif allows_free_initial_motion(node):
+    elif allows_free_initial_motion(node) and not require_contact:
         status = "above_support"
     else:
         status = "unsupported_gap"
@@ -258,13 +209,19 @@ def support_relation(node: dict[str, Any], support_node: dict[str, Any] | None) 
         "support_id": support_node["object_id"],
         "status": status,
         "vertical_gap_m": gap,
+        "signed_surface_gap_m": gap,
         "horizontal_margin_m": footprint_margins,
+        "support_normal_world": round_vec(normal),
+        "suggested_translation_m": round_vec(
+            [0.0 if abs(gap * component) < 1e-12 else -gap * component for component in normal]
+        ),
+        "tolerance_m": SUPPORT_CONTACT_TOLERANCE_M,
     }
 
 
 def support_footprint_margins(node: dict[str, Any], support_node: dict[str, Any]) -> list[float]:
-    node_position = object_position(node)
-    support_position = object_position(support_node)
+    node_position = collision_center(node)
+    support_position = collision_center(support_node)
     center_delta = [node_position[index] - support_position[index] for index in range(3)]
     axes, support_half_extents = support_footprint_axes(support_node)
     margins: list[float] = []
@@ -277,14 +234,7 @@ def support_footprint_margins(node: dict[str, Any], support_node: dict[str, Any]
 
 def support_footprint_axes(support_node: dict[str, Any]) -> tuple[list[list[float]], list[float]]:
     support_extents = object_extents(support_node)
-    rotation = (support_node.get("transform") or {}).get("rotation_deg") or [0.0, 0.0, 0.0]
-    pitch = math.radians(float(rotation[0]))
-    if abs(pitch) > 1e-9:
-        return (
-            [[math.cos(pitch), 0.0, -math.sin(pitch)], [0.0, 1.0, 0.0]],
-            [support_extents[0], support_extents[1]],
-        )
-    return ([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], [support_extents[0], support_extents[1]])
+    return (object_local_axes(support_node)[:2], support_extents[:2])
 
 
 def is_support_node(node: dict[str, Any]) -> bool:
@@ -311,14 +261,14 @@ def allows_free_initial_motion(node: dict[str, Any]) -> bool:
     return allows_above_support(str(node.get("role")))
 
 
-def inclined_surface_gap(node: dict[str, Any], support_node: dict[str, Any]) -> float | None:
-    rotation = (support_node.get("transform") or {}).get("rotation_deg") or [0.0, 0.0, 0.0]
-    pitch = math.radians(float(rotation[0]))
-    if abs(pitch) <= 1e-9:
-        return None
-    normal = [math.sin(pitch), 0.0, math.cos(pitch)]
-    node_position = object_position(node)
-    support_position = object_position(support_node)
+def support_surface_gap(
+    node: dict[str, Any],
+    support_node: dict[str, Any],
+    normal: list[float] | None = None,
+) -> float:
+    normal = normal or object_local_axes(support_node)[2]
+    node_position = collision_center(node)
+    support_position = collision_center(support_node)
     center_delta = [node_position[axis] - support_position[axis] for axis in range(3)]
     support_half_thickness = object_extents(support_node)[2]
     subject_radius = projected_object_radius(node, normal)
@@ -379,12 +329,22 @@ def collision_enabled(node: dict[str, Any]) -> bool:
 def collision_center(node: dict[str, Any]) -> list[float]:
     geometry = (node.get("physics") or {}).get("collision_geometry") or {}
     center = geometry.get("world_center_m")
-    return [float(value) for value in center[:3]] if isinstance(center, list) and len(center) >= 3 else object_position(node)
+    if isinstance(center, list) and len(center) >= 3:
+        return [float(value) for value in center[:3]]
+    position = object_position(node)
+    offset = (node.get("bounds") or {}).get("local_center_offset_m") or [0.0, 0.0, 0.0]
+    padded_offset = [float(value) for value in [*offset, 0.0, 0.0, 0.0][:3]]
+    axes = object_local_axes(node)
+    return [
+        position[component] + sum(padded_offset[axis] * axes[axis][component] for axis in range(3))
+        for component in range(3)
+    ]
 
 
 def collision_shape(node: dict[str, Any]) -> str:
     geometry = (node.get("physics") or {}).get("collision_geometry") or {}
-    return str(geometry.get("shape") or "box").casefold()
+    physics = node.get("physics") or {}
+    return str(geometry.get("shape") or physics.get("collider") or node.get("shape") or "box").casefold()
 
 
 def collision_pair_penetration(

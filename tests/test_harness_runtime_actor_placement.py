@@ -660,7 +660,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual(dynamic[0]["params"]["release_time_s"], 1.0)
         self.assertEqual(dynamic[0]["params"]["hold_position_m"], [0.0, -1.4, 0.1])
 
-    def test_v2_delayed_release_uses_compiled_support_snapped_position(self) -> None:
+    def test_v2_delayed_release_preserves_authored_hold_position(self) -> None:
         from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement
 
         binding = {
@@ -685,8 +685,8 @@ class RuntimeActorPlacementTests(unittest.TestCase):
                 }],
             },
         )
-        self.assertEqual(dynamic[0]["params"]["hold_position_m"], [1.0, 0.0, 0.83])
-        self.assertEqual(dynamic[0]["params"]["release_position_m"], [1.0, 0.0, 0.83])
+        self.assertEqual(dynamic[0]["params"]["hold_position_m"], [1.0, 0.0, 0.5])
+        self.assertEqual(dynamic[0]["params"]["release_position_m"], [1.0, 0.0, 0.5])
 
     def test_static_anchor_preserves_compiled_bounds_without_role_override(self) -> None:
         from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement, ue_path_for_binding
