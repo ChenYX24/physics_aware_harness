@@ -6,6 +6,7 @@
 
 class AADPPhysicsRuntimeDriver;
 class AActor;
+class UPhysicsConstraintComponent;
 
 UCLASS()
 class ADPPHYSICSRUNTIME_API UADPPhysicsRuntimeLibrary : public UBlueprintFunctionLibrary
@@ -15,6 +16,9 @@ class ADPPHYSICSRUNTIME_API UADPPhysicsRuntimeLibrary : public UBlueprintFunctio
 public:
 	UFUNCTION(BlueprintCallable, Category = "ADP Physics", meta = (WorldContext = "WorldContextObject"))
 	static AADPPhysicsRuntimeDriver* SpawnPhysicsRuntimeDriver(UObject* WorldContextObject);
+
+	UFUNCTION(BlueprintCallable, Category = "ADP Physics|Constraints")
+	static bool InitializePhysicsConstraint(UPhysicsConstraintComponent* ConstraintComponent);
 
 #if WITH_EDITOR
 	UFUNCTION(BlueprintCallable, Category = "ADP Physics|Geometry Collection")

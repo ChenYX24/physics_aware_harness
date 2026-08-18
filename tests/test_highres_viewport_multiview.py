@@ -22,6 +22,80 @@ class Vector:
 
 
 class HighresViewportMultiviewTests(unittest.TestCase):
+    def test_runtime_constraint_is_rebound_to_pie_body_components(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "rebind_runtime_actors_to_simulation_world"
+        )
+        called = {
+            node.func.id
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+
+        self.assertTrue(
+            {"configure_runtime_constraint", "initialize_runtime_constraint", "runtime_constraint_bindings_verified"}
+            <= called
+        )
+
+    def test_runtime_component_registration_falls_back_to_live_owner(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "runtime_component_registered"
+        )
+        namespace = {}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+
+        class Component:
+            def is_registered(self):
+                raise AttributeError("not exported to Python")
+
+            def get_editor_property(self, _name):
+                raise AttributeError("not exported to Python")
+
+            def get_owner(self):
+                return object()
+
+        self.assertTrue(namespace["runtime_component_registered"](Component()))
+
+    def test_runtime_constraint_initializer_uses_plugin_physics_state_entrypoint(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "initialize_runtime_constraint"
+        )
+        calls = []
+        library = types.SimpleNamespace(
+            initialize_physics_constraint=lambda component: calls.append(component) or True,
+        )
+        namespace = {"unreal": types.SimpleNamespace(ADPPhysicsRuntimeLibrary=library)}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+        component = object()
+
+        self.assertTrue(namespace["initialize_runtime_constraint"](component))
+        self.assertEqual(calls, [component])
+
+    def test_runtime_plugin_exposes_constraint_physics_state_initialization(self) -> None:
+        plugin = ROOT / "ue_template" / "Plugins" / "ADPPhysicsRuntime" / "Source" / "ADPPhysicsRuntime"
+        header = (plugin / "Public" / "ADPPhysicsRuntimeLibrary.h").read_text(encoding="utf-8")
+        implementation = (plugin / "Private" / "ADPPhysicsRuntimeLibrary.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("InitializePhysicsConstraint(UPhysicsConstraintComponent* ConstraintComponent)", header)
+        self.assertIn("ConstraintComponent->TermComponentConstraint();", implementation)
+        self.assertIn("ConstraintComponent->InitComponentConstraint();", implementation)
+        self.assertIn("ConstraintInstance.IsValidConstraintInstance()", implementation)
+
     def test_generic_constraint_maps_local_axes_to_ue_constraint_axes(self) -> None:
         source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
@@ -89,12 +163,12 @@ class HighresViewportMultiviewTests(unittest.TestCase):
             {
                 "capture_phase": "pre_simulation",
                 "objects": [{"mesh_component": {"registered": False}}],
-                "constraints": [{"component_registered": False, "body_bindings_verified": False}],
+                "constraints": [{"component_registered": False, "body_bindings_verified": False, "configuration_applied": False, "broken": False}],
             },
             {
                 "capture_phase": "pre_simulation",
                 "objects": [{"mesh_component": {"registered": True}}],
-                "constraints": [{"component_registered": True, "body_bindings_verified": True}],
+                "constraints": [{"component_registered": True, "body_bindings_verified": True, "configuration_applied": True, "broken": False}],
             },
         ]
         actors = {

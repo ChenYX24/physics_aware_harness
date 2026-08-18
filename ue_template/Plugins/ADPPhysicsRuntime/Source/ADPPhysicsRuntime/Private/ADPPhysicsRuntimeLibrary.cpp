@@ -3,6 +3,7 @@
 #include "ADPPhysicsRuntimeDriver.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "PhysicsEngine/PhysicsConstraintComponent.h"
 
 #if WITH_EDITOR
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -53,6 +54,22 @@ AADPPhysicsRuntimeDriver* UADPPhysicsRuntimeLibrary::SpawnPhysicsRuntimeDriver(U
 	}
 #endif
 	return Driver;
+}
+
+bool UADPPhysicsRuntimeLibrary::InitializePhysicsConstraint(UPhysicsConstraintComponent* ConstraintComponent)
+{
+	if (ConstraintComponent == nullptr || ConstraintComponent->GetWorld() == nullptr)
+	{
+		return false;
+	}
+	if (!ConstraintComponent->IsRegistered())
+	{
+		ConstraintComponent->RegisterComponentWithWorld(ConstraintComponent->GetWorld());
+	}
+	ConstraintComponent->TermComponentConstraint();
+	ConstraintComponent->InitComponentConstraint();
+	return ConstraintComponent->IsRegistered()
+		&& ConstraintComponent->ConstraintInstance.IsValidConstraintInstance();
 }
 
 #if WITH_EDITOR

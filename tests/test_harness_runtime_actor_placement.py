@@ -157,6 +157,19 @@ class RuntimeActorPlacementTests(unittest.TestCase):
 
         self.assertEqual(result["failure_code"], "F_UE_NATIVE_SCRIPT_EXCEPTION")
 
+    def test_constraint_binding_failure_precedes_missing_rgb_classification(self) -> None:
+        from scripts.harness_local_ue_runner import classify_native_pass_failure
+
+        with tempfile.TemporaryDirectory() as temporary:
+            native_output = Path(temporary)
+            (native_output / "summary.json").write_text(
+                json.dumps({"errors": [{"error": "F_RUNTIME_CONSTRAINT_BINDING_FAILED:constraint_binding_incomplete"}]}),
+                encoding="utf-8",
+            )
+            result = classify_native_pass_failure(native_output, "rgb")
+
+        self.assertEqual(result["failure_code"], "F_RUNTIME_CONSTRAINT_BINDING_FAILED")
+
     def test_failed_native_pass_records_actual_ue_invocation(self) -> None:
         from scripts.harness_local_ue_runner import fail_report
 

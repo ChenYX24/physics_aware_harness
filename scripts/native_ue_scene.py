@@ -2949,6 +2949,61 @@ def physics_constraint_component(actor):
     return actor.get_component_by_class(cls) if cls else None
 
 
+def runtime_component_registered(component) -> bool:
+    if not component:
+        return False
+    try:
+        return bool(component.is_registered())
+    except Exception:
+        pass
+    try:
+        return bool(component.get_editor_property("registered"))
+    except Exception:
+        pass
+    try:
+        return component.get_owner() is not None
+    except Exception:
+        return False
+
+
+def constrained_runtime_components(component) -> list:
+    if not component:
+        return []
+    try:
+        values = component.get_constrained_components() or []
+    except Exception:
+        return []
+    return [value for value in values if value and hasattr(value, "get_owner")]
+
+
+def runtime_constraint_bindings_verified(component, body_a_component, body_b_component) -> bool:
+    actual = constrained_runtime_components(component)
+    if len(actual) != 2:
+        return False
+    expected = (body_a_component, body_b_component)
+    for actual_component, expected_component in zip(actual, expected):
+        if actual_component is expected_component or actual_component == expected_component:
+            continue
+        try:
+            if actual_component.get_owner() == expected_component.get_owner():
+                continue
+        except Exception:
+            pass
+        return False
+    return True
+
+
+def initialize_runtime_constraint(component) -> bool:
+    library = getattr(unreal, "ADPPhysicsRuntimeLibrary", None)
+    if library is None:
+        unreal.load_class(None, "/Script/ADPPhysicsRuntime.ADPPhysicsRuntimeLibrary")
+        library = getattr(unreal, "ADPPhysicsRuntimeLibrary", None)
+    initializer = getattr(library, "initialize_physics_constraint", None) if library else None
+    if not callable(initializer):
+        raise RuntimeError("ADPPhysicsRuntime constraint initializer is unavailable")
+    return bool(initializer(component))
+
+
 def constraint_motion_enum(motion: str, *, angular: bool):
     enum_class = unreal.AngularConstraintMotion if angular else unreal.LinearConstraintMotion
     prefix = "ACM" if angular else "LCM"
@@ -3030,7 +3085,7 @@ def spawn_runtime_constraints(editor, runtime_scene: dict, runtime_actors: dict,
             "angular_motion": binding["angular_motion"],
             "angular_limits_deg": binding["angular_limits_deg"],
             "collision_enabled": binding["collision_enabled"],
-            "configuration_applied": True,
+            "configuration_applied": False,
         }
     return constraint_actors, details
 
@@ -5785,6 +5840,8 @@ def runtime_binding_snapshot_registered(snapshot: dict) -> bool:
         isinstance(item, dict)
         and item.get("component_registered") is True
         and item.get("body_bindings_verified") is True
+        and item.get("configuration_applied") is True
+        and item.get("broken") is False
         for item in (constraints or [])
     )
 
@@ -6639,17 +6696,6 @@ def setup_scene(runtime_scene: dict | None = None):
                         return str(asset)
             return None
 
-        def component_registered(component) -> bool:
-            if not component:
-                return False
-            try:
-                return bool(component.is_registered())
-            except Exception:
-                try:
-                    return bool(component.get_editor_property("registered"))
-                except Exception:
-                    return False
-
         def runtime_binding_snapshot_for(obj: dict, physics_actor, physics_detail: dict) -> dict:
             object_id = str(obj.get("id") or "")
             params = obj.get("params") if isinstance(obj.get("params"), dict) else {}
@@ -6692,7 +6738,7 @@ def setup_scene(runtime_scene: dict | None = None):
                 "/Engine/BasicShapes/Cylinder.Cylinder": "cylinder",
             }.get(collision_mesh_path)
             visible = params.get("visible") is not False
-            render_registered = component_registered(render_component)
+            render_registered = runtime_component_registered(render_component)
             pose_anchor = str(params.get("pose_anchor") or "actor_origin")
             pose_position = runtime_binding_pose_position(location, collision_origin, pose_anchor)
             try:
@@ -6969,18 +7015,12 @@ def setup_scene(runtime_scene: dict | None = None):
         def runtime_constraint_snapshot_for(constraint_id: str, constraint_actor) -> dict:
             detail = constraint_binding_details.get(constraint_id) or {}
             component = physics_constraint_component(constraint_actor)
-            actual_body_labels = []
-            if component:
-                try:
-                    constrained = component.get_constrained_components() or []
-                    for item in constrained:
-                        if not item or not hasattr(item, "get_owner"):
-                            continue
-                        owner = item.get_owner()
-                        if owner:
-                            actual_body_labels.append(str(owner.get_actor_label()))
-                except Exception:
-                    actual_body_labels = []
+            constrained = constrained_runtime_components(component)
+            actual_body_labels = [
+                str(item.get_owner().get_actor_label())
+                for item in constrained
+                if item.get_owner()
+            ]
             expected_labels = {
                 f"native_phenomena_demo_{(detail.get('body_a') or {}).get('object_id')}",
                 f"native_phenomena_demo_{(detail.get('body_b') or {}).get('object_id')}",
@@ -6991,8 +7031,8 @@ def setup_scene(runtime_scene: dict | None = None):
                 broken = None
             return {
                 **detail,
-                "component_registered": component_registered(component),
-                "body_bindings_verified": expected_labels <= set(actual_body_labels),
+                "component_registered": runtime_component_registered(component),
+                "body_bindings_verified": len(actual_body_labels) == 2 and expected_labels == set(actual_body_labels),
                 "actual_body_actor_labels": sorted(actual_body_labels),
                 "broken": broken,
             }
@@ -9345,6 +9385,45 @@ def rebind_runtime_actors_to_simulation_world(
     status["rebound_constraint_ids"] = sorted(set(rebound_constraints))
     missing_constraints = sorted(set(wanted_constraints) - set(rebound_constraints))
     status["missing_constraint_ids"] = missing_constraints
+    constraint_bindings = {
+        str(item.get("constraint_id")): item
+        for item in (runtime_scene.get("constraints") or [])
+        if item.get("constraint_id")
+    }
+    constraint_details = actors.get("constraint_binding_details") or {}
+    configured_constraints = []
+    constraint_binding_failures = []
+    for constraint_id in sorted(set(rebound_constraints)):
+        binding = constraint_bindings.get(constraint_id)
+        constraint_actor = constraint_actors.get(constraint_id)
+        body_a_id = str(((binding or {}).get("body_a") or {}).get("object_id") or "")
+        body_b_id = str(((binding or {}).get("body_b") or {}).get("object_id") or "")
+        component = physics_constraint_component(constraint_actor) if constraint_actor else None
+        body_a_component = actor_runtime_component(actors.get(body_a_id))
+        body_b_component = actor_runtime_component(actors.get(body_b_id))
+        detail = constraint_details.get(constraint_id)
+        if not binding or not component or not body_a_component or not body_b_component:
+            constraint_binding_failures.append(constraint_id)
+            if isinstance(detail, dict):
+                detail["configuration_applied"] = False
+            continue
+        try:
+            configure_runtime_constraint(component, binding, body_a_component, body_b_component)
+            initialized = initialize_runtime_constraint(component)
+            verified = initialized and runtime_constraint_bindings_verified(component, body_a_component, body_b_component)
+        except Exception as exc:
+            verified = False
+            if record_failure:
+                status.setdefault("errors", []).append(f"constraint_bind_failed:{constraint_id}:{exc}")
+        if isinstance(detail, dict):
+            detail["configuration_applied"] = verified
+        if verified:
+            configured_constraints.append(constraint_id)
+        else:
+            constraint_binding_failures.append(constraint_id)
+    status["configured_constraint_ids"] = configured_constraints
+    status["constraint_binding_failures"] = constraint_binding_failures
+    status["constraint_binding_complete"] = not missing_constraints and not constraint_binding_failures
     if missing_constraints and record_failure:
         status.setdefault("errors", []).append(f"constraint_rebind_missing:{missing_constraints}")
     initialize_gasp_locomotion(actors, runtime_scene, status)
@@ -10058,6 +10137,16 @@ def start_highres_viewport_capture(
             physics_status["interaction_driver"] = "gasp_character_movement_and_delayed_release"
         elif not start_cpp_runtime_driver(actors, runtime_scene, physics_status, len(trajectory)):
             apply_initial_physics_impulses(actors, runtime_scene, physics_status)
+        if runtime_scene.get("constraints"):
+            rebind_runtime_actors_to_simulation_world(
+                actors,
+                runtime_scene,
+                physics_status,
+                timeout_s=0.0,
+                record_failure=True,
+            )
+            if not physics_status.get("constraint_binding_complete") or not update_runtime_binding_snapshot():
+                raise RuntimeError("F_RUNTIME_CONSTRAINT_BINDING_FAILED: post-body-setup initialization failed")
         first_frame = trajectory[min(state["frame_index"], len(trajectory) - 1)] if trajectory else {"frame": 0, "time": 0.0, "objects": {}}
         runner_ids = [obj.get("id") for obj in (runtime_scene.get("dynamic_objects") or []) if obj.get("behavior") == "third_person_runner"] if runtime_scene else []
         if runner_ids:
@@ -10426,34 +10515,39 @@ def start_highres_viewport_capture(
                         summary["physics_capture"].update(physics_status)
                         write_summary(summary)
                 if not state["physics_ready"] and now - state["physics_wait_started"] > 12.0:
-                    timeout_reason = (
-                        "component_registration_incomplete"
-                        if physics_status.get("game_world_count", 0) > 0
-                        else "no_pie_game_world"
-                    )
-                    physics_status.setdefault("errors", []).append(f"physics_ready_timeout:{timeout_reason}")
-                    state["physics_ready"] = True
+                    if runtime_scene.get("constraints") and not physics_status.get("constraint_binding_complete"):
+                        failure_code = "F_RUNTIME_CONSTRAINT_BINDING_FAILED"
+                        timeout_reason = "constraint_binding_incomplete"
+                    else:
+                        failure_code = "F_RUNTIME_BINDING_MISMATCH"
+                        timeout_reason = (
+                            "component_registration_incomplete"
+                            if physics_status.get("game_world_count", 0) > 0
+                            else "no_pie_game_world"
+                        )
+                    physics_status.setdefault("errors", []).append(f"{failure_code}:{timeout_reason}")
                     summary["physics_capture"].update(physics_status)
                     state["errors"].append(
                         {
                             "frame": state.get("frame_index"),
-                            "error": f"physics_ready_timeout:{timeout_reason}",
+                            "error": f"{failure_code}:{timeout_reason}",
                         }
                     )
                     write_summary(summary)
+                    finish()
                 return
             if not state["runtime_binding_snapshot_ready"]:
                 if update_runtime_binding_snapshot():
                     write_summary(summary)
                 elif time.perf_counter() - state["runtime_binding_wait_started"] > 12.0:
-                    state["runtime_binding_snapshot_ready"] = True
                     state["errors"].append(
                         {
                             "frame": state.get("frame_index"),
-                            "error": "runtime_binding_timeout:component_registration_incomplete",
+                            "error": "F_RUNTIME_BINDING_MISMATCH:component_registration_incomplete",
                         }
                     )
                     write_summary(summary)
+                    finish()
                 else:
                     return
             if state.get("gasp_tick_pending") is not None:

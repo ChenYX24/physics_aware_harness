@@ -1071,6 +1071,16 @@ def classify_native_pass_failure(native_output: Path, pass_mode: str) -> dict[st
             "failure_code": "F_ASSET_RUNTIME_BINDING_INVALID",
             "failure_message": "UE runner tried to load a non-mesh class or invalid asset path as a renderable runtime asset. Keep Blueprint/class paths separate from StaticMesh asset paths.",
         }
+    if "F_RUNTIME_CONSTRAINT_BINDING_FAILED" in process_text:
+        return {
+            "failure_code": "F_RUNTIME_CONSTRAINT_BINDING_FAILED",
+            "failure_message": "UE PIE could not bind a declared rigid constraint to its runtime body components.",
+        }
+    if "F_RUNTIME_BINDING_MISMATCH" in process_text:
+        return {
+            "failure_code": "F_RUNTIME_BINDING_MISMATCH",
+            "failure_message": "UE PIE runtime components did not match the compiled binding declaration.",
+        }
     if "LogPython: Error: Traceback" in process_text or "Python script executed with errors" in process_text:
         return {
             "failure_code": "F_UE_NATIVE_SCRIPT_EXCEPTION",
