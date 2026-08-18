@@ -59,6 +59,21 @@ class CaseSpecV2Tests(unittest.TestCase):
             case_spec_v2_from_dict(data)
         self.assertIn("collision_geometry_without_collision", {issue.code for issue in context.exception.issues})
 
+    def test_hidden_collision_requires_explicit_geometry(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["visual_representation"] = {"source": "none", "visible": False}
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        self.assertIn("missing_hidden_collision_geometry", {issue.code for issue in context.exception.issues})
+
+        data["objects"][0]["physics"]["collision_geometry"] = {
+            "shape": "sphere",
+            "size_m": [0.18, 0.18, 0.18],
+        }
+        case_spec_v2_from_dict(data)
+
     def test_event_sequence_requires_multiple_explicit_events(self) -> None:
         data = case_spec_v2_fixture()
         data["verification_requirements"]["assertions"] = [
@@ -834,6 +849,14 @@ class CaseSpecV2Tests(unittest.TestCase):
         data["objects"][0]["solver"] = {"output": "renderable_geometry"}
         data["objects"][1]["visual_representation"] = {"source": "none"}
         data["objects"][2]["visual_representation"] = {"source": "none"}
+        data["objects"][1]["physics"]["collision_geometry"] = {
+            "shape": "sphere",
+            "size_m": [0.18, 0.18, 0.18],
+        }
+        data["objects"][2]["physics"]["collision_geometry"] = {
+            "shape": "box",
+            "size_m": [3.0, 2.0, 0.1],
+        }
 
         case = case_spec_v2_from_dict(data)
         projection = compile_case_spec_v2_runtime(case)

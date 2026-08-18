@@ -65,6 +65,40 @@ class StaticScenePlacementTests(unittest.TestCase):
         self.assertEqual(overlap["tolerance_m"], 0.002)
         self.assertEqual(len(overlap["minimum_translation_axis"]), 3)
 
+    def test_asset_body_setup_is_used_only_without_explicit_collision_geometry(self) -> None:
+        from harness.core.scene_layout import build_object_node
+
+        obj = {
+            "id": "asset_body",
+            "role": "dynamic body",
+            "shape": "box",
+            "size_m": [1.0, 1.0, 1.0],
+            "body_type": "dynamic",
+            "collision_required": True,
+            "visual_representation": {"source": "asset", "visible": True},
+        }
+        selected = {
+            "asset_id": "qualified_mesh",
+            "ue_path": "/Game/Generated/SM_Qualified.SM_Qualified",
+            "asset_kind": "StaticMesh",
+            "collider": "box",
+            "collision_profile": "PhysicsActor",
+            "collision": {"present": True, "kind": "simple_convex"},
+            "mass_kg": 1.0,
+            "material": {"dynamic_friction": 0.4},
+            "authored_size_m": [1.0, 1.0, 1.0],
+        }
+
+        node = build_object_node(obj, {"selected_asset": selected})
+        self.assertIsNone(node["physics"]["collision_geometry"])
+        self.assertEqual(node["physics"]["collision_binding_source"], "asset_body_setup")
+        self.assertTrue(node["asset_binding"]["collision_body_setup_verified"])
+
+        selected["collision"] = {"present": False}
+        invalid = build_object_node(obj, {"selected_asset": selected})
+        self.assertEqual(invalid["physics"]["collision_binding_source"], "unverified_asset_body_setup")
+        self.assertFalse(invalid["asset_binding"]["collision_body_setup_verified"])
+
     def test_initial_preflight_has_no_static_or_visibility_exemption(self) -> None:
         from harness.planning.static_scene_builder import build_static_scene_layout
 

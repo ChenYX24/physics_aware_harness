@@ -103,6 +103,7 @@ class NativeGenerationTests(unittest.TestCase):
         hard_rules = context["case_spec_contract"]["hard_rules"]
         self.assertTrue(any("sole collision truth" in rule for rule in hard_rules))
         self.assertTrue(any("controls rendering only" in rule for rule in hard_rules))
+        self.assertTrue(any("qualified imported asset BodySetup" in rule for rule in hard_rules))
         path_contract = context["intent_draft_contract"]["parameter_analysis_shape"]["path"]
         self.assertIn("$.scene.duration_s", path_contract)
         self.assertIn("$.objects.domino_10.initial_state.rotation_deg", path_contract)

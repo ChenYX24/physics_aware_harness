@@ -638,6 +638,17 @@ def collect_case_spec_v2_issues(
                 "invalid_type",
                 "must be boolean",
             )
+        if (
+            representation_source == "none"
+            and physics.get("collision_required") is True
+            and not isinstance(physics.get("collision_geometry"), Mapping)
+        ):
+            _issue(
+                issues,
+                f"{path}/physics/collision_geometry",
+                "missing_hidden_collision_geometry",
+                "source=none with collision_required=true requires explicit collision_geometry",
+            )
         if representation_source == "solver_generated" and not isinstance(obj.get("solver"), Mapping):
             _issue(
                 issues,

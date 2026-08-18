@@ -188,6 +188,17 @@ def first_bad_physics_binding(bindings: list[dict[str, Any]]) -> dict[str, Any] 
             return {"failure_type": "F3_invalid_initial_physics_state", "object_id": object_id, "metric": "missing_collider", "value": None}
         if physics.get("collision_enabled") and not physics.get("collision_profile"):
             return {"failure_type": "F3_invalid_initial_physics_state", "object_id": object_id, "metric": "missing_collision_profile", "value": None}
+        if physics.get("collision_enabled") and physics.get("collision_geometry_verification") not in {
+            "runtime_controlled",
+            "body_setup_verified",
+            "asset_body_setup_reflected",
+        }:
+            return {
+                "failure_type": "F2_asset_missing",
+                "object_id": object_id,
+                "metric": "collision_binding_unverified",
+                "value": physics.get("collision_geometry_verification"),
+            }
         if physics.get("simulate_physics") and physics.get("mass_kg") is None:
             return {"failure_type": "F3_invalid_initial_physics_state", "object_id": object_id, "metric": "missing_mass_kg", "value": None}
     return None

@@ -823,6 +823,106 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertNotIn("visual_ue5_path", hidden_static[0]["params"])
         self.assertTrue(hidden_static[0]["physics_properties"]["collision_enabled"])
 
+    def test_hidden_explicit_collision_needs_no_asset_metadata(self) -> None:
+        from harness.runtime.actor_placement import compile_runtime_actor_placement
+        from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement
+
+        node = {
+            "object_id": "hidden_wall",
+            "role": "collision wall",
+            "shape": "box",
+            "physics_critical": True,
+            "transform": {"position_m": [0.0, 0.0, 0.5], "rotation_deg": [0.0, 0.0, 0.0]},
+            "visual_representation": {"source": "none", "visible": False},
+            "physics": {
+                "body_type": "static",
+                "collision_required": True,
+                "collider": "box",
+                "collision_geometry": {
+                    "shape": "box",
+                    "size_m": [0.1, 1.0, 1.0],
+                    "local_center_offset_m": [0.0, 0.0, 0.0],
+                    "world_center_m": [0.0, 0.0, 0.5],
+                    "source": "declared",
+                },
+            },
+            "asset_binding": {},
+        }
+
+        placement = compile_runtime_actor_placement(
+            {"case_id": "hidden"},
+            {"case_id": "hidden", "object_nodes": [node]},
+        )
+        binding = placement["actor_bindings"][0]
+        _, static = runtime_objects_from_actor_placement(
+            placement,
+            {"case_id": "hidden", "objects": [{"id": "hidden_wall"}]},
+        )
+
+        self.assertTrue(binding["asset"]["proxy"])
+        self.assertEqual(binding["asset"]["runtime_usage"], "analytic_proxy")
+        self.assertEqual(binding["physics"]["collision_profile"], "BlockAll")
+        self.assertEqual(binding["physics"]["collision_geometry_verification"], "runtime_controlled")
+        self.assertEqual(static[0]["ue5_path"], "/Engine/BasicShapes/Cube.Cube")
+        self.assertFalse(static[0]["params"]["visible"])
+
+    def test_asset_body_setup_remains_collision_and_visual(self) -> None:
+        from harness.runtime.actor_placement import compile_runtime_actor_placement
+        from harness.verification.runtime_actor_placement_verifier import verify_runtime_actor_placement
+        from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement
+
+        node = {
+            "object_id": "complex_asset",
+            "role": "dynamic body",
+            "shape": "irregular",
+            "physics_critical": True,
+            "transform": {"position_m": [0.0, 0.0, 1.0], "rotation_deg": [0.0, 0.0, 0.0]},
+            "visual_representation": {"source": "asset", "visible": True},
+            "physics": {
+                "body_type": "dynamic",
+                "collision_required": True,
+                "collider": "simple_convex",
+                "collision_profile": "PhysicsActor",
+                "mass_kg": 2.0,
+            },
+            "asset_binding": {
+                "selected_asset_id": "complex_asset",
+                "selected_asset_ue_path": "/Game/Generated/SM_Complex.SM_Complex",
+                "asset_kind": "StaticMesh",
+                "collision": {"present": True, "kind": "simple_convex"},
+                "collision_body_setup_verified": True,
+                "quality_gate": {"status": "pass"},
+                "instance_scale": [1.0, 1.0, 1.0],
+            },
+        }
+
+        placement = compile_runtime_actor_placement(
+            {"case_id": "asset_collision"},
+            {"case_id": "asset_collision", "object_nodes": [node]},
+        )
+        binding = placement["actor_bindings"][0]
+        dynamic, _ = runtime_objects_from_actor_placement(
+            placement,
+            {"case_id": "asset_collision", "objects": [{"id": "complex_asset"}]},
+        )
+
+        self.assertIsNone(binding["physics"]["collision_geometry"])
+        self.assertEqual(binding["physics"]["collision_geometry_source"], "asset_body_setup")
+        self.assertEqual(binding["physics"]["collision_geometry_verification"], "body_setup_verified")
+        self.assertEqual(binding["asset"]["runtime_usage"], "collision_and_visual")
+        self.assertEqual(dynamic[0]["ue5_path"], "/Game/Generated/SM_Complex.SM_Complex")
+        self.assertNotIn("visual_ue5_path", dynamic[0]["params"])
+
+        node["asset_binding"]["collision_body_setup_verified"] = False
+        unverified = compile_runtime_actor_placement(
+            {"case_id": "asset_collision"},
+            {"case_id": "asset_collision", "object_nodes": [node]},
+        )
+        report = verify_runtime_actor_placement({"case_id": "asset_collision"}, unverified)
+        self.assertEqual(report["status"], "fail")
+        self.assertEqual(report["failure_type"], "F2_asset_missing")
+        self.assertEqual(report["first_failure"]["metric"], "collision_binding_unverified")
+
     def test_declared_box_collider_overrides_unverified_selected_asset_collision(self) -> None:
         from harness.runtime.actor_placement import compile_runtime_actor_placement
         from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement, ue_path_for_binding

@@ -71,10 +71,6 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
     kinematic = bool(body_type in {"static", "kinematic"} if body_type else physics.get("kinematic") or is_support or is_field)
     simulate_physics = bool(physics_critical and state_kind == "rigid" and not kinematic and not is_field)
     required_asset_unresolved = bool(asset_binding.get("required_asset_unresolved"))
-    proxy = bool(
-        not required_asset_unresolved
-        and (physics.get("proxy") or asset_binding.get("fallback_reason"))
-    )
     ue_path = asset_binding.get("selected_asset_ue_path")
     collision_geometry = (
         physics.get("collision_geometry")
@@ -88,7 +84,6 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
         and state_kind == "rigid"
         and not is_field
         and collision_required is not False
-        and collision_geometry is not None
     )
     analytic_primitive = (
         "sphere"
@@ -99,22 +94,27 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
         if "cylinder" in collider
         else None
     )
-    # A declared primitive collider is part of the CaseSpec physics contract.
-    # Never let an arbitrary selected asset's pivot or BodySetup silently replace
-    # that geometry: those properties vary by asset and by target UE platform.
     controlled_analytic_collision = bool(
         collision_enabled
-        and not required_asset_unresolved
+        and collision_geometry is not None
         and analytic_primitive is not None
     )
+    asset_body_setup_verified = bool(
+        collision_enabled
+        and ue_path
+        and asset_binding.get("collision_body_setup_verified") is True
+    )
+    proxy = bool(controlled_analytic_collision and not ue_path)
     collision_geometry_source = (
         "none"
         if not collision_enabled
-        else "unbound_required_asset"
-        if required_asset_unresolved and not ue_path
         else str((collision_geometry or {}).get("source") or f"analytic_{analytic_primitive or collider}")
         if controlled_analytic_collision
-        else "selected_asset"
+        else "asset_body_setup"
+        if asset_body_setup_verified
+        else "unbound_required_asset"
+        if required_asset_unresolved and not ue_path
+        else "unverified_asset_body_setup"
     )
     runtime_usage = (
         "unbound_required_asset"
@@ -127,6 +127,9 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
         if ue_path
         else "analytic_proxy"
     )
+    collision_profile = physics.get("collision_profile")
+    if controlled_analytic_collision and not collision_profile:
+        collision_profile = "BlockAll" if kinematic else "PhysicsActor"
     object_transform = node.get("transform") or {}
     collision_transform = dict(object_transform)
     if collision_geometry is not None:
@@ -159,7 +162,7 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
             "ue_path": ue_path,
             "asset_kind": asset_binding.get("asset_kind"),
             "proxy": proxy,
-            "binding_source": "ue_asset" if ue_path else "analytic_proxy" if proxy else "unbound",
+            "binding_source": "analytic_proxy" if controlled_analytic_collision and not ue_path else "ue_asset" if ue_path else "unbound",
             "runtime_usage": runtime_usage,
             "source_kind": asset_binding.get("source_kind"),
             "source_uri": asset_binding.get("source_uri"),
@@ -177,6 +180,8 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
             "quality_gate": asset_binding.get("quality_gate"),
             "fallback_reason": asset_binding.get("fallback_reason"),
             "required_asset_unresolved": required_asset_unresolved,
+            "collision": asset_binding.get("collision"),
+            "collision_body_setup_verified": asset_body_setup_verified,
         },
         "physics": {
             "state_kind": state_kind,
@@ -194,9 +199,11 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
                 if not collision_enabled
                 else "runtime_controlled"
                 if controlled_analytic_collision
+                else "body_setup_verified"
+                if asset_body_setup_verified
                 else "declared_unverified"
             ),
-            "collision_profile": "NoCollision" if is_field else physics.get("collision_profile"),
+            "collision_profile": "NoCollision" if is_field else collision_profile,
             "material": physics.get("material"),
             "linear_damping": physics.get("linear_damping"),
             "angular_damping": physics.get("angular_damping"),

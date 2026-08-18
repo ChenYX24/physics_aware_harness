@@ -52,6 +52,12 @@ def build_object_node(
         if isinstance(obj.get("collision_geometry"), dict)
         else None
     )
+    visual_representation = (
+        obj.get("visual_representation")
+        if isinstance(obj.get("visual_representation"), dict)
+        else {}
+    )
+    visual_source = str(visual_representation.get("source") or "asset")
     if declared_collision_geometry is not None and collision_required is None:
         collision_required = True
     mass = obj.get("mass_kg")
@@ -68,12 +74,7 @@ def build_object_node(
     collision_profile = obj.get("collision_profile")
     if collision_profile is None and isinstance(selected_asset, dict):
         collision_profile = selected_asset.get("collision_profile")
-    if (
-        state_kind != "particle"
-        and selected_asset is None
-        and not required_asset_unresolved
-        and (collision or (asset_row and asset_row.get("fallback_reason")))
-    ):
+    if state_kind != "particle" and declared_collision_geometry is not None:
         defaults = analytic_physics_defaults(obj, intent.role)
         mass = mass if mass is not None else defaults["mass_kg"]
         collider = collider if collider is not None else defaults["collider"]
@@ -99,20 +100,36 @@ def build_object_node(
         shape = "box"
     collision_geometry = resolved_collision_geometry(
         declared_collision_geometry,
-        collider=collider,
-        shape=str(shape),
-        extents=extents,
         object_position_m=position,
         object_rotation_deg=rotation,
-        visual_bounds=bounds,
         collision_enabled=collision_required is not False and state_kind != "particle",
     )
     if collision_geometry is not None:
         collider = collision_geometry["shape"]
-    visual_representation = (
-        obj.get("visual_representation")
-        if isinstance(obj.get("visual_representation"), dict)
+    selected_collision = (
+        selected_asset.get("collision")
+        if isinstance(selected_asset, dict) and isinstance(selected_asset.get("collision"), dict)
         else {}
+    )
+    asset_body_setup_verified = bool(
+        collision_required is not False
+        and visual_source == "asset"
+        and isinstance(selected_asset, dict)
+        and selected_asset.get("ue_path")
+        and selected_collision.get("present") is not False
+        and selected_asset.get("collider")
+        and selected_asset.get("collision_profile")
+    )
+    collision_binding_source = (
+        "analytic"
+        if collision_geometry is not None
+        else "asset_body_setup"
+        if asset_body_setup_verified
+        else "none"
+        if collision_required is False or state_kind == "particle"
+        else "unverified_asset_body_setup"
+        if visual_source == "asset" and isinstance(selected_asset, dict) and selected_asset.get("ue_path")
+        else "unbound"
     )
     visual_center_offset = [
         0.0,
@@ -139,7 +156,7 @@ def build_object_node(
             "local_center_offset_m": round_vec(visual_center_offset),
         },
         "visual_representation": {
-            "source": str(visual_representation.get("source") or "asset"),
+            "source": visual_source,
             "visible": visual_representation.get("visible") is not False,
         },
         "physics": {
@@ -149,6 +166,7 @@ def build_object_node(
             "mass_kg": mass,
             "collider": collider,
             "collision_geometry": collision_geometry,
+            "collision_binding_source": collision_binding_source,
             "collision_profile": collision_profile,
             "material": material,
             "linear_damping": obj.get("linear_damping"),
@@ -198,6 +216,8 @@ def build_object_node(
             "fallback_reason": asset_row.get("fallback_reason") if asset_row else "asset resolution missing",
             "required_asset_unresolved": required_asset_unresolved,
             "runtime_binding_requirements": asset_row.get("runtime_binding_requirements", []) if asset_row else [],
+            "collision": selected_collision or None,
+            "collision_body_setup_verified": asset_body_setup_verified,
         },
     }
 
@@ -205,38 +225,15 @@ def build_object_node(
 def resolved_collision_geometry(
     declared: dict[str, Any] | None,
     *,
-    collider: Any,
-    shape: str,
-    extents: list[float],
     object_position_m: list[float],
     object_rotation_deg: list[float],
-    visual_bounds: dict[str, float],
     collision_enabled: bool,
 ) -> dict[str, Any] | None:
-    if not collision_enabled:
+    if not collision_enabled or declared is None:
         return None
-    if declared is not None:
-        collision_shape = str(declared.get("shape") or "box")
-        size_m = vec3(declared.get("size_m"))
-        local_offset = vec3(declared.get("local_center_offset_m"))
-        source = "declared"
-    else:
-        collision_shape = canonical_collision_shape(collider or shape)
-        if collision_shape == "sphere":
-            diameter = 2.0 * max(extents)
-            size_m = [diameter, diameter, diameter]
-        elif collision_shape == "cylinder":
-            diameter = 2.0 * max(extents[0], extents[1])
-            size_m = [diameter, diameter, 2.0 * extents[2]]
-        else:
-            size_m = [2.0 * value for value in extents]
-        local_offset = [
-            0.0,
-            0.0,
-            (float(visual_bounds["bottom_z"]) + float(visual_bounds["top_z"])) / 2.0
-            - object_position_m[2],
-        ]
-        source = "compiled_default"
+    collision_shape = str(declared.get("shape") or "box")
+    size_m = vec3(declared.get("size_m"))
+    local_offset = vec3(declared.get("local_center_offset_m"))
     world_offset = rotate_local_vector_ue(local_offset, object_rotation_deg)
     world_center = [object_position_m[index] + world_offset[index] for index in range(3)]
     return {
@@ -244,17 +241,8 @@ def resolved_collision_geometry(
         "size_m": round_vec(size_m),
         "local_center_offset_m": round_vec(local_offset),
         "world_center_m": round_vec(world_center),
-        "source": source,
+        "source": "declared",
     }
-
-
-def canonical_collision_shape(value: Any) -> str:
-    normalized = str(value or "box").casefold()
-    if "sphere" in normalized:
-        return "sphere"
-    if "cylinder" in normalized:
-        return "cylinder"
-    return "box"
 
 
 def rotate_local_vector_ue(vector: list[float], rotation_deg: list[float]) -> list[float]:
@@ -400,7 +388,8 @@ def first_positive_size(*values: Any) -> list[float] | None:
 
 def analytic_physics_defaults(obj: dict[str, Any], role: str) -> dict[str, Any]:
     shape = str(obj.get("shape") or "").casefold()
-    if is_support_role(role):
+    body_type = str(obj.get("body_type") or "").casefold()
+    if is_support_role(role) or body_type in {"static", "kinematic"}:
         return {
             "mass_kg": 100.0,
             "collider": "box",

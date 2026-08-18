@@ -370,6 +370,10 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
         data["objects"][0]["visual_representation"] = {"source": "solver_generated"}
         data["objects"][0]["solver"] = {"output": "renderable_geometry"}
         data["objects"][1]["visual_representation"] = {"source": "none"}
+        data["objects"][1]["physics"]["collision_geometry"] = {
+            "shape": "sphere",
+            "size_m": [0.18, 0.18, 0.18],
+        }
         data["objects"][2]["visual_representation"] = {"source": "asset"}
         data["objects"][2]["asset"] = {
             "description": "visible floor asset",
