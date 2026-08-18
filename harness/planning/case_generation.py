@@ -1566,7 +1566,12 @@ FIELD-BY-FIELD INSTRUCTIONS
    top-level fixed_material_color=true; do not leave the color only in role or descriptive text. Use low restitution (normally <=0.1) unless a bounce is
    requested, and set physics.use_ccd=true for small or fast-moving collision bodies. Dynamic bodies use
    gravity by default; set physics.enable_gravity=false only when the user explicitly requests a gravity-free
-   body. Do not put use_ccd inside behavior.
+   body. Do not put use_ccd inside behavior. Declare physics.collision_geometry only when an explicit
+   analytic collision proxy is needed. Its shape is exactly box, sphere, or cylinder; size_m is the full
+   local size in meters; local_center_offset_m is an optional object-local offset that rotates with the
+   object and is not scaled again with the visual asset. Sphere size components are equal diameters;
+   cylinder x=y is the diameter and z is the local-Z height. Once declared, collision_geometry is the
+   collision truth. It cannot coexist with collision_required=false. Do not invent mesh or compound shapes.
 8. solver_scene and object.solver: use these only when the selected backend needs explicit generic
    solver primitives beyond rigid-body fields. For a coupled particle/rigid scene, set
    solver_scene.type="rigid_sph" and declare initialization, measurements, and numeric assertions there.
@@ -1596,6 +1601,8 @@ FIELD-BY-FIELD INSTRUCTIONS
    every declared body, initial volume, and expected motion. Do not name a physical phenomenon, select a prepared process, or put rendering
    behavior in these declarations. If the request does not require such coupling, omit both fields.
    Every object also declares visual_representation.source as exactly asset, solver_generated, or none.
+   visual_representation.visible is a boolean that defaults to true and controls rendering only; it never
+   enables or disables collision. Set it false for an intentionally hidden collision-proxy object.
    Use asset when Asset Resolve must supply a visual resource. Use solver_generated when the selected solver
    produces the renderable geometry or field consumed by a later render stage; omit object.asset in that case.
    Use none only for an intentionally invisible logical/helper object, and omit object.asset. Never invent a
@@ -1766,7 +1773,10 @@ def case_spec_generation_contract() -> dict[str, Any]:
             "object": {
                 "id": "stable identifier string",
                 "role": "semantic object role only; execution behavior comes from physics, initial_state, relations, events, and constraints",
-                "visual_representation": {"source": "asset, solver_generated, or none"},
+                "visual_representation": {
+                    "source": "asset, solver_generated, or none",
+                    "visible": "optional boolean; defaults true; controls rendering only and never collision",
+                },
                 "color_rgb": "optional [red, green, blue], each component between 0 and 1",
                 "fixed_material_color": "optional boolean; true when an explicit color_rgb must be rendered",
                 "geometry": {
@@ -1778,6 +1788,17 @@ def case_spec_generation_contract() -> dict[str, Any]:
                     "body_type": "dynamic, static, or kinematic",
                     "mass_kg": "positive number",
                     "collision_required": "boolean",
+                    "collision_geometry": {
+                        "shape": "box, sphere, or cylinder",
+                        "size_m": (
+                            "three positive full dimensions in object-local meters; sphere x=y=z is diameter; "
+                            "cylinder x=y is diameter and z is local-Z height"
+                        ),
+                        "local_center_offset_m": (
+                            "optional finite [x,y,z] in object-local meters; defaults zero, rotates with the object, "
+                            "and is not rescaled by the visual asset instance scale"
+                        ),
+                    },
                     "material": "object",
                 },
                 "initial_state": {
@@ -1945,6 +1966,8 @@ def case_spec_generation_contract() -> dict[str, Any]:
             "do not emit UE paths, runtime stages, exact camera poses, or verifier implementations",
             "solver_scene and object.solver may declare generic primitives only and must survive deterministic projection unchanged",
             "asset resolution applies only to objects with visual_representation.source=asset; solver_generated and none must omit object.asset",
+            "visual_representation.visible controls rendering only; collision is controlled only by physics.collision_required and physics.collision_geometry",
+            "declared physics.collision_geometry is the sole collision truth and supports only box, sphere, or cylinder; it cannot coexist with collision_required=false",
             "one logical rigid_sph body owns both its visual asset request and simplified solver collision; never split them into visual/collision object IDs",
             "a genesis_sph rigid_sph scene requires particle_dynamics, particle_cache, and surface_mesh_cache; rigid_body is an object role, not a genesis_sph solver capability",
         ],
@@ -1990,12 +2013,18 @@ def _valid_case_spec_structure_example() -> dict[str, Any]:
             {
                 "id": "generated_box",
                 "role": "dynamic_box",
+                "visual_representation": {"source": "asset", "visible": True},
                 "geometry": {"shape_hint": "box", "approx_size_m": [0.4, 0.6, 0.8]},
                 "physics": {
                     "body_type": "dynamic",
                     "enable_gravity": True,
                     "mass_kg": 1.0,
                     "collision_required": True,
+                    "collision_geometry": {
+                        "shape": "box",
+                        "size_m": [0.4, 0.6, 0.8],
+                        "local_center_offset_m": [0.0, 0.0, 0.0],
+                    },
                     "material": {"dynamic_friction": 0.5, "restitution": 0.2},
                 },
                 "initial_state": {
@@ -2021,8 +2050,17 @@ def _valid_case_spec_structure_example() -> dict[str, Any]:
             {
                 "id": "floor",
                 "role": "support",
+                "visual_representation": {"source": "none", "visible": False},
                 "geometry": {"shape_hint": "box", "approx_size_m": [3.0, 3.0, 0.1]},
-                "physics": {"body_type": "static", "collision_required": True},
+                "physics": {
+                    "body_type": "static",
+                    "collision_required": True,
+                    "collision_geometry": {
+                        "shape": "box",
+                        "size_m": [3.0, 3.0, 0.1],
+                        "local_center_offset_m": [0.0, 0.0, 0.0],
+                    },
+                },
                 "initial_state": {"position_m": [0.0, 0.0, 0.0]},
                 "behavior": {},
             },

@@ -94,6 +94,15 @@ class NativeGenerationTests(unittest.TestCase):
             any("event_sequence uses at least two explicit ordered pairs" in rule for rule in context["case_spec_contract"]["hard_rules"])
         )
         self.assertIn("pairs", context["case_spec_contract"]["field_shapes"]["verification_assertion"])
+        object_fields = context["case_spec_contract"]["field_shapes"]["object"]
+        self.assertIn("visible", object_fields["visual_representation"])
+        collision_geometry = object_fields["physics"]["collision_geometry"]
+        self.assertEqual(collision_geometry["shape"], "box, sphere, or cylinder")
+        self.assertIn("full dimensions", collision_geometry["size_m"])
+        self.assertIn("object-local meters", collision_geometry["local_center_offset_m"])
+        hard_rules = context["case_spec_contract"]["hard_rules"]
+        self.assertTrue(any("sole collision truth" in rule for rule in hard_rules))
+        self.assertTrue(any("controls rendering only" in rule for rule in hard_rules))
         path_contract = context["intent_draft_contract"]["parameter_analysis_shape"]["path"]
         self.assertIn("$.scene.duration_s", path_contract)
         self.assertIn("$.objects.domino_10.initial_state.rotation_deg", path_contract)
