@@ -1972,6 +1972,11 @@ def _validate_rigid_constraints(
         for obj in objects
         if isinstance(obj, Mapping)
     }
+    collision_requirements = {
+        str(obj.get("id") or ""): (obj.get("physics") or {}).get("collision_required")
+        for obj in objects
+        if isinstance(obj, Mapping)
+    }
     constraint_ids: list[str] = []
     allowed_fields = {
         "id",
@@ -2002,6 +2007,17 @@ def _validate_rigid_constraints(
                 _issue(issues, f"{path}/{field}", "unknown_object_reference", f"unknown object id: {body_id}")
             elif body_id and body_types.get(body_id) not in BODY_TYPES:
                 _issue(issues, f"{path}/{field}", "constraint_body_type_missing", "constrained objects require physics.body_type")
+            elif (
+                body_id
+                and body_types.get(body_id) == "dynamic"
+                and collision_requirements.get(body_id) is False
+            ):
+                _issue(
+                    issues,
+                    f"{path}/{field}",
+                    "constraint_dynamic_body_collision_disabled",
+                    "a constrained dynamic body requires collision_required=true to create a physics state",
+                )
         if body_a and body_b and body_a == body_b:
             _issue(issues, path, "constraint_self_reference", "body_a and body_b must be different objects")
         if body_a in body_types and body_b in body_types and body_types[body_a] != "dynamic" and body_types[body_b] != "dynamic":

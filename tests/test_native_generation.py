@@ -110,6 +110,8 @@ class NativeGenerationTests(unittest.TestCase):
         self.assertTrue(any("qualified imported asset BodySetup" in rule for rule in hard_rules))
         self.assertTrue(any("never guess collision_geometry.local_center_offset_m" in rule for rule in hard_rules))
         self.assertTrue(any("separate hidden source=none collision object" in rule for rule in hard_rules))
+        self.assertTrue(any("every constrained dynamic body requires" in rule for rule in hard_rules))
+        self.assertTrue(any("connected pair" in rule for rule in hard_rules))
         path_contract = context["intent_draft_contract"]["parameter_analysis_shape"]["path"]
         self.assertIn("$.scene.duration_s", path_contract)
         self.assertIn("$.objects.domino_10.initial_state.rotation_deg", path_contract)

@@ -1654,8 +1654,10 @@ FIELD-BY-FIELD INSTRUCTIONS
 11. constraints: use this array only when two rigid bodies need a physical joint. Declare two exact body
     IDs, an explicit local frame on each body, x/y/z linear and angular motion as locked, limited, or free,
     limits only for limited axes, and whether the two bodies collide. Angular x is rotation around each
-    frame's primary axis. Require the rigid_constraints solver capability. Do not infer frames from semantic
-    relations and do not emit springs, damping, drives, motors, break thresholds, or named workflow presets.
+    frame's primary axis. Every constrained dynamic body must keep physics.collision_required=true so the
+    backend can create its rigid-body physics state; use constraint.collision_enabled=false only to disable
+    collision between the connected pair. Require the rigid_constraints solver capability. Do not infer frames
+    from semantic relations and do not emit springs, damping, drives, motors, break thresholds, or named workflow presets.
 12. relations and events: use canonical reference-bearing objects. A binary relation is
     {"type": string, "source": exact_id, "target": exact_id}; a group relation may use
     {"type": string, "objects": [exact_ids]}; an object event is
@@ -1828,7 +1830,10 @@ def case_spec_generation_contract() -> dict[str, Any]:
             "rigid_constraint": {
                 "id": "unique stable identifier",
                 "body_a": "exact object.id",
-                "body_b": "a different exact object.id; at least one constrained body is dynamic",
+                "body_b": (
+                    "a different exact object.id; at least one constrained body is dynamic; every dynamic "
+                    "endpoint requires physics.collision_required=true"
+                ),
                 "frame_a": {
                     "position_m": ["local x", "local y", "local z"],
                     "primary_axis": "unit local vector",
@@ -1994,6 +1999,7 @@ def case_spec_generation_contract() -> dict[str, Any]:
             "every relation, event, camera, and assertion object reference must exactly equal one declared object.id; never use a phrase",
             "physical joints are declared only in top-level constraints; relations are semantic and never configure a runtime joint",
             "constraints require the rigid_constraints solver capability and explicit local frames; never infer frames or encode a named hinge/fixed workflow",
+            "every constrained dynamic body requires physics.collision_required=true to create a rigid-body physics state; constraint.collision_enabled=false only disables collision between the connected pair",
             "constraints support only passive 6-DOF axis locking/limits and inter-body collision; do not emit springs, damping, drives, motors, or break thresholds",
             "initial load-bearing support uses supported_by; expected future contacts use collision/impacts relations",
             "event_sequence uses at least two explicit ordered pairs; never use start/end shorthand or next_in_chain, chain_order, or topple_order",

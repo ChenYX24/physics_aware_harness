@@ -17,6 +17,7 @@ class CaseSpecV2Tests(unittest.TestCase):
         data = case_spec_v2_fixture()
         data["backend_constraints"]["required_solver_capabilities"].append("rigid_constraints")
         data["backend_constraints"]["allowed_solvers"] = ["ue"]
+        data["objects"][2]["physics"]["collision_required"] = False
         data["constraints"] = [
             {
                 "id": "cue_pivot",
@@ -43,6 +44,41 @@ class CaseSpecV2Tests(unittest.TestCase):
         runtime = compile_case_spec_v2_runtime(case)
 
         self.assertEqual(runtime.data["constraints"], data["constraints"])
+
+    def test_rigid_constraint_rejects_collisionless_dynamic_body(self) -> None:
+        data = case_spec_v2_fixture()
+        data["backend_constraints"]["required_solver_capabilities"].append("rigid_constraints")
+        data["backend_constraints"]["allowed_solvers"] = ["ue"]
+        data["objects"][0]["physics"]["collision_required"] = False
+        data["constraints"] = [
+            {
+                "id": "cue_pivot",
+                "body_a": "cue_ball",
+                "body_b": "floor",
+                "frame_a": {
+                    "position_m": [0.0, 0.0, 0.0],
+                    "primary_axis": [0.0, 1.0, 0.0],
+                    "secondary_axis": [0.0, 0.0, 1.0],
+                },
+                "frame_b": {
+                    "position_m": [-0.8, 0.0, 0.09],
+                    "primary_axis": [0.0, 1.0, 0.0],
+                    "secondary_axis": [0.0, 0.0, 1.0],
+                },
+                "linear_motion": {"x": "locked", "y": "locked", "z": "locked"},
+                "angular_motion": {"x": "free", "y": "locked", "z": "locked"},
+                "angular_limits_deg": {},
+                "collision_enabled": False,
+            }
+        ]
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        self.assertIn(
+            "constraint_dynamic_body_collision_disabled",
+            {issue.code for issue in context.exception.issues},
+        )
 
     def test_rigid_constraint_rejects_implicit_frames_and_capability(self) -> None:
         data = case_spec_v2_fixture()
