@@ -13,6 +13,34 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class StaticScenePlacementTests(unittest.TestCase):
+    def test_constraint_pair_collision_flag_controls_initial_overlap_check(self) -> None:
+        from harness.planning.static_scene_builder import find_overlap_pairs
+
+        nodes = [
+            {
+                "object_id": object_id,
+                "physics_critical": True,
+                "physics": {
+                    "state_kind": "rigid",
+                    "collision_required": True,
+                    "collision_geometry": {
+                        "shape": "sphere",
+                        "size_m": [0.4, 0.4, 0.4],
+                        "world_center_m": position,
+                    },
+                },
+                "bounds": {"extents_m": [0.2, 0.2, 0.2]},
+                "transform": {"position_m": position, "rotation_deg": [0.0, 0.0, 0.0]},
+            }
+            for object_id, position in (("rod", [0.0, 0.0, 0.0]), ("bob", [0.1, 0.0, 0.0]))
+        ]
+
+        self.assertEqual(len(find_overlap_pairs(nodes)), 1)
+        self.assertEqual(
+            find_overlap_pairs(nodes, collision_disabled_pairs={frozenset(("rod", "bob"))}),
+            [],
+        )
+
     def load_case(self, relative_path: str) -> dict:
         return json.loads((ROOT / relative_path).read_text(encoding="utf-8"))
 

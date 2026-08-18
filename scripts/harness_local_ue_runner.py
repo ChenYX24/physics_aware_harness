@@ -56,6 +56,9 @@ def main() -> int:
     if args.actor_placement and not actor_placement.get("actor_bindings"):
         write_json(run_dir / "local_ue_runner_report.json", fail_report("F_RUNTIME_ACTOR_PLACEMENT_MISSING", f"Actor placement is missing or invalid: {args.actor_placement}"))
         return 2
+    if case_spec.get("constraints") and not actor_placement.get("constraint_bindings"):
+        write_json(run_dir / "local_ue_runner_report.json", fail_report("F_RUNTIME_CONSTRAINT_BINDING_MISSING", "Declared rigid constraints have no compiled runtime bindings."))
+        return 2
     duration_s = duration_for_case(case_spec)
     try:
         timebase = timebase_for_case(case_spec)
@@ -387,6 +390,7 @@ def build_runtime_scene(case_spec: dict[str, Any], camera_plan: dict[str, Any], 
         "map_lighting_controls": lighting_controls,
         "dynamic_objects": dynamic_objects,
         "static_objects": static_objects,
+        "constraints": list((actor_placement or {}).get("constraint_bindings") or []),
         "action_trace": list((case_spec.get("expected_physics") or {}).get("action_trace") or []),
         "validation_targets": [],
         "precomputed_trajectory": simulation_trajectory or [],
@@ -658,6 +662,7 @@ def summarize_actor_placement(actor_placement: dict[str, Any] | None) -> dict[st
         "physics_critical_count": summary.get("physics_critical_count"),
         "simulated_actor_count": summary.get("simulated_actor_count"),
         "camera_count": summary.get("camera_count"),
+        "constraint_count": summary.get("constraint_count", len(actor_placement.get("constraint_bindings") or [])),
     }
 
 

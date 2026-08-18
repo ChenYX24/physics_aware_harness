@@ -10,9 +10,41 @@ from unittest.mock import patch
 
 from harness.core.timebase import build_timebase, sample_solver_trajectory
 from harness.verification.run_quality import EXR_MAGIC, evaluate_run
+from harness.verification.run_quality import validate_runtime_binding_snapshot
 
 
 class RunQualityTests(unittest.TestCase):
+    def test_runtime_constraint_binding_is_compared_as_executed_state(self) -> None:
+        constraint = {
+            "constraint_id": "joint",
+            "body_a": {"object_id": "rod", "runtime_actor_id": "actor_rod"},
+            "body_b": {"object_id": "anchor", "runtime_actor_id": "actor_anchor"},
+            "frame_a": {"position_m": [0.0, 0.0, 0.5], "primary_axis": [0.0, 1.0, 0.0], "secondary_axis": [0.0, 0.0, 1.0]},
+            "frame_b": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [0.0, 1.0, 0.0], "secondary_axis": [0.0, 0.0, 1.0]},
+            "linear_motion": {"x": "locked", "y": "locked", "z": "locked"},
+            "angular_motion": {"x": "free", "y": "locked", "z": "locked"},
+            "angular_limits_deg": {},
+            "collision_enabled": False,
+        }
+        actual = {
+            **constraint,
+            "component_registered": True,
+            "body_bindings_verified": True,
+            "configuration_applied": True,
+            "broken": False,
+        }
+        report = validate_runtime_binding_snapshot(
+            {"constraints": [constraint]},
+            {"runtime_binding_snapshot": {"capture_phase": "pre_simulation", "objects": [], "constraints": [actual]}},
+        )
+        self.assertEqual(report["status"], "pass")
+        actual["body_bindings_verified"] = False
+        report = validate_runtime_binding_snapshot(
+            {"constraints": [constraint]},
+            {"runtime_binding_snapshot": {"capture_phase": "pre_simulation", "objects": [], "constraints": [actual]}},
+        )
+        self.assertEqual(report["status"], "fail")
+
     def test_valid_run_passes_hard_gate_and_gets_technical_score(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = self.make_run(Path(tmp))

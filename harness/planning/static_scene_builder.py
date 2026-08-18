@@ -51,9 +51,15 @@ def build_static_scene_layout(
         )
     )
     support_relations = infer_support_relations(case_spec, nodes)
+    constraint_collision_disabled_pairs = {
+        frozenset((str(item.get("body_a") or ""), str(item.get("body_b") or "")))
+        for item in case_spec.get("constraints") or []
+        if isinstance(item, dict) and item.get("collision_enabled") is False
+    }
     overlap_diagnostics: list[dict[str, Any]] = []
     overlap_pairs = find_overlap_pairs(
         nodes,
+        collision_disabled_pairs=constraint_collision_disabled_pairs,
         diagnostics=overlap_diagnostics,
     )
     return {
@@ -69,6 +75,9 @@ def build_static_scene_layout(
         "placement_adjustments": [],
         "overlap_pairs": overlap_pairs,
         "overlap_diagnostics": overlap_diagnostics,
+        "constraint_collision_disabled_pairs": [
+            sorted(pair) for pair in sorted(constraint_collision_disabled_pairs, key=lambda pair: sorted(pair))
+        ],
         "physics_graph": {
             "nodes": [node["object_id"] for node in nodes if node.get("physics_graph_member")],
             "collision_edges": collision_edges,
@@ -265,9 +274,11 @@ def support_surface_gap(
 def find_overlap_pairs(
     nodes: list[dict[str, Any]],
     *,
+    collision_disabled_pairs: set[frozenset[str]] | None = None,
     diagnostics: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     pairs: list[dict[str, Any]] = []
+    disabled_pairs = collision_disabled_pairs or set()
     collidable = [
         node
         for node in nodes
@@ -277,6 +288,8 @@ def find_overlap_pairs(
         for right in collidable[index + 1 :]:
             left_id = str(left.get("object_id") or "")
             right_id = str(right.get("object_id") or "")
+            if frozenset((left_id, right_id)) in disabled_pairs:
+                continue
             left_pos = collision_center(left)
             right_pos = collision_center(right)
             distance = math.dist(left_pos, right_pos)

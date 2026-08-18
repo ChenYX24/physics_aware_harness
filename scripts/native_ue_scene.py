@@ -2935,6 +2935,106 @@ def actor_runtime_component(actor):
     return None
 
 
+def physics_constraint_component(actor):
+    component = getattr(actor, "constraint_comp", None)
+    if component:
+        return component
+    try:
+        component = actor.get_editor_property("constraint_comp")
+    except Exception:
+        component = None
+    if component:
+        return component
+    cls = getattr(unreal, "PhysicsConstraintComponent", None)
+    return actor.get_component_by_class(cls) if cls else None
+
+
+def constraint_motion_enum(motion: str, *, angular: bool):
+    enum_class = unreal.AngularConstraintMotion if angular else unreal.LinearConstraintMotion
+    prefix = "ACM" if angular else "LCM"
+    return getattr(enum_class, f"{prefix}_{str(motion).upper()}")
+
+
+def configure_runtime_constraint(component, binding: dict, body_a_component, body_b_component) -> None:
+    component.set_constrained_components(
+        body_a_component,
+        unreal.Name(""),
+        body_b_component,
+        unreal.Name(""),
+    )
+    frames = (
+        (unreal.ConstraintFrame.FRAME1, binding["frame_a"]),
+        (unreal.ConstraintFrame.FRAME2, binding["frame_b"]),
+    )
+    for frame_id, frame in frames:
+        position = frame["position_m"]
+        primary = frame["primary_axis"]
+        secondary = frame["secondary_axis"]
+        component.set_constraint_reference_position(
+            frame_id,
+            unreal.Vector(*[float(value) * 100.0 for value in position]),
+        )
+        component.set_constraint_reference_orientation(
+            frame_id,
+            unreal.Vector(*[float(value) for value in primary]),
+            unreal.Vector(*[float(value) for value in secondary]),
+        )
+    linear_limit_cm = float(binding.get("linear_limit_m") or 0.0) * 100.0
+    component.set_linear_x_limit(constraint_motion_enum(binding["linear_motion"]["x"], angular=False), linear_limit_cm)
+    component.set_linear_y_limit(constraint_motion_enum(binding["linear_motion"]["y"], angular=False), linear_limit_cm)
+    component.set_linear_z_limit(constraint_motion_enum(binding["linear_motion"]["z"], angular=False), linear_limit_cm)
+    angular_limits = binding.get("angular_limits_deg") or {}
+    component.set_angular_twist_limit(
+        constraint_motion_enum(binding["angular_motion"]["x"], angular=True),
+        float(angular_limits.get("x") or 0.0),
+    )
+    component.set_angular_swing1_limit(
+        constraint_motion_enum(binding["angular_motion"]["z"], angular=True),
+        float(angular_limits.get("z") or 0.0),
+    )
+    component.set_angular_swing2_limit(
+        constraint_motion_enum(binding["angular_motion"]["y"], angular=True),
+        float(angular_limits.get("y") or 0.0),
+    )
+    component.set_disable_collision(not bool(binding["collision_enabled"]))
+
+
+def spawn_runtime_constraints(editor, runtime_scene: dict, runtime_actors: dict, scene_origin):
+    constraint_actors = {}
+    details = {}
+    for binding in runtime_scene.get("constraints") or []:
+        constraint_id = str(binding.get("constraint_id") or "")
+        body_a_id = str((binding.get("body_a") or {}).get("object_id") or "")
+        body_b_id = str((binding.get("body_b") or {}).get("object_id") or "")
+        body_a_component = actor_runtime_component(runtime_actors.get(body_a_id))
+        body_b_component = actor_runtime_component(runtime_actors.get(body_b_id))
+        if not constraint_id or not body_a_component or not body_b_component:
+            raise RuntimeError(
+                f"F_RUNTIME_CONSTRAINT_BINDING_FAILED: constraint={constraint_id}, body_a={body_a_id}, body_b={body_b_id}"
+            )
+        actor = editor.spawn_actor_from_class(unreal.PhysicsConstraintActor, scene_origin)
+        actor.set_actor_label(f"native_phenomena_demo_constraint_{constraint_id}")
+        component = physics_constraint_component(actor)
+        if not component:
+            raise RuntimeError(f"F_RUNTIME_CONSTRAINT_BINDING_FAILED: constraint component missing for {constraint_id}")
+        configure_runtime_constraint(component, binding, body_a_component, body_b_component)
+        constraint_actors[constraint_id] = actor
+        details[constraint_id] = {
+            "constraint_id": constraint_id,
+            "body_a": binding["body_a"],
+            "body_b": binding["body_b"],
+            "frame_a": binding["frame_a"],
+            "frame_b": binding["frame_b"],
+            "linear_motion": binding["linear_motion"],
+            **({"linear_limit_m": binding["linear_limit_m"]} if binding.get("linear_limit_m") is not None else {}),
+            "angular_motion": binding["angular_motion"],
+            "angular_limits_deg": binding["angular_limits_deg"],
+            "collision_enabled": binding["collision_enabled"],
+            "configuration_applied": True,
+        }
+    return constraint_actors, details
+
+
 def component_scale(component):
     return component.get_editor_property("relative_scale3d")
 
@@ -5676,10 +5776,16 @@ def runtime_binding_pose_position(actor_location, bounds_center, pose_anchor: st
 
 def runtime_binding_snapshot_registered(snapshot: dict) -> bool:
     objects = snapshot.get("objects") if isinstance(snapshot, dict) else None
+    constraints = snapshot.get("constraints") if isinstance(snapshot, dict) else None
     return bool(objects) and all(
         isinstance(item, dict)
         and bool((item.get("mesh_component") or {}).get("registered"))
         for item in objects
+    ) and all(
+        isinstance(item, dict)
+        and item.get("component_registered") is True
+        and item.get("body_bindings_verified") is True
+        for item in (constraints or [])
     )
 
 
@@ -6848,11 +6954,48 @@ def setup_scene(runtime_scene: dict | None = None):
             record_runtime_actor_physics(obj["id"], physics_detail)
             record_runtime_actor_detail(obj["id"], actor, origin, extent)
             write_progress_marker("setup_scene_spawn_dynamic_done", obj.get("id"))
+        constraint_actors, constraint_binding_details = spawn_runtime_constraints(
+            editor,
+            runtime_scene,
+            runtime_actors,
+            scene_origin,
+        )
         physics_details_by_id = {
             str(item.get("id") or ""): item
             for item in chaos_runtime["actors"]
             if isinstance(item, dict) and item.get("id")
         }
+
+        def runtime_constraint_snapshot_for(constraint_id: str, constraint_actor) -> dict:
+            detail = constraint_binding_details.get(constraint_id) or {}
+            component = physics_constraint_component(constraint_actor)
+            actual_body_labels = []
+            if component:
+                try:
+                    constrained = component.get_constrained_components() or []
+                    for item in constrained:
+                        if not item or not hasattr(item, "get_owner"):
+                            continue
+                        owner = item.get_owner()
+                        if owner:
+                            actual_body_labels.append(str(owner.get_actor_label()))
+                except Exception:
+                    actual_body_labels = []
+            expected_labels = {
+                f"native_phenomena_demo_{(detail.get('body_a') or {}).get('object_id')}",
+                f"native_phenomena_demo_{(detail.get('body_b') or {}).get('object_id')}",
+            }
+            try:
+                broken = bool(component.is_broken()) if component else None
+            except Exception:
+                broken = None
+            return {
+                **detail,
+                "component_registered": component_registered(component),
+                "body_bindings_verified": expected_labels <= set(actual_body_labels),
+                "actual_body_actor_labels": sorted(actual_body_labels),
+                "broken": broken,
+            }
 
         def capture_runtime_binding_snapshot(actor_bindings: dict) -> dict:
             return {
@@ -6870,12 +7013,17 @@ def setup_scene(runtime_scene: dict | None = None):
                     ]
                     if str(obj.get("id") or "") in actor_bindings
                 ],
+                "constraints": [
+                    runtime_constraint_snapshot_for(constraint_id, constraint_actor)
+                    for constraint_id, constraint_actor in sorted((actor_bindings.get("constraint_actors") or {}).items())
+                ],
             }
 
         runtime_binding_snapshot = {
             "schema_version": "harness_ue_runtime_binding_snapshot_v1",
             "capture_phase": "component_registration_pending",
             "objects": [],
+            "constraints": [],
         }
         write_progress_marker("setup_scene_runtime_actors_done", f"count={len(runtime_actors)}")
         write_progress_marker("setup_scene_runtime_camera_pose_start")
@@ -6928,6 +7076,8 @@ def setup_scene(runtime_scene: dict | None = None):
             exposure = {"enabled": False, "reason": "map_lighting_controls.use_post_process=false_or_zero_blend"}
         return {
             **runtime_actors,
+            "constraint_actors": constraint_actors,
+            "constraint_binding_details": constraint_binding_details,
             "visual_actors": runtime_visual_actors,
             "visual_center_offsets_cm": runtime_visual_center_offsets_cm,
             "capture": capture,
@@ -9125,8 +9275,15 @@ def rebind_runtime_actors_to_simulation_world(
         actor_id: f"native_phenomena_visual_{actor_id}"
         for actor_id in visual_actors
     }
+    wanted_constraints = {
+        str(item.get("constraint_id")): f"native_phenomena_demo_constraint_{item.get('constraint_id')}"
+        for item in (runtime_scene.get("constraints") or [])
+        if item.get("constraint_id")
+    }
+    constraint_actors = actors.get("constraint_actors") or {}
     rebound = []
     rebound_visuals = []
+    rebound_constraints = []
     actor_classes = [unreal.Actor]
     for world in worlds:
         world_actors = []
@@ -9156,6 +9313,13 @@ def rebind_runtime_actors_to_simulation_world(
             if match:
                 visual_actors[actor_id] = match
                 rebound_visuals.append(actor_id)
+        for constraint_id, label in wanted_constraints.items():
+            match = label_map.get(label)
+            if not match:
+                match = next((actor for actor_label, actor in label_map.items() if actor_label.startswith(label)), None)
+            if match:
+                constraint_actors[constraint_id] = match
+                rebound_constraints.append(constraint_id)
         capture_actor = label_map.get("native_phenomena_demo_capture_camera")
         if capture_actor:
             capture_component = getattr(capture_actor, "capture_component2d", None)
@@ -9177,6 +9341,12 @@ def rebind_runtime_actors_to_simulation_world(
             status["rebound_world"] = str(world)
             break
     status["rebound_actor_ids"] = sorted(set(rebound))
+    actors["constraint_actors"] = constraint_actors
+    status["rebound_constraint_ids"] = sorted(set(rebound_constraints))
+    missing_constraints = sorted(set(wanted_constraints) - set(rebound_constraints))
+    status["missing_constraint_ids"] = missing_constraints
+    if missing_constraints and record_failure:
+        status.setdefault("errors", []).append(f"constraint_rebind_missing:{missing_constraints}")
     initialize_gasp_locomotion(actors, runtime_scene, status)
     status["rebound_visual_actor_ids"] = sorted(set(rebound_visuals))
     missing_visuals = sorted(set(wanted_visuals) - set(rebound_visuals))

@@ -16,6 +16,11 @@ def compile_runtime_actor_placement(
 ) -> dict[str, Any]:
     object_nodes = [node for node in scene_layout.get("object_nodes", []) if isinstance(node, dict)]
     actor_bindings = [actor_binding_from_node(node, target_backend=target_backend) for node in object_nodes]
+    constraint_bindings = constraint_bindings_from_case(
+        case_spec.get("constraints") or [],
+        actor_bindings,
+        target_backend=target_backend,
+    )
     camera_bindings = camera_bindings_from_layout(scene_layout)
     placement_warnings = placement_warnings_for(actor_bindings, scene_layout)
     return {
@@ -27,6 +32,7 @@ def compile_runtime_actor_placement(
         "target_backend": target_backend,
         "coordinate_system": scene_layout.get("coordinate_system", "z_up"),
         "actor_bindings": actor_bindings,
+        "constraint_bindings": constraint_bindings,
         "camera_bindings": camera_bindings,
         "physics_graph": scene_layout.get("physics_graph") or {"nodes": [], "collision_edges": []},
         "required_runtime_exports": [
@@ -46,10 +52,50 @@ def compile_runtime_actor_placement(
             "physics_critical_count": sum(1 for binding in actor_bindings if binding.get("physics_critical")),
             "simulated_actor_count": sum(1 for binding in actor_bindings if (binding.get("physics") or {}).get("simulate_physics")),
             "camera_count": len(camera_bindings),
+            "constraint_count": len(constraint_bindings),
             "proxy_actor_count": sum(1 for binding in actor_bindings if (binding.get("asset") or {}).get("proxy")),
         },
         "placement_warnings": placement_warnings,
     }
+
+
+def constraint_bindings_from_case(
+    constraints: list[Any],
+    actor_bindings: list[dict[str, Any]],
+    *,
+    target_backend: str,
+) -> list[dict[str, Any]]:
+    runtime_actor_ids = {
+        str(binding.get("object_id") or ""): str(binding.get("runtime_actor_id") or "")
+        for binding in actor_bindings
+    }
+    return [
+        {
+            "constraint_id": str(constraint["id"]),
+            "body_a": {
+                "object_id": str(constraint["body_a"]),
+                "runtime_actor_id": runtime_actor_ids.get(str(constraint["body_a"])) or None,
+            },
+            "body_b": {
+                "object_id": str(constraint["body_b"]),
+                "runtime_actor_id": runtime_actor_ids.get(str(constraint["body_b"])) or None,
+            },
+            "frame_a": constraint["frame_a"],
+            "frame_b": constraint["frame_b"],
+            "linear_motion": constraint["linear_motion"],
+            **(
+                {"linear_limit_m": constraint["linear_limit_m"]}
+                if constraint.get("linear_limit_m") is not None
+                else {}
+            ),
+            "angular_motion": constraint["angular_motion"],
+            "angular_limits_deg": constraint["angular_limits_deg"],
+            "collision_enabled": constraint["collision_enabled"],
+            "target_backend": target_backend,
+        }
+        for constraint in constraints
+        if isinstance(constraint, dict)
+    ]
 
 
 def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dict[str, Any]:

@@ -22,6 +22,55 @@ class Vector:
 
 
 class HighresViewportMultiviewTests(unittest.TestCase):
+    def test_generic_constraint_maps_local_axes_to_ue_constraint_axes(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        functions = [
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name in {"constraint_motion_enum", "configure_runtime_constraint"}
+        ]
+
+        class Motion:
+            LCM_LOCKED = "linear_locked"
+            LCM_LIMITED = "linear_limited"
+            LCM_FREE = "linear_free"
+            ACM_LOCKED = "angular_locked"
+            ACM_LIMITED = "angular_limited"
+            ACM_FREE = "angular_free"
+
+        fake_unreal = types.SimpleNamespace(
+            LinearConstraintMotion=Motion,
+            AngularConstraintMotion=Motion,
+            ConstraintFrame=types.SimpleNamespace(FRAME1="frame1", FRAME2="frame2"),
+            Name=lambda value: value,
+            Vector=lambda *values: values,
+        )
+        namespace = {"unreal": fake_unreal}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"), namespace)
+
+        class Component:
+            def __init__(self):
+                self.calls = {}
+
+            def __getattr__(self, name):
+                return lambda *args: self.calls.setdefault(name, []).append(args)
+
+        component = Component()
+        binding = {
+            "frame_a": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+            "frame_b": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+            "linear_motion": {"x": "locked", "y": "locked", "z": "locked"},
+            "angular_motion": {"x": "free", "y": "limited", "z": "locked"},
+            "angular_limits_deg": {"y": 35.0},
+            "collision_enabled": False,
+        }
+        namespace["configure_runtime_constraint"](component, binding, object(), object())
+
+        self.assertEqual(component.calls["set_angular_twist_limit"][0], ("angular_free", 0.0))
+        self.assertEqual(component.calls["set_angular_swing1_limit"][0], ("angular_locked", 0.0))
+        self.assertEqual(component.calls["set_angular_swing2_limit"][0], ("angular_limited", 35.0))
+
     def test_runtime_binding_snapshot_refresh_replaces_pre_registration_state(self) -> None:
         source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
@@ -40,10 +89,12 @@ class HighresViewportMultiviewTests(unittest.TestCase):
             {
                 "capture_phase": "pre_simulation",
                 "objects": [{"mesh_component": {"registered": False}}],
+                "constraints": [{"component_registered": False, "body_bindings_verified": False}],
             },
             {
                 "capture_phase": "pre_simulation",
                 "objects": [{"mesh_component": {"registered": True}}],
+                "constraints": [{"component_registered": True, "body_bindings_verified": True}],
             },
         ]
         actors = {

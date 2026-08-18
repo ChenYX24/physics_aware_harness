@@ -1407,6 +1407,15 @@ def validate_runtime_binding_snapshot(runtime: dict[str, Any], summary: dict[str
         for item in snapshot.get("objects") or []
         if isinstance(item, dict) and item.get("object_id")
     }
+    expected_constraints = [
+        item for item in runtime.get("constraints") or []
+        if isinstance(item, dict) and item.get("constraint_id")
+    ]
+    actual_constraints_by_id = {
+        str(item.get("constraint_id")): item
+        for item in snapshot.get("constraints") or []
+        if isinstance(item, dict) and item.get("constraint_id")
+    }
     mismatches: list[dict[str, Any]] = []
     residuals: dict[str, dict[str, Any]] = {}
     if snapshot.get("capture_phase") != "pre_simulation":
@@ -1472,11 +1481,40 @@ def validate_runtime_binding_snapshot(runtime: dict[str, Any], summary: dict[str
                     mismatches, object_id, "collision_geometry.world_center_m", expected_geometry.get("world_center_m"), actual_geometry.get("world_center_m"), tolerance=1e-4
                 )
         residuals[object_id] = object_residuals
+    expected_constraint_ids = {str(item["constraint_id"]) for item in expected_constraints}
+    actual_constraint_ids = set(actual_constraints_by_id)
+    for missing_id in sorted(expected_constraint_ids - actual_constraint_ids):
+        mismatches.append({"constraint_id": missing_id, "field": "snapshot", "expected": "present", "actual": "missing"})
+    for unexpected_id in sorted(actual_constraint_ids - expected_constraint_ids):
+        mismatches.append({"constraint_id": unexpected_id, "field": "snapshot", "expected": "absent", "actual": "present"})
+    for expected in expected_constraints:
+        constraint_id = str(expected["constraint_id"])
+        actual = actual_constraints_by_id.get(constraint_id)
+        if not actual:
+            continue
+        for field in (
+            "body_a",
+            "body_b",
+            "frame_a",
+            "frame_b",
+            "linear_motion",
+            "angular_motion",
+            "angular_limits_deg",
+            "collision_enabled",
+        ):
+            compare_binding_value(mismatches, constraint_id, f"constraint.{field}", expected.get(field), actual.get(field))
+        compare_binding_value(mismatches, constraint_id, "constraint.linear_limit_m", expected.get("linear_limit_m"), actual.get("linear_limit_m"))
+        compare_binding_value(mismatches, constraint_id, "constraint.component_registered", True, actual.get("component_registered"))
+        compare_binding_value(mismatches, constraint_id, "constraint.body_bindings_verified", True, actual.get("body_bindings_verified"))
+        compare_binding_value(mismatches, constraint_id, "constraint.configuration_applied", True, actual.get("configuration_applied"))
+        compare_binding_value(mismatches, constraint_id, "constraint.broken", False, actual.get("broken"))
     return {
         "schema_version": "harness_runtime_binding_quality_v1",
         "status": "fail" if mismatches else "pass",
         "expected_object_count": len(expected_objects),
         "actual_object_count": len(actual_by_id),
+        "expected_constraint_count": len(expected_constraints),
+        "actual_constraint_count": len(actual_constraints_by_id),
         "residuals": residuals,
         "mismatches": mismatches,
     }

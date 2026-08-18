@@ -1651,7 +1651,12 @@ FIELD-BY-FIELD INSTRUCTIONS
    600 characters. Fill it only from an explicit material, color, or style intent. When the user wants to
    preserve the source photos' original texture/colors without a new style, omit texture_prompt. Never use
    it as a geometry prompt or synthesize it from description, role, or shape.
-11. relations and events: use canonical reference-bearing objects. A binary relation is
+11. constraints: use this array only when two rigid bodies need a physical joint. Declare two exact body
+    IDs, an explicit local frame on each body, x/y/z linear and angular motion as locked, limited, or free,
+    limits only for limited axes, and whether the two bodies collide. Angular x is rotation around each
+    frame's primary axis. Require the rigid_constraints solver capability. Do not infer frames from semantic
+    relations and do not emit springs, damping, drives, motors, break thresholds, or named workflow presets.
+12. relations and events: use canonical reference-bearing objects. A binary relation is
     {"type": string, "source": exact_id, "target": exact_id}; a group relation may use
     {"type": string, "objects": [exact_ids]}; an object event is
     {"type": string, "object": exact_id}. Additional semantic parameters may be objects or scalars, but
@@ -1673,21 +1678,21 @@ FIELD-BY-FIELD INSTRUCTIONS
     matching collision/impacts relation; never infer surface_gap_m from approximate positions. When a release
     event's object is the source of one direct impacts relation, its linear velocity must point from the source's
     initial position toward that impacts target.
-12. expected_behavior: describe causal and observable outcomes without claiming success.
-13. observation_requirements: cameras use registered camera roles and exact target object IDs; modalities
+13. expected_behavior: describe causal and observable outcomes without claiming success.
+14. observation_requirements: cameras use registered camera roles and exact target object IDs; modalities
     use registered values; signals name evidence required by the capability and assertions. Do not emit
     exact camera coordinates.
-14. verification_requirements: each assertion is an object with a registered type and exact object IDs.
+15. verification_requirements: each assertion is an object with a registered type and exact object IDs.
     event_sequence uses pairs=[[id_a,id_b],[id_b,id_c],...] with at least two explicit event pairs; a start/end
     objects list does not express a sequence.
     Choose assertions that test the primary physical invariant. thresholds and time_window are global
     verifier configuration objects passed unchanged to the selected verifier. Use {} unless the selected
     capability contract or an explicit user requirement supplies a named numeric tolerance/window; do not
     invent threshold names, measured values, or pass/fail evidence.
-15. variant: should_pass is boolean. provenance is an object. notes is a string.
+16. variant: should_pass is boolean. provenance is an object. notes is a string.
 
 REFERENCE INTEGRITY
-First declare every object in objects. Then reuse those exact IDs in relations, events, camera targets,
+First declare every object in objects. Then reuse those exact IDs in constraints, relations, events, camera targets,
 and verification assertions. These IDs link CaseSpec records; they are not natural-language asset-search
 queries. Asset search later uses asset.description, geometry, taxonomy, and hard requirements.
 
@@ -1713,7 +1718,7 @@ one complete harness_case_spec_v2 object, not a patch. Preserve user intent and 
 a listed error requires a change. For each error, correct the exact JSON path and then recheck dependent
 rules: capabilities.required contains primary; backend constraints honor the explicit requested backend;
 asset-policy booleans authorize declared routes; behavior is an object; body_type is an enum; every
-relation, event, camera, and assertion reference exactly matches an objects[].id; every assertion has a
+constraint body, relation, event, camera, and assertion reference exactly matches an objects[].id; every assertion has a
 registered type. asset_source_constraints in repair_constraints are hard and must be restored at the exact
 object asset acquisition paths named by validation_errors. For
 solver_capability_mismatch, keep repair_constraints.requested_backend as the only allowed solver and never
@@ -1756,6 +1761,7 @@ def case_spec_generation_contract() -> dict[str, Any]:
             "backend_constraints",
             "asset_policy",
             "objects",
+            "constraints",
             "relations",
             "events",
             "expected_behavior",
@@ -1819,6 +1825,23 @@ def case_spec_generation_contract() -> dict[str, Any]:
                 "behavior": "object, never a string",
                 "solver": "optional object of generic backend solver primitives; never a named physical-process mode",
             },
+            "rigid_constraint": {
+                "id": "unique stable identifier",
+                "body_a": "exact object.id",
+                "body_b": "a different exact object.id; at least one constrained body is dynamic",
+                "frame_a": {
+                    "position_m": ["local x", "local y", "local z"],
+                    "primary_axis": "unit local vector",
+                    "secondary_axis": "orthogonal unit local vector",
+                },
+                "frame_b": "same shape as frame_a, expressed in body_b local coordinates",
+                "linear_motion": {"x": "locked, limited, or free", "y": "locked, limited, or free", "z": "locked, limited, or free"},
+                "linear_limit_m": "positive shared limit, present exactly when any linear axis is limited",
+                "angular_motion": {"x": "locked, limited, or free around primary axis", "y": "locked, limited, or free around secondary axis", "z": "locked, limited, or free around the derived third axis"},
+                "angular_limits_deg": "object containing exactly the limited angular axes with positive limits",
+                "collision_enabled": "boolean controlling collision between the two constrained bodies",
+            },
+            "constraints": ["zero or more rigid_constraint objects"],
             "solver_scene": {
                 "type": "rigid_sph when explicit rigid/particle coupling is required",
                 "initialization": "{state:settled|as_authored,pre_roll_s:nonnegative,capture_after_pre_roll:boolean}",
@@ -1926,6 +1949,7 @@ def case_spec_generation_contract() -> dict[str, Any]:
             "primary_capability": _executable_primary_capabilities(),
             "coordinate_system": ["z_up"],
             "body_type": ["dynamic", "static", "kinematic"],
+            "constraint_motion": ["locked", "limited", "free"],
             "geometry_scale_policy": ["preserve_authored", "fit_uniform_to_approx_size"],
             "backend": ["fallback", "genesis_fem", "genesis_sph", "taichi_cloth", "ue"],
             "solver_capability": sorted(frozenset().union(*BACKEND_SOLVER_CAPABILITIES.values())),
@@ -1968,6 +1992,9 @@ def case_spec_generation_contract() -> dict[str, Any]:
             "capabilities must be an object and capabilities.required must contain exactly capabilities.primary",
             "every object behavior must be an object and every physics.body_type must use the body_type enum",
             "every relation, event, camera, and assertion object reference must exactly equal one declared object.id; never use a phrase",
+            "physical joints are declared only in top-level constraints; relations are semantic and never configure a runtime joint",
+            "constraints require the rigid_constraints solver capability and explicit local frames; never infer frames or encode a named hinge/fixed workflow",
+            "constraints support only passive 6-DOF axis locking/limits and inter-body collision; do not emit springs, damping, drives, motors, or break thresholds",
             "initial load-bearing support uses supported_by; expected future contacts use collision/impacts relations",
             "event_sequence uses at least two explicit ordered pairs; never use start/end shorthand or next_in_chain, chain_order, or topple_order",
             "an explicitly requested collision surface clearance belongs in relation.surface_gap_m and must survive projection",
@@ -2081,6 +2108,7 @@ def _valid_case_spec_structure_example() -> dict[str, Any]:
                 "behavior": {},
             },
         ],
+        "constraints": [],
         "relations": [{"type": "collision", "source": "generated_box", "target": "floor"}],
         "events": [],
         "expected_behavior": {"contact_required": True},

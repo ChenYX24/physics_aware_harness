@@ -66,7 +66,7 @@ GEOMETRY_SCALE_POLICIES = {"preserve_authored", "fit_uniform_to_approx_size"}
 BACKEND_SOLVERS = {"fallback", "genesis_fem", "genesis_sph", "taichi_cloth", "ue"}
 BACKEND_SOLVER_CAPABILITIES = {
     "fallback": {"rigid_body", "contact_events", "trajectory"},
-    "ue": {"rigid_body", "contact_events", "trajectory", "fracture_events", "geometry_collection"},
+    "ue": {"rigid_body", "rigid_constraints", "contact_events", "trajectory", "fracture_events", "geometry_collection"},
     "genesis_sph": {"particle_dynamics", "fluid_dynamics", "particle_cache", "surface_mesh_cache", "trajectory"},
     "genesis_fem": {"soft_body", "finite_element", "mesh_cache", "deformable_mesh_cache", "trajectory"},
     "taichi_cloth": {"soft_body", "cloth", "mesh_cache", "trajectory"},
@@ -127,6 +127,7 @@ TOP_LEVEL_FIELDS = {
     "backend_constraints",
     "asset_policy",
     "objects",
+    "constraints",
     "relations",
     "events",
     "expected_behavior",
@@ -230,6 +231,7 @@ def normalize_case_spec_v2(data: Mapping[str, Any]) -> dict[str, Any]:
     policy.setdefault("required_license_tier", "local_preview")
     for key, default in (
         ("objects", []),
+        ("constraints", []),
         ("relations", []),
         ("events", []),
         ("expected_behavior", {}),
@@ -701,6 +703,7 @@ def collect_case_spec_v2_issues(
     if duplicates:
         _issue(issues, "/objects", "duplicate_object_ids", f"duplicate ids: {', '.join(duplicates)}")
     known_objects = set(object_ids)
+    _validate_rigid_constraints(data.get("constraints"), objects, known_objects, backend, issues)
     _validate_references(data.get("relations"), "/relations", known_objects, issues)
     _validate_relation_surface_gaps(data.get("relations"), issues)
     _validate_references(data.get("events"), "/events", known_objects, issues)
@@ -852,6 +855,7 @@ def compile_case_spec_v2_runtime(case_spec: CaseSpecV2) -> RuntimeCase:
         "physical_parameters": copy.deepcopy(variant.get("physical_parameters") or {}),
         "expected_physics": expected,
         "objects": projected_objects,
+        "constraints": copy.deepcopy(data.get("constraints") or []),
         "active_objects": active,
         "passive_objects": passive,
         "required_assets": required_assets,
@@ -1944,6 +1948,122 @@ def _mapping(
         _issue(issues, path, "invalid_type", "must be an object")
         return {}
     return value
+
+
+def _validate_rigid_constraints(
+    value: Any,
+    objects: list[Any],
+    known_objects: set[str],
+    backend_constraints: Mapping[str, Any],
+    issues: list[ValidationIssue],
+) -> None:
+    if not isinstance(value, list):
+        _issue(issues, "/constraints", "invalid_type", "must be a list")
+        return
+    if value and "rigid_constraints" not in set(backend_constraints.get("required_solver_capabilities") or []):
+        _issue(
+            issues,
+            "/backend_constraints/required_solver_capabilities",
+            "rigid_constraint_capability_missing",
+            "declared constraints require rigid_constraints",
+        )
+    body_types = {
+        str(obj.get("id") or ""): str((obj.get("physics") or {}).get("body_type") or "")
+        for obj in objects
+        if isinstance(obj, Mapping)
+    }
+    constraint_ids: list[str] = []
+    allowed_fields = {
+        "id",
+        "body_a",
+        "body_b",
+        "frame_a",
+        "frame_b",
+        "linear_motion",
+        "linear_limit_m",
+        "angular_motion",
+        "angular_limits_deg",
+        "collision_enabled",
+    }
+    motion_values = {"locked", "limited", "free"}
+    for index, raw in enumerate(value):
+        path = f"/constraints/{index}"
+        constraint = _mapping(raw, path, issues)
+        unknown = sorted(str(key) for key in constraint if str(key) not in allowed_fields)
+        if unknown:
+            _issue(issues, path, "unknown_constraint_fields", f"unsupported fields: {', '.join(unknown)}")
+        constraint_id = _nonempty_string(constraint.get("id"), f"{path}/id", issues)
+        if constraint_id:
+            constraint_ids.append(constraint_id)
+        body_a = _nonempty_string(constraint.get("body_a"), f"{path}/body_a", issues)
+        body_b = _nonempty_string(constraint.get("body_b"), f"{path}/body_b", issues)
+        for field, body_id in (("body_a", body_a), ("body_b", body_b)):
+            if body_id and body_id not in known_objects:
+                _issue(issues, f"{path}/{field}", "unknown_object_reference", f"unknown object id: {body_id}")
+            elif body_id and body_types.get(body_id) not in BODY_TYPES:
+                _issue(issues, f"{path}/{field}", "constraint_body_type_missing", "constrained objects require physics.body_type")
+        if body_a and body_b and body_a == body_b:
+            _issue(issues, path, "constraint_self_reference", "body_a and body_b must be different objects")
+        if body_a in body_types and body_b in body_types and body_types[body_a] != "dynamic" and body_types[body_b] != "dynamic":
+            _issue(issues, path, "constraint_without_dynamic_body", "at least one constrained body must be dynamic")
+        for frame_name in ("frame_a", "frame_b"):
+            frame_path = f"{path}/{frame_name}"
+            frame = _mapping(constraint.get(frame_name), frame_path, issues)
+            frame_unknown = sorted(
+                str(key) for key in frame if str(key) not in {"position_m", "primary_axis", "secondary_axis"}
+            )
+            if frame_unknown:
+                _issue(issues, frame_path, "unknown_constraint_frame_fields", f"unsupported fields: {', '.join(frame_unknown)}")
+            _finite_vec3(frame.get("position_m"), f"{frame_path}/position_m", issues)
+            primary = _finite_vec3(frame.get("primary_axis"), f"{frame_path}/primary_axis", issues)
+            secondary = _finite_vec3(frame.get("secondary_axis"), f"{frame_path}/secondary_axis", issues)
+            if primary and not math.isclose(math.sqrt(sum(component * component for component in primary)), 1.0, abs_tol=1e-6):
+                _issue(issues, f"{frame_path}/primary_axis", "constraint_axis_not_unit", "must be a unit vector")
+            if secondary and not math.isclose(math.sqrt(sum(component * component for component in secondary)), 1.0, abs_tol=1e-6):
+                _issue(issues, f"{frame_path}/secondary_axis", "constraint_axis_not_unit", "must be a unit vector")
+            if primary and secondary and not math.isclose(sum(a * b for a, b in zip(primary, secondary)), 0.0, abs_tol=1e-6):
+                _issue(issues, frame_path, "constraint_axes_not_orthogonal", "primary_axis and secondary_axis must be orthogonal")
+        linear = _validate_constraint_motion(constraint.get("linear_motion"), f"{path}/linear_motion", motion_values, issues)
+        angular = _validate_constraint_motion(constraint.get("angular_motion"), f"{path}/angular_motion", motion_values, issues)
+        linear_limited = any(value == "limited" for value in linear.values())
+        linear_limit = constraint.get("linear_limit_m")
+        if linear_limited:
+            _positive_number(linear_limit, f"{path}/linear_limit_m", issues)
+        elif linear_limit is not None:
+            _issue(issues, f"{path}/linear_limit_m", "unused_constraint_limit", "must be omitted when no linear axis is limited")
+        angular_limits = _mapping(constraint.get("angular_limits_deg"), f"{path}/angular_limits_deg", issues)
+        expected_angular_limits = {axis for axis, motion in angular.items() if motion == "limited"}
+        actual_angular_limits = set(str(key) for key in angular_limits)
+        if actual_angular_limits != expected_angular_limits:
+            _issue(
+                issues,
+                f"{path}/angular_limits_deg",
+                "constraint_angular_limits_mismatch",
+                f"must contain exactly the limited axes: {sorted(expected_angular_limits)}",
+            )
+        for axis, limit in angular_limits.items():
+            if str(axis) in {"x", "y", "z"}:
+                _positive_number(limit, f"{path}/angular_limits_deg/{axis}", issues)
+        if not isinstance(constraint.get("collision_enabled"), bool):
+            _issue(issues, f"{path}/collision_enabled", "invalid_type", "must be boolean")
+    duplicates = sorted({value for value in constraint_ids if constraint_ids.count(value) > 1})
+    if duplicates:
+        _issue(issues, "/constraints", "duplicate_constraint_ids", f"duplicate ids: {', '.join(duplicates)}")
+
+
+def _validate_constraint_motion(
+    value: Any,
+    path: str,
+    allowed: set[str],
+    issues: list[ValidationIssue],
+) -> Mapping[str, Any]:
+    motion = _mapping(value, path, issues)
+    if set(str(key) for key in motion) != {"x", "y", "z"}:
+        _issue(issues, path, "invalid_constraint_motion_axes", "must contain exactly x, y, and z")
+    for axis in ("x", "y", "z"):
+        if motion.get(axis) not in allowed:
+            _issue(issues, f"{path}/{axis}", "invalid_constraint_motion", f"must be one of {sorted(allowed)}")
+    return motion
 
 
 def _ensure_dict(data: dict[str, Any], key: str) -> dict[str, Any]:

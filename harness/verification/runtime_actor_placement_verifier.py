@@ -18,6 +18,16 @@ def verify_runtime_actor_placement(case_spec: dict[str, Any], placement: dict[st
     if duplicate:
         return fail_report(case_id, "F7_runtime_artifact_incomplete", duplicate, "duplicate_runtime_actor_id", duplicate)
     by_object = {str(binding.get("object_id")): binding for binding in bindings if binding.get("object_id")}
+    constraint_error = first_bad_constraint_binding(case_spec, placement, by_object)
+    if constraint_error:
+        return fail_report(
+            case_id,
+            "F7_runtime_artifact_incomplete",
+            constraint_error["constraint_id"],
+            constraint_error["metric"],
+            constraint_error["value"],
+            checks=checks(placement, bindings),
+        )
     missing_physics_object = first_missing_physics_object(case_spec, by_object)
     if missing_physics_object:
         return fail_report(case_id, "F7_runtime_artifact_incomplete", missing_physics_object, "missing_runtime_actor_binding", missing_physics_object, checks=checks(placement, bindings))
@@ -70,6 +80,41 @@ def first_missing_physics_object(case_spec: dict[str, Any], by_object: dict[str,
             continue
         if object_id not in by_object and is_physics_contract_object(obj):
             return object_id
+    return None
+
+
+def first_bad_constraint_binding(
+    case_spec: dict[str, Any],
+    placement: dict[str, Any],
+    by_object: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    expected = {
+        str(item.get("id") or ""): item
+        for item in case_spec.get("constraints") or []
+        if isinstance(item, dict) and item.get("id")
+    }
+    actual = {
+        str(item.get("constraint_id") or ""): item
+        for item in placement.get("constraint_bindings") or []
+        if isinstance(item, dict) and item.get("constraint_id")
+    }
+    if set(expected) != set(actual):
+        return {
+            "constraint_id": sorted(set(expected) ^ set(actual))[0],
+            "metric": "missing_runtime_constraint_binding",
+            "value": {"expected": sorted(expected), "actual": sorted(actual)},
+        }
+    for constraint_id, declaration in expected.items():
+        binding = actual[constraint_id]
+        for side in ("a", "b"):
+            object_id = str(declaration.get(f"body_{side}") or "")
+            body_binding = binding.get(f"body_{side}") if isinstance(binding.get(f"body_{side}"), dict) else {}
+            if object_id not in by_object or body_binding.get("object_id") != object_id or not body_binding.get("runtime_actor_id"):
+                return {
+                    "constraint_id": constraint_id,
+                    "metric": "invalid_runtime_constraint_body_binding",
+                    "value": {"side": side, "object_id": object_id, "binding": body_binding},
+                }
     return None
 
 
@@ -226,6 +271,7 @@ def checks(placement: dict[str, Any], bindings: list[dict[str, Any]]) -> dict[st
             if (((binding.get("asset") or {}).get("quality_gate") or {}).get("status") == "pass_local_preview")
         ),
         "camera_count": len(placement.get("camera_bindings") or []),
+        "constraint_count": len(placement.get("constraint_bindings") or []),
         "collision_edge_count": len((placement.get("physics_graph") or {}).get("collision_edges") or []),
     }
 

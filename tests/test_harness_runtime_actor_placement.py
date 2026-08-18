@@ -19,6 +19,43 @@ class RuntimeActorPlacementTests(unittest.TestCase):
     def load_case(self, relative_path: str) -> dict:
         return json.loads((ROOT / relative_path).read_text(encoding="utf-8"))
 
+    def test_generic_constraint_binding_reuses_compiled_actor_ids(self) -> None:
+        from harness.runtime.actor_placement import constraint_bindings_from_case
+
+        declaration = {
+            "id": "joint",
+            "body_a": "rod",
+            "body_b": "anchor",
+            "frame_a": {"position_m": [0.0, 0.0, 0.5], "primary_axis": [0.0, 1.0, 0.0], "secondary_axis": [0.0, 0.0, 1.0]},
+            "frame_b": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [0.0, 1.0, 0.0], "secondary_axis": [0.0, 0.0, 1.0]},
+            "linear_motion": {"x": "locked", "y": "locked", "z": "locked"},
+            "angular_motion": {"x": "free", "y": "locked", "z": "locked"},
+            "angular_limits_deg": {},
+            "collision_enabled": False,
+        }
+        bindings = constraint_bindings_from_case(
+            [declaration],
+            [
+                {"object_id": "rod", "runtime_actor_id": "actor_rod"},
+                {"object_id": "anchor", "runtime_actor_id": "actor_anchor"},
+            ],
+            target_backend="ue",
+        )
+
+        self.assertEqual(bindings[0]["constraint_id"], "joint")
+        self.assertEqual(bindings[0]["body_a"]["runtime_actor_id"], "actor_rod")
+        self.assertEqual(bindings[0]["body_b"]["runtime_actor_id"], "actor_anchor")
+        self.assertNotIn("linear_limit_m", bindings[0])
+
+        scene = __import__("scripts.harness_local_ue_runner", fromlist=["build_runtime_scene"]).build_runtime_scene(
+            {"case_id": "constraint_case"},
+            {"views": []},
+            Namespace(map=""),
+            pass_mode="data",
+            actor_placement={"actor_bindings": [], "constraint_bindings": bindings},
+        )
+        self.assertEqual(scene["constraints"], bindings)
+
     def test_compiled_actor_placement_is_not_refit_without_explicit_opt_in(self) -> None:
         from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement
 
