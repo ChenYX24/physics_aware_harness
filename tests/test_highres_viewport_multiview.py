@@ -151,22 +151,18 @@ class HighresViewportMultiviewTests(unittest.TestCase):
         self.assertIn("FindRegisteredPrimitive(BodyAId)", implementation)
         self.assertIn("FindRegisteredPrimitive(BodyBId)", implementation)
         self.assertIn("World->SpawnActor<APhysicsConstraintActor>", implementation)
-        self.assertIn("Component->TermComponentConstraint();", implementation)
         self.assertIn("Component->SetConstraintReferenceFrame(EConstraintFrame::Frame1, FrameA);", implementation)
         self.assertIn("Component->SetConstraintReferenceFrame(EConstraintFrame::Frame2, FrameB);", implementation)
         self.assertNotIn("Component->SetConstraintReferencePosition", implementation)
         self.assertNotIn("Component->SetConstraintReferenceOrientation", implementation)
-        self.assertIn("Component->InitComponentConstraint();", implementation)
-        self.assertEqual(implementation.count("Component->InitComponentConstraint();"), 1)
+        self.assertNotIn("Component->TermComponentConstraint();", implementation)
+        self.assertNotIn("Component->InitComponentConstraint();", implementation)
         self.assertIn("Instance.IsValidConstraintInstance()", implementation)
-        self.assertIn("bVerified = bBodiesVerified && bInstanceVerified && bMotionsVerified && bFramesVerified", implementation)
+        self.assertIn("FPhysicsInterface::GetLocalPose", implementation)
+        self.assertIn("bVerified = bBodiesVerified && bInstanceVerified && bMotionsVerified && bFramesVerified && bSolverFramesVerified", implementation)
         self.assertLess(
-            implementation.index("Component->InitComponentConstraint();"),
+            implementation.index("Component->SetConstrainedComponents(BodyA, NAME_None, BodyB, NAME_None);"),
             implementation.index("Component->SetConstraintReferenceFrame(EConstraintFrame::Frame1"),
-        )
-        self.assertLess(
-            implementation.index("Component->SetDisableCollision(!bCollisionEnabled);"),
-            implementation.index("Component->InitComponentConstraint();"),
         )
 
     def test_runtime_binding_snapshot_refresh_replaces_pre_registration_state(self) -> None:

@@ -8,6 +8,7 @@
 #include "Misc/FileHelper.h"
 #include "PhysicsEngine/PhysicsConstraintActor.h"
 #include "PhysicsEngine/PhysicsConstraintComponent.h"
+#include "Physics/Experimental/PhysInterface_Chaos.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 
@@ -388,9 +389,10 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 	ConstraintActor->SetActorLabel(FString::Printf(TEXT("native_phenomena_demo_constraint_%s"), *ConstraintId.ToString()));
 #endif
 	Component->SetConstrainedComponents(BodyA, NAME_None, BodyB, NAME_None);
-	Component->TermComponentConstraint();
 	const FTransform FrameA = MakeConstraintFrame(FrameAPositionCm, FrameAPrimaryAxis, FrameASecondaryAxis);
 	const FTransform FrameB = MakeConstraintFrame(FrameBPositionCm, FrameBPrimaryAxis, FrameBSecondaryAxis);
+	Component->SetConstraintReferenceFrame(EConstraintFrame::Frame1, FrameA);
+	Component->SetConstraintReferenceFrame(EConstraintFrame::Frame2, FrameB);
 	Component->SetLinearXLimit(LinearX, LinearLimitCm);
 	Component->SetLinearYLimit(LinearY, LinearLimitCm);
 	Component->SetLinearZLimit(LinearZ, LinearLimitCm);
@@ -398,9 +400,6 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 	Component->SetAngularSwing1Limit(AngularZ, AngularLimitsDegrees.Z);
 	Component->SetAngularSwing2Limit(AngularY, AngularLimitsDegrees.Y);
 	Component->SetDisableCollision(!bCollisionEnabled);
-	Component->InitComponentConstraint();
-	Component->SetConstraintReferenceFrame(EConstraintFrame::Frame1, FrameA);
-	Component->SetConstraintReferenceFrame(EConstraintFrame::Frame2, FrameB);
 
 	UPrimitiveComponent* ActualBodyA = nullptr;
 	UPrimitiveComponent* ActualBodyB = nullptr;
@@ -418,11 +417,23 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 		&& Instance.GetAngularSwing2Motion() == AngularY;
 	const bool bFramesVerified = Instance.GetRefFrame(EConstraintFrame::Frame1).Equals(FrameA, 0.001f)
 		&& Instance.GetRefFrame(EConstraintFrame::Frame2).Equals(FrameB, 0.001f);
-	const bool bVerified = bBodiesVerified && bInstanceVerified && bMotionsVerified && bFramesVerified;
+	bool bSolverFramesVerified = false;
+	if (bInstanceVerified)
+	{
+		const FPhysicsConstraintHandle& Handle = Instance.GetPhysicsConstraintRef();
+		bool bSolverFramesMatch = false;
+		const bool bSolverFramesRead = FPhysicsInterface::ExecuteRead(Handle, [&](const FPhysicsConstraintHandle& Constraint)
+		{
+			bSolverFramesMatch = FPhysicsInterface::GetLocalPose(Constraint, EConstraintFrame::Frame1).Equals(FrameA, 0.001f)
+				&& FPhysicsInterface::GetLocalPose(Constraint, EConstraintFrame::Frame2).Equals(FrameB, 0.001f);
+		});
+		bSolverFramesVerified = bSolverFramesRead && bSolverFramesMatch;
+	}
+	const bool bVerified = bBodiesVerified && bInstanceVerified && bMotionsVerified && bFramesVerified && bSolverFramesVerified;
 	if (!bVerified)
 	{
-		UE_LOG(LogTemp, Error, TEXT("ADP constraint bind rejected: id=%s bodies=%d instance=%d motions=%d frames=%d"),
-			*ConstraintId.ToString(), bBodiesVerified, bInstanceVerified, bMotionsVerified, bFramesVerified);
+		UE_LOG(LogTemp, Error, TEXT("ADP constraint bind rejected: id=%s bodies=%d instance=%d motions=%d frames=%d solver_frames=%d"),
+			*ConstraintId.ToString(), bBodiesVerified, bInstanceVerified, bMotionsVerified, bFramesVerified, bSolverFramesVerified);
 		ConstraintActor->Destroy();
 		return nullptr;
 	}
