@@ -161,6 +161,7 @@ def simulate_rigid_sph_scene(case_spec: dict[str, Any]) -> dict[str, Any]:
                     "linear_velocity_m_s": [0.0, 0.0, 0.0],
                     "angular_velocity_rad_s": [0.0, 0.0, 0.0],
                     "kinematic": True,
+                    "mobility": "kinematic",
                 }
             elif body["mobility"] == "dynamic":
                 entity = dynamic_entities[body["id"]]
@@ -175,10 +176,25 @@ def simulate_rigid_sph_scene(case_spec: dict[str, Any]) -> dict[str, Any]:
                     "linear_velocity_m_s": tensor_vector(entity.get_vel()),
                     "angular_velocity_rad_s": tensor_vector(entity.get_ang()),
                     "kinematic": False,
+                    "mobility": "dynamic",
                 }
             else:
                 bodies_at_frame[body["id"]] = body
-        measurements = evaluate_measurements(positions, bodies_at_frame, compiled["measurements"])
+                rigid_states[body["id"]] = {
+                    "position_m": list(body["transform"]["position_m"]),
+                    "solver_rotation_xyz_deg": list(body["transform"]["euler_xyz_deg"]),
+                    "ue_rotation_pyr_deg": list(body["transform"]["ue_rotation_pyr_deg"]),
+                    "linear_velocity_m_s": [0.0, 0.0, 0.0],
+                    "angular_velocity_rad_s": [0.0, 0.0, 0.0],
+                    "kinematic": True,
+                    "mobility": "static",
+                }
+        measurements = evaluate_measurements(
+            positions,
+            bodies_at_frame,
+            rigid_states,
+            compiled["measurements"],
+        )
         reconstruction_positions = np.asarray(positions, dtype=np.float32)
         reconstruction = pysplashsurf.reconstruct_surface(
             reconstruction_positions,
@@ -346,7 +362,7 @@ def add_asset_collision(scene: Any, gs: Any, body: dict[str, Any]) -> Any:
         material_options["coup_restitution"] = float(material_spec["restitution"])
     return scene.add_entity(
         morph=gs.morphs.Mesh(
-            file=collision["source_mesh_path"],
+            file=collision["portable_mesh_path"],
             scale=tuple(body["transform"]["scale"]),
             pos=tuple(body["transform"]["position_m"]),
             euler=tuple(body["transform"]["euler_xyz_deg"]),
@@ -356,7 +372,8 @@ def add_asset_collision(scene: Any, gs: Any, body: dict[str, Any]) -> Any:
             convexify=True,
             decompose_object_error_threshold=0.0,
             recompute_inertia=True,
-            file_meshes_are_zup=collision["source_format"] not in {"glb", "gltf"},
+            align=False,
+            file_meshes_are_zup=True,
         ),
         material=gs.materials.Rigid(**material_options),
     )
@@ -501,6 +518,7 @@ def rigid_body_at_pose(
 def evaluate_measurements(
     positions: list[list[float]],
     bodies: dict[str, dict[str, Any]],
+    rigid_states: dict[str, dict[str, Any]],
     definitions: list[dict[str, Any]],
 ) -> dict[str, float]:
     total = max(1, len(positions))
@@ -522,12 +540,21 @@ def evaluate_measurements(
             distance = float(definition["distance_m"])
             count = sum(abs(sum((float(row[axis]) - float(origin[axis])) * normal[axis] for axis in range(3))) <= distance for row in positions)
             value = count / total
-        else:
+        elif kind == "axis_span":
             axis_indices = {"x": 0, "y": 1, "z": 2}
             value = max(
                 max(float(row[axis_indices[axis]]) for row in positions) - min(float(row[axis_indices[axis]]) for row in positions)
                 for axis in definition["axes"]
             ) if positions else 0.0
+        else:
+            state = rigid_states[definition["body_id"]]
+            vector = [float(component) for component in state[definition["field"]]]
+            component = definition["component"]
+            value = (
+                math.sqrt(sum(item * item for item in vector))
+                if component == "magnitude"
+                else vector[{"x": 0, "y": 1, "z": 2}[component]]
+            )
         result[definition["id"]] = value
     return result
 

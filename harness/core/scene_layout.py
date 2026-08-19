@@ -44,6 +44,7 @@ def build_object_node(
     state_kind = declared_state_kind(obj)
     body_type = obj.get("body_type") or solver.get("mobility") or ("particle" if state_kind == "particle" else None)
     collision = solver.get("collision") if isinstance(solver.get("collision"), dict) else {}
+    explicit_solver_collision = str(collision.get("type") or "") in {"plane", "axisymmetric_profile"}
     collision_required = obj.get("collision_required")
     if collision_required is None:
         collision_required = False if state_kind == "particle" else True if collision else None
@@ -74,7 +75,7 @@ def build_object_node(
     collision_profile = obj.get("collision_profile")
     if collision_profile is None and isinstance(selected_asset, dict):
         collision_profile = selected_asset.get("collision_profile")
-    if state_kind != "particle" and declared_collision_geometry is not None:
+    if state_kind != "particle" and (declared_collision_geometry is not None or explicit_solver_collision):
         defaults = analytic_physics_defaults(obj, intent.role)
         mass = mass if mass is not None else defaults["mass_kg"]
         collider = collider if collider is not None else defaults["collider"]
@@ -123,6 +124,8 @@ def build_object_node(
     collision_binding_source = (
         "analytic"
         if collision_geometry is not None
+        else "explicit_solver_analytic"
+        if explicit_solver_collision
         else "asset_body_setup"
         if asset_body_setup_verified
         else "none"

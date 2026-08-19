@@ -400,7 +400,16 @@ class CaseSpecV2Tests(unittest.TestCase):
         data["solver_scene"] = {
             "type": "rigid_sph",
             "initialization": {"state": "settled", "pre_roll_s": 0.25, "capture_after_pre_roll": True},
-            "measurements": [{"id": "span", "type": "axis_span", "axes": ["x", "y"]}],
+            "measurements": [
+                {"id": "span", "type": "axis_span", "axes": ["x", "y"]},
+                {
+                    "id": "body_speed",
+                    "type": "rigid_body_state",
+                    "body_id": "target_ball",
+                    "field": "linear_velocity_m_s",
+                    "component": "magnitude",
+                },
+            ],
             "assertions": [
                 {
                     "id": "span_grows",
@@ -408,7 +417,14 @@ class CaseSpecV2Tests(unittest.TestCase):
                     "reduction": "final",
                     "operator": ">=",
                     "value": 0.1,
-                }
+                },
+                {
+                    "id": "body_speed_finite",
+                    "measurement_id": "body_speed",
+                    "reduction": "max",
+                    "operator": ">=",
+                    "value": 0.0,
+                },
             ],
         }
         data["objects"][0]["role"] = "fluid"
@@ -475,6 +491,12 @@ class CaseSpecV2Tests(unittest.TestCase):
         dynamic["objects"][1]["solver"].pop("motion")
         dynamic_projection = compile_case_spec_v2_runtime(case_spec_v2_from_dict(dynamic)).data
         self.assertEqual(dynamic_projection["objects"][1]["solver"]["collision"], {"type": "asset"})
+
+        invalid_state_measurement = deepcopy(data)
+        invalid_state_measurement["solver_scene"]["measurements"][1]["field"] = "acceleration_m_s2"
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(invalid_state_measurement)
+        self.assertIn("invalid_rigid_body_state_field", {issue.code for issue in context.exception.issues})
 
         invalid_rotation = deepcopy(data)
         invalid_rotation["objects"][1]["solver"]["motion"]["ue_end_rotation_pyr_deg"] = [90.0, 0.0, 0.0]

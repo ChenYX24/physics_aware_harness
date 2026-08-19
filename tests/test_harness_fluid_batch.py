@@ -20,6 +20,11 @@ class FluidBatchVerifierTests(unittest.TestCase):
         self.assertEqual(profile.name, "local_preview")
         self.assertEqual(profile.render_passes, ("rgb",))
 
+        with self.assertRaisesRegex(ValueError, "missing"):
+            fluid_execution_profile("local_preview", ["event_closeup"])
+        with self.assertRaisesRegex(ValueError, "missing"):
+            fluid_execution_profile("candidate", ["event_closeup"])
+
     def test_rigid_replay_camera_bounds_come_from_declared_workspace(self) -> None:
         from scripts.harness_render_fluid_ue import replay_scene_bounds
 
@@ -255,6 +260,7 @@ class FluidBatchVerifierTests(unittest.TestCase):
                         "position_m": [0.0, 0.0, 0.42],
                         "ue_rotation_pyr_deg": [4.0, 5.0, 6.0],
                         "linear_velocity_m_s": [0.0, 0.0, -1.2],
+                        "angular_velocity_rad_s": [0.1, 0.2, 0.3],
                     },
                 }
             },
@@ -264,6 +270,7 @@ class FluidBatchVerifierTests(unittest.TestCase):
         self.assertEqual(trajectory["dynamic_body"]["position"], [0.0, 0.0, 0.445])
         self.assertEqual(trajectory["dynamic_body"]["rotation_degrees"], [4.0, 5.0, 6.0])
         self.assertEqual(trajectory["dynamic_body"]["velocity"], [0.0, 0.0, -1.2])
+        self.assertEqual(trajectory["dynamic_body"]["angular_velocity_rad_s"], [0.1, 0.2, 0.3])
 
         del bodies[0]["transform"]["ue_rotation_pyr_deg"]
         with self.assertRaisesRegex(ValueError, "missing an explicit UE transform"):

@@ -105,6 +105,22 @@ def execution_profile(name: str) -> ExecutionProfile:
         raise ValueError(f"unknown execution profile: {name}") from exc
 
 
+def execution_profile_names() -> tuple[str, ...]:
+    """Return the single registered profile set shared by every adapter."""
+    return tuple(EXECUTION_PROFILES)
+
+
+def execution_profile_for_views(name: str, requested_views: list[str]) -> ExecutionProfile:
+    """Validate an adapter request without changing the requested profile."""
+    profile = execution_profile(name)
+    missing = [view for view in profile.views if view not in requested_views]
+    if missing:
+        raise ValueError(
+            f"execution profile {profile.name} requires views {list(profile.views)}; missing {missing}"
+        )
+    return profile
+
+
 def write_execution_reports(
     run_dir: str | Path,
     profile: ExecutionProfile,

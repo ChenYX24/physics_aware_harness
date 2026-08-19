@@ -85,7 +85,10 @@ def first_missing_physics_asset(nodes: list[dict[str, Any]]) -> dict[str, Any] |
             required.extend(("collider", "collision_profile"))
             if (
                 not isinstance(physics.get("collision_geometry"), dict)
-                and physics.get("collision_binding_source") != "asset_body_setup"
+                and physics.get("collision_binding_source") not in {
+                    "asset_body_setup",
+                    "explicit_solver_analytic",
+                }
             ):
                 return {"object_id": node.get("object_id"), "missing_property": "verified_collision_body_setup"}
         if str(physics.get("body_type") or "").casefold() in {"", "dynamic"}:

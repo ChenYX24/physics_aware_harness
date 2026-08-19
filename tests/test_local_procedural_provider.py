@@ -48,6 +48,10 @@ if args.mode == "lfs_pointer":
 asset_file.write_bytes(payload)
 digest = hashlib.sha256(payload).hexdigest()
 file_hash = "0" * 64 if args.mode == "bad_hash" else digest
+collision_file = work / "qualified_collision_mesh.obj"
+collision_payload = b"# qualified collision\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"
+collision_file.write_bytes(collision_payload)
+collision_hash = hashlib.sha256(collision_payload).hexdigest()
 dependencies = []
 if args.mode == "incomplete_dependency":
     dependencies = [{
@@ -76,6 +80,23 @@ result = {
         "materialized": True,
     }],
     "dependencies": dependencies,
+    "portable_collision_artifact": {
+        "schema_version": "harness_portable_collision_mesh_v1",
+        "role": "qualified_collision_mesh",
+        "local_path": str(collision_file),
+        "format": "obj",
+        "sha256": "0" * 64 if args.mode == "bad_collision_hash" else collision_hash,
+        "byte_size": len(collision_payload),
+        "materialized": True,
+        "coordinate_system": "asset_local_z_up_m",
+        "artifact_to_asset_transform": {
+            "matrix4x4": (
+                [[1,0,0,0],[0,1,0,0],[0,0,1,0]]
+                if args.mode == "invalid_collision_transform"
+                else [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
+            )
+        },
+    },
 }
 Path(args.result).write_text(json.dumps(result), encoding="utf-8")
 print("fake importer completed", args.mode)
@@ -97,6 +118,9 @@ for item in manifest["items"]:
     asset_file = result_path.parent / f"{request['asset_id'].replace('.', '_')}.uasset"
     payload = request["asset_id"].encode("utf-8")
     asset_file.write_bytes(payload)
+    collision_file = result_path.parent / "qualified_collision_mesh.obj"
+    collision_payload = b"# qualified collision\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"
+    collision_file.write_bytes(collision_payload)
     result = {
         "schema_version": "harness_backend_asset_import_result_v1",
         "request_id": request["request_id"],
@@ -116,6 +140,17 @@ for item in manifest["items"]:
             "materialized": True,
         }],
         "dependencies": [],
+        "portable_collision_artifact": {
+            "schema_version": "harness_portable_collision_mesh_v1",
+            "role": "qualified_collision_mesh",
+            "local_path": str(collision_file),
+            "format": "obj",
+            "sha256": hashlib.sha256(collision_payload).hexdigest(),
+            "byte_size": len(collision_payload),
+            "materialized": True,
+            "coordinate_system": "asset_local_z_up_m",
+            "artifact_to_asset_transform": {"matrix4x4": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]},
+        },
     }
     result_path.write_text(json.dumps(result), encoding="utf-8")
     results.append(result)
@@ -443,6 +478,11 @@ class LocalProceduralProviderTests(unittest.TestCase):
         self.assertEqual(compilation.compiled_asset_intents[0].search_intent.must["source_kind"], "procedural_generation")
         selected = compilation.artifacts["asset_resolution"]["assets"][0]["selected_asset"]
         self.assertTrue(selected["asset_id"].startswith("generated.local.sphere_mesh_v1."))
+        self.assertEqual(
+            selected["collision"]["portable_mesh"]["schema_version"],
+            "harness_portable_collision_mesh_v1",
+        )
+        self.assertEqual(selected["collision"]["portable_mesh"]["role"], "qualified_collision_mesh")
         self.assertEqual(compilation.report["asset_resolve_invocation_count"], 1)
 
     def test_provider_candidate_canonicalizes_structured_physics_role(self) -> None:
@@ -575,6 +615,8 @@ class LocalProceduralProviderTests(unittest.TestCase):
             "incomplete_dependency": "dependency_file_missing",
             "lfs_pointer": "file_lfs_pointer",
             "identity_mismatch": "does not match request",
+            "bad_collision_hash": "file_hash_mismatch",
+            "invalid_collision_transform": "portable_collision_transform_invalid",
         }
         for mode, fragment in expected_fragments.items():
             with self.subTest(mode=mode):

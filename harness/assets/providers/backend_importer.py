@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -22,7 +23,7 @@ from harness.core.artifact_schema import write_json
 # outer command timeout longer so it does not terminate the launcher first.
 DEFAULT_TIMEOUT_S = 330.0
 IMPORTER_COMMAND_ENV = "SIM_HARNESS_UE_ASSET_IMPORTER_CMD"
-IMPORTER_CONTRACT_VERSION = "ue_static_mesh_import_v3"
+IMPORTER_CONTRACT_VERSION = "ue_static_mesh_import_v4"
 
 
 class BackendImporterAdapter:
@@ -340,6 +341,44 @@ def _validate_fulfilled_result(result: Mapping[str, Any], *, workspace: Path) ->
     error = _validate_file_records(result.get("dependencies") or [], workspace=workspace, dependencies=True)
     if error:
         raise BackendImportValidationError(error, "imported dependency validation failed")
+    portable_collision = result.get("portable_collision_artifact")
+    if portable_collision is not None:
+        if not isinstance(portable_collision, Mapping):
+            raise BackendImportValidationError(
+                "portable_collision_artifact_invalid",
+                "portable collision artifact must be an object",
+            )
+        if portable_collision.get("schema_version") != "harness_portable_collision_mesh_v1":
+            raise BackendImportValidationError(
+                "portable_collision_artifact_invalid",
+                "portable collision artifact schema is unsupported",
+            )
+        error = _validate_file_records([portable_collision], workspace=workspace)
+        if error:
+            raise BackendImportValidationError(error, "portable collision artifact validation failed")
+        if portable_collision.get("format") != "obj" or portable_collision.get("coordinate_system") != "asset_local_z_up_m":
+            raise BackendImportValidationError(
+                "portable_collision_artifact_invalid",
+                "portable collision artifact must be an asset-local Z-up OBJ in meters",
+            )
+        transform = portable_collision.get("artifact_to_asset_transform")
+        matrix = transform.get("matrix4x4") if isinstance(transform, Mapping) else None
+        if not (
+            isinstance(matrix, list)
+            and len(matrix) == 4
+            and all(isinstance(row, list) and len(row) == 4 for row in matrix)
+            and all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+                for row in matrix
+                for value in row
+            )
+        ):
+            raise BackendImportValidationError(
+                "portable_collision_transform_invalid",
+                "portable collision artifact requires a finite artifact-to-asset 4x4 transform",
+            )
 
 
 def _validate_file_records(

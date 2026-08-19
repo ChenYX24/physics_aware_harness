@@ -18,6 +18,7 @@ from harness.runtime.rigid_sph_scene import (
     ue_rotation_pyr_from_solver_xyz,
 )
 from scripts.harness_genesis_rigid_sph import (
+    evaluate_measurements,
     rigid_body_pose_at_time,
     set_dynamic_body_initial_state,
     set_rigid_body_pose,
@@ -43,11 +44,19 @@ class RigidSPHSceneTests(unittest.TestCase):
             self.assertEqual(body["mass_kg"], 0.42)
             self.assertEqual(body["initial_linear_velocity_m_s"], [0.0, 0.0, -0.3])
             self.assertEqual(body["collision"]["type"], "asset")
-            self.assertEqual(body["collision"]["backend_conversion"], "genesis_convex_decomposition")
+            self.assertEqual(
+                body["collision"]["backend_conversion"],
+                "catalog_portable_collision_mesh_v1_to_genesis_mesh",
+            )
             self.assertTrue(body["collision"]["asset_geometry_match"])
 
             case["objects"][1]["asset"]["collision"]["present"] = False
             with self.assertRaisesRegex(RigidSphCapabilityMissing, "not qualified"):
+                compile_rigid_sph_scene(case)
+
+            case = dynamic_asset_case(source)
+            case["objects"][1]["asset"]["collision"]["portable_mesh"]["sha256"] = "0" * 64
+            with self.assertRaisesRegex(RigidSphCapabilityMissing, "identity"):
                 compile_rigid_sph_scene(case)
 
     def test_dynamic_body_initial_state_is_held_for_preroll_then_released(self) -> None:
@@ -74,6 +83,37 @@ class RigidSPHSceneTests(unittest.TestCase):
         self.assertEqual(calls[-1][1], (0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
         set_dynamic_body_initial_state(entity, body, hold=False)
         self.assertEqual(calls[-1][1], (1.0, 2.0, 3.0, 0.1, 0.2, 0.3))
+
+    def test_rigid_body_state_measurement_projects_structured_solver_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "irregular.obj"
+            source.write_text("v 0 0 0\nv 0.1 0 0\nv 0 0.2 0\nf 1 2 3\n", encoding="utf-8")
+            case = dynamic_asset_case(source)
+            case["solver_scene"]["measurements"].append(
+                {
+                    "id": "body_speed",
+                    "type": "rigid_body_state",
+                    "body_id": "irregular_body",
+                    "field": "linear_velocity_m_s",
+                    "component": "magnitude",
+                }
+            )
+            compiled = compile_rigid_sph_scene(case)
+
+        definition = next(row for row in compiled["measurements"] if row["id"] == "body_speed")
+        measured = evaluate_measurements(
+            [[0.0, 0.0, 0.0]],
+            {"irregular_body": compiled["rigid_bodies"][1]},
+            {
+                "irregular_body": {
+                    "position_m": [0.0, 0.0, 0.5],
+                    "linear_velocity_m_s": [3.0, 4.0, 0.0],
+                    "angular_velocity_rad_s": [0.0, 1.0, 0.0],
+                }
+            },
+            [definition],
+        )
+        self.assertEqual(measured["body_speed"], 5.0)
 
     def test_different_scenarios_compile_to_one_execution_contract(self) -> None:
         transfer = compile_rigid_sph_scene(load_case_spec(TRANSFER_CASE).data)
@@ -283,11 +323,27 @@ def dynamic_asset_case(source: Path) -> dict:
                 "role": "rigid_body",
                 "asset": {
                     **asset,
-                    "collision": {"present": True, "kind": "simple_convex"},
-                    "collision_source": {
-                        "local_path": str(source),
-                        "sha256": source_sha256,
-                        "format": "obj",
+                    "collision": {
+                        "present": True,
+                        "kind": "simple_convex",
+                        "portable_mesh": {
+                            "schema_version": "harness_portable_collision_mesh_v1",
+                            "role": "qualified_collision_mesh",
+                            "local_path": str(source),
+                            "sha256": source_sha256,
+                            "byte_size": source.stat().st_size,
+                            "materialized": True,
+                            "format": "obj",
+                            "coordinate_system": "asset_local_z_up_m",
+                            "artifact_to_asset_transform": {
+                                "matrix4x4": [
+                                    [1.0, 0.0, 0.0, 0.0],
+                                    [0.0, 1.0, 0.0, 0.0],
+                                    [0.0, 0.0, 1.0, 0.0],
+                                    [0.0, 0.0, 0.0, 1.0],
+                                ]
+                            },
+                        },
                     },
                 },
                 "mass_kg": 0.42,

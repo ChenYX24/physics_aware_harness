@@ -9,7 +9,7 @@
     "A reconstructed mesh is a coupling representation, not a replacement for particle truth.",
     "A declared velocity field initializes the particles once at frame zero; later particle states must come only from the solver.",
     "A kinematic rigid body receives only its declared motion schedule; a dynamic rigid body receives only its declared mass, material, and initial state; every coupled response remains solver-owned.",
-    "Every declared rigid collider must match the visible asset geometry; qualified Catalog collision meshes are converted at the Genesis boundary, while analytic colliders are used only when explicitly declared.",
+    "Every declared rigid collider must match the visible asset geometry; Genesis consumes only the Catalog-qualified portable collision mesh, hash, and baked asset-local transform, while analytic colliders are used only when explicitly declared.",
     "The solver-to-Unreal bridge converts right-handed meters to left-handed centimeters and uses one named pitch-yaw-roll conversion for both initial placement and per-frame replay.",
     "Unreal surface assets are content-addressed by particle-state truth and reconstructed-frame hashes; cached UAssets may be reused only when that fingerprint matches."
   ],
@@ -25,6 +25,8 @@
     "declared_measurements",
     "solver_assertion_results",
     "rigid_body_pose",
+    "rigid_body_linear_velocity",
+    "rigid_body_angular_velocity",
     "surface_import_fingerprint",
     "asset_geometry_match",
     "rigid_body_asset_scale_xyz"
@@ -75,6 +77,8 @@
     "rigid_collision_invalid",
     "asset_geometry_mismatch",
     "declared_measurement_missing",
+    "rigid_body_state_missing",
+    "rigid_body_state_measurement_mismatch",
     "solver_assertion_failed",
     "solver_ue_rotation_mapping_mismatch",
     "surface_import_fingerprint_mismatch",
@@ -87,7 +91,7 @@
     "Fix the active surface material/render proxy before expanding an RGB smoke into a multi-camera candidate.",
     "Quantize instance masks to black plus the declared stable instance palette and re-run palette closure.",
     "Drive tracking cameras from the particle center trajectory rather than a static proxy transform.",
-    "Provide a Catalog-qualified collision source that Genesis can consume, or declare an explicit analytic collider that matches the selected visible asset.",
+    "Requalify the asset to produce a portable collision artifact that Genesis can consume, or explicitly declare a matching analytic collider in CaseSpec.",
     "Use the shared runtime_rotator conversion for initial placement and per-frame rigid-body replay.",
     "Tune scene declarations from solver measurements, not from the rendered video alone.",
     "Invalidate and re-import the Unreal surface sequence whenever particle truth or any reconstructed mesh hash changes."

@@ -598,7 +598,28 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
                             "bbox_size_m": [0.1, 0.2, 0.1],
                             "source_kind": "model_generation",
                             "proxy": False,
-                            "collision": {"present": True, "kind": "simple_convex"},
+                            "collision": {
+                                "present": True,
+                                "kind": "simple_convex",
+                                "portable_mesh": {
+                                    "schema_version": "harness_portable_collision_mesh_v1",
+                                    "role": "qualified_collision_mesh",
+                                    "local_path": str(source),
+                                    "format": "obj",
+                                    "sha256": source_sha256,
+                                    "byte_size": source.stat().st_size,
+                                    "materialized": True,
+                                    "coordinate_system": "asset_local_z_up_m",
+                                    "artifact_to_asset_transform": {
+                                        "matrix4x4": [
+                                            [1.0, 0.0, 0.0, 0.0],
+                                            [0.0, 1.0, 0.0, 0.0],
+                                            [0.0, 0.0, 1.0, 0.0],
+                                            [0.0, 0.0, 0.0, 1.0],
+                                        ]
+                                    },
+                                },
+                            },
                             "files": [
                                 {
                                     "role": "import_source",
@@ -615,8 +636,8 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
 
             self.assertIsNone(bind_resolved_solver_assets(case, resolution))
             self.assertEqual(
-                case["objects"][1]["asset"]["collision_source"]["local_path"],
-                str(source.resolve()),
+                case["objects"][1]["asset"]["collision"]["portable_mesh"]["local_path"],
+                str(source),
             )
 
             unqualified = dynamic_asset_case(source)

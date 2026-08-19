@@ -4589,7 +4589,7 @@ class AgentJobController:
         *,
         excluded_paths: set[str] | None = None,
     ) -> dict[str, Any]:
-        """Open bounded layout and tunable physics leaves without changing topology."""
+        """Open bounded layout leaves without changing topology or physics intent."""
         excluded = excluded_paths or set()
         raw_bounds = (case_spec.get("scene") or {}).get("bounds_hint_m")
         scene_bounds = (
@@ -4606,10 +4606,6 @@ class AgentJobController:
             else [20.0, 20.0, 20.0]
         )
         constraints: dict[str, Any] = {}
-
-        def add_constraint(path: str, value: Any, constraint: Mapping[str, Any]) -> None:
-            if path not in excluded and value is not None:
-                constraints[path] = dict(constraint)
 
         for obj in case_spec.get("objects") or []:
             if not isinstance(obj, Mapping):
@@ -4654,60 +4650,6 @@ class AgentJobController:
                         ],
                     }
 
-            if body_type == "dynamic":
-                for field, limit in (
-                    ("linear_velocity_m_s", 1000.0),
-                    ("angular_velocity_rad_s", 10000.0),
-                    ("angular_velocity_deg_s", math.degrees(10000.0)),
-                ):
-                    value = initial.get(field)
-                    if not cls._finite_numeric_vector(value, length=3):
-                        continue
-                    bound = max(limit, *(abs(float(component)) for component in value))
-                    add_constraint(
-                        f"$.objects.{object_id}.initial_state.{field}",
-                        value,
-                        {
-                            "kind": "numeric_vector",
-                            "min": [-bound, -bound, -bound],
-                            "max": [bound, bound, bound],
-                        },
-                    )
-
-                for field, minimum, maximum in (
-                    ("mass_kg", 1e-9, 1e6),
-                    ("linear_damping", 0.0, 1000.0),
-                    ("angular_damping", 0.0, 1000.0),
-                ):
-                    value = physics.get(field)
-                    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)):
-                        add_constraint(
-                            f"$.objects.{object_id}.physics.{field}",
-                            value,
-                            {"kind": "numeric", "min": minimum, "max": max(maximum, float(value))},
-                        )
-                for field in ("enable_gravity", "use_ccd"):
-                    value = physics.get(field)
-                    if isinstance(value, bool):
-                        add_constraint(
-                            f"$.objects.{object_id}.physics.{field}",
-                            value,
-                            {"kind": "enum", "values": [False, True]},
-                        )
-
-            material = physics.get("material") if isinstance(physics.get("material"), Mapping) else {}
-            for field, maximum in (
-                ("static_friction", 100.0),
-                ("dynamic_friction", 100.0),
-                ("restitution", 1.0),
-            ):
-                value = material.get(field)
-                if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)):
-                    add_constraint(
-                        f"$.objects.{object_id}.physics.material.{field}",
-                        value,
-                        {"kind": "numeric", "min": 0.0, "max": max(maximum, float(value))},
-                    )
         paths = sorted(constraints)
         return {
             "paths": paths,

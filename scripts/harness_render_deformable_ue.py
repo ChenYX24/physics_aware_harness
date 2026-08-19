@@ -20,7 +20,12 @@ from harness.core.artifact_manager import ArtifactManager
 from harness.core.artifact_schema import read_json, write_json
 from harness.core.case_spec import load_case_spec
 from harness.runtime.camera_planner import camera_plan_from_case_spec, camera_plan_to_dict
-from harness.runtime.execution_profile import COMPLETE_CASE_VIEWS, execution_profile, write_execution_reports
+from harness.runtime.execution_profile import (
+    execution_profile,
+    execution_profile_for_views,
+    execution_profile_names,
+    write_execution_reports,
+)
 from harness.runtime.render_pass_contract import write_render_contract_artifacts
 from harness.verification.render_sync_checker import check_render_sync
 from harness.verification.rgb_observability import verify_expected_color_observability
@@ -48,7 +53,7 @@ def main() -> int:
     parser.add_argument("--ue-project", required=True)
     parser.add_argument("--ue-executable", default=str(DEFAULT_UE_EXECUTABLE))
     parser.add_argument("--map", default="/Game/Maps/MarketEnvironment/Maps/Day.Day")
-    parser.add_argument("--profile", choices=("smoke", "candidate", "publish"), default="smoke")
+    parser.add_argument("--profile", choices=execution_profile_names(), default="smoke")
     parser.add_argument("--views")
     parser.add_argument("--width", type=int)
     parser.add_argument("--height", type=int)
@@ -57,8 +62,10 @@ def main() -> int:
     started = time.perf_counter()
     requested_profile = execution_profile(args.profile)
     requested_views = [item.strip() for item in args.views.split(",") if item.strip()] if args.views else list(requested_profile.views)
-    complete_views = set(COMPLETE_CASE_VIEWS).issubset(requested_views)
-    profile = requested_profile if requested_profile.name == "smoke" or complete_views else execution_profile("smoke")
+    try:
+        profile = execution_profile_for_views(requested_profile.name, requested_views)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     width = int(args.width or profile.width)
     height = int(args.height or profile.height)
     render_passes = list(profile.render_passes)

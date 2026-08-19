@@ -23,7 +23,12 @@ from harness.runtime.camera_planner import camera_plan_from_case_spec
 from harness.runtime.fluid_surface_adapter import particle_centers_m
 from harness.runtime.render_pass_contract import camera_plan_to_dict
 from harness.runtime.render_pass_contract import write_render_contract_artifacts
-from harness.runtime.execution_profile import COMPLETE_CASE_VIEWS, execution_profile, write_execution_reports
+from harness.runtime.execution_profile import (
+    execution_profile,
+    execution_profile_for_views,
+    execution_profile_names,
+    write_execution_reports,
+)
 from harness.verification.render_sync_checker import check_render_sync
 from harness.verification.physics_verifier import PhysicsVerifier
 from harness.verification.rgb_observability import verify_expected_color_observability
@@ -38,13 +43,7 @@ from scripts.harness_local_ue_runner import (
 
 
 def fluid_execution_profile(profile_name: str, requested_views: list[str]):
-    requested = execution_profile(profile_name)
-    complete_camera_contract = set(COMPLETE_CASE_VIEWS).issubset(requested_views)
-    return (
-        requested
-        if requested.name in {"smoke", "local_preview"} or complete_camera_contract
-        else execution_profile("smoke")
-    )
+    return execution_profile_for_views(profile_name, requested_views)
 
 
 def main() -> int:
@@ -62,7 +61,7 @@ def main() -> int:
     parser.add_argument("--basin-scale-xyz", type=float, nargs=3)
     parser.add_argument("--basin-pivot-to-rim-m", type=float)
     parser.add_argument("--scene-z-offset-m", type=float, default=-0.05)
-    parser.add_argument("--profile", choices=("smoke", "local_preview", "candidate", "publish"), default="candidate")
+    parser.add_argument("--profile", choices=execution_profile_names(), default="candidate")
     parser.add_argument("--views", help="Comma-separated override. Missing canonical views is diagnostic-only.")
     parser.add_argument("--width", type=int)
     parser.add_argument("--height", type=int)
@@ -75,7 +74,10 @@ def main() -> int:
         else list(execution_profile(args.profile).views)
     )
     requested_views = ["front_static" if value == "overview_static" else value for value in requested_views]
-    profile = fluid_execution_profile(args.profile, requested_views)
+    try:
+        profile = fluid_execution_profile(args.profile, requested_views)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     width = int(args.width or profile.width)
     height = int(args.height or profile.height)
     render_passes = list(profile.render_passes)
@@ -903,7 +905,7 @@ def rigid_body_trajectory_objects(
         state = states.get(body_id) if isinstance(states.get(body_id), dict) else {}
         required_fields = ["position_m", "ue_rotation_pyr_deg"]
         if body.get("mobility") == "dynamic":
-            required_fields.append("linear_velocity_m_s")
+            required_fields.extend(("linear_velocity_m_s", "angular_velocity_rad_s"))
         if any(len(state.get(field) or []) != 3 for field in required_fields):
             raise ValueError(f"moving rigid body is missing a complete solver state: {body_id}")
         result[body_id] = {
@@ -911,6 +913,11 @@ def rigid_body_trajectory_objects(
             "rotation_degrees": list(state["ue_rotation_pyr_deg"]),
             "velocity": (
                 list(state["linear_velocity_m_s"])
+                if body.get("mobility") == "dynamic"
+                else [0.0, 0.0, 0.0]
+            ),
+            "angular_velocity_rad_s": (
+                list(state["angular_velocity_rad_s"])
                 if body.get("mobility") == "dynamic"
                 else [0.0, 0.0, 0.0]
             ),

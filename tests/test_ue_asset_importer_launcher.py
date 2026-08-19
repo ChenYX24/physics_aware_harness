@@ -213,8 +213,14 @@ class UEAssetImporterLauncherTests(unittest.TestCase):
             request_path = root / "request.json"
             request_path.write_text(json.dumps(request), encoding="utf-8")
             ue_request_path, temporary_paths = _prepare_ue_request(request_path, request)
-            self.assertEqual(ue_request_path, request_path)
-            self.assertEqual(temporary_paths, ())
+            self.assertEqual(ue_request_path, root / "request.ue_import.json")
+            self.assertEqual(temporary_paths, (ue_request_path,))
+            ue_request = json.loads(ue_request_path.read_text(encoding="utf-8"))
+            self.assertEqual(ue_request["source_files"], request["source_files"])
+            self.assertEqual(
+                ue_request["portable_collision_artifact_path"],
+                str(root / "qualified_collision_mesh.obj"),
+            )
 
     def test_fbx_scale_is_uniformly_corrected_once_from_declared_dimensions(self) -> None:
         source = Path(__file__).resolve().parents[1] / "scripts" / "native_ue_asset_importer.py"

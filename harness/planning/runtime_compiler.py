@@ -713,7 +713,6 @@ def bind_resolved_solver_assets(
             "catalog_source": str(selected.get("source_kind") or selected.get("source_uri") or "catalog"),
             "bbox_m": copy.deepcopy(bbox_m),
             "collision": copy.deepcopy(selected.get("collision") or {}),
-            "collision_source": _solver_collision_source(selected),
         }
     register_model_generated_solver_frames(case_spec, selected_by_object)
     try:
@@ -733,44 +732,6 @@ def bind_resolved_solver_assets(
             "message": str(exc),
         }
     return None
-
-
-def _solver_collision_source(selected: Mapping[str, Any]) -> dict[str, Any]:
-    from harness.runtime.rigid_sph_scene import GENESIS_COLLISION_MESH_SUFFIXES
-
-    candidates = [row for row in selected.get("files") or [] if isinstance(row, Mapping)]
-    if isinstance(selected.get("local_path"), str):
-        candidates.append(
-            {
-                "role": "catalog_local_path",
-                "local_path": selected["local_path"],
-                "sha256": selected.get("sha256"),
-                "format": Path(selected["local_path"]).suffix.lstrip("."),
-                "materialized": selected.get("materialized", True),
-            }
-        )
-    role_order = {
-        "provider_import_source": 0,
-        "import_source": 1,
-        "generated_source": 2,
-        "canonical": 3,
-        "catalog_local_path": 4,
-    }
-    candidates.sort(key=lambda row: role_order.get(str(row.get("role") or ""), 5))
-    for row in candidates:
-        path = Path(str(row.get("local_path") or row.get("path") or "")).expanduser()
-        if (
-            row.get("materialized") is not False
-            and path.suffix.casefold() in GENESIS_COLLISION_MESH_SUFFIXES
-            and path.is_file()
-        ):
-            return {
-                "local_path": str(path.resolve()),
-                "sha256": str(row.get("sha256") or "").lower(),
-                "format": str(row.get("format") or path.suffix.lstrip(".")).casefold(),
-                "role": str(row.get("role") or ""),
-            }
-    return {}
 
 
 def register_model_generated_solver_frames(

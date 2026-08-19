@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 
-GENESIS_COLLISION_MESH_SUFFIXES = frozenset({".dae", ".glb", ".gltf", ".obj", ".ply", ".stl"})
+PORTABLE_COLLISION_MESH_SCHEMA_VERSION = "harness_portable_collision_mesh_v1"
 
 
 class RigidSphCapabilityMissing(ValueError):
@@ -163,29 +163,42 @@ def compile_collision(
     collision_type = str(collision.get("type") or "")
     if collision_type == "asset":
         qualification = asset.get("collision") if isinstance(asset.get("collision"), dict) else {}
-        source = asset.get("collision_source") if isinstance(asset.get("collision_source"), dict) else {}
         collision_kind = str(qualification.get("kind") or "").strip()
-        source_path = Path(str(source.get("local_path") or "")).expanduser()
-        source_sha256 = str(source.get("sha256") or "").lower()
-        source_format = str(source.get("format") or source_path.suffix.lstrip(".")).casefold()
         if qualification.get("present") is not True or not collision_kind:
             raise RigidSphCapabilityMissing("asset collision is not qualified by the Catalog")
-        if source_path.suffix.casefold() not in GENESIS_COLLISION_MESH_SUFFIXES:
+        portable = qualification.get("portable_mesh") if isinstance(qualification.get("portable_mesh"), dict) else {}
+        artifact_path = Path(str(portable.get("local_path") or "")).expanduser()
+        artifact_sha256 = str(portable.get("sha256") or "").lower()
+        if portable.get("schema_version") != PORTABLE_COLLISION_MESH_SCHEMA_VERSION:
+            raise RigidSphCapabilityMissing("Catalog qualification has no supported portable collision mesh artifact")
+        if portable.get("format") != "obj" or portable.get("coordinate_system") != "asset_local_z_up_m":
+            raise RigidSphCapabilityMissing("Genesis cannot consume the qualified portable collision mesh representation")
+        if portable.get("materialized") is not True or not artifact_path.is_file():
+            raise RigidSphCapabilityMissing(f"qualified portable collision mesh is unavailable: {artifact_path}")
+        if (
+            not is_sha256(artifact_sha256)
+            or sha256_file(artifact_path) != artifact_sha256
+            or not isinstance(portable.get("byte_size"), int)
+            or isinstance(portable.get("byte_size"), bool)
+            or portable.get("byte_size") != artifact_path.stat().st_size
+        ):
+            raise RigidSphCapabilityMissing("qualified portable collision mesh identity does not match its Catalog record")
+        transform = portable.get("artifact_to_asset_transform")
+        matrix = transform.get("matrix4x4") if isinstance(transform, dict) else None
+        if not identity_matrix4x4(matrix):
             raise RigidSphCapabilityMissing(
-                f"Genesis cannot consume the qualified asset collision source format: {source_path.suffix or '<none>'}"
+                "Genesis cannot consume a portable collision artifact whose transform was not baked to asset-local space"
             )
-        if not source_path.is_file():
-            raise RigidSphCapabilityMissing(f"qualified asset collision source is unavailable: {source_path}")
-        if not is_sha256(source_sha256) or sha256_file(source_path) != source_sha256:
-            raise RigidSphCapabilityMissing("qualified asset collision source identity does not match its Catalog record")
         return {
             "type": "asset",
             "asset_geometry_match": True,
             "catalog_collision_kind": collision_kind,
-            "source_mesh_path": str(source_path.resolve()),
-            "source_mesh_sha256": source_sha256,
-            "source_format": source_format,
-            "backend_conversion": "genesis_convex_decomposition",
+            "portable_mesh_path": str(artifact_path.resolve()),
+            "portable_mesh_sha256": artifact_sha256,
+            "portable_mesh_schema_version": PORTABLE_COLLISION_MESH_SCHEMA_VERSION,
+            "coordinate_system": "asset_local_z_up_m",
+            "artifact_to_asset_transform": {"matrix4x4": matrix},
+            "backend_conversion": "catalog_portable_collision_mesh_v1_to_genesis_mesh",
             "convexify": True,
         }
     if collision_type == "plane":
@@ -252,6 +265,28 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def identity_matrix4x4(value: Any) -> bool:
+    expected = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+    return bool(
+        isinstance(value, list)
+        and len(value) == 4
+        and all(isinstance(row, list) and len(row) == 4 for row in value)
+        and all(
+            isinstance(actual, (int, float))
+            and not isinstance(actual, bool)
+            and math.isfinite(float(actual))
+            and abs(float(actual) - target) <= 1e-12
+            for row, expected_row in zip(value, expected, strict=True)
+            for actual, target in zip(row, expected_row, strict=True)
+        )
+    )
 
 
 def compile_motion(value: Any, transform: dict[str, Any], mobility: str) -> dict[str, Any] | None:
@@ -414,6 +449,19 @@ def compile_measurements(value: Any, bodies: dict[str, dict[str, Any]]) -> list[
             if not axes or any(axis not in {"x", "y", "z"} for axis in axes):
                 raise ValueError("axis_span requires axes drawn from x/y/z")
             compiled["axes"] = axes
+        elif kind == "rigid_body_state":
+            body_id = str(item.get("body_id") or "")
+            field = str(item.get("field") or "")
+            component = str(item.get("component") or "")
+            if body_id not in bodies:
+                raise ValueError("rigid_body_state requires a known body_id")
+            if field not in {"position_m", "linear_velocity_m_s", "angular_velocity_rad_s"}:
+                raise ValueError(
+                    "rigid_body_state field must be position_m, linear_velocity_m_s, or angular_velocity_rad_s"
+                )
+            if component not in {"x", "y", "z", "magnitude"}:
+                raise ValueError("rigid_body_state component must be x, y, z, or magnitude")
+            compiled.update({"body_id": body_id, "field": field, "component": component})
         else:
             raise ValueError(f"unsupported rigid_sph measurement type: {kind}")
         result.append(compiled)

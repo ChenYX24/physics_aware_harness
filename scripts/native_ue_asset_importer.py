@@ -108,6 +108,16 @@ def _import_one(request: dict[str, Any]) -> dict[str, Any]:
         )
         if body_setup is None:
             raise RuntimeError(f"imported StaticMesh has no collision body setup: {object_path}")
+        portable_collision_artifact = None
+        portable_collision_error = None
+        try:
+            portable_collision_artifact = _export_portable_collision_artifact(body_setup, request)
+        except Exception as exc:
+            # UE runtime qualification remains useful to UE-only cases.  A
+            # solver that requires the portable collision contract will reject
+            # this asset as capability_missing instead of substituting visual
+            # geometry or a bounds proxy.
+            portable_collision_error = str(exc)
         unreal.EditorAssetLibrary.save_loaded_asset(asset, only_if_is_dirty=False)
 
         package_file = CONTENT_ROOT / "Generated" / "Provider" / f"{asset_name}.uasset"
@@ -136,11 +146,16 @@ def _import_one(request: dict[str, Any]) -> dict[str, Any]:
                 }
             ],
             "dependencies": dependencies,
+            "portable_collision_artifact": portable_collision_artifact,
             "import_validation": {
                 "loaded_class": asset.get_class().get_name(),
                 "lod0_section_count": int(asset.get_num_sections(0)),
                 "collision_body_setup_present": True,
                 "convex_collision_count": collision_count,
+                "portable_collision_artifact_status": (
+                    "qualified" if portable_collision_artifact is not None else "unavailable"
+                ),
+                "portable_collision_artifact_error": portable_collision_error,
                 "actual_size_cm": actual_size_cm,
                 "expected_size_m": request.get("expected_size_m"),
                 "obj_meter_to_ue_centimeter_scale": 100.0,
@@ -169,6 +184,79 @@ def _import_one(request: dict[str, Any]) -> dict[str, Any]:
             "traceback": traceback.format_exc(limit=20),
         }
     return result
+
+
+def _export_portable_collision_artifact(body_setup: Any, request: dict[str, Any]) -> dict[str, Any]:
+    path_value = request.get("portable_collision_artifact_path")
+    if not isinstance(path_value, str) or not path_value.strip():
+        raise RuntimeError("portable collision artifact destination is not declared")
+    destination = Path(path_value).expanduser().resolve()
+    aggregate = body_setup.get_editor_property("agg_geom")
+    convex_elements = aggregate.get_editor_property("convex_elems")
+    if not convex_elements:
+        raise RuntimeError("qualified BodySetup has no portable convex elements")
+
+    lines = [
+        "# harness_portable_collision_mesh_v1",
+        "# asset-local Z-up coordinates in meters; FKConvexElem transforms are baked",
+    ]
+    vertex_offset = 0
+    triangle_count = 0
+    for hull_index, element in enumerate(convex_elements):
+        vertices = list(element.get_editor_property("vertex_data") or [])
+        indices = [int(value) for value in (element.get_editor_property("index_data") or [])]
+        transform = element.get_editor_property("transform")
+        if len(vertices) < 4 or not indices or len(indices) % 3:
+            raise RuntimeError(f"BodySetup convex element {hull_index} has incomplete triangle data")
+        if any(index < 0 or index >= len(vertices) for index in indices):
+            raise RuntimeError(f"BodySetup convex element {hull_index} has an invalid triangle index")
+        lines.append(f"o collision_hull_{hull_index:04d}")
+        for vertex in vertices:
+            transformed = transform.transform_location(vertex)
+            coordinates_m = [
+                float(transformed.x) / 100.0,
+                float(transformed.y) / 100.0,
+                float(transformed.z) / 100.0,
+            ]
+            if any(not math.isfinite(value) for value in coordinates_m):
+                raise RuntimeError(f"BodySetup convex element {hull_index} contains non-finite vertices")
+            lines.append("v " + " ".join(_format_float(value) for value in coordinates_m))
+        for start in range(0, len(indices), 3):
+            face = [vertex_offset + indices[start + axis] + 1 for axis in range(3)]
+            lines.append("f " + " ".join(str(value) for value in face))
+            triangle_count += 1
+        vertex_offset += len(vertices)
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    payload = destination.read_bytes()
+    return {
+        "schema_version": "harness_portable_collision_mesh_v1",
+        "role": "qualified_collision_mesh",
+        "local_path": str(destination),
+        "format": "obj",
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "byte_size": len(payload),
+        "materialized": True,
+        "coordinate_system": "asset_local_z_up_m",
+        "artifact_to_asset_transform": {
+            "matrix4x4": [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        },
+        "qualification_source": "unreal_static_mesh_body_setup",
+        "convex_part_count": len(convex_elements),
+        "vertex_count": vertex_offset,
+        "triangle_count": triangle_count,
+    }
+
+
+def _format_float(value: float) -> str:
+    text = format(float(value), ".17g")
+    return "0" if text in {"-0", "-0.0"} else text
 
 
 def _source_file(request: dict[str, Any]) -> Path:

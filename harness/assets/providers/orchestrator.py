@@ -1298,6 +1298,11 @@ class AssetProviderOrchestrator:
         primary = next((row for row in imported_files if row.get("role") == "primary"), imported_files[0])
         dependencies = [dict(row) for row in import_result.get("dependencies") or []]
         import_validation = import_result.get("import_validation") if isinstance(import_result.get("import_validation"), Mapping) else {}
+        collision_qualification = _catalog_collision_qualification(
+            import_result,
+            kind="simple_convex",
+        )
+        portable_collision_files = _portable_collision_files(collision_qualification)
         actual_size_cm = import_validation.get("actual_size_cm")
         size = (
             [float(value) / 100.0 for value in actual_size_cm]
@@ -1381,8 +1386,8 @@ class AssetProviderOrchestrator:
             "collision_profile": "PhysicsActor",
             "mass_kg": max(volume_m3 * 1000.0, 0.001),
             "material": {"static_friction": 0.5, "dynamic_friction": 0.4, "restitution": 0.1},
-            "collision": {"present": True, "kind": "simple_convex"},
-            "files": [*imported_files, *source_files],
+            "collision": collision_qualification,
+            "files": [*imported_files, *source_files, *portable_collision_files],
             "ue": {
                 "object_path": import_result["object_path"],
                 "class_name": import_result["class_name"],
@@ -1519,6 +1524,8 @@ class AssetProviderOrchestrator:
         dependencies = [dict(row) for row in import_result.get("dependencies") or []]
         size = [float(value) for value in normalized["size_m"]]
         shape = str(normalized["shape"])
+        collision_qualification = _catalog_collision_qualification(import_result, kind=shape)
+        portable_collision_files = _portable_collision_files(collision_qualification)
         volume_m3 = _primitive_volume_m3(shape, size)
         mass = volume_m3 * 1000.0
         redistribution = copy.deepcopy(self.redistribution_evidence)
@@ -1566,7 +1573,7 @@ class AssetProviderOrchestrator:
             "collision_profile": "PhysicsActor",
             "mass_kg": mass,
             "material": {"static_friction": 0.5, "dynamic_friction": 0.4, "restitution": 0.1},
-            "collision": {"present": True, "kind": shape},
+            "collision": collision_qualification,
             "files": [
                 *imported_files,
                 {
@@ -1577,6 +1584,7 @@ class AssetProviderOrchestrator:
                     "byte_size": generated["byte_size"],
                     "materialized": True,
                 },
+                *portable_collision_files,
             ],
             "ue": {
                 "object_path": import_result["object_path"],
@@ -1741,6 +1749,23 @@ class AssetProviderOrchestrator:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 digest.update(chunk)
         return digest.hexdigest()
+
+
+def _catalog_collision_qualification(
+    import_result: Mapping[str, Any],
+    *,
+    kind: str,
+) -> dict[str, Any]:
+    qualification: dict[str, Any] = {"present": True, "kind": str(kind)}
+    artifact = import_result.get("portable_collision_artifact")
+    if isinstance(artifact, Mapping):
+        qualification["portable_mesh"] = copy.deepcopy(dict(artifact))
+    return qualification
+
+
+def _portable_collision_files(collision: Mapping[str, Any]) -> list[dict[str, Any]]:
+    artifact = collision.get("portable_mesh")
+    return [copy.deepcopy(dict(artifact))] if isinstance(artifact, Mapping) else []
 
 
 def _is_sha256(value: str) -> bool:

@@ -1590,9 +1590,10 @@ FIELD-BY-FIELD INSTRUCTIONS
    dimensions, pose, and a frame. Use frame={"type":"body_local","body_id":exact_id} when the initial
    volume is contained by a moving rigid body; use a world frame otherwise. Every coupled rigid participant
    uses role="rigid_body" and declares
-   solver.mobility, solver.transform, and solver.collision. Use collision={"type":"asset"} for a qualified
-   Catalog asset collision mesh; the compiler verifies its collision record and source identity before Genesis
-   converts it, and fails capability_missing when that conversion is unavailable. Explicit analytic collision
+   solver.mobility, solver.transform, and solver.collision. Use collision={"type":"asset"} only for a Catalog
+   qualification that includes a portable collision mesh, hash, and artifact-to-asset transform. Genesis consumes
+   only that qualified collision artifact; a missing artifact, hash mismatch, unsupported transform, or conversion
+   failure is capability_missing. It never substitutes the visual source mesh or asset bounds. Explicit analytic collision
    forms are plane and axisymmetric_profile; do not emit composite or primitives arrays. A plane contains
    position_m, normal, and asset_geometry_match=true. An axisymmetric_profile contains an inner_profile
    array of positive-radius {z_m,radius_m} points, wall_thickness_m, panel_count,
@@ -1870,8 +1871,13 @@ def case_spec_generation_contract() -> dict[str, Any]:
                         "outside_body_interiors_fraction",
                         "plane_proximity_fraction",
                         "axis_span",
+                        "rigid_body_state",
                     ],
-                    "shape": "non-empty array; each item has id, type, and only the fields required by that type",
+                    "shape": (
+                        "non-empty array; each item has id, type, and only the fields required by that type; "
+                        "rigid_body_state uses body_id, field=position_m|linear_velocity_m_s|"
+                        "angular_velocity_rad_s, and component=x|y|z|magnitude"
+                    ),
                 },
                 "assertions": {
                     "shape": "non-empty array of {id, measurement_id, reduction, operator, value}",
@@ -1896,7 +1902,11 @@ def case_spec_generation_contract() -> dict[str, Any]:
                     "ue_rotation_pyr_deg": ["pitch", "yaw", "roll"],
                     "scale": "optional positive xyz",
                 },
-                "collision": "exactly one asset, plane, or axisymmetric_profile object; asset uses qualified Catalog collision geometry; axisymmetric_profile requires non-empty fit_method; composite/primitives are invalid",
+                "collision": (
+                    "exactly one asset, plane, or axisymmetric_profile object; asset requires the Catalog-qualified "
+                    "portable collision artifact and never uses a visual-source/bounds fallback; axisymmetric_profile "
+                    "requires non-empty fit_method; composite/primitives are invalid"
+                ),
                 "motion": "optional {type:pivot_rotation,start_time_s,duration_s,pivot_local_m,solver_end_rotation_xyz_deg,ue_end_rotation_pyr_deg}",
             },
             "rigid_sph_fluid_object_solver": {

@@ -1948,12 +1948,35 @@ def _validate_rigid_sph_declarations(
             axes = _string_list(item.get("axes"), f"{path}/axes", issues)
             if not axes or any(axis not in {"x", "y", "z"} for axis in axes):
                 _issue(issues, f"{path}/axes", "invalid_measurement_axes", "must use x, y, or z")
+        elif kind == "rigid_body_state":
+            body_id = str(item.get("body_id") or "")
+            if body_id not in rigid_ids:
+                _issue(issues, f"{path}/body_id", "invalid_measurement_body", "must reference a known rigid_body")
+            if item.get("field") not in {
+                "position_m",
+                "linear_velocity_m_s",
+                "angular_velocity_rad_s",
+            }:
+                _issue(
+                    issues,
+                    f"{path}/field",
+                    "invalid_rigid_body_state_field",
+                    "must be position_m, linear_velocity_m_s, or angular_velocity_rad_s",
+                )
+            if item.get("component") not in {"x", "y", "z", "magnitude"}:
+                _issue(
+                    issues,
+                    f"{path}/component",
+                    "invalid_rigid_body_state_component",
+                    "must be x, y, z, or magnitude",
+                )
         else:
             _issue(
                 issues,
                 f"{path}/type",
                 "unsupported_rigid_sph_measurement",
-                "must be body_interior_fraction, outside_body_interiors_fraction, plane_proximity_fraction, or axis_span",
+                "must be body_interior_fraction, outside_body_interiors_fraction, plane_proximity_fraction, "
+                "axis_span, or rigid_body_state",
             )
 
     assertions = scene.get("assertions")

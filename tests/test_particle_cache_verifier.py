@@ -228,6 +228,31 @@ class ParticleCacheVerifierTests(unittest.TestCase):
         self.assertIn("declared_measurement_missing", report["failure_codes"])
         self.assertIn("solver_assertion_failed", report["failure_codes"])
 
+    def test_rigid_body_state_measurement_is_bound_to_structured_cache_state(self) -> None:
+        cache = particle_cache()
+        declaration = {
+            "id": "body_speed",
+            "type": "rigid_body_state",
+            "body_id": "body",
+            "field": "linear_velocity_m_s",
+            "component": "magnitude",
+        }
+        cache["environment"] = {
+            **declared_environment([assertion("moves", "body_speed", "max", ">=", 1.0)]),
+            "measurements": [declaration],
+        }
+        for frame, velocity in zip(cache["frames"], ([0.0, 0.0, 0.0], [3.0, 4.0, 0.0]), strict=True):
+            frame["rigid_objects"] = {"body": {"linear_velocity_m_s": velocity}}
+            frame["measurements"] = {
+                "body_speed": sum(value * value for value in velocity) ** 0.5,
+            }
+
+        self.assertEqual(verify_particle_cache(cache)["status"], "pass")
+
+        cache["frames"][1]["measurements"]["body_speed"] = 4.0
+        report = verify_particle_cache(cache)
+        self.assertIn("rigid_body_state_measurement_mismatch", report["failure_codes"])
+
 def assertion(assertion_id: str, measurement_id: str, reduction: str, operator: str, value: float) -> dict:
     return {
         "id": assertion_id,

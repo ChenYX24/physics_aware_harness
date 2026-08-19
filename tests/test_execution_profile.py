@@ -5,11 +5,32 @@ import unittest
 from pathlib import Path
 
 from harness.core.artifact_schema import read_json, write_json
-from harness.runtime.execution_profile import execution_profile, verified_run_status, write_execution_reports
+from harness.runtime.execution_profile import (
+    execution_profile,
+    execution_profile_for_views,
+    execution_profile_names,
+    verified_run_status,
+    write_execution_reports,
+)
 from harness.runtime.render_pass_contract import enforce_ue_render_passes, normalize_passes
 
 
 class ExecutionProfileTests(unittest.TestCase):
+    def test_registered_profiles_and_views_are_one_fail_closed_contract(self) -> None:
+        self.assertEqual(
+            execution_profile_names(),
+            ("smoke", "candidate", "local_preview", "publish"),
+        )
+        preview = execution_profile_for_views(
+            "local_preview",
+            ["front_static", "event_closeup"],
+        )
+        self.assertEqual(preview.render_passes, ("rgb",))
+        with self.assertRaisesRegex(ValueError, "missing"):
+            execution_profile_for_views("local_preview", ["event_closeup"])
+        with self.assertRaisesRegex(ValueError, "missing"):
+            execution_profile_for_views("candidate", ["event_closeup"])
+
     def test_profiles_make_capture_cost_and_delivery_eligibility_explicit(self) -> None:
         smoke = execution_profile("smoke")
         local_preview = execution_profile("local_preview")

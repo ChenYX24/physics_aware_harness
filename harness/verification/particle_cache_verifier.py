@@ -113,6 +113,28 @@ def verify_declared_measurements(
                 failures.append(failure("declared_measurement_missing", int(frame.get("frame") or 0), measurement_id))
                 values = []
                 break
+            if declaration.get("type") == "rigid_body_state":
+                expected = rigid_body_state_measurement(frame, declaration)
+                if expected is None:
+                    failures.append(
+                        failure(
+                            "rigid_body_state_missing",
+                            int(frame.get("frame") or 0),
+                            {"measurement_id": measurement_id, "body_id": declaration.get("body_id")},
+                        )
+                    )
+                    values = []
+                    break
+                if abs(float(value) - expected) > 1e-9:
+                    failures.append(
+                        failure(
+                            "rigid_body_state_measurement_mismatch",
+                            int(frame.get("frame") or 0),
+                            {"measurement_id": measurement_id, "measured": float(value), "state_value": expected},
+                        )
+                    )
+                    values = []
+                    break
             values.append(float(value))
         if values:
             series[measurement_id] = values
@@ -146,6 +168,31 @@ def verify_declared_measurements(
         "measurement_reductions": reductions,
         "assertion_results": assertion_results,
     }
+
+
+def rigid_body_state_measurement(frame: dict[str, Any], declaration: dict[str, Any]) -> float | None:
+    states = frame.get("rigid_objects") if isinstance(frame.get("rigid_objects"), dict) else {}
+    state = states.get(str(declaration.get("body_id") or ""))
+    if not isinstance(state, dict):
+        return None
+    vector = state.get(str(declaration.get("field") or ""))
+    if not (
+        isinstance(vector, list)
+        and len(vector) == 3
+        and all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+            for value in vector
+        )
+    ):
+        return None
+    values = [float(value) for value in vector]
+    component = str(declaration.get("component") or "")
+    if component == "magnitude":
+        return math.sqrt(sum(value * value for value in values))
+    index = {"x": 0, "y": 1, "z": 2}.get(component)
+    return values[index] if index is not None else None
 
 
 def reduce_measurement(values: list[float], assertion: dict[str, Any], frames: list[dict[str, Any]]) -> float | None:

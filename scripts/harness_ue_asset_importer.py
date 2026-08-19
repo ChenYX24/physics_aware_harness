@@ -292,7 +292,13 @@ def _prepare_ue_request(request_path: Path, request: dict[str, Any]) -> tuple[Pa
     if source.suffix.casefold() not in {".obj", ".fbx"} or not source.is_file():
         raise ValueError(f"Unreal static-mesh import requires a materialized OBJ or FBX: {source}")
     if source.suffix.casefold() == ".fbx":
-        return request_path, ()
+        ue_request = json.loads(json.dumps(request))
+        ue_request["portable_collision_artifact_path"] = str(
+            request_path.with_name("qualified_collision_mesh.obj")
+        )
+        ue_request_path = request_path.with_name(f"{request_path.stem}.ue_import.json")
+        _write_json(ue_request_path, ue_request)
+        return ue_request_path, (ue_request_path,)
     normalized_obj = request_path.with_name(f"{request_path.stem}.ue_centimeters.obj")
     if str(request.get("source_kind") or "") in {"external_site", "model_generation"} and request.get("expected_size_m"):
         fitted_size_m = _write_fitted_obj(
@@ -309,6 +315,9 @@ def _prepare_ue_request(request_path: Path, request: dict[str, Any]) -> tuple[Pa
         _write_scaled_obj(source, normalized_obj, scale=100.0)
         fitted_size_m = None
     ue_request = json.loads(json.dumps(request))
+    ue_request["portable_collision_artifact_path"] = str(
+        request_path.with_name("qualified_collision_mesh.obj")
+    )
     if fitted_size_m is not None:
         ue_request["expected_size_m"] = fitted_size_m
     payload = normalized_obj.read_bytes()
