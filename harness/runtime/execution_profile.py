@@ -8,21 +8,11 @@ from typing import Any
 from harness.core.artifact_schema import read_json, write_json
 
 
-COMPLETE_CASE_VIEWS = (
-    "front_static",
-    "side_static",
-    "top_down",
-    "tracking_subject",
-    "event_closeup",
-)
-
-
 @dataclass(frozen=True)
 class ExecutionProfile:
     """One small interface for the capture cost/quality contract."""
 
     name: str
-    views: tuple[str, ...]
     render_passes: tuple[str, ...]
     render_mode: str
     width: int
@@ -49,7 +39,6 @@ class ExecutionProfile:
 EXECUTION_PROFILES: dict[str, ExecutionProfile] = {
     "smoke": ExecutionProfile(
         name="smoke",
-        views=("event_closeup",),
         render_passes=("rgb",),
         render_mode="rgb",
         width=1280,
@@ -61,7 +50,6 @@ EXECUTION_PROFILES: dict[str, ExecutionProfile] = {
     ),
     "candidate": ExecutionProfile(
         name="candidate",
-        views=COMPLETE_CASE_VIEWS,
         render_passes=("rgb", "depth", "segmentation"),
         render_mode="both",
         width=1920,
@@ -69,11 +57,10 @@ EXECUTION_PROFILES: dict[str, ExecutionProfile] = {
         render_fps=24,
         physics_hz=120,
         artifact_eligibility="review_candidate",
-        purpose="Full-HD five-camera multimodal review candidate.",
+        purpose="Full-HD multimodal review candidate.",
     ),
     "local_preview": ExecutionProfile(
         name="local_preview",
-        views=("front_static", "event_closeup"),
         render_passes=("rgb",),
         render_mode="rgb",
         width=1280,
@@ -81,11 +68,10 @@ EXECUTION_PROFILES: dict[str, ExecutionProfile] = {
         render_fps=24,
         physics_hz=120,
         artifact_eligibility="local_preview",
-        purpose="HD two-camera RGB preview with physics, camera, and semantic verification.",
+        purpose="HD RGB preview with physics, camera, and semantic verification.",
     ),
     "publish": ExecutionProfile(
         name="publish",
-        views=COMPLETE_CASE_VIEWS,
         render_passes=("rgb", "depth", "segmentation"),
         render_mode="both",
         width=3840,
@@ -110,17 +96,6 @@ def execution_profile_names() -> tuple[str, ...]:
     return tuple(EXECUTION_PROFILES)
 
 
-def execution_profile_for_views(name: str, requested_views: list[str]) -> ExecutionProfile:
-    """Validate an adapter request without changing the requested profile."""
-    profile = execution_profile(name)
-    missing = [view for view in profile.views if view not in requested_views]
-    if missing:
-        raise ValueError(
-            f"execution profile {profile.name} requires views {list(profile.views)}; missing {missing}"
-        )
-    return profile
-
-
 def write_execution_reports(
     run_dir: str | Path,
     profile: ExecutionProfile,
@@ -138,8 +113,17 @@ def write_execution_reports(
     write_json(run_dir / "execution_profile.json", profile_payload)
 
     render_config = optional_json(run_dir / "inputs" / "render_config.json")
+    observation_plan = optional_json(run_dir / "observation_plan.json")
     frame_count = profile_frame_count(run_dir, render_config)
-    actual_views = render_config.get("views") if isinstance(render_config.get("views"), list) else list(profile.views)
+    actual_views = (
+        list(render_config["views"])
+        if isinstance(render_config.get("views"), list)
+        else [
+            str(camera["camera_id"])
+            for camera in observation_plan.get("cameras") or []
+            if isinstance(camera, dict) and camera.get("camera_id")
+        ]
+    )
     actual_passes = render_config.get("passes") if isinstance(render_config.get("passes"), list) else list(profile.render_passes)
     work_units = frame_count * len(actual_views) * len(actual_passes)
     native_timing, native_summary = native_timing_for_run(run_dir)

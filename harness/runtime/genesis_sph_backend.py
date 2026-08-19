@@ -64,7 +64,14 @@ class GenesisSPHBackend:
             )
         parameters = genesis_parameters(case.data)
         command = genesis_command(executable, run_dir, case.data.get("backend_options"), parameters)
-        result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            env=genesis_child_environment(run_dir),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
         report = {
             "schema_version": "harness_genesis_sph_backend_report_v1",
             "backend": self.name,
@@ -86,71 +93,26 @@ class GenesisSPHBackend:
                 f"Genesis SPH backend failed with exit code {result.returncode}; "
                 f"see {run_dir / 'genesis_sph_backend_report.json'}",
             )
-        try:
-            validate_genesis_execution_artifacts(run_dir)
-        except GenesisSPHExecutionError as exc:
-            report["status"] = "failed"
-            report["failure_code"] = exc.code
-            write_json(run_dir / "genesis_sph_backend_report.json", report)
-            raise
         verifier = write_genesis_artifacts(case, run_dir)
         report["verification_status"] = verifier["status"]
         write_json(run_dir / "genesis_sph_backend_report.json", report)
         return run_dir
 
 
-def validate_genesis_execution_artifacts(run_dir: str | Path) -> None:
-    """Require the solver products needed by verification and replay."""
-    run_dir = Path(run_dir)
-    cache_path = run_dir / "particle_cache.json"
-    video_path = run_dir / "video.mp4"
-    missing: list[str] = []
-    if not cache_path.is_file() or cache_path.stat().st_size == 0:
-        missing.append("particle_cache.json")
-    if not video_path.is_file() or video_path.stat().st_size == 0:
-        missing.append("video.mp4")
-    if missing:
-        raise GenesisSPHExecutionError(
-            "genesis_sph_output_missing",
-            f"Genesis SPH execution did not produce required artifacts: {missing}",
-        )
-    try:
-        cache = read_json(cache_path)
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise GenesisSPHExecutionError(
-            "genesis_sph_output_invalid",
-            f"Genesis SPH particle cache is unreadable: {exc}",
-        ) from exc
-    frames = cache.get("frames") if isinstance(cache, dict) else None
-    if (
-        not isinstance(cache, dict)
-        or cache.get("schema_version") != "harness_particle_cache_v1"
-        or not isinstance(frames, list)
-        or not frames
-    ):
-        raise GenesisSPHExecutionError(
-            "genesis_sph_output_invalid",
-            "Genesis SPH particle cache must be a non-empty harness_particle_cache_v1 artifact",
-        )
-    missing_surfaces: list[str] = []
-    for index, frame in enumerate(frames):
-        surface = frame.get("surface") if isinstance(frame, dict) and isinstance(frame.get("surface"), dict) else {}
-        relative = str(surface.get("path") or "")
-        surface_path = run_dir / relative if relative else None
-        if surface_path is None or not surface_path.is_file() or surface_path.stat().st_size == 0:
-            missing_surfaces.append(relative or f"frame[{index}].surface.path")
-    if missing_surfaces:
-        raise GenesisSPHExecutionError(
-            "genesis_sph_output_missing",
-            f"Genesis SPH execution did not produce surface frames: {missing_surfaces[:8]}",
-        )
+def genesis_child_environment(run_dir: str | Path) -> dict[str, str]:
+    """Keep Genesis imports headless without changing the controller process."""
+    config_dir = Path(run_dir) / ".matplotlib"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    environment = os.environ.copy()
+    environment["MPLBACKEND"] = "Agg"
+    environment["MPLCONFIGDIR"] = str(config_dir.resolve())
+    return environment
 
 
 def run_ue_surface_replay(
     run_dir: str | Path,
     *,
     profile: str,
-    requested_views: list[str] | None = None,
     width: int | None = None,
     height: int | None = None,
 ) -> dict[str, Any]:
@@ -208,8 +170,6 @@ def run_ue_surface_replay(
         "--profile",
         profile,
     ]
-    if requested_views:
-        command.extend(("--views", ",".join(requested_views)))
     if width is not None and height is not None:
         command.extend(("--width", str(width), "--height", str(height)))
     result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)

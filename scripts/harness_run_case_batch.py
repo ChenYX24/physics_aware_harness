@@ -79,7 +79,6 @@ def run_one_case(
     case = load_case_spec(case_path)
     profile = execution_profile(profile_name) if profile_name else None
     if profile:
-        requested_views = list(profile.views)
         render_passes = list(profile.render_passes)
         render_mode = profile.render_mode
     if backend_name == "ue":

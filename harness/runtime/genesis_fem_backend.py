@@ -6,7 +6,7 @@ from pathlib import Path
 from harness.core.artifact_schema import read_json, write_json
 from harness.core.runtime_case import RuntimeCase
 from harness.core.physics_contract import infer_scene_domain
-from harness.runtime.genesis_sph_backend import genesis_python
+from harness.runtime.genesis_sph_backend import genesis_child_environment, genesis_python
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,7 +30,14 @@ class GenesisFEMBackend:
         ]
         if not executable.is_file():
             raise RuntimeError(f"Genesis environment missing: {executable}")
-        result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            env=genesis_child_environment(run_dir),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
         verifier = read_json(run_dir / "harness_verifier.json") if (run_dir / "harness_verifier.json").is_file() else {}
         status = "completed" if result.returncode == 0 and verifier.get("status") == "pass" else "failed"
         write_json(run_dir / "genesis_fem_backend_report.json", {

@@ -112,7 +112,6 @@ def execute_runtime_plan(
                     run_dir,
                     handoff_contract=dict(handoff),
                     profile=profile,
-                    requested_views=requested_views,
                     width=width,
                     height=height,
                 )
@@ -183,7 +182,6 @@ def render_ue_handoff(
     *,
     handoff_contract: Mapping[str, Any],
     profile: str,
-    requested_views: list[str] | None,
     width: int,
     height: int,
 ) -> dict[str, Any]:
@@ -198,7 +196,6 @@ def render_ue_handoff(
     return adapter(
         Path(run_dir),
         profile=profile,
-        requested_views=requested_views,
         width=width,
         height=height,
     )
@@ -208,14 +205,12 @@ def _render_particle_surface_cache_in_ue(
     run_dir: Path,
     *,
     profile: str,
-    requested_views: list[str] | None,
     width: int,
     height: int,
 ) -> dict[str, Any]:
     return run_ue_surface_replay(
         run_dir,
         profile=profile,
-        requested_views=requested_views,
         width=width,
         height=height,
     )
@@ -225,7 +220,6 @@ def _render_deformable_mesh_cache_in_ue(
     run_dir: Path,
     *,
     profile: str,
-    requested_views: list[str] | None,
     width: int,
     height: int,
 ) -> dict[str, Any]:
@@ -258,8 +252,6 @@ def _render_deformable_mesh_cache_in_ue(
         "--profile",
         profile,
     ]
-    if requested_views:
-        command.extend(("--views", ",".join(requested_views)))
     command.extend(("--width", str(width), "--height", str(height)))
     result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
     report = {

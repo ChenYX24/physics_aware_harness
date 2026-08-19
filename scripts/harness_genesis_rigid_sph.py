@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 from harness.core.runtime_case import load_runtime_case
 from harness.core.workspace import workspace_path
+from harness.runtime.genesis_headless import import_headless_genesis
 from harness.runtime.rigid_sph_scene import (
     compile_rigid_sph_scene,
     matrix_vector,
@@ -37,7 +38,7 @@ from scripts.harness_genesis_fluid import (
 
 def simulate_rigid_sph_scene(case_spec: dict[str, Any]) -> dict[str, Any]:
     wake_macos_display()
-    import genesis as gs
+    gs = import_headless_genesis()
     import numpy as np
     import pysplashsurf
 

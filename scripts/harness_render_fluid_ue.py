@@ -19,13 +19,11 @@ if str(ROOT) not in sys.path:
 from harness.core.artifact_manager import ArtifactManager
 from harness.core.artifact_schema import read_json, write_json
 from harness.core.runtime_case import load_runtime_case
-from harness.runtime.camera_planner import camera_plan_from_case_spec
 from harness.runtime.fluid_surface_adapter import particle_centers_m
-from harness.runtime.render_pass_contract import camera_plan_to_dict
+from harness.runtime.observation_planner import camera_ids_from_observation_plan, render_passes_from_observation_plan
 from harness.runtime.render_pass_contract import write_render_contract_artifacts
 from harness.runtime.execution_profile import (
     execution_profile,
-    execution_profile_for_views,
     execution_profile_names,
     write_execution_reports,
 )
@@ -40,10 +38,6 @@ from scripts.harness_local_ue_runner import (
     run_ue_until_artifacts,
     standardize_native_output,
 )
-
-
-def fluid_execution_profile(profile_name: str, requested_views: list[str]):
-    return execution_profile_for_views(profile_name, requested_views)
 
 
 def main() -> int:
@@ -62,29 +56,24 @@ def main() -> int:
     parser.add_argument("--basin-pivot-to-rim-m", type=float)
     parser.add_argument("--scene-z-offset-m", type=float, default=-0.05)
     parser.add_argument("--profile", choices=execution_profile_names(), default="candidate")
-    parser.add_argument("--views", help="Comma-separated override. Missing canonical views is diagnostic-only.")
     parser.add_argument("--width", type=int)
     parser.add_argument("--height", type=int)
     args = parser.parse_args()
 
     started = time.perf_counter()
-    requested_views = (
-        [value.strip() for value in args.views.split(",") if value.strip()]
-        if args.views
-        else list(execution_profile(args.profile).views)
-    )
-    requested_views = ["front_static" if value == "overview_static" else value for value in requested_views]
-    try:
-        profile = fluid_execution_profile(args.profile, requested_views)
-    except ValueError as exc:
-        raise SystemExit(str(exc)) from exc
+    profile = execution_profile(args.profile)
     width = int(args.width or profile.width)
     height = int(args.height or profile.height)
-    render_passes = list(profile.render_passes)
     render_mode = profile.render_mode
     run_dir = Path(args.run_dir).expanduser().resolve()
     native_output = run_dir / "logs" / "native_combined"
     run_dir.mkdir(parents=True, exist_ok=True)
+    observation_plan = read_json(run_dir / "observation_plan.json")
+    camera_plan_payload = read_json(run_dir / "camera_plan.json")
+    requested_views = camera_ids_from_observation_plan(observation_plan)
+    render_passes = render_passes_from_observation_plan(observation_plan)
+    if not requested_views:
+        raise SystemExit("compiled Observation Plan contains no cameras")
     ue_project = Path(args.ue_project).expanduser().resolve()
     ue_executable = Path(args.ue_executable).expanduser().resolve()
     replay = read_json(Path(args.replay_manifest))
@@ -149,11 +138,6 @@ def main() -> int:
         "sample_phase": "genesis_surface_frame_boundary",
         "endpoint_policy": "inclusive",
     }
-    camera_plan = camera_plan_from_case_spec(case_spec, requested_views=requested_views, camera_strategy="bounds_auto_v1")
-    camera_plan_payload = camera_plan_to_dict(camera_plan)
-    planned_view_ids = [str(view.get("camera_id")) for view in camera_plan_payload.get("views") or []]
-    if planned_view_ids != requested_views:
-        raise SystemExit(f"requested UE fluid views did not compile exactly: requested={requested_views}, planned={planned_view_ids}")
     asset_paths = [
         f"{frame['ue_asset_path']}.{str(frame['ue_asset_path']).rsplit('/', 1)[-1]}"
         for frame in replay["frames"]
@@ -345,7 +329,6 @@ def main() -> int:
     write_json(runtime_path, runtime_scene)
     write_json(studio_path, studio_scene)
     write_json(run_dir / "case_spec.json", case_spec)
-    write_json(run_dir / "camera_plan.json", camera_plan_payload)
     particle_cache_path = Path(args.particle_cache).expanduser().resolve()
     copy_file_if_different(particle_cache_path, run_dir / "particle_cache.json")
     source_surface_frames = particle_cache_path.parent / "surface_frames"
@@ -516,7 +499,7 @@ def main() -> int:
         run_dir,
         backend="ue",
         case_id=case_spec["case_id"],
-        camera_plan=camera_plan,
+        camera_plan=camera_plan_payload,
         render_passes=render_passes,
         allow_placeholders=False,
         source="genesis_surface_ue_replay",

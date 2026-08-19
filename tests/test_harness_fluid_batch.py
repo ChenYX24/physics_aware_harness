@@ -21,6 +21,31 @@ class FluidBatchVerifierTests(unittest.TestCase):
             replay = root / "replay.json"
             cache = root / "particle_cache.json"
             case = root / "case_spec.json"
+            run_dir = root / "run"
+            run_dir.mkdir()
+            (run_dir / "observation_plan.json").write_text(
+                json.dumps(
+                    {
+                        "cameras": [
+                            {"camera_id": "overview", "role": "overview"},
+                            {"camera_id": "side_static", "role": "side_static"},
+                        ],
+                        "modalities": ["rgb"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "camera_plan.json").write_text(
+                json.dumps(
+                    {
+                        "views": [
+                            {"camera_id": "overview", "role": "overview"},
+                            {"camera_id": "side_static", "role": "side_static"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
             replay.write_text("{}", encoding="utf-8")
             cache.write_text(json.dumps({"environment": {"type": "rigid_sph_scene"}}), encoding="utf-8")
             case.write_text(
@@ -44,7 +69,7 @@ class FluidBatchVerifierTests(unittest.TestCase):
                 "--case",
                 str(case),
                 "--run-dir",
-                str(root / "run"),
+                str(run_dir),
                 "--ue-project",
                 str(root / "test.uproject"),
                 "--profile",
@@ -54,19 +79,6 @@ class FluidBatchVerifierTests(unittest.TestCase):
                 SystemExit, "invalid fluid surface replay timebase"
             ):
                 main()
-
-    def test_fluid_local_preview_profile_remains_terminal_rgb(self) -> None:
-        from scripts.harness_render_fluid_ue import fluid_execution_profile
-
-        profile = fluid_execution_profile("local_preview", ["front_static", "event_closeup"])
-
-        self.assertEqual(profile.name, "local_preview")
-        self.assertEqual(profile.render_passes, ("rgb",))
-
-        with self.assertRaisesRegex(ValueError, "missing"):
-            fluid_execution_profile("local_preview", ["event_closeup"])
-        with self.assertRaisesRegex(ValueError, "missing"):
-            fluid_execution_profile("candidate", ["event_closeup"])
 
     def test_rigid_replay_camera_bounds_come_from_declared_workspace(self) -> None:
         from scripts.harness_render_fluid_ue import replay_scene_bounds
@@ -187,8 +199,12 @@ class FluidBatchVerifierTests(unittest.TestCase):
         renderer = (ROOT / "scripts" / "harness_render_fluid_ue.py").read_text(encoding="utf-8")
         self.assertIn('"trajectory_source": "genesis_sph"', renderer)
         self.assertIn('"source": "genesis_rigid_sph_frame"', renderer)
-        self.assertIn('"front_static" if value == "overview_static"', renderer)
-        self.assertIn("requested UE fluid views did not compile exactly", renderer)
+        self.assertIn("camera_ids_from_observation_plan(observation_plan)", renderer)
+        self.assertNotIn("camera_plan_from_case_spec", renderer)
+        self.assertNotIn("requested UE fluid views did not compile exactly", renderer)
+        deformable_renderer = (ROOT / "scripts" / "harness_render_deformable_ue.py").read_text(encoding="utf-8")
+        self.assertIn("camera_ids_from_observation_plan(observation_plan)", deformable_renderer)
+        self.assertNotIn("camera_plan_from_case_spec", deformable_renderer)
 
         real_basin = basin_runtime_objects(
             {

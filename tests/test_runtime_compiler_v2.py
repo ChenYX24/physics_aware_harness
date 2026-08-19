@@ -221,7 +221,6 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
             smoke = compile_runtime_case(
                 case,
                 requested_backend="fallback",
-                requested_views=["event_closeup"],
                 render_passes=["rgb"],
                 registry=self.registry(),
                 provider_orchestrator=orchestrator,
@@ -230,7 +229,6 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
             candidate = compile_runtime_case(
                 case,
                 requested_backend="fallback",
-                requested_views=["front_static", "side_static"],
                 render_passes=["rgb", "depth", "segmentation"],
                 registry=self.registry(),
                 provider_orchestrator=orchestrator,
@@ -243,8 +241,12 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
         self.assertEqual(orchestrator.calls, 2)
         self.assertEqual(candidate.report["asset_resolve_invocation_count"], 1)
         self.assertEqual(
-            [view["camera_id"] for view in candidate.artifacts["observation_plan"]["cameras"][:2]],
-            ["front_static", "side_static"],
+            [view["camera_id"] for view in smoke.artifacts["observation_plan"]["cameras"]],
+            ["front_static", "event_closeup"],
+        )
+        self.assertEqual(
+            [view["camera_id"] for view in candidate.artifacts["observation_plan"]["cameras"]],
+            ["front_static", "event_closeup"],
         )
 
     def test_provider_exception_is_landed_at_provider_stage_not_compile(self) -> None:

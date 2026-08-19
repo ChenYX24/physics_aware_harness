@@ -160,9 +160,15 @@ class SuccessfulHarness:
         return SimpleNamespace(case_spec=case, expansion=expansion, stage_result=result)
 
     def compile(self, case_spec, **kwargs):
-        views = tuple(kwargs.get("requested_views") or ())
+        requested_views = tuple(kwargs.get("requested_views") or ())
+        declared_views = tuple(
+            str(camera.get("role"))
+            for camera in (case_spec.data.get("observation_requirements") or {}).get("cameras") or []
+            if isinstance(camera, dict) and camera.get("role")
+        )
+        views = requested_views or declared_views
         passes = tuple(kwargs.get("render_passes") or ())
-        self.compile_calls.append((views, passes))
+        self.compile_calls.append((requested_views, passes))
         self.provider_manifests.append(copy.deepcopy(kwargs.get("provider_input_manifest")))
         runtime_case = compile_case_spec_v2_runtime(case_spec)
         backend = self.selected_backend
@@ -172,10 +178,17 @@ class SuccessfulHarness:
             "verification_plan": {"schema_version": "verification_plan.v1"},
             "observation_plan": {
                 "schema_version": "observation_plan.v1",
-                "views": [{"camera_id": value} for value in views],
-                "render_passes": list(passes),
+                "cameras": [{"camera_id": value, "role": value} for value in views],
+                "modalities": list(passes),
+                "camera_plan_compatibility_projection": {
+                    "schema_version": "camera_plan.v1",
+                    "views": [{"camera_id": value, "role": value} for value in views],
+                },
             },
-            "camera_plan": {"schema_version": "camera_plan.v1", "views": [{"camera_id": value} for value in views]},
+            "camera_plan": {
+                "schema_version": "camera_plan.v1",
+                "views": [{"camera_id": value, "role": value} for value in views],
+            },
             "runtime_actor_placement": {"schema_version": "runtime_actor_placement.v1", "actors": []},
             "runtime_plan": {
                 "schema_version": "runtime_plan.v1",
@@ -208,7 +221,11 @@ class SuccessfulHarness:
                 "schema_version": "harness_runtime_compilation_transaction_v1",
                 "transaction_id": "compilation_" + "a" * 24,
                 "input_identity": {"case_spec_digest": "a" * 64, "requested_backend": None},
-                "latest_projection": {"requested_views": list(views), "render_passes": list(passes), "camera_strategy": "bounds_auto_v1"},
+                "latest_projection": {
+                    "requested_views": list(requested_views) if requested_views else None,
+                    "render_passes": list(passes),
+                    "camera_strategy": "bounds_auto_v1",
+                },
                 "state": "completed",
                 "asset_resolve_invocation_count": 1,
                 "catalog_snapshot": None,
@@ -755,10 +772,14 @@ class AgentJobControllerTests(unittest.TestCase):
         gate = read_json(attempt_root / "smoke_gate.json")
         self.assertEqual(gate["mode"], "executed")
         self.assertEqual(gate["status"], "pass")
-        self.assertNotEqual(fake.compile_calls[0], fake.compile_calls[-1])
+        self.assertEqual(fake.compile_calls[0], fake.compile_calls[-1])
         self.assertEqual(
             fake.compile_calls[-1],
-            (("front_static", "event_closeup"), ("rgb",)),
+            ((), ("rgb",)),
+        )
+        self.assertEqual(
+            [row["role"] for row in read_json(attempt_root / "compilation" / "observation_plan.json")["cameras"]],
+            ["front_static"],
         )
         candidate = read_json(attempt_root / "candidate_run.json")
         self.assertTrue((Path(candidate["run_dir"]) / "quality_report.json").is_file())
@@ -2144,6 +2165,7 @@ class AgentJobControllerTests(unittest.TestCase):
         before = controller.inspect("job_map_config_recompile")
         usage_before = copy.deepcopy(before["job"]["usage"])
         provider_before = read_json(attempt_dir / "compilation" / "asset_provider_batch.json")
+        compile_count_before_reopen = fake.compile_calls.count(((), ("rgb",)))
 
         reopened = controller.recompile_after_config(
             "job_map_config_recompile",
@@ -2161,12 +2183,12 @@ class AgentJobControllerTests(unittest.TestCase):
         receipt = read_json(root / "receipts" / "configuration_recompile_001.json")
         self.assertNotEqual(receipt["old_compile_config_digest"], receipt["new_compile_config_digest"])
         self.assertEqual(receipt["provider_checkpoint"]["request_identities"], [])
-        self.assertEqual(fake.compile_calls.count((("event_closeup",), ("rgb",))), 1)
+        self.assertEqual(fake.compile_calls.count(((), ("rgb",))), compile_count_before_reopen)
 
         resumed = controller.resume("job_map_config_recompile")
         self.assertEqual(resumed["job"]["state"], "awaiting_semantic_review")
         self.assertEqual(resumed["job"]["current_attempt_id"], "attempt_001")
-        self.assertEqual(fake.compile_calls.count((("event_closeup",), ("rgb",))), 2)
+        self.assertGreater(fake.compile_calls.count(((), ("rgb",))), compile_count_before_reopen)
         self.assertGreaterEqual(
             resumed["job"]["usage"]["active_elapsed_seconds"],
             usage_before["active_elapsed_seconds"],

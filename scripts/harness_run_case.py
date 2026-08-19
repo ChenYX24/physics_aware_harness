@@ -155,12 +155,8 @@ def main() -> int:
                 raise SystemExit("Provider input manifest root must be an object")
             provider_input_manifest = loaded_manifest
     pre_run_stage_dir = Path(output_root) / "_planning" / source_case.case_id
-    if profile:
-        requested_views = list(profile.views)
-        render_passes = list(profile.render_passes)
-    else:
-        requested_views = parse_csv(args.views) if args.views else None
-        render_passes = parse_csv(args.render_passes) if args.render_passes else None
+    requested_views = parse_csv(args.views) if args.views else None
+    render_passes = list(profile.render_passes) if profile else parse_csv(args.render_passes) if args.render_passes else None
     render_mode = profile.render_mode if profile else args.mode
     provider_orchestrator = None
     if args.resume_meshy_request:

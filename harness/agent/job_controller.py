@@ -116,6 +116,7 @@ from harness.planning.case_generation import (
 )
 from harness.planning.runtime_compiler import RuntimeCompilation, compile_runtime_case
 from harness.runtime.execution_profile import execution_profile, verified_run_status, write_execution_reports
+from harness.runtime.observation_planner import camera_ids_from_observation_plan, render_passes_from_observation_plan
 from harness.runtime.stage_executor import execute_runtime_plan
 from harness.verification.physics_verifier import PhysicsVerifier
 from harness.verification.render_sync_checker import check_render_sync
@@ -2458,7 +2459,7 @@ class AgentJobController:
         compilation = self.hooks.compile(
             case_spec,
             requested_backend=requested,
-            requested_views=list(execution_profile("smoke").views),
+            requested_views=None,
             render_passes=list(execution_profile("smoke").render_passes),
             registry=self._registry(),
             provider_orchestrator=self._provider_orchestrator(manifest),
@@ -2508,6 +2509,9 @@ class AgentJobController:
         case_spec = self._load_current_case_spec(manifest)
         compilation = self._compilation_for_attempt(manifest, case_spec, profile_name=profile_name)
         profile = execution_profile(profile_name)
+        observation_plan = compilation.artifacts["observation_plan"]
+        planned_views = camera_ids_from_observation_plan(observation_plan)
+        planned_passes = render_passes_from_observation_plan(observation_plan)
         profile_fingerprint = stable_digest(
             {"execution": self._execution_fingerprint(case_spec.data, compilation), "profile": profile.__dict__}
         )
@@ -2563,8 +2567,8 @@ class AgentJobController:
                             compilation.runtime_case,
                             run_slot,
                             compilation=compilation,
-                            requested_views=list(profile.views),
-                            render_passes=list(profile.render_passes),
+                            requested_views=planned_views,
+                            render_passes=planned_passes,
                             camera_strategy="bounds_auto_v1",
                             profile=profile.name,
                             width=profile.width,
@@ -2837,7 +2841,7 @@ class AgentJobController:
         compilation = self.hooks.compile(
             case_spec,
             requested_backend=requested,
-            requested_views=list(execution_profile(profile_name).views),
+            requested_views=None,
             render_passes=list(execution_profile(profile_name).render_passes),
             registry=self._registry(),
             provider_orchestrator=self._provider_orchestrator(manifest),

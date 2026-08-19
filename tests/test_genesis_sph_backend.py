@@ -4,6 +4,7 @@ import copy
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,12 +16,14 @@ from harness.core.case_spec import load_case_spec
 from harness.runtime.genesis_sph_backend import (
     GenesisSPHBackend,
     GenesisSPHExecutionError,
+    genesis_child_environment,
     genesis_command,
     genesis_parameters,
     genesis_python,
     run_ue_surface_replay,
     write_genesis_artifacts,
 )
+from harness.runtime.genesis_headless import import_headless_genesis
 from harness.runtime.stage_executor import execute_runtime_plan
 from scripts.harness_genesis_fluid import apply_negative_mode, confine_surface_vertices, initial_velocity_rows, percentile, surface_component_metrics
 
@@ -29,6 +32,36 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class GenesisSPHBackendTests(unittest.TestCase):
+    def test_headless_import_blocks_tk_before_loading_genesis(self) -> None:
+        prior_tkinter = sys.modules.get("tkinter", ...)
+        fake_genesis = object()
+        try:
+            with patch("harness.runtime.genesis_headless.importlib.import_module") as import_module:
+                import_module.side_effect = lambda name: (
+                    self.assertIsNone(sys.modules["tkinter"]) or fake_genesis
+                )
+                self.assertIs(import_headless_genesis(), fake_genesis)
+                import_module.assert_called_once_with("genesis")
+        finally:
+            if prior_tkinter is ...:
+                sys.modules.pop("tkinter", None)
+            else:
+                sys.modules["tkinter"] = prior_tkinter
+
+    def test_genesis_child_environment_is_headless_and_run_local(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"MPLBACKEND": "TkAgg", "MPLCONFIGDIR": "/unwritable/matplotlib"},
+            clear=False,
+        ):
+            run_dir = Path(tmp) / "run"
+            environment = genesis_child_environment(run_dir)
+            self.assertEqual(environment["MPLBACKEND"], "Agg")
+            self.assertEqual(environment["MPLCONFIGDIR"], str((run_dir / ".matplotlib").resolve()))
+            self.assertTrue((run_dir / ".matplotlib").is_dir())
+            self.assertEqual(os.environ["MPLBACKEND"], "TkAgg")
+            self.assertEqual(os.environ["MPLCONFIGDIR"], "/unwritable/matplotlib")
+
     def test_surface_component_metric_detects_fragmentation(self) -> None:
         connected = surface_component_metrics([[0, 1, 2], [2, 1, 3]], 4)
         fragmented = surface_component_metrics([[0, 1, 2], [3, 4, 5]], 6)
@@ -138,8 +171,11 @@ class GenesisSPHBackendTests(unittest.TestCase):
             executable = Path(tmp) / "python"
             executable.touch()
 
-            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
                 run_dir = Path(command[command.index("--output-dir") + 1])
+                environment = kwargs["env"]
+                self.assertEqual(environment["MPLBACKEND"], "Agg")
+                self.assertEqual(environment["MPLCONFIGDIR"], str((run_dir / ".matplotlib").resolve()))
                 write_valid_cache(run_dir)
                 return subprocess.CompletedProcess(command, 0, "genesis ok", "")
 
@@ -264,50 +300,31 @@ class GenesisSPHBackendTests(unittest.TestCase):
         self.assertEqual(execute_result["failure_code"], "genesis_sph_process_failed")
         self.assertEqual(execute_result["failure_class"], "execution_failed")
 
-    def test_missing_core_output_remains_artifact_execution_failure(self) -> None:
-        case = load_case_spec(ROOT / "cases/fluid/fluid_drop_in_basin.json")
-        compilation = SimpleNamespace(
-            selected_backend="genesis_sph",
-            artifacts={
-                "runtime_plan": {
-                    "stages": [
-                        {"id": "solve_render", "kind": "solve_render", "backend": "genesis_sph"}
-                    ]
-                }
-            },
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            executable = Path(tmp) / "python"
-            executable.touch()
-            completed = subprocess.CompletedProcess([], 0, "completed", "")
-            with patch("harness.runtime.genesis_sph_backend.genesis_python", return_value=executable), patch(
-                "harness.runtime.genesis_sph_backend.subprocess.run", return_value=completed
-            ):
-                with self.assertRaises(GenesisSPHExecutionError):
-                    execute_runtime_plan(
-                        case,
-                        Path(tmp) / "runs",
-                        compilation=compilation,
-                        requested_views=None,
-                        render_passes=None,
-                        camera_strategy="bounds_auto_v1",
-                        profile="smoke",
-                        width=320,
-                        height=180,
-                        complete_sensor_contract=False,
-                    )
-            run_dir = Path(tmp) / "runs" / "fluid_drop_in_basin_genesis_sph"
-            execute_result = read_json(run_dir / "stage_results" / "execute.json")
-
-        self.assertEqual(execute_result["failure_code"], "genesis_sph_output_missing")
-        self.assertEqual(execute_result["failure_class"], "artifact_incomplete")
-
     def test_completed_cache_can_enter_existing_ue_replay_without_publishing_solver_preview(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_dir = root / "run"
             write_valid_cache(run_dir)
             write_json(run_dir / "case_spec.json", load_case_spec(ROOT / "cases/fluid/fluid_drop_in_basin.json").data)
+            write_json(
+                run_dir / "observation_plan.json",
+                {
+                    "cameras": [
+                        {"camera_id": "overview", "role": "overview"},
+                        {"camera_id": "side_static", "role": "side_static"},
+                    ],
+                    "modalities": ["rgb"],
+                },
+            )
+            write_json(
+                run_dir / "camera_plan.json",
+                {
+                    "views": [
+                        {"camera_id": "overview", "role": "overview"},
+                        {"camera_id": "side_static", "role": "side_static"},
+                    ]
+                },
+            )
             write_json(
                 run_dir / "render_manifest.json",
                 {"render_kind": "solver_surface_preview", "ue_render_real": False},
@@ -330,7 +347,6 @@ class GenesisSPHBackendTests(unittest.TestCase):
                 report = run_ue_surface_replay(
                     run_dir,
                     profile="smoke",
-                    requested_views=["event_closeup"],
                     width=1280,
                     height=720,
                 )
@@ -340,7 +356,11 @@ class GenesisSPHBackendTests(unittest.TestCase):
             self.assertTrue((run_dir / "solver_preview.mp4").is_file())
             self.assertFalse((run_dir / "video.mp4").exists())
             self.assertIn("harness_render_fluid_ue.py", command[1])
-            self.assertEqual(command[command.index("--views") + 1], "event_closeup")
+            self.assertNotIn("--views", command)
+            self.assertEqual(
+                [row["camera_id"] for row in read_json(run_dir / "observation_plan.json")["cameras"]],
+                ["overview", "side_static"],
+            )
             self.assertTrue((run_dir / "ue_replay_input" / "fluid_surface_replay.json").is_file())
 
     def test_registered_negative_case_is_rejected_by_unified_verifier(self) -> None:

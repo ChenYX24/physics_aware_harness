@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from harness.core.case_spec import load_case_spec
+from harness.runtime.genesis_headless import import_headless_genesis
 from scripts.harness_taichi_cloth import object_with_role, write_run
 
 
@@ -43,7 +44,7 @@ def vector3(value: Any, name: str) -> tuple[float, float, float]:
 
 
 def simulate(case_data: dict[str, Any]) -> dict[str, Any]:
-    import genesis as gs
+    gs = import_headless_genesis()
 
     solid = object_with_role(case_data, "deformable_solid")
     floor = object_with_role(case_data, "support_surface")
