@@ -4589,7 +4589,7 @@ class AgentJobController:
         *,
         excluded_paths: set[str] | None = None,
     ) -> dict[str, Any]:
-        """Open bounded layout leaves without changing topology or physics intent."""
+        """Open bounded continuous leaves without changing topology or physics mechanisms."""
         excluded = excluded_paths or set()
         raw_bounds = (case_spec.get("scene") or {}).get("bounds_hint_m")
         scene_bounds = (
@@ -4606,6 +4606,33 @@ class AgentJobController:
             else [20.0, 20.0, 20.0]
         )
         constraints: dict[str, Any] = {}
+
+        def add_numeric_window(path: str, value: Any, *, relative: float, floor: float = 0.0) -> None:
+            if (
+                path in excluded
+                or not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(float(value))
+            ):
+                return
+            current = float(value)
+            delta = max(abs(current) * relative, floor)
+            constraints[path] = {
+                "kind": "numeric",
+                "min": max(0.0, current - delta),
+                "max": current + delta,
+            }
+
+        def add_vector_window(path: str, value: Any, *, relative: float, floor: float) -> None:
+            if path in excluded or not cls._finite_numeric_vector(value, length=3):
+                return
+            current = [float(component) for component in value]
+            deltas = [max(abs(component) * relative, floor) for component in current]
+            constraints[path] = {
+                "kind": "numeric_vector",
+                "min": [component - delta for component, delta in zip(current, deltas)],
+                "max": [component + delta for component, delta in zip(current, deltas)],
+            }
 
         for obj in case_spec.get("objects") or []:
             if not isinstance(obj, Mapping):
@@ -4636,6 +4663,59 @@ class AgentJobController:
                 }
             physics = obj.get("physics") if isinstance(obj.get("physics"), Mapping) else {}
             body_type = str(physics.get("body_type") or "").casefold()
+            if body_type == "dynamic":
+                add_vector_window(
+                    f"$.objects.{object_id}.initial_state.linear_velocity_m_s",
+                    initial.get("linear_velocity_m_s"),
+                    relative=0.5,
+                    floor=0.5,
+                )
+                add_vector_window(
+                    f"$.objects.{object_id}.initial_state.angular_velocity_rad_s",
+                    initial.get("angular_velocity_rad_s"),
+                    relative=0.5,
+                    floor=math.pi / 2.0,
+                )
+                add_vector_window(
+                    f"$.objects.{object_id}.initial_state.angular_velocity_deg_s",
+                    initial.get("angular_velocity_deg_s"),
+                    relative=0.5,
+                    floor=90.0,
+                )
+                add_numeric_window(
+                    f"$.objects.{object_id}.physics.mass_kg",
+                    physics.get("mass_kg"),
+                    relative=0.5,
+                )
+                for field in ("linear_damping", "angular_damping"):
+                    add_numeric_window(
+                        f"$.objects.{object_id}.physics.{field}",
+                        physics.get(field),
+                        relative=0.5,
+                        floor=0.05,
+                    )
+                material = physics.get("material") if isinstance(physics.get("material"), Mapping) else {}
+                for field in ("static_friction", "dynamic_friction"):
+                    add_numeric_window(
+                        f"$.objects.{object_id}.physics.material.{field}",
+                        material.get(field),
+                        relative=0.5,
+                        floor=0.05,
+                    )
+                restitution = material.get("restitution")
+                restitution_path = f"$.objects.{object_id}.physics.material.restitution"
+                if (
+                    restitution_path not in excluded
+                    and isinstance(restitution, (int, float))
+                    and not isinstance(restitution, bool)
+                    and math.isfinite(float(restitution))
+                ):
+                    current = float(restitution)
+                    constraints[restitution_path] = {
+                        "kind": "numeric",
+                        "min": max(0.0, current - 0.15),
+                        "max": min(1.0, current + 0.15),
+                    }
             if body_type in {"static", "kinematic"}:
                 geometry = obj.get("geometry") if isinstance(obj.get("geometry"), Mapping) else {}
                 size = geometry.get("approx_size_m")

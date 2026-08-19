@@ -2704,7 +2704,7 @@ class AgentJobControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "frozen verification assertions"):
             controller.resume("job_frozen_assertion", revised_case_spec=weakened, revision_reason="weaken")
 
-    def test_revision_preserves_frozen_asset_policy_and_does_not_implicitly_open_mass(self) -> None:
+    def test_revision_preserves_frozen_policy_while_allowing_bounded_mass_change(self) -> None:
         controller, _ = self.controller(SuccessfulHarness(fail_verifier=True))
         controller.create(
             self.request,
@@ -2725,8 +2725,8 @@ class AgentJobControllerTests(unittest.TestCase):
 
         revised = case_spec_v2_fixture()
         revised["objects"][0]["physics"]["mass_kg"] = 0.2
-        with self.assertRaisesRegex(ValueError, "allowed_adjustments"):
-            controller.resume("job_frozen_policy", revised_case_spec=revised, revision_reason="change mass")
+        resumed = controller.resume("job_frozen_policy", revised_case_spec=revised, revision_reason="change mass")
+        self.assertEqual(resumed["job"]["current_attempt_id"], "attempt_002")
 
     def test_object_leaf_adjustment_uses_stable_object_id_path(self) -> None:
         before = case_spec_v2_fixture()
@@ -2778,20 +2778,32 @@ class AgentJobControllerTests(unittest.TestCase):
 
         self.assertIn("$.objects.cue_ball.initial_state.position_m", policy["paths"])
         self.assertIn("$.objects.cue_ball.initial_state.rotation_deg", policy["paths"])
-        self.assertNotIn("$.objects.cue_ball.initial_state.linear_velocity_m_s", policy["paths"])
-        self.assertNotIn("$.objects.cue_ball.initial_state.angular_velocity_deg_s", policy["paths"])
-        self.assertNotIn("$.objects.cue_ball.physics.mass_kg", policy["paths"])
-        self.assertNotIn("$.objects.cue_ball.physics.linear_damping", policy["paths"])
-        self.assertNotIn("$.objects.cue_ball.physics.angular_damping", policy["paths"])
+        self.assertIn("$.objects.cue_ball.initial_state.linear_velocity_m_s", policy["paths"])
+        self.assertIn("$.objects.cue_ball.initial_state.angular_velocity_deg_s", policy["paths"])
+        self.assertIn("$.objects.cue_ball.physics.mass_kg", policy["paths"])
+        self.assertIn("$.objects.cue_ball.physics.linear_damping", policy["paths"])
+        self.assertIn("$.objects.cue_ball.physics.angular_damping", policy["paths"])
         self.assertNotIn("$.objects.cue_ball.physics.enable_gravity", policy["paths"])
         self.assertNotIn("$.objects.cue_ball.physics.use_ccd", policy["paths"])
-        self.assertNotIn("$.objects.cue_ball.physics.material.static_friction", policy["paths"])
-        self.assertNotIn("$.objects.cue_ball.physics.material.dynamic_friction", policy["paths"])
-        self.assertNotIn("$.objects.cue_ball.physics.material.restitution", policy["paths"])
+        self.assertIn("$.objects.cue_ball.physics.material.static_friction", policy["paths"])
+        self.assertIn("$.objects.cue_ball.physics.material.dynamic_friction", policy["paths"])
+        self.assertIn("$.objects.cue_ball.physics.material.restitution", policy["paths"])
         self.assertIn("$.objects.floor.geometry.approx_size_m", policy["paths"])
         self.assertNotIn("$.objects.cue_ball.geometry.approx_size_m", policy["paths"])
         self.assertNotIn("$.objects.cue_ball.physics.body_type", policy["paths"])
         self.assertNotIn("$.objects.cue_ball.physics.collision_required", policy["paths"])
+        self.assertEqual(
+            policy["ranges"]["$.objects.cue_ball.initial_state.linear_velocity_m_s"],
+            {"kind": "numeric_vector", "min": [0.5, -0.5, -0.5], "max": [1.5, 0.5, 0.5]},
+        )
+        self.assertEqual(
+            policy["ranges"]["$.objects.cue_ball.physics.mass_kg"],
+            {"kind": "numeric", "min": 0.085, "max": 0.255},
+        )
+        self.assertEqual(
+            policy["ranges"]["$.objects.cue_ball.physics.material.restitution"],
+            {"kind": "numeric", "min": 0.71, "max": 1.0},
+        )
         AgentJobController._validate_revision_changes(
             [
                 {
@@ -2818,14 +2830,26 @@ class AgentJobControllerTests(unittest.TestCase):
                 repair_layer="case_spec_source",
             )
 
-        with self.assertRaisesRegex(ValueError, "allowed_adjustments"):
+        AgentJobController._validate_revision_changes(
+            [
+                {
+                    "path": "$.objects.cue_ball.physics.angular_damping",
+                    "operation": "replace",
+                    "before": 0.24,
+                    "after": 0.3,
+                }
+            ],
+            policy,
+            repair_layer="case_spec_source",
+        )
+        with self.assertRaisesRegex(ValueError, "allowed range"):
             AgentJobController._validate_revision_changes(
                 [
                     {
                         "path": "$.objects.cue_ball.physics.angular_damping",
                         "operation": "replace",
                         "before": 0.24,
-                        "after": 0.1,
+                        "after": 1.0,
                     }
                 ],
                 policy,
@@ -2833,14 +2857,17 @@ class AgentJobControllerTests(unittest.TestCase):
             )
 
     def test_case_spec_revision_policy_excludes_hard_parameter_paths(self) -> None:
-        path = "$.objects.cue_ball.initial_state.position_m"
+        paths = {
+            "$.objects.cue_ball.initial_state.position_m",
+            "$.objects.cue_ball.physics.mass_kg",
+        }
 
         policy = AgentJobController._case_spec_revision_policy(
             case_spec_v2_fixture(),
-            excluded_paths={path},
+            excluded_paths=paths,
         )
 
-        self.assertNotIn(path, policy["paths"])
+        self.assertTrue(paths.isdisjoint(policy["paths"]))
 
     def test_soft_intent_explicitly_opens_one_physics_parameter(self) -> None:
         case_spec = case_spec_v2_fixture()
