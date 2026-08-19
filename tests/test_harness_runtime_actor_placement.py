@@ -144,6 +144,23 @@ class RuntimeActorPlacementTests(unittest.TestCase):
             self.assertAlmostEqual(actual, expected)
         self.assertEqual(report["status"], "pass")
 
+        visible_case = deepcopy(case)
+        visible_case["objects"][1]["visual_representation"] = {"source": "asset", "visible": True}
+        visible_scene = deepcopy(scene_layout)
+        visible_anchor = visible_scene["object_nodes"][1]
+        visible_anchor["visual_representation"] = {"source": "asset", "visible": True}
+        visible_anchor["asset_binding"] = {
+            "selected_asset_id": "anchor_mesh",
+            "selected_asset_ue_path": "/Engine/BasicShapes/Sphere.Sphere",
+            "asset_kind": "StaticMesh",
+            "quality_gate": {"status": "pass"},
+        }
+        visible_placement = compile_runtime_actor_placement(visible_case, visible_scene, target_backend="ue")
+        visible_report = verify_runtime_actor_placement(visible_case, visible_placement)
+        self.assertEqual([item["object_id"] for item in visible_placement["actor_bindings"]], ["bob", "anchor"])
+        self.assertEqual(visible_placement["constraint_bindings"][0]["body_b"]["endpoint_type"], "world_anchor")
+        self.assertEqual(visible_report["status"], "pass")
+
         forged = deepcopy(placement)
         forged["constraint_bindings"][0]["body_a"] = {
             "endpoint_type": "world_anchor",
@@ -155,7 +172,11 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual(forged_report["first_failure"]["metric"], "invalid_runtime_constraint_body_binding")
 
     def test_world_anchor_lowering_is_symmetric_and_strict(self) -> None:
-        from harness.runtime.actor_placement import constraint_bindings_from_case, is_world_anchor_object
+        from harness.runtime.actor_placement import (
+            constraint_bindings_from_case,
+            is_actorless_world_anchor_object,
+            is_world_constraint_endpoint_object,
+        )
 
         anchor = {
             "id": "anchor",
@@ -188,7 +209,8 @@ class RuntimeActorPlacementTests(unittest.TestCase):
 
         self.assertEqual(bindings[0]["body_a"]["endpoint_type"], "world_anchor")
         self.assertEqual(bindings[1]["body_b"]["endpoint_type"], "world_anchor")
-        self.assertTrue(is_world_anchor_object(anchor))
+        self.assertTrue(is_world_constraint_endpoint_object(anchor))
+        self.assertTrue(is_actorless_world_anchor_object(anchor))
         for field, value in (
             ("body_type", "dynamic"),
             ("body_type", "kinematic"),
@@ -196,20 +218,22 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         ):
             invalid = deepcopy(anchor)
             invalid[field] = value
-            self.assertFalse(is_world_anchor_object(invalid))
+            self.assertFalse(is_world_constraint_endpoint_object(invalid))
         for visual in (
             {"source": "none", "visible": True},
             {"source": "asset", "visible": False},
         ):
             invalid = deepcopy(anchor)
             invalid["visual_representation"] = visual
-            self.assertFalse(is_world_anchor_object(invalid))
+            self.assertTrue(is_world_constraint_endpoint_object(invalid))
+            self.assertFalse(is_actorless_world_anchor_object(invalid))
         invalid = deepcopy(anchor)
         invalid["asset"] = {}
-        self.assertFalse(is_world_anchor_object(invalid))
+        self.assertTrue(is_world_constraint_endpoint_object(invalid))
+        self.assertFalse(is_actorless_world_anchor_object(invalid))
         invalid = deepcopy(anchor)
         invalid["collision_geometry"] = {"shape": "box", "size_m": [0.1, 0.1, 0.1]}
-        self.assertFalse(is_world_anchor_object(invalid))
+        self.assertFalse(is_world_constraint_endpoint_object(invalid))
 
     def test_compiled_actor_placement_is_not_refit_without_explicit_opt_in(self) -> None:
         from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement

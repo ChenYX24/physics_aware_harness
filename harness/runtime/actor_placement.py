@@ -17,11 +17,11 @@ def compile_runtime_actor_placement(
     target_backend: str = "UE",
 ) -> dict[str, Any]:
     object_nodes = [node for node in scene_layout.get("object_nodes", []) if isinstance(node, dict)]
-    world_anchor_ids = world_anchor_object_ids(case_spec)
+    actorless_anchor_ids = actorless_world_anchor_object_ids(case_spec)
     actor_bindings = [
         actor_binding_from_node(node, target_backend=target_backend)
         for node in object_nodes
-        if str(node.get("object_id") or "") not in world_anchor_ids
+        if str(node.get("object_id") or "") not in actorless_anchor_ids
     ]
     constraint_bindings = constraint_bindings_from_case(
         case_spec.get("constraints") or [],
@@ -83,7 +83,7 @@ def constraint_bindings_from_case(
         for obj in objects
         if isinstance(obj, dict) and obj.get("id")
     }
-    world_anchor_ids = world_anchor_object_ids({"objects": objects, "constraints": constraints})
+    world_anchor_ids = world_constraint_endpoint_object_ids({"objects": objects, "constraints": constraints})
     bindings = []
     for constraint in constraints:
         if not isinstance(constraint, dict):
@@ -122,32 +122,52 @@ def constraint_bindings_from_case(
     return bindings
 
 
-def world_anchor_object_ids(case_spec: dict[str, Any]) -> set[str]:
-    endpoint_ids = {
+def constraint_endpoint_object_ids(case_spec: dict[str, Any]) -> set[str]:
+    return {
         str(constraint.get(side) or "")
         for constraint in case_spec.get("constraints") or []
         if isinstance(constraint, dict)
         for side in ("body_a", "body_b")
     }
+
+
+def world_constraint_endpoint_object_ids(case_spec: dict[str, Any]) -> set[str]:
+    endpoint_ids = constraint_endpoint_object_ids(case_spec)
     return {
         str(obj.get("id"))
         for obj in case_spec.get("objects") or []
         if isinstance(obj, dict)
         and str(obj.get("id") or "") in endpoint_ids
-        and is_world_anchor_object(obj)
+        and is_world_constraint_endpoint_object(obj)
     }
 
 
-def is_world_anchor_object(obj: dict[str, Any]) -> bool:
+def actorless_world_anchor_object_ids(case_spec: dict[str, Any]) -> set[str]:
+    endpoint_ids = world_constraint_endpoint_object_ids(case_spec)
+    return {
+        str(obj.get("id"))
+        for obj in case_spec.get("objects") or []
+        if isinstance(obj, dict)
+        and str(obj.get("id") or "") in endpoint_ids
+        and is_actorless_world_anchor_object(obj)
+    }
+
+
+def is_world_constraint_endpoint_object(obj: dict[str, Any]) -> bool:
     physics = obj.get("physics") if isinstance(obj.get("physics"), dict) else obj
-    visual = obj.get("visual_representation") if isinstance(obj.get("visual_representation"), dict) else {}
     return bool(
         str(physics.get("body_type") or "").casefold() == "static"
-        and visual.get("source") == "none"
-        and visual.get("visible") is False
         and physics.get("collision_required") is False
         and not isinstance(physics.get("collision_geometry"), dict)
-        and not physics.get("collider")
+    )
+
+
+def is_actorless_world_anchor_object(obj: dict[str, Any]) -> bool:
+    visual = obj.get("visual_representation") if isinstance(obj.get("visual_representation"), dict) else {}
+    return bool(
+        is_world_constraint_endpoint_object(obj)
+        and visual.get("source") == "none"
+        and visual.get("visible") is False
         and not isinstance(obj.get("asset"), dict)
         and not obj.get("ue5_path")
     )

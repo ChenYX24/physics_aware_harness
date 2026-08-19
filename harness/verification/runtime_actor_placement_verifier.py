@@ -5,8 +5,9 @@ from typing import Any
 
 from harness.runtime.actor_placement import (
     RUNTIME_ACTOR_PLACEMENT_SCHEMA_VERSION,
+    actorless_world_anchor_object_ids,
     constraint_frame_in_world,
-    world_anchor_object_ids,
+    world_constraint_endpoint_object_ids,
 )
 
 
@@ -76,14 +77,14 @@ def verify_runtime_actor_placement(case_spec: dict[str, Any], placement: dict[st
 
 
 def first_missing_physics_object(case_spec: dict[str, Any], by_object: dict[str, dict[str, Any]]) -> str | None:
-    world_anchor_ids = world_anchor_object_ids(case_spec)
+    actorless_anchor_ids = actorless_world_anchor_object_ids(case_spec)
     for obj in case_spec.get("objects") or []:
         if not isinstance(obj, dict):
             continue
         object_id = str(obj.get("id") or "")
         if not object_id:
             continue
-        if object_id not in by_object and object_id not in world_anchor_ids and is_physics_contract_object(obj):
+        if object_id not in by_object and object_id not in actorless_anchor_ids and is_physics_contract_object(obj):
             return object_id
     return None
 
@@ -114,7 +115,8 @@ def first_bad_constraint_binding(
         for obj in case_spec.get("objects") or []
         if isinstance(obj, dict) and obj.get("id")
     }
-    world_anchor_ids = world_anchor_object_ids(case_spec)
+    world_anchor_ids = world_constraint_endpoint_object_ids(case_spec)
+    actorless_anchor_ids = actorless_world_anchor_object_ids(case_spec)
     for constraint_id, declaration in expected.items():
         binding = actual[constraint_id]
         for side in ("a", "b"):
@@ -124,7 +126,7 @@ def first_bad_constraint_binding(
             if object_id in world_anchor_ids:
                 expected_frame = constraint_frame_in_world(objects_by_id[object_id], declaration[f"frame_{side}"])
                 valid = bool(
-                    object_id not in by_object
+                    (object_id in by_object) == (object_id not in actorless_anchor_ids)
                     and body_binding.get("endpoint_type") == "world_anchor"
                     and body_binding.get("object_id") == object_id
                     and body_binding.get("frame_space") == "world"
