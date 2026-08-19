@@ -4,6 +4,7 @@
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "JsonObjectConverter.h"
+#include "Math/RotationMatrix.h"
 #include "Misc/FileHelper.h"
 #include "PhysicsEngine/PhysicsConstraintActor.h"
 #include "PhysicsEngine/PhysicsConstraintComponent.h"
@@ -121,6 +122,13 @@ bool ParseAngularMotion(FName Name, EAngularConstraintMotion& OutMotion)
 	if (Value == TEXT("limited")) { OutMotion = ACM_Limited; return true; }
 	if (Value == TEXT("free")) { OutMotion = ACM_Free; return true; }
 	return false;
+}
+
+FTransform MakeConstraintFrame(const FVector& PositionCm, const FVector& PrimaryAxis, const FVector& SecondaryAxis)
+{
+	return FTransform(
+		FRotationMatrix::MakeFromXY(PrimaryAxis.GetSafeNormal(), SecondaryAxis.GetSafeNormal()).ToQuat(),
+		PositionCm);
 }
 }
 
@@ -381,10 +389,10 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 #endif
 	Component->SetConstrainedComponents(BodyA, NAME_None, BodyB, NAME_None);
 	Component->TermComponentConstraint();
-	Component->SetConstraintReferencePosition(EConstraintFrame::Frame1, FrameAPositionCm);
-	Component->SetConstraintReferenceOrientation(EConstraintFrame::Frame1, FrameAPrimaryAxis, FrameASecondaryAxis);
-	Component->SetConstraintReferencePosition(EConstraintFrame::Frame2, FrameBPositionCm);
-	Component->SetConstraintReferenceOrientation(EConstraintFrame::Frame2, FrameBPrimaryAxis, FrameBSecondaryAxis);
+	const FTransform FrameA = MakeConstraintFrame(FrameAPositionCm, FrameAPrimaryAxis, FrameASecondaryAxis);
+	const FTransform FrameB = MakeConstraintFrame(FrameBPositionCm, FrameBPrimaryAxis, FrameBSecondaryAxis);
+	Component->SetConstraintReferenceFrame(EConstraintFrame::Frame1, FrameA);
+	Component->SetConstraintReferenceFrame(EConstraintFrame::Frame2, FrameB);
 	Component->SetLinearXLimit(LinearX, LinearLimitCm);
 	Component->SetLinearYLimit(LinearY, LinearLimitCm);
 	Component->SetLinearZLimit(LinearZ, LinearLimitCm);
@@ -408,11 +416,13 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 		&& Instance.GetAngularTwistMotion() == AngularX
 		&& Instance.GetAngularSwing1Motion() == AngularZ
 		&& Instance.GetAngularSwing2Motion() == AngularY;
-	const bool bVerified = bBodiesVerified && bInstanceVerified && bMotionsVerified;
+	const bool bFramesVerified = Instance.GetRefFrame(EConstraintFrame::Frame1).Equals(FrameA, 0.001f)
+		&& Instance.GetRefFrame(EConstraintFrame::Frame2).Equals(FrameB, 0.001f);
+	const bool bVerified = bBodiesVerified && bInstanceVerified && bMotionsVerified && bFramesVerified;
 	if (!bVerified)
 	{
-		UE_LOG(LogTemp, Error, TEXT("ADP constraint bind rejected: id=%s bodies=%d instance=%d motions=%d"),
-			*ConstraintId.ToString(), bBodiesVerified, bInstanceVerified, bMotionsVerified);
+		UE_LOG(LogTemp, Error, TEXT("ADP constraint bind rejected: id=%s bodies=%d instance=%d motions=%d frames=%d"),
+			*ConstraintId.ToString(), bBodiesVerified, bInstanceVerified, bMotionsVerified, bFramesVerified);
 		ConstraintActor->Destroy();
 		return nullptr;
 	}

@@ -152,12 +152,16 @@ class HighresViewportMultiviewTests(unittest.TestCase):
         self.assertIn("FindRegisteredPrimitive(BodyBId)", implementation)
         self.assertIn("World->SpawnActor<APhysicsConstraintActor>", implementation)
         self.assertIn("Component->TermComponentConstraint();", implementation)
+        self.assertIn("Component->SetConstraintReferenceFrame(EConstraintFrame::Frame1, FrameA);", implementation)
+        self.assertIn("Component->SetConstraintReferenceFrame(EConstraintFrame::Frame2, FrameB);", implementation)
+        self.assertNotIn("Component->SetConstraintReferencePosition", implementation)
+        self.assertNotIn("Component->SetConstraintReferenceOrientation", implementation)
         self.assertIn("Component->InitComponentConstraint();", implementation)
         self.assertIn("Instance.IsValidConstraintInstance()", implementation)
-        self.assertIn("bVerified = bBodiesVerified && bInstanceVerified && bMotionsVerified", implementation)
+        self.assertIn("bVerified = bBodiesVerified && bInstanceVerified && bMotionsVerified && bFramesVerified", implementation)
         self.assertLess(
             implementation.index("Component->TermComponentConstraint();"),
-            implementation.index("Component->SetConstraintReferencePosition(EConstraintFrame::Frame1"),
+            implementation.index("Component->SetConstraintReferenceFrame(EConstraintFrame::Frame1"),
         )
         self.assertLess(
             implementation.index("Component->SetDisableCollision(!bCollisionEnabled);"),
