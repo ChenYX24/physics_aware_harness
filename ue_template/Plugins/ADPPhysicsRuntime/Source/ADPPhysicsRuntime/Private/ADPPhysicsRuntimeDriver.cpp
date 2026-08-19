@@ -400,25 +400,27 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 	FName ActualBoneB;
 	Component->GetConstrainedComponents(ActualBodyA, ActualBoneA, ActualBodyB, ActualBoneB);
 	const FConstraintInstance& Instance = Component->ConstraintInstance;
-	const auto FrameMatches = [](const FTransform& Actual, const FVector& Position, const FVector& Primary, const FVector& Secondary)
+	const auto FrameMatches = [](const FVector& ActualPosition, const FVector& ActualPrimary, const FVector& ActualSecondary, const FVector& Position, const FVector& Primary, const FVector& Secondary)
 	{
-		return Actual.GetTranslation().Equals(Position, 0.01f)
-			&& Actual.GetUnitAxis(EAxis::X).Equals(Primary.GetSafeNormal(), 0.001f)
-			&& Actual.GetUnitAxis(EAxis::Y).Equals(Secondary.GetSafeNormal(), 0.001f);
+		return ActualPosition.Equals(Position, 0.01f)
+			&& ActualPrimary.Equals(Primary.GetSafeNormal(), 0.001f)
+			&& ActualSecondary.Equals(Secondary.GetSafeNormal(), 0.001f);
 	};
-	const bool bVerified = ActualBodyA == BodyA
-		&& ActualBodyB == BodyB
-		&& Instance.IsValidConstraintInstance()
-		&& Instance.GetLinearXMotion() == LinearX
+	const bool bBodiesVerified = ActualBodyA == BodyA && ActualBodyB == BodyB;
+	const bool bInstanceVerified = Instance.IsValidConstraintInstance();
+	const bool bMotionsVerified = Instance.GetLinearXMotion() == LinearX
 		&& Instance.GetLinearYMotion() == LinearY
 		&& Instance.GetLinearZMotion() == LinearZ
 		&& Instance.GetAngularTwistMotion() == AngularX
 		&& Instance.GetAngularSwing1Motion() == AngularZ
-		&& Instance.GetAngularSwing2Motion() == AngularY
-		&& FrameMatches(Instance.GetRefFrame(EConstraintFrame::Frame1), FrameAPositionCm, FrameAPrimaryAxis, FrameASecondaryAxis)
-		&& FrameMatches(Instance.GetRefFrame(EConstraintFrame::Frame2), FrameBPositionCm, FrameBPrimaryAxis, FrameBSecondaryAxis);
+		&& Instance.GetAngularSwing2Motion() == AngularY;
+	const bool bFramesVerified = FrameMatches(Instance.Pos1, Instance.PriAxis1, Instance.SecAxis1, FrameAPositionCm, FrameAPrimaryAxis, FrameASecondaryAxis)
+		&& FrameMatches(Instance.Pos2, Instance.PriAxis2, Instance.SecAxis2, FrameBPositionCm, FrameBPrimaryAxis, FrameBSecondaryAxis);
+	const bool bVerified = bBodiesVerified && bInstanceVerified && bMotionsVerified && bFramesVerified;
 	if (!bVerified)
 	{
+		UE_LOG(LogTemp, Error, TEXT("ADP constraint bind rejected: id=%s bodies=%d instance=%d motions=%d frames=%d"),
+			*ConstraintId.ToString(), bBodiesVerified, bInstanceVerified, bMotionsVerified, bFramesVerified);
 		ConstraintActor->Destroy();
 		return nullptr;
 	}

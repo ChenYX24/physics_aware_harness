@@ -154,6 +154,9 @@ class HighresViewportMultiviewTests(unittest.TestCase):
         self.assertIn("Component->TermComponentConstraint();", implementation)
         self.assertIn("Component->InitComponentConstraint();", implementation)
         self.assertIn("Instance.IsValidConstraintInstance()", implementation)
+        self.assertIn("Instance.Pos1, Instance.PriAxis1, Instance.SecAxis1", implementation)
+        self.assertIn("Instance.Pos2, Instance.PriAxis2, Instance.SecAxis2", implementation)
+        self.assertNotIn("Instance.GetRefFrame", implementation)
         self.assertLess(
             implementation.index("Component->TermComponentConstraint();"),
             implementation.index("Component->SetConstraintReferencePosition(EConstraintFrame::Frame1"),
