@@ -391,8 +391,6 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 	Component->TermComponentConstraint();
 	const FTransform FrameA = MakeConstraintFrame(FrameAPositionCm, FrameAPrimaryAxis, FrameASecondaryAxis);
 	const FTransform FrameB = MakeConstraintFrame(FrameBPositionCm, FrameBPrimaryAxis, FrameBSecondaryAxis);
-	Component->SetConstraintReferenceFrame(EConstraintFrame::Frame1, FrameA);
-	Component->SetConstraintReferenceFrame(EConstraintFrame::Frame2, FrameB);
 	Component->SetLinearXLimit(LinearX, LinearLimitCm);
 	Component->SetLinearYLimit(LinearY, LinearLimitCm);
 	Component->SetLinearZLimit(LinearZ, LinearLimitCm);
@@ -401,6 +399,8 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 	Component->SetAngularSwing2Limit(AngularY, AngularLimitsDegrees.Y);
 	Component->SetDisableCollision(!bCollisionEnabled);
 	Component->InitComponentConstraint();
+	Component->SetConstraintReferenceFrame(EConstraintFrame::Frame1, FrameA);
+	Component->SetConstraintReferenceFrame(EConstraintFrame::Frame2, FrameB);
 
 	UPrimitiveComponent* ActualBodyA = nullptr;
 	UPrimitiveComponent* ActualBodyB = nullptr;
