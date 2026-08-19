@@ -314,16 +314,17 @@ class AgentJobController:
                 )
 
             try:
-                result = register_local_asset_input(
-                    source,
-                    workspace=self.store.workspace,
-                    registration_root=registration_root,
-                    registry=self._registry(),
-                    importer=UECommandImporterAdapter(command=self.config.ue_asset_importer_command),
-                    before_import=before_import,
-                    license_name=license_name,
-                    license_tier=license_tier,
-                )
+                with self._effective_environment(manifest):
+                    result = register_local_asset_input(
+                        source,
+                        workspace=self.store.workspace,
+                        registration_root=registration_root,
+                        registry=self._registry(),
+                        importer=UECommandImporterAdapter(command=self.config.ue_asset_importer_command),
+                        before_import=before_import,
+                        license_name=license_name,
+                        license_tier=license_tier,
+                    )
             except LocalAssetRegistrationError as exc:
                 manifest = self._reconcile_ue_launch_usage(self.store.load_manifest(job_id))
                 failure = {

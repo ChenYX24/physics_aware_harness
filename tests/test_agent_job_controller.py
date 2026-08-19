@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -579,10 +580,20 @@ class AgentJobControllerTests(unittest.TestCase):
                 "fallback_order": [],
             },
         }
+        importer_environment = {}
+
+        def registered_with_effective_environment(*_args, **_kwargs):
+            importer_environment.update(
+                {
+                    "ue_executable": os.environ.get("SIM_STUDIO_UE_EXECUTABLE"),
+                    "ue_project": os.environ.get("SIM_STUDIO_UE_PROJECT"),
+                }
+            )
+            return registration
 
         with patch(
             "harness.agent.job_controller.register_local_asset_input",
-            return_value=registration,
+            side_effect=registered_with_effective_environment,
         ):
             result = controller.register_local_asset(
                 "job_local_asset_registration",
@@ -593,6 +604,8 @@ class AgentJobControllerTests(unittest.TestCase):
         effective = read_json(result["provider_input_manifest"]["path"])
         self.assertEqual(effective["inputs"][0]["kind"], "asset_3d")
         self.assertEqual(effective["inputs"][0]["source_uri"], registration["source_uri"])
+        self.assertEqual(importer_environment["ue_executable"], str(controller.config.ue_executable))
+        self.assertEqual(importer_environment["ue_project"], str(controller.config.ue_project))
         inspection = controller.inspect("job_local_asset_registration")
         self.assertEqual(inspection["local_asset_registrations"][0]["source_sha256"], source_hash)
 
