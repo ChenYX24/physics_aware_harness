@@ -353,15 +353,19 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 	{
 		return nullptr;
 	}
-	UPrimitiveComponent* BodyA = FindRegisteredPrimitive(BodyAId);
-	UPrimitiveComponent* BodyB = FindRegisteredPrimitive(BodyBId);
+	const bool bBodyAWorld = BodyAId.IsNone();
+	const bool bBodyBWorld = BodyBId.IsNone();
+	UPrimitiveComponent* BodyA = bBodyAWorld ? nullptr : FindRegisteredPrimitive(BodyAId);
+	UPrimitiveComponent* BodyB = bBodyBWorld ? nullptr : FindRegisteredPrimitive(BodyBId);
 	ELinearConstraintMotion LinearX;
 	ELinearConstraintMotion LinearY;
 	ELinearConstraintMotion LinearZ;
 	EAngularConstraintMotion AngularX;
 	EAngularConstraintMotion AngularY;
 	EAngularConstraintMotion AngularZ;
-	if (BodyA == nullptr || BodyB == nullptr
+	if ((bBodyAWorld && bBodyBWorld)
+		|| (!bBodyAWorld && BodyA == nullptr)
+		|| (!bBodyBWorld && BodyB == nullptr)
 		|| !ParseLinearMotion(LinearXMotion, LinearX)
 		|| !ParseLinearMotion(LinearYMotion, LinearY)
 		|| !ParseLinearMotion(LinearZMotion, LinearZ)

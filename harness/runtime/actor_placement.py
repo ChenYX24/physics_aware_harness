@@ -3,10 +3,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from harness.core.scene_layout import is_support_role
+from harness.core.scene_layout import is_support_role, rotate_local_vector_ue
 
 
-RUNTIME_ACTOR_PLACEMENT_SCHEMA_VERSION = "harness_runtime_actor_placement_v1"
+RUNTIME_ACTOR_PLACEMENT_SCHEMA_VERSION = "harness_runtime_actor_placement_v2"
+
+
 def compile_runtime_actor_placement(
     case_spec: dict[str, Any],
     scene_layout: dict[str, Any],
@@ -15,10 +17,16 @@ def compile_runtime_actor_placement(
     target_backend: str = "UE",
 ) -> dict[str, Any]:
     object_nodes = [node for node in scene_layout.get("object_nodes", []) if isinstance(node, dict)]
-    actor_bindings = [actor_binding_from_node(node, target_backend=target_backend) for node in object_nodes]
+    world_anchor_ids = world_anchor_object_ids(case_spec)
+    actor_bindings = [
+        actor_binding_from_node(node, target_backend=target_backend)
+        for node in object_nodes
+        if str(node.get("object_id") or "") not in world_anchor_ids
+    ]
     constraint_bindings = constraint_bindings_from_case(
         case_spec.get("constraints") or [],
         actor_bindings,
+        case_spec.get("objects") or [],
         target_backend=target_backend,
     )
     camera_bindings = camera_bindings_from_layout(scene_layout)
@@ -62,6 +70,7 @@ def compile_runtime_actor_placement(
 def constraint_bindings_from_case(
     constraints: list[Any],
     actor_bindings: list[dict[str, Any]],
+    objects: list[Any],
     *,
     target_backend: str,
 ) -> list[dict[str, Any]]:
@@ -69,19 +78,36 @@ def constraint_bindings_from_case(
         str(binding.get("object_id") or ""): str(binding.get("runtime_actor_id") or "")
         for binding in actor_bindings
     }
-    return [
-        {
+    objects_by_id = {
+        str(obj.get("id") or ""): obj
+        for obj in objects
+        if isinstance(obj, dict) and obj.get("id")
+    }
+    world_anchor_ids = world_anchor_object_ids({"objects": objects, "constraints": constraints})
+    bindings = []
+    for constraint in constraints:
+        if not isinstance(constraint, dict):
+            continue
+        body_a, frame_a = constraint_endpoint_binding(
+            str(constraint["body_a"]),
+            constraint["frame_a"],
+            runtime_actor_ids,
+            objects_by_id,
+            world_anchor_ids,
+        )
+        body_b, frame_b = constraint_endpoint_binding(
+            str(constraint["body_b"]),
+            constraint["frame_b"],
+            runtime_actor_ids,
+            objects_by_id,
+            world_anchor_ids,
+        )
+        bindings.append({
             "constraint_id": str(constraint["id"]),
-            "body_a": {
-                "object_id": str(constraint["body_a"]),
-                "runtime_actor_id": runtime_actor_ids.get(str(constraint["body_a"])) or None,
-            },
-            "body_b": {
-                "object_id": str(constraint["body_b"]),
-                "runtime_actor_id": runtime_actor_ids.get(str(constraint["body_b"])) or None,
-            },
-            "frame_a": constraint["frame_a"],
-            "frame_b": constraint["frame_b"],
+            "body_a": body_a,
+            "body_b": body_b,
+            "frame_a": frame_a,
+            "frame_b": frame_b,
             "linear_motion": constraint["linear_motion"],
             **(
                 {"linear_limit_m": constraint["linear_limit_m"]}
@@ -92,10 +118,79 @@ def constraint_bindings_from_case(
             "angular_limits_deg": constraint["angular_limits_deg"],
             "collision_enabled": constraint["collision_enabled"],
             "target_backend": target_backend,
-        }
-        for constraint in constraints
+        })
+    return bindings
+
+
+def world_anchor_object_ids(case_spec: dict[str, Any]) -> set[str]:
+    endpoint_ids = {
+        str(constraint.get(side) or "")
+        for constraint in case_spec.get("constraints") or []
         if isinstance(constraint, dict)
-    ]
+        for side in ("body_a", "body_b")
+    }
+    return {
+        str(obj.get("id"))
+        for obj in case_spec.get("objects") or []
+        if isinstance(obj, dict)
+        and str(obj.get("id") or "") in endpoint_ids
+        and is_world_anchor_object(obj)
+    }
+
+
+def is_world_anchor_object(obj: dict[str, Any]) -> bool:
+    physics = obj.get("physics") if isinstance(obj.get("physics"), dict) else obj
+    visual = obj.get("visual_representation") if isinstance(obj.get("visual_representation"), dict) else {}
+    return bool(
+        str(physics.get("body_type") or "").casefold() == "static"
+        and visual.get("source") == "none"
+        and visual.get("visible") is False
+        and physics.get("collision_required") is False
+        and not isinstance(physics.get("collision_geometry"), dict)
+        and not physics.get("collider")
+        and not isinstance(obj.get("asset"), dict)
+        and not obj.get("ue5_path")
+    )
+
+
+def constraint_endpoint_binding(
+    object_id: str,
+    frame: dict[str, Any],
+    runtime_actor_ids: dict[str, str],
+    objects_by_id: dict[str, dict[str, Any]],
+    world_anchor_ids: set[str],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if object_id not in world_anchor_ids:
+        return (
+            {
+                "endpoint_type": "rigid_body",
+                "object_id": object_id,
+                "runtime_actor_id": runtime_actor_ids.get(object_id) or None,
+                "frame_space": "body_local",
+            },
+            dict(frame),
+        )
+    return (
+        {
+            "endpoint_type": "world_anchor",
+            "object_id": object_id,
+            "frame_space": "world",
+        },
+        constraint_frame_in_world(objects_by_id[object_id], frame),
+    )
+
+
+def constraint_frame_in_world(obj: dict[str, Any], frame: dict[str, Any]) -> dict[str, Any]:
+    initial = obj.get("initial_state") if isinstance(obj.get("initial_state"), dict) else {}
+    position = initial.get("position_m") or obj.get("initial_position_m") or [0.0, 0.0, 0.0]
+    rotation = initial.get("rotation_deg") or obj.get("initial_rotation_deg") or [0.0, 0.0, 0.0]
+    local_position = frame["position_m"]
+    world_offset = rotate_local_vector_ue(local_position, rotation)
+    return {
+        "position_m": [float(position[index]) + world_offset[index] for index in range(3)],
+        "primary_axis": rotate_local_vector_ue(frame["primary_axis"], rotation),
+        "secondary_axis": rotate_local_vector_ue(frame["secondary_axis"], rotation),
+    }
 
 
 def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dict[str, Any]:

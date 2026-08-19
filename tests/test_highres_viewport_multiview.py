@@ -146,10 +146,14 @@ class HighresViewportMultiviewTests(unittest.TestCase):
         plugin = ROOT / "ue_template" / "Plugins" / "ADPPhysicsRuntime" / "Source" / "ADPPhysicsRuntime"
         header = (plugin / "Public" / "ADPPhysicsRuntimeDriver.h").read_text(encoding="utf-8")
         implementation = (plugin / "Private" / "ADPPhysicsRuntimeDriver.cpp").read_text(encoding="utf-8")
+        native_scene = (ROOT / "scripts" / "native_ue_scene.py").read_text(encoding="utf-8")
 
         self.assertIn("APhysicsConstraintActor* BindConstraint(", header)
-        self.assertIn("FindRegisteredPrimitive(BodyAId)", implementation)
-        self.assertIn("FindRegisteredPrimitive(BodyBId)", implementation)
+        self.assertIn("bBodyAWorld ? nullptr : FindRegisteredPrimitive(BodyAId)", implementation)
+        self.assertIn("bBodyBWorld ? nullptr : FindRegisteredPrimitive(BodyBId)", implementation)
+        self.assertIn("bBodyAWorld && bBodyBWorld", implementation)
+        self.assertIn('ue_name("None" if body_a_world else body_a_id)', native_scene)
+        self.assertIn('ue_name("None" if body_b_world else body_b_id)', native_scene)
         self.assertIn("World->SpawnActor<APhysicsConstraintActor>", implementation)
         self.assertIn("Component->SetConstraintReferenceFrame(EConstraintFrame::Frame1, FrameA);", implementation)
         self.assertIn("Component->SetConstraintReferenceFrame(EConstraintFrame::Frame2, FrameB);", implementation)

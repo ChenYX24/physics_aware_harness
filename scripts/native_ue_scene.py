@@ -3016,19 +3016,23 @@ def spawn_runtime_constraints_in_game_world(actors: dict, runtime_scene: dict, s
     failures = []
     for binding in bindings:
         constraint_id = str(binding.get("constraint_id") or "")
-        body_a_id = str((binding.get("body_a") or {}).get("object_id") or "")
-        body_b_id = str((binding.get("body_b") or {}).get("object_id") or "")
+        body_a = binding.get("body_a") or {}
+        body_b = binding.get("body_b") or {}
+        body_a_id = str(body_a.get("object_id") or "")
+        body_b_id = str(body_b.get("object_id") or "")
+        body_a_world = body_a.get("endpoint_type") == "world_anchor"
+        body_b_world = body_b.get("endpoint_type") == "world_anchor"
         detail = details.get(constraint_id)
         try:
-            if not constraint_id or not body_a_id or not body_b_id:
+            if not constraint_id or not body_a_id or not body_b_id or body_a_world and body_b_world:
                 raise RuntimeError("constraint body id is unavailable")
             frame_a = binding["frame_a"]
             frame_b = binding["frame_b"]
             angular_limits = binding.get("angular_limits_deg") or {}
             actor = binder(
                 ue_name(constraint_id),
-                ue_name(body_a_id),
-                ue_name(body_b_id),
+                ue_name("None" if body_a_world else body_a_id),
+                ue_name("None" if body_b_world else body_b_id),
                 unreal.Vector(*[float(value) * 100.0 for value in frame_a["position_m"]]),
                 unreal.Vector(*[float(value) for value in frame_a["primary_axis"]]),
                 unreal.Vector(*[float(value) for value in frame_a["secondary_axis"]]),
@@ -7006,9 +7010,11 @@ def setup_scene(runtime_scene: dict | None = None):
                 for item in constrained
                 if item.get_owner()
             ]
+            endpoints = [detail.get("body_a") or {}, detail.get("body_b") or {}]
             expected_labels = {
-                f"native_phenomena_demo_{(detail.get('body_a') or {}).get('object_id')}",
-                f"native_phenomena_demo_{(detail.get('body_b') or {}).get('object_id')}",
+                f"native_phenomena_demo_{endpoint.get('object_id')}"
+                for endpoint in endpoints
+                if endpoint.get("endpoint_type") == "rigid_body"
             }
             try:
                 broken = bool(component.is_broken()) if component else None
@@ -7017,7 +7023,7 @@ def setup_scene(runtime_scene: dict | None = None):
             return {
                 **detail,
                 "component_registered": runtime_component_registered(component),
-                "body_bindings_verified": len(actual_body_labels) == 2 and expected_labels == set(actual_body_labels),
+                "body_bindings_verified": len(actual_body_labels) == len(expected_labels) and expected_labels == set(actual_body_labels),
                 "actual_body_actor_labels": sorted(actual_body_labels),
                 "broken": broken,
             }

@@ -39,12 +39,18 @@ class RuntimeActorPlacementTests(unittest.TestCase):
                 {"object_id": "rod", "runtime_actor_id": "actor_rod"},
                 {"object_id": "anchor", "runtime_actor_id": "actor_anchor"},
             ],
+            [
+                {"id": "rod", "body_type": "dynamic", "visual_representation": {"source": "asset", "visible": True}},
+                {"id": "anchor", "body_type": "static", "visual_representation": {"source": "asset", "visible": True}},
+            ],
             target_backend="ue",
         )
 
         self.assertEqual(bindings[0]["constraint_id"], "joint")
         self.assertEqual(bindings[0]["body_a"]["runtime_actor_id"], "actor_rod")
         self.assertEqual(bindings[0]["body_b"]["runtime_actor_id"], "actor_anchor")
+        self.assertEqual(bindings[0]["body_a"]["endpoint_type"], "rigid_body")
+        self.assertEqual(bindings[0]["body_b"]["frame_space"], "body_local")
         self.assertNotIn("linear_limit_m", bindings[0])
 
         scene = __import__("scripts.harness_local_ue_runner", fromlist=["build_runtime_scene"]).build_runtime_scene(
@@ -55,6 +61,155 @@ class RuntimeActorPlacementTests(unittest.TestCase):
             actor_placement={"actor_bindings": [], "constraint_bindings": bindings},
         )
         self.assertEqual(scene["constraints"], bindings)
+
+    def test_hidden_static_constraint_endpoint_compiles_to_world_anchor(self) -> None:
+        from harness.runtime.actor_placement import compile_runtime_actor_placement
+        from harness.verification.runtime_actor_placement_verifier import verify_runtime_actor_placement
+
+        anchor = {
+            "id": "anchor",
+            "body_type": "static",
+            "collision_required": False,
+            "initial_position_m": [2.0, 3.0, 4.0],
+            "initial_rotation_deg": [90.0, 0.0, 0.0],
+            "visual_representation": {"source": "none", "visible": False},
+        }
+        bob = {
+            "id": "bob",
+            "body_type": "dynamic",
+            "collision_required": True,
+            "visual_representation": {"source": "asset", "visible": True},
+        }
+        constraint = {
+            "id": "joint",
+            "body_a": "bob",
+            "body_b": "anchor",
+            "frame_a": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+            "frame_b": {"position_m": [0.5, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+            "linear_motion": {"x": "locked", "y": "locked", "z": "locked"},
+            "angular_motion": {"x": "free", "y": "free", "z": "free"},
+            "angular_limits_deg": {},
+            "collision_enabled": False,
+        }
+        case = {"case_id": "world_anchor", "objects": [bob, anchor], "constraints": [constraint]}
+        scene_layout = {
+            "case_id": "world_anchor",
+            "object_nodes": [
+                {
+                    "object_id": "bob",
+                    "role": "dynamic body",
+                    "shape": "sphere",
+                    "physics_critical": True,
+                    "transform": {"position_m": [0.0, 0.0, 0.0], "rotation_deg": [0.0, 0.0, 0.0]},
+                    "bounds": {"extents_m": [0.1, 0.1, 0.1]},
+                    "visual_representation": {"source": "asset", "visible": True},
+                    "physics": {
+                        "state_kind": "rigid",
+                        "body_type": "dynamic",
+                        "collision_required": True,
+                        "collision_geometry": {"shape": "sphere", "size_m": [0.2, 0.2, 0.2], "world_center_m": [0.0, 0.0, 0.0]},
+                        "collider": "sphere",
+                        "mass_kg": 1.0,
+                    },
+                    "asset_binding": {
+                        "selected_asset_id": "sphere",
+                        "selected_asset_ue_path": "/Engine/BasicShapes/Sphere.Sphere",
+                        "asset_kind": "StaticMesh",
+                        "quality_gate": {"status": "pass"},
+                    },
+                },
+                {
+                    "object_id": "anchor",
+                    "role": "constraint endpoint",
+                    "shape": "fixed_point",
+                    "physics_critical": True,
+                    "transform": {"position_m": [2.0, 3.0, 4.0], "rotation_deg": [90.0, 0.0, 0.0]},
+                    "visual_representation": {"source": "none", "visible": False},
+                    "physics": {"state_kind": "rigid", "body_type": "static", "collision_required": False},
+                    "asset_binding": {},
+                },
+            ],
+            "camera_plan": {"views": [{"id": "front"}]},
+        }
+
+        placement = compile_runtime_actor_placement(case, scene_layout, target_backend="ue")
+        report = verify_runtime_actor_placement(case, placement)
+
+        self.assertEqual([item["object_id"] for item in placement["actor_bindings"]], ["bob"])
+        binding = placement["constraint_bindings"][0]
+        self.assertEqual(binding["body_a"]["endpoint_type"], "rigid_body")
+        self.assertEqual(binding["body_b"], {"endpoint_type": "world_anchor", "object_id": "anchor", "frame_space": "world"})
+        self.assertEqual(binding["frame_b"]["position_m"], [2.0, 3.0, 4.5])
+        for actual, expected in zip(binding["frame_b"]["primary_axis"], [0.0, 0.0, 1.0], strict=True):
+            self.assertAlmostEqual(actual, expected)
+        self.assertEqual(report["status"], "pass")
+
+        forged = deepcopy(placement)
+        forged["constraint_bindings"][0]["body_a"] = {
+            "endpoint_type": "world_anchor",
+            "object_id": "bob",
+            "frame_space": "world",
+        }
+        forged_report = verify_runtime_actor_placement(case, forged)
+        self.assertEqual(forged_report["status"], "fail")
+        self.assertEqual(forged_report["first_failure"]["metric"], "invalid_runtime_constraint_body_binding")
+
+    def test_world_anchor_lowering_is_symmetric_and_strict(self) -> None:
+        from harness.runtime.actor_placement import constraint_bindings_from_case, is_world_anchor_object
+
+        anchor = {
+            "id": "anchor",
+            "body_type": "static",
+            "collision_required": False,
+            "initial_position_m": [0.0, 0.0, 0.0],
+            "initial_rotation_deg": [0.0, 0.0, 0.0],
+            "visual_representation": {"source": "none", "visible": False},
+        }
+        frame = {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]}
+        motion = {"x": "locked", "y": "locked", "z": "locked"}
+        constraints = [
+            {"id": "left", "body_a": "anchor", "body_b": "bob_a", "frame_a": frame, "frame_b": frame, "linear_motion": motion, "angular_motion": motion, "angular_limits_deg": {}, "collision_enabled": False},
+            {"id": "right", "body_a": "bob_b", "body_b": "anchor", "frame_a": frame, "frame_b": frame, "linear_motion": motion, "angular_motion": motion, "angular_limits_deg": {}, "collision_enabled": False},
+        ]
+        bodies = [
+            {"id": "bob_a", "body_type": "dynamic", "visual_representation": {"source": "asset", "visible": True}},
+            {"id": "bob_b", "body_type": "dynamic", "visual_representation": {"source": "asset", "visible": True}},
+            anchor,
+        ]
+        bindings = constraint_bindings_from_case(
+            constraints,
+            [
+                {"object_id": "bob_a", "runtime_actor_id": "actor_bob_a"},
+                {"object_id": "bob_b", "runtime_actor_id": "actor_bob_b"},
+            ],
+            bodies,
+            target_backend="ue",
+        )
+
+        self.assertEqual(bindings[0]["body_a"]["endpoint_type"], "world_anchor")
+        self.assertEqual(bindings[1]["body_b"]["endpoint_type"], "world_anchor")
+        self.assertTrue(is_world_anchor_object(anchor))
+        for field, value in (
+            ("body_type", "dynamic"),
+            ("body_type", "kinematic"),
+            ("collision_required", True),
+        ):
+            invalid = deepcopy(anchor)
+            invalid[field] = value
+            self.assertFalse(is_world_anchor_object(invalid))
+        for visual in (
+            {"source": "none", "visible": True},
+            {"source": "asset", "visible": False},
+        ):
+            invalid = deepcopy(anchor)
+            invalid["visual_representation"] = visual
+            self.assertFalse(is_world_anchor_object(invalid))
+        invalid = deepcopy(anchor)
+        invalid["asset"] = {}
+        self.assertFalse(is_world_anchor_object(invalid))
+        invalid = deepcopy(anchor)
+        invalid["collision_geometry"] = {"shape": "box", "size_m": [0.1, 0.1, 0.1]}
+        self.assertFalse(is_world_anchor_object(invalid))
 
     def test_compiled_actor_placement_is_not_refit_without_explicit_opt_in(self) -> None:
         from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement
@@ -311,7 +466,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         placement = compile_runtime_actor_placement(case, scene_layout, asset_resolution=asset_resolution)
         report = verify_runtime_actor_placement(case, placement)
 
-        self.assertEqual(placement["schema_version"], "harness_runtime_actor_placement_v1")
+        self.assertEqual(placement["schema_version"], "harness_runtime_actor_placement_v2")
         self.assertEqual(report["status"], "pass")
         actor_ids = {binding["runtime_actor_id"] for binding in placement["actor_bindings"]}
         self.assertEqual(len(actor_ids), len(placement["actor_bindings"]))
@@ -664,7 +819,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         from harness.verification.runtime_actor_placement_verifier import verify_runtime_actor_placement
 
         placement = {
-            "schema_version": "harness_runtime_actor_placement_v1",
+            "schema_version": "harness_runtime_actor_placement_v2",
             "actor_bindings": [
                 {
                     "object_id": "crate",

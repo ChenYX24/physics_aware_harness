@@ -3,7 +3,11 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from harness.runtime.actor_placement import RUNTIME_ACTOR_PLACEMENT_SCHEMA_VERSION
+from harness.runtime.actor_placement import (
+    RUNTIME_ACTOR_PLACEMENT_SCHEMA_VERSION,
+    constraint_frame_in_world,
+    world_anchor_object_ids,
+)
 
 
 def verify_runtime_actor_placement(case_spec: dict[str, Any], placement: dict[str, Any] | None) -> dict[str, Any]:
@@ -72,13 +76,14 @@ def verify_runtime_actor_placement(case_spec: dict[str, Any], placement: dict[st
 
 
 def first_missing_physics_object(case_spec: dict[str, Any], by_object: dict[str, dict[str, Any]]) -> str | None:
+    world_anchor_ids = world_anchor_object_ids(case_spec)
     for obj in case_spec.get("objects") or []:
         if not isinstance(obj, dict):
             continue
         object_id = str(obj.get("id") or "")
         if not object_id:
             continue
-        if object_id not in by_object and is_physics_contract_object(obj):
+        if object_id not in by_object and object_id not in world_anchor_ids and is_physics_contract_object(obj):
             return object_id
     return None
 
@@ -104,12 +109,38 @@ def first_bad_constraint_binding(
             "metric": "missing_runtime_constraint_binding",
             "value": {"expected": sorted(expected), "actual": sorted(actual)},
         }
+    objects_by_id = {
+        str(obj.get("id") or ""): obj
+        for obj in case_spec.get("objects") or []
+        if isinstance(obj, dict) and obj.get("id")
+    }
+    world_anchor_ids = world_anchor_object_ids(case_spec)
     for constraint_id, declaration in expected.items():
         binding = actual[constraint_id]
         for side in ("a", "b"):
             object_id = str(declaration.get(f"body_{side}") or "")
             body_binding = binding.get(f"body_{side}") if isinstance(binding.get(f"body_{side}"), dict) else {}
-            if object_id not in by_object or body_binding.get("object_id") != object_id or not body_binding.get("runtime_actor_id"):
+            frame = binding.get(f"frame_{side}")
+            if object_id in world_anchor_ids:
+                expected_frame = constraint_frame_in_world(objects_by_id[object_id], declaration[f"frame_{side}"])
+                valid = bool(
+                    object_id not in by_object
+                    and body_binding.get("endpoint_type") == "world_anchor"
+                    and body_binding.get("object_id") == object_id
+                    and body_binding.get("frame_space") == "world"
+                    and not body_binding.get("runtime_actor_id")
+                    and frame == expected_frame
+                )
+            else:
+                valid = bool(
+                    object_id in by_object
+                    and body_binding.get("endpoint_type") == "rigid_body"
+                    and body_binding.get("object_id") == object_id
+                    and body_binding.get("runtime_actor_id") == by_object[object_id].get("runtime_actor_id")
+                    and body_binding.get("frame_space") == "body_local"
+                    and frame == declaration.get(f"frame_{side}")
+                )
+            if not valid:
                 return {
                     "constraint_id": constraint_id,
                     "metric": "invalid_runtime_constraint_body_binding",
