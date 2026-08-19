@@ -12,6 +12,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class FluidBatchVerifierTests(unittest.TestCase):
+    def test_fluid_local_preview_profile_remains_terminal_rgb(self) -> None:
+        from scripts.harness_render_fluid_ue import fluid_execution_profile
+
+        profile = fluid_execution_profile("local_preview", ["front_static", "event_closeup"])
+
+        self.assertEqual(profile.name, "local_preview")
+        self.assertEqual(profile.render_passes, ("rgb",))
+
     def test_rigid_replay_camera_bounds_come_from_declared_workspace(self) -> None:
         from scripts.harness_render_fluid_ue import replay_scene_bounds
 
@@ -188,6 +196,7 @@ class FluidBatchVerifierTests(unittest.TestCase):
         from scripts.harness_render_fluid_ue import (
             rigid_body_asset_resolution_entries,
             rigid_body_runtime_objects,
+            rigid_body_trajectory_objects,
             runtime_pose_registration_report,
         )
 
@@ -208,6 +217,14 @@ class FluidBatchVerifierTests(unittest.TestCase):
                 "motion": None,
                 "collision": {"type": "plane", "asset_geometry_match": True},
             },
+            {
+                "id": "dynamic_body",
+                "mobility": "dynamic",
+                "asset": {"ue_path": "/Game/Generated/Irregular.Irregular", "sha256": "c" * 64},
+                "transform": {"position_m": [0.0, 0.0, 0.5], "ue_rotation_pyr_deg": [0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0]},
+                "motion": None,
+                "collision": {"type": "asset", "asset_geometry_match": True},
+            },
         ]
         cache = {"environment": {"rigid_bodies": bodies}}
 
@@ -215,6 +232,7 @@ class FluidBatchVerifierTests(unittest.TestCase):
         resolution = rigid_body_asset_resolution_entries(bodies)
 
         self.assertEqual(dynamic[0]["ue5_path"], bodies[0]["asset"]["ue_path"])
+        self.assertEqual(dynamic[1]["ue5_path"], bodies[2]["asset"]["ue_path"])
         self.assertEqual(static[0]["ue5_path"], bodies[1]["asset"]["ue_path"])
         self.assertEqual(dynamic[0]["params"]["base_rotation_degrees"], [0.0, 0.0, 0.0])
         self.assertEqual(dynamic[0]["params"]["pose_anchor"], "bounds_center")
@@ -224,6 +242,28 @@ class FluidBatchVerifierTests(unittest.TestCase):
         self.assertTrue(dynamic[0]["params"]["asset_geometry_match"])
         self.assertEqual(resolution[0]["selected_asset"]["collision_representation"], "axisymmetric_profile")
         self.assertFalse(resolution[0]["selected_asset"]["proxy"])
+
+        trajectory = rigid_body_trajectory_objects(
+            {
+                "rigid_objects": {
+                    "moving_body": {
+                        "position_m": [-0.25, 0.0, 0.35],
+                        "ue_rotation_pyr_deg": [0.0, 0.0, 0.0],
+                        "linear_velocity_m_s": [0.0, 0.0, 0.0],
+                    },
+                    "dynamic_body": {
+                        "position_m": [0.0, 0.0, 0.42],
+                        "ue_rotation_pyr_deg": [4.0, 5.0, 6.0],
+                        "linear_velocity_m_s": [0.0, 0.0, -1.2],
+                    },
+                }
+            },
+            bodies,
+            render_z_offset_m=0.025,
+        )
+        self.assertEqual(trajectory["dynamic_body"]["position"], [0.0, 0.0, 0.445])
+        self.assertEqual(trajectory["dynamic_body"]["rotation_degrees"], [4.0, 5.0, 6.0])
+        self.assertEqual(trajectory["dynamic_body"]["velocity"], [0.0, 0.0, -1.2])
 
         del bodies[0]["transform"]["ue_rotation_pyr_deg"]
         with self.assertRaisesRegex(ValueError, "missing an explicit UE transform"):

@@ -1,7 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import math
+from pathlib import Path
 from typing import Any
+
+
+GENESIS_COLLISION_MESH_SUFFIXES = frozenset({".dae", ".glb", ".gltf", ".obj", ".ply", ".stl"})
+
+
+class RigidSphCapabilityMissing(ValueError):
+    """The declared rigid/SPH scene cannot be represented without changing its physics truth."""
 
 
 def compile_rigid_sph_scene(case_spec: dict[str, Any]) -> dict[str, Any]:
@@ -82,8 +91,8 @@ def compile_rigid_body(body: dict[str, Any]) -> dict[str, Any]:
     if asset.get("proxy") is not False:
         raise ValueError("rigid_sph scene requires non-proxy UE assets")
     mobility = str(solver.get("mobility") or "")
-    if mobility not in {"static", "kinematic"}:
-        raise ValueError("rigid_body solver.mobility must be static or kinematic")
+    if mobility not in {"static", "kinematic", "dynamic"}:
+        raise ValueError("rigid_body solver.mobility must be static, kinematic, or dynamic")
     transform_raw = solver.get("transform") if isinstance(solver.get("transform"), dict) else {}
     solver_rotation = vec3(transform_raw.get("euler_xyz_deg"), "rigid_body transform.euler_xyz_deg")
     declared_ue_rotation = vec3(
@@ -100,8 +109,19 @@ def compile_rigid_body(body: dict[str, Any]) -> dict[str, Any]:
     }
     if any(value <= 0.0 for value in transform["scale"]):
         raise ValueError("rigid_body transform.scale values must be positive")
-    compiled_collision = compile_collision(collision, transform)
+    compiled_collision = compile_collision(collision, transform, asset)
+    if mobility == "dynamic" and compiled_collision["type"] != "asset":
+        raise RigidSphCapabilityMissing("dynamic rigid_sph bodies require a qualified asset collision mesh")
     compiled_motion = compile_motion(solver.get("motion"), transform, mobility)
+    material = dict(body.get("material") or {})
+    density_kg_m3 = material.get("density_kg_m3")
+    if density_kg_m3 is not None:
+        density_kg_m3 = positive(density_kg_m3, "rigid_body material.density_kg_m3")
+    mass_kg = body.get("mass_kg")
+    if mobility == "dynamic":
+        mass_kg = positive(mass_kg, "dynamic rigid_body mass_kg")
+    elif mass_kg is not None:
+        mass_kg = positive(mass_kg, "rigid_body mass_kg")
     return {
         "id": body_id,
         "role": "rigid_body",
@@ -117,13 +137,57 @@ def compile_rigid_body(body: dict[str, Any]) -> dict[str, Any]:
             "support_registration": dict(asset.get("support_registration") or {}),
         },
         "transform": transform,
+        "mass_kg": mass_kg,
+        "material": {
+            **material,
+            **({"density_kg_m3": density_kg_m3} if density_kg_m3 is not None else {}),
+        },
+        "initial_linear_velocity_m_s": vec3(
+            body.get("initial_velocity_m_s", [0.0, 0.0, 0.0]),
+            "rigid_body initial_velocity_m_s",
+        ),
+        "initial_angular_velocity_rad_s": vec3(
+            body.get("initial_angular_velocity_rad_s", [0.0, 0.0, 0.0]),
+            "rigid_body initial_angular_velocity_rad_s",
+        ),
         "motion": compiled_motion,
         "collision": compiled_collision,
     }
 
 
-def compile_collision(collision: dict[str, Any], transform: dict[str, Any]) -> dict[str, Any]:
+def compile_collision(
+    collision: dict[str, Any],
+    transform: dict[str, Any],
+    asset: dict[str, Any],
+) -> dict[str, Any]:
     collision_type = str(collision.get("type") or "")
+    if collision_type == "asset":
+        qualification = asset.get("collision") if isinstance(asset.get("collision"), dict) else {}
+        source = asset.get("collision_source") if isinstance(asset.get("collision_source"), dict) else {}
+        collision_kind = str(qualification.get("kind") or "").strip()
+        source_path = Path(str(source.get("local_path") or "")).expanduser()
+        source_sha256 = str(source.get("sha256") or "").lower()
+        source_format = str(source.get("format") or source_path.suffix.lstrip(".")).casefold()
+        if qualification.get("present") is not True or not collision_kind:
+            raise RigidSphCapabilityMissing("asset collision is not qualified by the Catalog")
+        if source_path.suffix.casefold() not in GENESIS_COLLISION_MESH_SUFFIXES:
+            raise RigidSphCapabilityMissing(
+                f"Genesis cannot consume the qualified asset collision source format: {source_path.suffix or '<none>'}"
+            )
+        if not source_path.is_file():
+            raise RigidSphCapabilityMissing(f"qualified asset collision source is unavailable: {source_path}")
+        if not is_sha256(source_sha256) or sha256_file(source_path) != source_sha256:
+            raise RigidSphCapabilityMissing("qualified asset collision source identity does not match its Catalog record")
+        return {
+            "type": "asset",
+            "asset_geometry_match": True,
+            "catalog_collision_kind": collision_kind,
+            "source_mesh_path": str(source_path.resolve()),
+            "source_mesh_sha256": source_sha256,
+            "source_format": source_format,
+            "backend_conversion": "genesis_convex_decomposition",
+            "convexify": True,
+        }
     if collision_type == "plane":
         normal = vec3(collision.get("normal"), "plane normal")
         if math.sqrt(sum(value * value for value in normal)) <= 1e-12:
@@ -176,6 +240,18 @@ def compile_collision(collision: dict[str, Any], transform: dict[str, Any]) -> d
         "parts": parts,
         "geometry_registration": dict(collision.get("geometry_registration") or {}),
     }
+
+
+def is_sha256(value: str) -> bool:
+    return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def compile_motion(value: Any, transform: dict[str, Any], mobility: str) -> dict[str, Any] | None:

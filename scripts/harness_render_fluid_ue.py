@@ -37,6 +37,16 @@ from scripts.harness_local_ue_runner import (
 )
 
 
+def fluid_execution_profile(profile_name: str, requested_views: list[str]):
+    requested = execution_profile(profile_name)
+    complete_camera_contract = set(COMPLETE_CASE_VIEWS).issubset(requested_views)
+    return (
+        requested
+        if requested.name in {"smoke", "local_preview"} or complete_camera_contract
+        else execution_profile("smoke")
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Replay a Genesis surface sequence through native UE RGB/depth/segmentation capture.")
     parser.add_argument("replay_manifest")
@@ -52,22 +62,20 @@ def main() -> int:
     parser.add_argument("--basin-scale-xyz", type=float, nargs=3)
     parser.add_argument("--basin-pivot-to-rim-m", type=float)
     parser.add_argument("--scene-z-offset-m", type=float, default=-0.05)
-    parser.add_argument("--profile", choices=("smoke", "candidate", "publish"), default="candidate")
+    parser.add_argument("--profile", choices=("smoke", "local_preview", "candidate", "publish"), default="candidate")
     parser.add_argument("--views", help="Comma-separated override. Missing canonical views is diagnostic-only.")
     parser.add_argument("--width", type=int)
     parser.add_argument("--height", type=int)
     args = parser.parse_args()
 
     started = time.perf_counter()
-    requested_profile = execution_profile(args.profile)
     requested_views = (
         [value.strip() for value in args.views.split(",") if value.strip()]
         if args.views
-        else list(requested_profile.views)
+        else list(execution_profile(args.profile).views)
     )
     requested_views = ["front_static" if value == "overview_static" else value for value in requested_views]
-    has_complete_camera_contract = set(COMPLETE_CASE_VIEWS).issubset(requested_views)
-    profile = requested_profile if requested_profile.name == "smoke" or has_complete_camera_contract else execution_profile("smoke")
+    profile = fluid_execution_profile(args.profile, requested_views)
     width = int(args.width or profile.width)
     height = int(args.height or profile.height)
     render_passes = list(profile.render_passes)
@@ -220,21 +228,11 @@ def main() -> int:
                     }
                     for item in rigid_specs
                 },
-                **{
-                        str(body["id"]): {
-                            "position": offset_z(
-                                particle_cache["frames"][index]["rigid_objects"][str(body["id"])]["position_m"],
-                                args.scene_z_offset_m,
-                            ),
-                            "rotation_degrees": list(
-                                particle_cache["frames"][index]["rigid_objects"][str(body["id"])]["ue_rotation_pyr_deg"]
-                            ),
-                            "velocity": [0.0, 0.0, 0.0],
-                            "source": "genesis_kinematic_rigid_body_frame",
-                        }
-                    for body in declared_rigid_bodies
-                    if body.get("mobility") == "kinematic"
-                },
+                **rigid_body_trajectory_objects(
+                    particle_cache["frames"][index],
+                    declared_rigid_bodies,
+                    render_z_offset_m=args.scene_z_offset_m,
+                ),
             },
             "contacts": [],
         }
@@ -871,7 +869,7 @@ def rigid_body_runtime_objects(cache: dict, *, render_z_offset_m: float) -> tupl
             {
                 "base_rotation_degrees": (
                     [0.0, 0.0, 0.0]
-                    if body.get("mobility") == "kinematic" and isinstance(body.get("motion"), dict)
+                    if body.get("mobility") in {"kinematic", "dynamic"}
                     else list(transform["ue_rotation_pyr_deg"])
                 ),
                 "preserve_authored_scale": True,
@@ -886,8 +884,39 @@ def rigid_body_runtime_objects(cache: dict, *, render_z_offset_m: float) -> tupl
                 "asset_geometry_match": ((body.get("collision") or {}).get("asset_geometry_match") is True),
             },
         )
-        (dynamic_objects if body.get("mobility") == "kinematic" else static_objects).append(runtime)
+        (dynamic_objects if body.get("mobility") in {"kinematic", "dynamic"} else static_objects).append(runtime)
     return dynamic_objects, static_objects
+
+
+def rigid_body_trajectory_objects(
+    frame: dict,
+    bodies: list[dict],
+    *,
+    render_z_offset_m: float,
+) -> dict[str, dict]:
+    states = frame.get("rigid_objects") if isinstance(frame.get("rigid_objects"), dict) else {}
+    result: dict[str, dict] = {}
+    for body in bodies:
+        if body.get("mobility") not in {"kinematic", "dynamic"}:
+            continue
+        body_id = str(body.get("id") or "")
+        state = states.get(body_id) if isinstance(states.get(body_id), dict) else {}
+        required_fields = ["position_m", "ue_rotation_pyr_deg"]
+        if body.get("mobility") == "dynamic":
+            required_fields.append("linear_velocity_m_s")
+        if any(len(state.get(field) or []) != 3 for field in required_fields):
+            raise ValueError(f"moving rigid body is missing a complete solver state: {body_id}")
+        result[body_id] = {
+            "position": offset_z(state["position_m"], render_z_offset_m),
+            "rotation_degrees": list(state["ue_rotation_pyr_deg"]),
+            "velocity": (
+                list(state["linear_velocity_m_s"])
+                if body.get("mobility") == "dynamic"
+                else [0.0, 0.0, 0.0]
+            ),
+            "source": "genesis_rigid_body_frame",
+        }
+    return result
 
 
 def rigid_body_asset_resolution_entries(bodies: list[dict]) -> list[dict]:

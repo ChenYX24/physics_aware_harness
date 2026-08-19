@@ -1528,7 +1528,7 @@ FIELD-BY-FIELD INSTRUCTIONS
    backend in allowed_solvers and do not add or substitute another solver or fallback. Renderer capabilities
    never satisfy required_solver_capabilities. A declared rigid_sph scene solved by genesis_sph uses exactly
    particle_dynamics, particle_cache, and surface_mesh_cache as required_solver_capabilities. The rigid_body
-   role on a static or kinematic rigid_sph participant is a scene-role requirement and must not add the unsupported
+   role on a static, kinematic, or dynamic rigid_sph participant is a scene-role requirement and must not add the unsupported
    rigid_body solver capability to genesis_sph. Use the solver itself as render_backend unless
    the requested evidence needs a separate renderer and case_spec_contract.backend_stage_io shows a shared,
    versioned artifact contract. Set allow_multi_backend=true exactly when solver and renderer differ.
@@ -1590,8 +1590,10 @@ FIELD-BY-FIELD INSTRUCTIONS
    dimensions, pose, and a frame. Use frame={"type":"body_local","body_id":exact_id} when the initial
    volume is contained by a moving rigid body; use a world frame otherwise. Every coupled rigid participant
    uses role="rigid_body" and declares
-   solver.mobility, solver.transform, and solver.collision. Supported generic collision primitives are
-   exactly plane and axisymmetric_profile; do not emit composite or primitives arrays. A plane contains
+   solver.mobility, solver.transform, and solver.collision. Use collision={"type":"asset"} for a qualified
+   Catalog asset collision mesh; the compiler verifies its collision record and source identity before Genesis
+   converts it, and fails capability_missing when that conversion is unavailable. Explicit analytic collision
+   forms are plane and axisymmetric_profile; do not emit composite or primitives arrays. A plane contains
    position_m, normal, and asset_geometry_match=true. An axisymmetric_profile contains an inner_profile
    array of positive-radius {z_m,radius_m} points, wall_thickness_m, panel_count,
    asset_geometry_match=true, and a non-empty fit_method naming the evidence used to align that profile
@@ -1608,6 +1610,8 @@ FIELD-BY-FIELD INSTRUCTIONS
    object.initial_state. Also provide workspace_bounds_m={"min_m":[x,y,z],"max_m":[x,y,z]} enclosing
    every declared body, initial volume, and expected motion. Do not name a physical phenomenon, select a prepared process, or put rendering
    behavior in these declarations. If the request does not require such coupling, omit both fields.
+   Dynamic rigid_sph mass comes from physics.mass_kg; optional density_kg_m3, dynamic_friction, and
+   restitution come from physics.material. Initial linear and angular velocity come from initial_state.
    Every object also declares visual_representation.source as exactly asset, solver_generated, or none.
    visual_representation.visible is a boolean that defaults to true and controls rendering only; it never
    enables or disables collision. Set it false for an intentionally hidden collision-proxy object.
@@ -1733,7 +1737,7 @@ solver_capability_mismatch, keep repair_constraints.requested_backend as the onl
 add a solver, renderer, or fallback to allowed_solvers. Replace unsupported requirements using the selected
 solver's row in case_spec_contract.backend_solver_capability_matrix. In particular, a genesis_sph rigid_sph
 scene requires exactly particle_dynamics, particle_cache, and surface_mesh_cache; its rigid_body object roles
-describe static or kinematic collision participants and do not require the unsupported rigid_body solver
+   describe static, kinematic, or dynamic collision participants and do not require the unsupported rigid_body solver
 capability. UE remains render_backend only. For
 rigid_sph_role_required or missing rigid_sph solver fields, never turn a visual-only duplicate into a
 second rigid body. Merge the visual asset request and simplified solver collision onto one logical object,
@@ -1823,7 +1827,7 @@ def case_spec_generation_contract() -> dict[str, Any]:
                             "asset mesh origin"
                         ),
                     },
-                    "material": "object",
+                    "material": "object; optional positive density_kg_m3 and numeric dynamic_friction/restitution",
                 },
                 "initial_state": {
                     "position_m": ["x", "y", "z"],
@@ -1885,14 +1889,14 @@ def case_spec_generation_contract() -> dict[str, Any]:
             },
             "rigid_sph_rigid_object_solver": {
                 "role": "exactly rigid_body",
-                "mobility": "static or kinematic",
+                "mobility": "static, kinematic, or dynamic; dynamic requires physics.mass_kg",
                 "transform": {
                     "position_m": ["x", "y", "z"],
                     "euler_xyz_deg": ["x", "y", "z"],
                     "ue_rotation_pyr_deg": ["pitch", "yaw", "roll"],
                     "scale": "optional positive xyz",
                 },
-                "collision": "exactly one plane or axisymmetric_profile object; axisymmetric_profile requires non-empty fit_method; composite/primitives are invalid",
+                "collision": "exactly one asset, plane, or axisymmetric_profile object; asset uses qualified Catalog collision geometry; axisymmetric_profile requires non-empty fit_method; composite/primitives are invalid",
                 "motion": "optional {type:pivot_rotation,start_time_s,duration_s,pivot_local_m,solver_end_rotation_xyz_deg,ue_end_rotation_pyr_deg}",
             },
             "rigid_sph_fluid_object_solver": {
@@ -2029,7 +2033,7 @@ def case_spec_generation_contract() -> dict[str, Any]:
             "declared physics.collision_geometry is the sole collision truth and supports only box, sphere, or cylinder; it cannot coexist with collision_required=false",
             "source=none with collision_required=true requires explicit collision_geometry; source=asset without collision_geometry uses the qualified imported asset BodySetup and never a bounds-derived fallback",
             "never guess collision_geometry.local_center_offset_m when the asset mesh origin is not known in the current context; use qualified BodySetup or a separate hidden source=none collision object with an explicit world transform",
-            "one logical rigid_sph body owns both its visual asset request and simplified solver collision; never split them into visual/collision object IDs",
+            "one logical rigid_sph body owns both its visual asset request and declared solver collision; never split them into visual/collision object IDs",
             "a genesis_sph rigid_sph scene requires particle_dynamics, particle_cache, and surface_mesh_cache; rigid_body is an object role, not a genesis_sph solver capability",
         ],
         "valid_structure_example_do_not_copy_values": _valid_case_spec_structure_example(),

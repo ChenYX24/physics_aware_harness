@@ -570,6 +570,60 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
         self.assertEqual(case["objects"][1]["asset"]["ue_path"], "/Game/Generated/Table.Table")
         self.assertFalse(case["objects"][1]["asset"]["proxy"])
 
+    def test_dynamic_rigid_sph_asset_binding_fails_closed_as_capability_missing(self) -> None:
+        from tests.test_rigid_sph_scene import dynamic_asset_case
+
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "irregular.obj"
+            source.write_text("v 0 0 0\nv 0.1 0 0\nv 0 0.2 0\nf 1 2 3\n", encoding="utf-8")
+            source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+            case = dynamic_asset_case(source)
+            resolution = {
+                "assets": [
+                    {
+                        "intent": {"object_id": "floor"},
+                        "selected_asset": {
+                            "ue_path": "/Game/Generated/Floor.Floor",
+                            "sha256": "a" * 64,
+                            "bbox_size_m": [1.0, 1.0, 0.05],
+                            "source_kind": "procedural_generation",
+                            "proxy": False,
+                        },
+                    },
+                    {
+                        "intent": {"object_id": "irregular_body"},
+                        "selected_asset": {
+                            "ue_path": "/Game/Generated/Irregular.Irregular",
+                            "sha256": "b" * 64,
+                            "bbox_size_m": [0.1, 0.2, 0.1],
+                            "source_kind": "model_generation",
+                            "proxy": False,
+                            "collision": {"present": True, "kind": "simple_convex"},
+                            "files": [
+                                {
+                                    "role": "import_source",
+                                    "local_path": str(source),
+                                    "format": "obj",
+                                    "sha256": source_sha256,
+                                    "materialized": True,
+                                }
+                            ],
+                        },
+                    },
+                ]
+            }
+
+            self.assertIsNone(bind_resolved_solver_assets(case, resolution))
+            self.assertEqual(
+                case["objects"][1]["asset"]["collision_source"]["local_path"],
+                str(source.resolve()),
+            )
+
+            unqualified = dynamic_asset_case(source)
+            resolution["assets"][1]["selected_asset"]["collision"]["present"] = False
+            error = bind_resolved_solver_assets(unqualified, resolution)
+            self.assertEqual(error["code"], "capability_missing")
+
     def registry(self) -> AssetRegistry:
         return AssetRegistry(ROOT / "assets" / "asset_registry.example.json")
 

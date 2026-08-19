@@ -1658,12 +1658,27 @@ def _validate_rigid_sph_declarations(
             rigid_ids.add(body_id)
         solver = _mapping(body.get("solver"), f"{path}/solver", issues)
         mobility = str(solver.get("mobility") or "")
-        if mobility not in {"static", "kinematic"}:
+        if mobility not in {"static", "kinematic", "dynamic"}:
             _issue(
                 issues,
                 f"{path}/solver/mobility",
                 "unsupported_rigid_sph_mobility",
-                "must be static or kinematic",
+                "must be static, kinematic, or dynamic",
+            )
+        physics = _mapping(body.get("physics"), f"{path}/physics", issues, required=False)
+        if mobility == "dynamic" and physics.get("mass_kg") is None:
+            _issue(
+                issues,
+                f"{path}/physics/mass_kg",
+                "dynamic_rigid_sph_mass_missing",
+                "dynamic rigid_sph bodies require a positive mass_kg",
+            )
+        material = _mapping(physics.get("material"), f"{path}/physics/material", issues, required=False)
+        if material.get("density_kg_m3") is not None:
+            _positive_number(
+                material.get("density_kg_m3"),
+                f"{path}/physics/material/density_kg_m3",
+                issues,
             )
         transform = _mapping(solver.get("transform"), f"{path}/solver/transform", issues)
         _finite_vec3(transform.get("position_m"), f"{path}/solver/transform/position_m", issues)
@@ -1691,7 +1706,23 @@ def _validate_rigid_sph_declarations(
         collision_type = str(collision.get("type") or "")
         if body_id:
             collision_types[body_id] = collision_type
-        if collision_type == "plane":
+        if collision_type == "asset":
+            representation = body.get("visual_representation") if isinstance(body.get("visual_representation"), Mapping) else {}
+            if representation.get("source") != "asset":
+                _issue(
+                    issues,
+                    f"{path}/visual_representation/source",
+                    "asset_collision_requires_asset",
+                    "must be asset when solver collision type is asset",
+                )
+            if physics.get("collision_required") is False:
+                _issue(
+                    issues,
+                    f"{path}/physics/collision_required",
+                    "asset_collision_disabled",
+                    "must not be false when solver collision type is asset",
+                )
+        elif collision_type == "plane":
             _finite_vec3(collision.get("position_m"), f"{path}/solver/collision/position_m", issues)
             normal = _finite_vec3(collision.get("normal"), f"{path}/solver/collision/normal", issues)
             if normal and math.sqrt(sum(value * value for value in normal)) <= 1e-12:
@@ -1769,7 +1800,7 @@ def _validate_rigid_sph_declarations(
                 issues,
                 f"{path}/solver/collision/type",
                 "unsupported_rigid_sph_collision",
-                "must be exactly plane or axisymmetric_profile; composite collisions are not registered",
+                "must be exactly asset, plane, or axisymmetric_profile; composite collisions are not registered",
             )
 
         motion = solver.get("motion")

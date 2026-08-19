@@ -469,6 +469,13 @@ class CaseSpecV2Tests(unittest.TestCase):
         self.assertEqual(projection["workspace_bounds_m"], data["workspace_bounds_m"])
         self.assertEqual(projection["objects"][1]["solver"], data["objects"][1]["solver"])
 
+        dynamic = deepcopy(data)
+        dynamic["objects"][1]["solver"]["mobility"] = "dynamic"
+        dynamic["objects"][1]["solver"]["collision"] = {"type": "asset"}
+        dynamic["objects"][1]["solver"].pop("motion")
+        dynamic_projection = compile_case_spec_v2_runtime(case_spec_v2_from_dict(dynamic)).data
+        self.assertEqual(dynamic_projection["objects"][1]["solver"]["collision"], {"type": "asset"})
+
         invalid_rotation = deepcopy(data)
         invalid_rotation["objects"][1]["solver"]["motion"]["ue_end_rotation_pyr_deg"] = [90.0, 0.0, 0.0]
         with self.assertRaises(CaseSpecV2ValidationError) as context:

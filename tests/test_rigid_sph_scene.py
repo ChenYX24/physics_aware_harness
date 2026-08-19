@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import tempfile
 import unittest
 from pathlib import Path
 
 from harness.core.case_spec import load_case_spec, validate_case_spec
 from harness.runtime.genesis_sph_backend import genesis_command, genesis_parameters
 from harness.runtime.rigid_sph_scene import (
+    RigidSphCapabilityMissing,
     add,
     compile_rigid_sph_scene,
     matrix_vector,
@@ -14,7 +17,11 @@ from harness.runtime.rigid_sph_scene import (
     rotation_matrix_xyz,
     ue_rotation_pyr_from_solver_xyz,
 )
-from scripts.harness_genesis_rigid_sph import rigid_body_pose_at_time, set_rigid_body_pose
+from scripts.harness_genesis_rigid_sph import (
+    rigid_body_pose_at_time,
+    set_dynamic_body_initial_state,
+    set_rigid_body_pose,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +30,51 @@ COFFEE_CASE = ROOT / "cases/fluid/container_to_surface_spill/v001_coffee_mug_tab
 
 
 class RigidSPHSceneTests(unittest.TestCase):
+    def test_dynamic_body_uses_qualified_asset_collision_and_structured_initial_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "irregular.obj"
+            source.write_text("v 0 0 0\nv 0.1 0 0\nv 0 0.2 0\nf 1 2 3\n", encoding="utf-8")
+            case = dynamic_asset_case(source)
+
+            compiled = compile_rigid_sph_scene(case)
+            body = next(item for item in compiled["rigid_bodies"] if item["id"] == "irregular_body")
+
+            self.assertEqual(body["mobility"], "dynamic")
+            self.assertEqual(body["mass_kg"], 0.42)
+            self.assertEqual(body["initial_linear_velocity_m_s"], [0.0, 0.0, -0.3])
+            self.assertEqual(body["collision"]["type"], "asset")
+            self.assertEqual(body["collision"]["backend_conversion"], "genesis_convex_decomposition")
+            self.assertTrue(body["collision"]["asset_geometry_match"])
+
+            case["objects"][1]["asset"]["collision"]["present"] = False
+            with self.assertRaisesRegex(RigidSphCapabilityMissing, "not qualified"):
+                compile_rigid_sph_scene(case)
+
+    def test_dynamic_body_initial_state_is_held_for_preroll_then_released(self) -> None:
+        calls: list[tuple[str, tuple[float, ...]]] = []
+
+        class Entity:
+            def set_pos(self, value, **_kwargs) -> None:
+                calls.append(("position", tuple(value)))
+
+            def set_quat(self, value, **_kwargs) -> None:
+                calls.append(("rotation", tuple(value)))
+
+            def set_dofs_velocity(self, value, **_kwargs) -> None:
+                calls.append(("velocity", tuple(value)))
+
+        body = {
+            "transform": {"position_m": [0.1, 0.2, 0.3], "euler_xyz_deg": [0.0, 0.0, 0.0]},
+            "initial_linear_velocity_m_s": [1.0, 2.0, 3.0],
+            "initial_angular_velocity_rad_s": [0.1, 0.2, 0.3],
+        }
+        entity = Entity()
+
+        set_dynamic_body_initial_state(entity, body, hold=True)
+        self.assertEqual(calls[-1][1], (0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+        set_dynamic_body_initial_state(entity, body, hold=False)
+        self.assertEqual(calls[-1][1], (1.0, 2.0, 3.0, 0.1, 0.2, 0.3))
+
     def test_different_scenarios_compile_to_one_execution_contract(self) -> None:
         transfer = compile_rigid_sph_scene(load_case_spec(TRANSFER_CASE).data)
         coffee = compile_rigid_sph_scene(load_case_spec(COFFEE_CASE).data)
@@ -181,6 +233,92 @@ class RigidSPHSceneTests(unittest.TestCase):
         fluid["solver"]["initial_volume"]["radius_m"] = 0.04
         with self.assertRaisesRegex(ValueError, "clear the container wall"):
             validate_case_spec(no_clearance)
+
+
+def dynamic_asset_case(source: Path) -> dict:
+    source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+    asset = {
+        "ue_path": "/Game/Generated/Asset.Asset",
+        "sha256": "a" * 64,
+        "proxy": False,
+        "bbox_m": [0.1, 0.2, 0.1],
+    }
+    return {
+        "solver_scene": {
+            "type": "rigid_sph",
+            "measurements": [{"id": "vertical_span", "type": "axis_span", "axes": ["z"]}],
+            "assertions": [
+                {
+                    "id": "span",
+                    "measurement_id": "vertical_span",
+                    "reduction": "max",
+                    "operator": ">=",
+                    "value": 0.01,
+                }
+            ],
+        },
+        "workspace_bounds_m": {"min_m": [-1.0, -1.0, -0.1], "max_m": [1.0, 1.0, 1.0]},
+        "objects": [
+            {
+                "id": "floor",
+                "role": "rigid_body",
+                "asset": dict(asset),
+                "solver": {
+                    "mobility": "static",
+                    "transform": {
+                        "position_m": [0.0, 0.0, -0.025],
+                        "euler_xyz_deg": [0.0, 0.0, 0.0],
+                        "ue_rotation_pyr_deg": [0.0, 0.0, 0.0],
+                    },
+                    "collision": {
+                        "type": "plane",
+                        "position_m": [0.0, 0.0, 0.0],
+                        "normal": [0.0, 0.0, 1.0],
+                        "asset_geometry_match": True,
+                    },
+                },
+            },
+            {
+                "id": "irregular_body",
+                "role": "rigid_body",
+                "asset": {
+                    **asset,
+                    "collision": {"present": True, "kind": "simple_convex"},
+                    "collision_source": {
+                        "local_path": str(source),
+                        "sha256": source_sha256,
+                        "format": "obj",
+                    },
+                },
+                "mass_kg": 0.42,
+                "initial_velocity_m_s": [0.0, 0.0, -0.3],
+                "initial_angular_velocity_rad_s": [0.0, 1.0, 0.0],
+                "solver": {
+                    "mobility": "dynamic",
+                    "transform": {
+                        "position_m": [0.0, 0.0, 0.5],
+                        "euler_xyz_deg": [0.0, 0.0, 0.0],
+                        "ue_rotation_pyr_deg": [0.0, 0.0, 0.0],
+                    },
+                    "collision": {"type": "asset"},
+                },
+            },
+            {
+                "id": "water",
+                "role": "fluid",
+                "solver": {
+                    "material_model": "sph_liquid",
+                    "initial_volume": {
+                        "shape": "cylinder",
+                        "frame": {"type": "world"},
+                        "position_m": [0.0, 0.0, 0.15],
+                        "radius_m": 0.25,
+                        "height_m": 0.25,
+                    },
+                },
+            },
+        ],
+    }
 
 
 if __name__ == "__main__":

@@ -24,11 +24,13 @@ from harness.runtime.rigid_sph_scene import (
     quaternion_from_matrix,
     rotation_matrix_xyz,
     subtract,
+    ue_rotation_pyr_from_solver_xyz,
 )
 from scripts.harness_genesis_fluid import (
     surface_component_metrics,
     surface_shape_metrics,
     tensor_rows,
+    tensor_vector,
     write_fluid_cache,
 )
 
@@ -100,13 +102,19 @@ def simulate_rigid_sph_scene(case_spec: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("surface reconstruction requires a declared upward horizontal plane")
     floor_z = min(float(body["collision"]["position_m"][2]) for body in horizontal_planes)
     kinematic_entities: dict[str, Any] = {}
+    dynamic_entities: dict[str, Any] = {}
     for body in compiled["rigid_bodies"]:
-        if body["collision"]["type"] != "axisymmetric_profile":
-            continue
-        if body["mobility"] == "kinematic":
-            kinematic_entities[body["id"]] = add_kinematic_axisymmetric_collision(scene, gs, rigid_material, body)
-        else:
-            add_static_axisymmetric_collision(scene, gs, rigid_material, body)
+        if body["collision"]["type"] == "axisymmetric_profile":
+            if body["mobility"] == "kinematic":
+                kinematic_entities[body["id"]] = add_kinematic_axisymmetric_collision(scene, gs, rigid_material, body)
+            else:
+                add_static_axisymmetric_collision(scene, gs, rigid_material, body)
+        elif body["collision"]["type"] == "asset":
+            entity = add_asset_collision(scene, gs, body)
+            if body["mobility"] == "kinematic":
+                kinematic_entities[body["id"]] = entity
+            elif body["mobility"] == "dynamic":
+                dynamic_entities[body["id"]] = entity
     fluid_spec = compiled["fluid"]
     liquid = scene.add_entity(
         morph=gs.morphs.Cylinder(
@@ -118,14 +126,22 @@ def simulate_rigid_sph_scene(case_spec: dict[str, Any]) -> dict[str, Any]:
         material=gs.materials.SPH.Liquid(sampler="regular"),
     )
     scene.build()
+    for body in compiled["rigid_bodies"]:
+        if body["id"] in dynamic_entities:
+            dynamic_entities[body["id"]].set_mass(float(body["mass_kg"]))
+            set_dynamic_body_initial_state(dynamic_entities[body["id"]], body, hold=pre_roll_s > 0.0)
     for _ in range(max(0, int(round(pre_roll_s / solver_dt)))):
         for body in compiled["rigid_bodies"]:
             if body["id"] in kinematic_entities:
                 set_rigid_body_pose(kinematic_entities[body["id"]], body, 0.0)
+            elif body["id"] in dynamic_entities:
+                set_dynamic_body_initial_state(dynamic_entities[body["id"]], body, hold=True)
         scene.step()
     for body in compiled["rigid_bodies"]:
         if body["id"] in kinematic_entities:
             set_rigid_body_pose(kinematic_entities[body["id"]], body, 0.0)
+        elif body["id"] in dynamic_entities:
+            set_dynamic_body_initial_state(dynamic_entities[body["id"]], body, hold=False)
 
     frame_count = max(1, int(round(duration_s * fps)))
     frames: list[dict[str, Any]] = []
@@ -142,7 +158,23 @@ def simulate_rigid_sph_scene(case_spec: dict[str, Any]) -> dict[str, Any]:
                     "position_m": position,
                     "solver_rotation_xyz_deg": solver_rotation,
                     "ue_rotation_pyr_deg": ue_rotation,
+                    "linear_velocity_m_s": [0.0, 0.0, 0.0],
+                    "angular_velocity_rad_s": [0.0, 0.0, 0.0],
                     "kinematic": True,
+                }
+            elif body["mobility"] == "dynamic":
+                entity = dynamic_entities[body["id"]]
+                position = tensor_vector(entity.get_pos())
+                solver_rotation = tensor_vector(gs.utils.geom.quat_to_xyz(entity.get_quat(), rpy=True, degrees=True))
+                ue_rotation = ue_rotation_pyr_from_solver_xyz(solver_rotation)
+                bodies_at_frame[body["id"]] = rigid_body_at_pose(body, position, solver_rotation, ue_rotation)
+                rigid_states[body["id"]] = {
+                    "position_m": position,
+                    "solver_rotation_xyz_deg": solver_rotation,
+                    "ue_rotation_pyr_deg": ue_rotation,
+                    "linear_velocity_m_s": tensor_vector(entity.get_vel()),
+                    "angular_velocity_rad_s": tensor_vector(entity.get_ang()),
+                    "kinematic": False,
                 }
             else:
                 bodies_at_frame[body["id"]] = body
@@ -297,6 +329,39 @@ def add_static_axisymmetric_collision(
     return entities
 
 
+def add_asset_collision(scene: Any, gs: Any, body: dict[str, Any]) -> Any:
+    collision = body["collision"]
+    material_spec = body.get("material") if isinstance(body.get("material"), dict) else {}
+    material_options: dict[str, Any] = {
+        "needs_coup": True,
+        "coup_softness": 0.002,
+        "gravity_compensation": 0.0 if body["mobility"] == "dynamic" else 1.0,
+    }
+    if material_spec.get("density_kg_m3") is not None:
+        material_options["rho"] = float(material_spec["density_kg_m3"])
+    if material_spec.get("dynamic_friction") is not None:
+        material_options["friction"] = float(material_spec["dynamic_friction"])
+        material_options["coup_friction"] = float(material_spec["dynamic_friction"])
+    if material_spec.get("restitution") is not None:
+        material_options["coup_restitution"] = float(material_spec["restitution"])
+    return scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=collision["source_mesh_path"],
+            scale=tuple(body["transform"]["scale"]),
+            pos=tuple(body["transform"]["position_m"]),
+            euler=tuple(body["transform"]["euler_xyz_deg"]),
+            fixed=body["mobility"] == "static",
+            visualization=False,
+            collision=True,
+            convexify=True,
+            decompose_object_error_threshold=0.0,
+            recompute_inertia=True,
+            file_meshes_are_zup=collision["source_format"] not in {"glb", "gltf"},
+        ),
+        material=gs.materials.Rigid(**material_options),
+    )
+
+
 def add_kinematic_axisymmetric_collision(scene: Any, gs: Any, material: Any, body: dict[str, Any]) -> Any:
     collision = body["collision"]
     parts = profile_collision_parts(
@@ -361,6 +426,27 @@ def set_rigid_body_pose(
         skip_forward=True,
     )
     entity.set_dofs_velocity((*linear_velocity, *angular_velocity), skip_forward=False)
+
+
+def set_dynamic_body_initial_state(entity: Any, body: dict[str, Any], *, hold: bool) -> None:
+    transform = body["transform"]
+    entity.set_pos(
+        tuple(transform["position_m"]),
+        zero_velocity=True,
+        relative=False,
+        skip_forward=True,
+    )
+    entity.set_quat(
+        tuple(quaternion_from_matrix(rotation_matrix_xyz(transform["euler_xyz_deg"]))),
+        zero_velocity=True,
+        relative=False,
+        skip_forward=True,
+    )
+    velocity = [0.0] * 6 if hold else [
+        *body["initial_linear_velocity_m_s"],
+        *body["initial_angular_velocity_rad_s"],
+    ]
+    entity.set_dofs_velocity(tuple(velocity), skip_forward=False)
 
 
 def rigid_body_pose_at_time(body: dict[str, Any], time_s: float) -> tuple[list[float], list[float], list[float]]:
