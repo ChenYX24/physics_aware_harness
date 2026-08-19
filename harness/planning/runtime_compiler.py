@@ -316,6 +316,7 @@ def _compile_runtime_case_impl(
         runtime_case.data,
         scene_layout,
         asset_resolution=asset_resolution,
+        handoff_contract=backend_selection.get("handoff_contract"),
         target_backend=str(backend_selection.get("render_backend") or backend_selection["selected_backend"]),
     )
     actor_report = verify_runtime_actor_placement(runtime_case.data, runtime_actor_placement)

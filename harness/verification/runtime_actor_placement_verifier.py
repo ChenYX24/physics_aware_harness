@@ -164,7 +164,8 @@ def first_structured_physics_contract_mismatch(
             continue
         physics = binding.get("physics") if isinstance(binding.get("physics"), dict) else {}
         body_type = str(obj.get("body_type") or "").casefold()
-        if body_type == "dynamic" and physics.get("simulate_physics") is not True:
+        state_kind = str(physics.get("state_kind") or "rigid").casefold()
+        if state_kind != "particle" and body_type == "dynamic" and physics.get("simulate_physics") is not True:
             return {
                 "object_id": object_id,
                 "metric": "dynamic_object_not_simulated",
@@ -227,15 +228,38 @@ def first_bad_physics_binding(bindings: list[dict[str, Any]]) -> dict[str, Any] 
         object_id = str(binding.get("object_id") or "")
         asset = binding.get("asset") if isinstance(binding.get("asset"), dict) else {}
         physics = binding.get("physics") if isinstance(binding.get("physics"), dict) else {}
-        if not asset.get("ue_path") and not asset.get("proxy"):
-            return {"failure_type": "F2_asset_missing", "object_id": object_id, "metric": "missing_asset_or_proxy_binding", "value": None}
-        quality_gate = asset.get("quality_gate")
-        if asset.get("ue_path") and (
-            not isinstance(quality_gate, dict)
-            or quality_gate.get("status") not in {"pass", "pass_local_preview"}
-        ):
-            return {"failure_type": "F2_asset_missing", "object_id": object_id, "metric": "asset_quality_gate", "value": quality_gate}
-        if asset.get("ue_path") and asset.get("scale_policy") == "fit_uniform_to_approx_size":
+        visual = binding.get("visual_representation") if isinstance(binding.get("visual_representation"), dict) else {}
+        visual_source = str(visual.get("source") or "asset")
+        render_binding = binding.get("render_binding") if isinstance(binding.get("render_binding"), dict) else {}
+        if visual_source == "solver_generated":
+            cache_contract = render_binding.get("cache_contract") if isinstance(render_binding.get("cache_contract"), dict) else {}
+            if (
+                render_binding.get("kind") != "solver_generated"
+                or render_binding.get("solver_declared") is not True
+                or not str(cache_contract.get("contract_id") or "")
+                or not str(cache_contract.get("schema_version") or "")
+                or not str(cache_contract.get("producer_backend") or "")
+                or not str(cache_contract.get("consumer_backend") or "")
+                or not isinstance(cache_contract.get("required_artifacts"), list)
+                or not cache_contract.get("required_artifacts")
+                or not str(cache_contract.get("adapter_contract") or "")
+            ):
+                return {
+                    "failure_type": "F7_runtime_artifact_incomplete",
+                    "object_id": object_id,
+                    "metric": "solver_generated_render_cache_binding",
+                    "value": render_binding,
+                }
+        elif visual_source == "asset":
+            if not asset.get("ue_path") and not asset.get("proxy"):
+                return {"failure_type": "F2_asset_missing", "object_id": object_id, "metric": "missing_asset_or_proxy_binding", "value": None}
+            quality_gate = asset.get("quality_gate")
+            if asset.get("ue_path") and (
+                not isinstance(quality_gate, dict)
+                or quality_gate.get("status") not in {"pass", "pass_local_preview"}
+            ):
+                return {"failure_type": "F2_asset_missing", "object_id": object_id, "metric": "asset_quality_gate", "value": quality_gate}
+        if visual_source == "asset" and asset.get("ue_path") and asset.get("scale_policy") == "fit_uniform_to_approx_size":
             instance_scale = asset.get("instance_scale")
             valid_scale = bool(
                 asset.get("scale_applied") is True
@@ -298,6 +322,11 @@ def checks(placement: dict[str, Any], bindings: list[dict[str, Any]]) -> dict[st
         "physics_critical_count": sum(1 for binding in bindings if binding.get("physics_critical")),
         "simulated_actor_count": sum(1 for binding in bindings if (binding.get("physics") or {}).get("simulate_physics")),
         "proxy_actor_count": sum(1 for binding in bindings if (binding.get("asset") or {}).get("proxy")),
+        "solver_generated_actor_count": sum(
+            1
+            for binding in bindings
+            if ((binding.get("render_binding") or {}).get("kind") == "solver_generated")
+        ),
         "local_preview_asset_count": sum(
             1
             for binding in bindings

@@ -1413,6 +1413,7 @@ class AssetProviderOrchestrator:
                 "provider_version": acquisition.provider_version,
                 "receipt_id": receipt_id,
                 "source_asset_id": acquisition.source_asset_id,
+                "requested_source_uri_hint": str(request.get("source_uri_hint") or ""),
                 "canonical_file_sha256": next(
                     str(row["sha256"])
                     for row in acquisition.files

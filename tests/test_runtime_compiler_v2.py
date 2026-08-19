@@ -444,6 +444,147 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
             ["floor"],
         )
 
+    def test_solver_generated_fluid_compiles_with_cache_binding_and_no_asset(self) -> None:
+        data = case_spec_v2_fixture()
+        data["identity"]["case_id"] = "solver_generated_fluid"
+        data["capabilities"] = {
+            "primary": "fluid_particle_dynamics",
+            "required": ["fluid_particle_dynamics"],
+        }
+        data["backend_constraints"] = {
+            "required_solver_capabilities": [
+                "particle_dynamics",
+                "particle_cache",
+                "surface_mesh_cache",
+            ],
+            "allowed_solvers": ["genesis_sph"],
+            "render_backend": "ue",
+            "allow_multi_backend": True,
+        }
+        data["workspace_bounds_m"] = {
+            "min_m": [-1.0, -1.0, -0.1],
+            "max_m": [1.0, 1.0, 1.0],
+        }
+        data["solver_scene"] = {
+            "type": "rigid_sph",
+            "initialization": {
+                "state": "settled",
+                "pre_roll_s": 0.25,
+                "capture_after_pre_roll": True,
+            },
+            "measurements": [{"id": "span", "type": "axis_span", "axes": ["x", "y"]}],
+            "assertions": [
+                {
+                    "id": "span_final",
+                    "measurement_id": "span",
+                    "reduction": "final",
+                    "operator": ">=",
+                    "value": 0.01,
+                }
+            ],
+        }
+        water = data["objects"][0]
+        water.update(
+            {
+                "id": "water",
+                "role": "fluid",
+                "visual_representation": {"source": "solver_generated", "visible": True},
+                "physics": {"body_type": "dynamic", "collision_required": False},
+                "solver": {
+                    "material_model": "sph_liquid",
+                    "initial_volume": {
+                        "shape": "cylinder",
+                        "frame": {"type": "world"},
+                        "position_m": [0.0, 0.0, 0.2],
+                        "radius_m": 0.05,
+                        "height_m": 0.1,
+                    },
+                },
+            }
+        )
+        floor = data["objects"][2]
+        floor.update(
+            {
+                "id": "floor",
+                "role": "rigid_body",
+                "visual_representation": {"source": "asset", "visible": True},
+                "asset": {
+                    "description": "registered test floor",
+                    "resource_kind": "mesh_3d",
+                    "acquisition": {
+                        "route": "local_catalog",
+                        "requirement": "required",
+                        "origin": "user_explicit",
+                        "source_uri_hint": "harness://tests/fluid-floor",
+                    },
+                },
+                "solver": {
+                    "mobility": "static",
+                    "transform": {
+                        "position_m": [0.0, 0.0, 0.0],
+                        "euler_xyz_deg": [0.0, 0.0, 0.0],
+                        "ue_rotation_pyr_deg": [0.0, 0.0, 0.0],
+                    },
+                    "collision": {
+                        "type": "plane",
+                        "position_m": [0.0, 0.0, 0.05],
+                        "normal": [0.0, 0.0, 1.0],
+                        "asset_geometry_match": True,
+                    },
+                },
+            }
+        )
+        data["objects"] = [water, floor]
+        data["relations"] = []
+        data["events"] = []
+        data["expected_behavior"] = {}
+        data["observation_requirements"]["cameras"][0]["target_objects"] = ["water"]
+        data["verification_requirements"]["assertions"] = []
+
+        floor_asset = {
+            "asset_id": "registered_fluid_floor",
+            "name": "registered fluid floor",
+            "source_kind": "engine_builtin",
+            "source_uri": "harness://tests/fluid-floor",
+            "ue_path": "/Game/Harness/FluidFloor.FluidFloor",
+            "sha256": "a" * 64,
+            "license": "CC0-1.0",
+            "license_tier": "reference",
+            "quality_status": "approved",
+            "materialized": True,
+            "bbox_size_m": [3.0, 2.0, 0.1],
+            "authored_size_m": [3.0, 2.0, 0.1],
+            "preserve_authored_scale": True,
+            "collider": "box",
+            "collision_profile": "PhysicsActor",
+            "collision": {"present": True, "kind": "simple_box"},
+            "mass_kg": 100.0,
+            "material": {"dynamic_friction": 0.04, "restitution": 0.15},
+            "proxy": False,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            registry_path = Path(temporary) / "registry.json"
+            registry_path.write_text(json.dumps({"assets": [floor_asset]}), encoding="utf-8")
+            compilation = compile_runtime_case(
+                case_spec_v2_from_dict(data),
+                requested_backend="genesis_sph",
+                registry=AssetRegistry(registry_path),
+            )
+
+        self.assertEqual(compilation.status, "pass")
+        water_binding = next(
+            binding
+            for binding in compilation.artifacts["runtime_actor_placement"]["actor_bindings"]
+            if binding["object_id"] == "water"
+        )
+        self.assertIsNone(water_binding["asset"]["ue_path"])
+        self.assertFalse(water_binding["asset"]["proxy"])
+        self.assertEqual(water_binding["render_binding"]["kind"], "solver_generated")
+        self.assertEqual(
+            water_binding["render_binding"]["cache_contract"]["contract_id"],
+            "particle_surface_cache_v1",
+        )
+
     def test_rigid_sph_solver_targets_ue_replay_asset_bindings(self) -> None:
         source = CaseSpecV2(
             {
@@ -909,6 +1050,103 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
         self.assertIsNone(row["selected_asset"])
         self.assertEqual(row["acquisition"]["status"], "local_catalog_unresolved")
         self.assertTrue(compilation.artifacts["asset_resolution"]["assets"][1]["selected_asset"])
+
+    def test_required_local_source_uri_cannot_be_replaced_by_semantic_match(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            catalog_path = root / "catalog.sqlite"
+            initialize_catalog(catalog_path)
+            registry = AssetRegistry(catalog_path)
+            exact_file = root / "coffee_mug.fbx"
+            similar_file = root / "meshy_mug.fbx"
+            exact_file.write_bytes(b"exact-user-mug")
+            similar_file.write_bytes(b"similar-meshy-mug")
+            exact_uri = "local-input://sha256/exact/coffee_mug.fbx"
+
+            def asset(asset_id: str, path: Path, source_uri: str, source_kind: str) -> dict:
+                return {
+                    "asset_id": asset_id,
+                    "name": "Coffee Mug",
+                    "semantic_name": "coffee mug",
+                    "description": "coffee mug",
+                    "aliases": ["coffee mug"],
+                    "tags": ["active_striker"],
+                    "category": "rigid_body",
+                    "type": "StaticMesh",
+                    "asset_kind": "StaticMesh",
+                    "source_kind": source_kind,
+                    "source_uri": source_uri,
+                    "license": "All Rights Reserved",
+                    "license_tier": "local_preview",
+                    "quality_status": "approved",
+                    "lifecycle_status": "runtime_bound",
+                    "materialized": True,
+                    "ue_path": f"/Game/Test/{asset_id}.{asset_id}",
+                    "class_name": "StaticMesh",
+                    "local_path": str(path),
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "byte_size": path.stat().st_size,
+                    "bbox_size_m": [0.1, 0.1, 0.1],
+                    "collider": "box",
+                    "collision_profile": "PhysicsActor",
+                    "mass_kg": 0.2,
+                    "material": {"static_friction": 0.5},
+                    "collision": {"present": True, "kind": "simple_convex"},
+                    "backend_bindings": {
+                        "unreal": {
+                            "object_path": f"/Game/Test/{asset_id}.{asset_id}",
+                            "class_name": "StaticMesh",
+                            "materialized": True,
+                            "runtime_ready": True,
+                        }
+                    },
+                }
+
+            registry.register_asset(asset("user_mug", exact_file, exact_uri, "local_input"))
+            registry.register_asset(asset("meshy_mug", similar_file, "meshy://mug", "model_generation"))
+            data = case_spec_v2_fixture()
+            data["objects"][0]["asset"] = {
+                "description": "coffee mug",
+                "resource_kind": "mesh_3d",
+                "acquisition": {
+                    "route": "local_catalog",
+                    "requirement": "required",
+                    "origin": "user_explicit",
+                    "source_uri_hint": exact_uri,
+                    "reference_inputs": [],
+                    "fallback_order": [],
+                },
+            }
+            source = case_spec_v2_from_dict(data)
+            runtime = compile_case_spec_v2_runtime(source)
+            intents = compile_v2_asset_intents(source, runtime.data, target_backend="unreal")
+
+            resolution = resolve_asset_intents(
+                runtime.data,
+                registry=registry,
+                compiled_intents=intents,
+                target_backend="unreal",
+                allow_local_preview=True,
+            )
+            row = resolution["assets"][0]
+            self.assertEqual(row["selected_asset"]["asset_id"], "user_mug")
+            self.assertEqual(row["selection_reason"], "required_source_uri_exact_match")
+            self.assertNotIn("meshy_mug", {item["asset_id"] for item in row["candidates"]})
+
+            data["objects"][0]["asset"]["acquisition"]["source_uri_hint"] = "local-input://missing"
+            missing_source = case_spec_v2_from_dict(data)
+            missing_runtime = compile_case_spec_v2_runtime(missing_source)
+            missing_intents = compile_v2_asset_intents(missing_source, missing_runtime.data, target_backend="unreal")
+            missing = resolve_asset_intents(
+                missing_runtime.data,
+                registry=registry,
+                compiled_intents=missing_intents,
+                target_backend="unreal",
+                allow_local_preview=True,
+            )["assets"][0]
+            self.assertIsNone(missing["selected_asset"])
+            self.assertEqual(missing["candidates"], [])
+            self.assertIsNone(missing["fallback_mode"])
 
     def test_required_model_generation_fails_closed_without_writable_catalog(self) -> None:
         data = case_spec_v2_fixture()

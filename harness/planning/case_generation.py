@@ -2039,6 +2039,7 @@ def case_spec_generation_contract() -> dict[str, Any]:
             "do not emit UE paths, runtime stages, exact camera poses, or verifier implementations",
             "solver_scene and object.solver may declare generic primitives only and must survive deterministic projection unchanged",
             "asset resolution applies only to objects with visual_representation.source=asset; solver_generated and none must omit object.asset",
+            "a required source_uri_hint is an exact source identity: register local files first and use the returned local-input URI; resolution must fail instead of selecting a semantically similar asset",
             "visual_representation.visible controls rendering only; collision is controlled by physics declarations and the selected collision binding",
             "declared physics.collision_geometry is the sole collision truth and supports only box, sphere, or cylinder; it cannot coexist with collision_required=false",
             "source=none with collision_required=true requires explicit collision_geometry; source=asset without collision_geometry uses the qualified imported asset BodySetup and never a bounds-derived fallback",

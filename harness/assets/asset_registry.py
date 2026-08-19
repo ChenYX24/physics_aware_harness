@@ -115,6 +115,14 @@ class AssetRegistry:
     def get_assets_by_ids(self, asset_ids: list[str]) -> list[dict[str, Any]]:
         return [asset for asset_id in asset_ids if (asset := self.get_asset_by_id(asset_id)) is not None]
 
+    def get_assets_by_source_uri(self, source_uri: str) -> list[dict[str, Any]]:
+        identity = str(source_uri).strip()
+        if not identity:
+            return []
+        if self._sqlite is not None:
+            return self._sqlite.get_assets_by_source_uri(identity)
+        return [item for item in self.assets if str(item.get("source_uri") or "") == identity]
+
     def search_intent(self, intent: SearchIntent, *, top_k: int = 5) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         if self._sqlite:

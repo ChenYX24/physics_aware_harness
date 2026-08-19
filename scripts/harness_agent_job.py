@@ -105,6 +105,15 @@ def parse_args() -> argparse.Namespace:
     submit.add_argument("job_id")
     submit.add_argument("--submission", required=True)
 
+    register_asset = commands.add_parser(
+        "register-local-asset",
+        help="Hash, import, qualify, and register one user-provided FBX/OBJ or archive before CaseSpec submission.",
+    )
+    register_asset.add_argument("job_id")
+    register_asset.add_argument("--path", required=True)
+    register_asset.add_argument("--license", default="All Rights Reserved")
+    register_asset.add_argument("--license-tier", choices=["local_preview", "reference"], default="local_preview")
+
     resume = commands.add_parser("resume")
     resume.add_argument("job_id")
     resume.add_argument("--budget-extension-seconds", type=int, default=0)
@@ -216,6 +225,13 @@ def main() -> int:
             )
         else:
             result = controller.submit_native_generation(args.job_id, submission)
+    elif args.command == "register-local-asset":
+        result = controller.register_local_asset(
+            args.job_id,
+            args.path,
+            license_name=args.license,
+            license_tier=args.license_tier,
+        )
     elif args.command == "resume":
         authorizations = {}
         for field, enabled in (

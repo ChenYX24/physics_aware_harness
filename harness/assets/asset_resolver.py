@@ -44,6 +44,11 @@ def resolve_asset_intents(
         provider_result = provider_results.get((compiled.object_id, compiled.slot)) if provider_results else None
         explicit_proxy = bool(obj.get("force_analytic_proxy") or obj.get("asset_policy") == "analytic_proxy")
         search_intent = compiled.search_intent
+        required_source_uri = (
+            str(acquisition.get("source_uri_hint") or "").strip()
+            if acquisition and acquisition.get("requirement") == "required"
+            else ""
+        )
         provider_fulfilled = bool(provider_result and provider_result.get("status") == "fulfilled")
         provider_failed = bool(provider_result and provider_result.get("status") in {"blocked", "failed"})
         explicit_local_fallback = bool(
@@ -66,6 +71,14 @@ def resolve_asset_intents(
                 )
                 if candidate_matches_search_intent(candidate, search_intent)
             ]
+            if required_source_uri:
+                ranked = [
+                    candidate
+                    for candidate in ranked
+                    if candidate_matches_required_source_uri(candidate, required_source_uri)
+                ]
+        elif required_source_uri:
+            ranked = registry.get_assets_by_source_uri(required_source_uri) if can_search_catalog else []
         else:
             ranked = registry.search_intent(search_intent, top_k=max(top_k * 4, top_k)) if can_search_catalog else []
         if explicit_proxy:
@@ -89,7 +102,9 @@ def resolve_asset_intents(
             "rejected_candidates": rejected,
             "selected_asset": selected,
             "selection_reason": (
-                "explicit_analytic_recipe_policy"
+                "required_source_uri_exact_match"
+                if required_source_uri and selected
+                else "explicit_analytic_recipe_policy"
                 if explicit_proxy and selected
                 else "first_reference_approved_candidate"
                 if selected and selected["quality_gate"]["status"] == "pass"
@@ -107,6 +122,8 @@ def resolve_asset_intents(
             "fallback_reason": (
                 None
                 if selected
+                else f"required source_uri_hint did not resolve exactly: {required_source_uri}"
+                if required_source_uri
                 else str((provider_result.get("failure") or {}).get("message") or "Provider result did not yield a qualified registered asset")
                 if provider_result
                 else f"requested acquisition route requires next-stage Provider: {acquisition['route']}"
@@ -116,7 +133,9 @@ def resolve_asset_intents(
                 else "no quality-approved registry candidate; use analytic/proxy asset"
             ),
             "fallback_mode": (
-                "provider_required"
+                None
+                if required_source_uri
+                else "provider_required"
                 if provider_pending and not selected
                 else "harness_generate_analytic"
                 if explicit_proxy and not selected
@@ -204,6 +223,17 @@ def resolve_asset_intents(
     if scene_map:
         result["scene_map"] = scene_map
     return result
+
+
+def candidate_matches_required_source_uri(candidate: dict[str, Any], source_uri: str) -> bool:
+    expected = str(source_uri).strip()
+    if not expected:
+        return False
+    provenance = candidate.get("provenance") if isinstance(candidate.get("provenance"), dict) else {}
+    return expected in {
+        str(candidate.get("source_uri") or "").strip(),
+        str(provenance.get("requested_source_uri_hint") or "").strip(),
+    }
 
 
 def requested_map_reference(

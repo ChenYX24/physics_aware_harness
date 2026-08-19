@@ -543,6 +543,59 @@ class AgentJobControllerTests(unittest.TestCase):
             requested_backend="fallback",
         )
 
+    def test_local_asset_registration_is_persisted_in_effective_provider_manifest(self) -> None:
+        controller, _fake = self.controller()
+        controller.create(
+            self.request,
+            job_id="job_local_asset_registration",
+            publication_tier="local_preview",
+        )
+        source = self.workspace / "registered" / "coffee_mug.fbx"
+        source.parent.mkdir()
+        source.write_bytes(b"coffee-mug")
+        source_hash = __import__("hashlib").sha256(source.read_bytes()).hexdigest()
+        registration = {
+            "schema_version": "harness_local_asset_registration_v1",
+            "status": "registered",
+            "asset_id": f"local_input.coffee_mug.{source_hash[:16]}",
+            "source_uri": f"local-input://sha256/{source_hash}/coffee_mug.fbx",
+            "source_sha256": source_hash,
+            "catalog_sha256": source_hash,
+            "local_path": str(source),
+            "byte_size": source.stat().st_size,
+            "ue_path": "/Game/HarnessImported/SM_CoffeeMug.SM_CoffeeMug",
+            "class_name": "StaticMesh",
+            "license": "All Rights Reserved",
+            "license_tier": "local_preview",
+            "qualification": {"status": "pass_local_preview"},
+            "importer_invoked": True,
+            "registration_root": str(source.parent),
+            "case_spec_reference": {
+                "route": "local_catalog",
+                "requirement": "required",
+                "origin": "user_explicit",
+                "source_uri_hint": f"local-input://sha256/{source_hash}/coffee_mug.fbx",
+                "reference_inputs": [],
+                "fallback_order": [],
+            },
+        }
+
+        with patch(
+            "harness.agent.job_controller.register_local_asset_input",
+            return_value=registration,
+        ):
+            result = controller.register_local_asset(
+                "job_local_asset_registration",
+                source,
+            )
+
+        self.assertEqual(result["asset_id"], registration["asset_id"])
+        effective = read_json(result["provider_input_manifest"]["path"])
+        self.assertEqual(effective["inputs"][0]["kind"], "asset_3d")
+        self.assertEqual(effective["inputs"][0]["source_uri"], registration["source_uri"])
+        inspection = controller.inspect("job_local_asset_registration")
+        self.assertEqual(inspection["local_asset_registrations"][0]["source_sha256"], source_hash)
+
     def test_image_only_without_planning_authorization_blocks_at_l0_without_generation(self) -> None:
         controller, fake = self.controller()
         request = self._image_request(text=None)

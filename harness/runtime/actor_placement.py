@@ -14,12 +14,17 @@ def compile_runtime_actor_placement(
     scene_layout: dict[str, Any],
     *,
     asset_resolution: dict[str, Any] | None = None,
+    handoff_contract: dict[str, Any] | None = None,
     target_backend: str = "UE",
 ) -> dict[str, Any]:
     object_nodes = [node for node in scene_layout.get("object_nodes", []) if isinstance(node, dict)]
     actorless_anchor_ids = actorless_world_anchor_object_ids(case_spec)
     actor_bindings = [
-        actor_binding_from_node(node, target_backend=target_backend)
+        actor_binding_from_node(
+            node,
+            target_backend=target_backend,
+            handoff_contract=handoff_contract,
+        )
         for node in object_nodes
         if str(node.get("object_id") or "") not in actorless_anchor_ids
     ]
@@ -62,6 +67,11 @@ def compile_runtime_actor_placement(
             "camera_count": len(camera_bindings),
             "constraint_count": len(constraint_bindings),
             "proxy_actor_count": sum(1 for binding in actor_bindings if (binding.get("asset") or {}).get("proxy")),
+            "solver_generated_actor_count": sum(
+                1
+                for binding in actor_bindings
+                if ((binding.get("render_binding") or {}).get("kind") == "solver_generated")
+            ),
         },
         "placement_warnings": placement_warnings,
     }
@@ -213,7 +223,12 @@ def constraint_frame_in_world(obj: dict[str, Any], frame: dict[str, Any]) -> dic
     }
 
 
-def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dict[str, Any]:
+def actor_binding_from_node(
+    node: dict[str, Any],
+    *,
+    target_backend: str,
+    handoff_contract: dict[str, Any] | None,
+) -> dict[str, Any]:
     object_id = str(node.get("object_id") or "")
     role = str(node.get("role") or "")
     physics = node.get("physics") if isinstance(node.get("physics"), dict) else {}
@@ -302,6 +317,12 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
         float(visual_center_offset[index]) - float(collision_center_offset[index])
         for index in range(3)
     ]
+    visual_source = str(visual_representation.get("source") or "asset")
+    render_binding = render_binding_for(
+        visual_source,
+        solver_declared=node.get("solver_declared") is True,
+        handoff_contract=handoff_contract,
+    )
     return {
         "object_id": object_id,
         "runtime_actor_id": runtime_actor_id(object_id),
@@ -314,10 +335,11 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
         "declared_object_transform": object_transform,
         "bounds": node.get("bounds") or {},
         "visual_representation": {
-            "source": str(visual_representation.get("source") or "asset"),
+            "source": visual_source,
             "visible": visible,
             "local_bounds_center_from_collision_m": relative_visual_center_offset,
         },
+        "render_binding": render_binding,
         "asset": {
             "selected_asset_id": asset_binding.get("selected_asset_id"),
             "ue_path": ue_path,
@@ -375,6 +397,32 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
         "runtime_binding_requirements": asset_binding.get("runtime_binding_requirements") or [],
         "target_backend": target_backend,
     }
+
+
+def render_binding_for(
+    visual_source: str,
+    *,
+    solver_declared: bool,
+    handoff_contract: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if visual_source == "solver_generated":
+        contract = handoff_contract if isinstance(handoff_contract, dict) else {}
+        return {
+            "kind": "solver_generated",
+            "solver_declared": solver_declared,
+            "cache_contract": {
+                key: contract.get(key)
+                for key in (
+                    "contract_id",
+                    "schema_version",
+                    "producer_backend",
+                    "consumer_backend",
+                    "required_artifacts",
+                    "adapter_contract",
+                )
+            } if contract else None,
+        }
+    return {"kind": visual_source}
 
 
 def camera_bindings_from_layout(scene_layout: dict[str, Any]) -> list[dict[str, Any]]:

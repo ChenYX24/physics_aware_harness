@@ -72,8 +72,19 @@ from harness.agent.semantic_reviewer import (
     semantic_reviewer_input_digest,
 )
 from harness.assets.asset_registry import AssetRegistry
+from harness.assets.local_asset_input import (
+    LOCAL_ASSET_REGISTRATION_SCHEMA,
+    LocalAssetRegistrationError,
+    provider_manifest_input,
+    register_local_asset_input,
+)
+from harness.assets.providers.backend_importer import UECommandImporterAdapter
 from harness.assets.providers.orchestrator import AssetProviderOrchestrator
-from harness.assets.providers.input_manifest import PROVIDER_INPUT_MANIFEST_SCHEMA, build_provider_input_manifest
+from harness.assets.providers.input_manifest import (
+    PROVIDER_INPUT_MANIFEST_SCHEMA,
+    build_provider_input_manifest,
+    with_registered_asset_input,
+)
 from harness.assets.providers.local_procedural_mesh import RECIPE_BY_SHAPE
 from harness.assets.providers.remote import MeshyModelGenerationAdapter, PolyHavenExternalSiteAdapter
 from harness.core.artifact_schema import read_json, write_json
@@ -218,6 +229,7 @@ class AgentJobController:
             meshy_flags = [
                 (row.get("authorizations") or {}).get("meshy_upload") is True
                 for row in provider_manifest.get("inputs") or []
+                if row.get("kind") == "image"
             ]
             if meshy_flags and auth["meshy_upload"] != all(meshy_flags):
                 raise ValueError("meshy_upload authorization must match every Provider input manifest record")
@@ -265,6 +277,95 @@ class AgentJobController:
         self._emit(identity, "job_created", stage="intake_readiness", artifact_refs=[str(root / "job_manifest.json")])
         return self.inspect(identity)
 
+    def register_local_asset(
+        self,
+        job_id: str,
+        source_path: str | Path,
+        *,
+        license_name: str = "All Rights Reserved",
+        license_tier: str = "local_preview",
+    ) -> dict[str, Any]:
+        with self.store.lock(job_id):
+            manifest = self.store.load_manifest(job_id)
+            if manifest.get("current_attempt_id") is not None or manifest.get("current_stage") not in {
+                "intake_readiness",
+                "generation",
+            }:
+                raise JobStoreError("local assets must be registered before a CaseSpec attempt is created")
+            source = Path(source_path).expanduser().resolve()
+            source_identity = (
+                self._sha256_file(source)[:16]
+                if source.is_file()
+                else stable_digest({"path": str(source), "job_id": job_id})[:16]
+            )
+            registration_root = self.store.job_dir(job_id) / "request" / "local_assets" / source_identity
+
+            def before_import(_request: Any) -> None:
+                current = self._reconcile_ue_launch_usage(self.store.load_manifest(job_id))
+                if int(current["usage"]["ue_launches"]) >= int(current["budget"]["max_ue_launches"]):
+                    raise LocalAssetRegistrationError(
+                        "ue_launch_budget_exhausted",
+                        "UE launch budget is exhausted before local asset import",
+                    )
+                self._record_controller_ue_launch(
+                    current,
+                    kind="local_asset_importer",
+                    stage="local_asset_registration",
+                )
+
+            try:
+                result = register_local_asset_input(
+                    source,
+                    workspace=self.store.workspace,
+                    registration_root=registration_root,
+                    registry=self._registry(),
+                    importer=UECommandImporterAdapter(command=self.config.ue_asset_importer_command),
+                    before_import=before_import,
+                    license_name=license_name,
+                    license_tier=license_tier,
+                )
+            except LocalAssetRegistrationError as exc:
+                manifest = self._reconcile_ue_launch_usage(self.store.load_manifest(job_id))
+                failure = {
+                    "schema_version": LOCAL_ASSET_REGISTRATION_SCHEMA,
+                    "status": "failed",
+                    "job_id": job_id,
+                    "failure": {"code": exc.code, "message": exc.message},
+                    "source_path": str(source),
+                }
+                self.store.write_request_artifact(
+                    job_id,
+                    f"local_asset_registration_failed_{stable_digest(failure)[:16]}.json",
+                    failure,
+                )
+                return failure
+
+            result = {**result, "job_id": job_id}
+            self.store.write_request_artifact(
+                job_id,
+                f"local_asset_registration_{result['source_sha256'][:16]}.json",
+                result,
+            )
+            current_manifest = self._effective_provider_input_manifest(job_id)
+            if current_manifest is None:
+                request = read_json(self.store.job_dir(job_id) / "request" / "user_request.json")
+                current_manifest = build_provider_input_manifest(
+                    list(request.get("inputs") or []),
+                    workspace=self.store.workspace,
+                    meshy_upload_authorized=manifest["authorizations"]["meshy_upload"],
+                )
+            effective = with_registered_asset_input(current_manifest, provider_manifest_input(result))
+            manifest_path = self._write_effective_provider_manifest(job_id, effective)
+            reconciled = self._reconcile_ue_launch_usage(self.store.load_manifest(job_id))
+            return {
+                **result,
+                "provider_input_manifest": {
+                    "path": str(manifest_path),
+                    "digest": stable_digest(effective),
+                },
+                "usage": copy.deepcopy(reconciled["usage"]),
+            }
+
     def inspect(self, job_id: str) -> dict[str, Any]:
         manifest = self.store.load_manifest(job_id)
         root = self.store.job_dir(job_id)
@@ -280,6 +381,11 @@ class AgentJobController:
         attempts = []
         for path in sorted((root / "attempts").glob("attempt_*/attempt_manifest.json")):
             attempts.append(AttemptManifest.from_dict(read_json(path)).to_dict())
+        local_asset_registrations = [
+            read_json(path)
+            for path in sorted((root / "request").glob("local_asset_registration_*.json"))
+            if "failed" not in path.name
+        ]
         current_leaf_stage_result = self._current_leaf_stage_result(manifest)
         case_spec_contract_repair = self._case_spec_contract_repair_eligibility(
             manifest,
@@ -333,6 +439,7 @@ class AgentJobController:
             "native_generation_context_digest": context_digest,
             "job": manifest,
             "attempts": attempts,
+            "local_asset_registrations": local_asset_registrations,
             "current_leaf_stage_result": current_leaf_stage_result,
             "failed_stage_retry": self._failed_stage_retry_eligibility(
                 manifest,
@@ -3134,9 +3241,16 @@ class AgentJobController:
             workspace=self.store.workspace,
             meshy_upload_authorized=manifest["authorizations"]["meshy_upload"],
         )
-        provider_path = self.store.write_request_artifact(
-            manifest["job_id"],
-            f"provider_input_manifest_effective_{sequence:03d}.json",
+        current_provider_manifest = self._effective_provider_input_manifest(str(manifest["job_id"]))
+        if current_provider_manifest is not None:
+            for row in current_provider_manifest.get("inputs") or []:
+                if isinstance(row, Mapping) and row.get("kind") == "asset_3d":
+                    effective_provider_manifest = with_registered_asset_input(
+                        effective_provider_manifest,
+                        row,
+                    )
+        provider_path = self._write_effective_provider_manifest(
+            str(manifest["job_id"]),
             effective_provider_manifest,
         )
         payload = {
@@ -4248,6 +4362,25 @@ class AgentJobController:
         if not path.is_file():
             return None
         return self._validate_provider_manifest(read_json(path))
+
+    def _write_effective_provider_manifest(
+        self,
+        job_id: str,
+        manifest: Mapping[str, Any],
+    ) -> Path:
+        request_root = self.store.job_dir(job_id) / "request"
+        sequences = []
+        for path in request_root.glob("provider_input_manifest_effective_*.json"):
+            try:
+                sequences.append(int(path.stem.rsplit("_", 1)[1]))
+            except (IndexError, ValueError):
+                continue
+        sequence = max(sequences, default=0) + 1
+        return self.store.write_request_artifact(
+            job_id,
+            f"provider_input_manifest_effective_{sequence:03d}.json",
+            self._validate_provider_manifest(manifest),
+        )
 
     def _provider_orchestrator(self, manifest: Mapping[str, Any]) -> AssetProviderOrchestrator:
         ue_launch_ledger_path = self._ensure_ue_launch_ledger(manifest)

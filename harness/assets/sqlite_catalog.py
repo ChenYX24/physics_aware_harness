@@ -132,6 +132,23 @@ class SQLiteCatalog:
             ).fetchone()
         return json.loads(str(row["row_json"])) if row else None
 
+    def get_assets_by_source_uri(self, source_uri: str) -> list[dict[str, Any]]:
+        identity = str(source_uri).strip()
+        if not identity:
+            return []
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT a.row_json
+                FROM asset_sources s
+                JOIN assets a ON a.asset_id = s.asset_id
+                WHERE s.source_uri = ?
+                ORDER BY a.asset_id
+                """,
+                (identity,),
+            ).fetchall()
+        return [json.loads(str(row["row_json"])) for row in rows]
+
     def search(self, intent: SearchIntent, *, top_k: int = 5) -> list[dict[str, Any]]:
         return [entry["asset"] for entry in self.search_detailed(intent, top_k=top_k)["results"]]
 

@@ -575,6 +575,122 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual(report["failure_type"], "F2_asset_missing")
         self.assertEqual(report["first_failure"]["metric"], "missing_asset_or_proxy_binding")
 
+    def test_solver_generated_particle_uses_render_cache_binding_without_asset(self) -> None:
+        from harness.runtime.actor_placement import compile_runtime_actor_placement
+        from harness.verification.runtime_actor_placement_verifier import verify_runtime_actor_placement
+
+        case = {
+            "case_id": "solver_generated_water",
+            "objects": [
+                {
+                    "id": "water",
+                    "role": "fluid",
+                    "body_type": "dynamic",
+                    "solver": {"material_model": "sph_liquid"},
+                    "visual_representation": {"source": "solver_generated", "visible": True},
+                }
+            ],
+        }
+        scene_layout = {
+            "case_id": case["case_id"],
+            "object_nodes": [
+                {
+                    "object_id": "water",
+                    "role": "fluid",
+                    "shape": "cylinder",
+                    "physics_critical": True,
+                    "solver_declared": True,
+                    "transform": {"position_m": [0.0, 0.0, 0.2], "rotation_deg": [0.0, 0.0, 0.0]},
+                    "bounds": {"extents_m": [0.1, 0.1, 0.2]},
+                    "visual_representation": {"source": "solver_generated", "visible": True},
+                    "physics": {
+                        "state_kind": "particle",
+                        "body_type": "particle",
+                        "collision_required": False,
+                    },
+                    "asset_binding": {},
+                }
+            ],
+            "camera_plan": {"views": [{"id": "front"}]},
+        }
+        handoff = {
+            "contract_id": "particle_surface_cache_v1",
+            "schema_version": "harness_particle_cache_v1",
+            "producer_backend": "genesis_sph",
+            "consumer_backend": "ue",
+            "required_artifacts": ["particle_cache.json"],
+            "adapter_contract": "surface_mesh_sequence_replay_v1",
+        }
+
+        placement = compile_runtime_actor_placement(
+            case,
+            scene_layout,
+            handoff_contract=handoff,
+            target_backend="ue",
+        )
+        report = verify_runtime_actor_placement(case, placement)
+
+        binding = placement["actor_bindings"][0]
+        self.assertEqual(binding["render_binding"]["kind"], "solver_generated")
+        self.assertEqual(binding["render_binding"]["cache_contract"], handoff)
+        self.assertIsNone(binding["asset"]["ue_path"])
+        self.assertFalse(binding["asset"]["proxy"])
+        self.assertEqual(report["status"], "pass")
+
+        missing_handoff = compile_runtime_actor_placement(case, scene_layout, target_backend="ue")
+        missing_report = verify_runtime_actor_placement(case, missing_handoff)
+        self.assertEqual(missing_report["status"], "fail")
+        self.assertEqual(missing_report["failure_type"], "F7_runtime_artifact_incomplete")
+        self.assertEqual(missing_report["first_failure"]["metric"], "solver_generated_render_cache_binding")
+
+    def test_ordinary_asset_representation_still_requires_asset_binding(self) -> None:
+        from harness.runtime.actor_placement import compile_runtime_actor_placement
+        from harness.verification.runtime_actor_placement_verifier import verify_runtime_actor_placement
+
+        case = {
+            "case_id": "missing_asset",
+            "objects": [
+                {
+                    "id": "mug",
+                    "role": "rigid_body",
+                    "body_type": "dynamic",
+                    "collision_required": True,
+                    "visual_representation": {"source": "asset", "visible": True},
+                }
+            ],
+        }
+        scene_layout = {
+            "case_id": "missing_asset",
+            "object_nodes": [
+                {
+                    "object_id": "mug",
+                    "role": "rigid_body",
+                    "shape": "box",
+                    "physics_critical": True,
+                    "transform": {"position_m": [0.0, 0.0, 0.1], "rotation_deg": [0.0, 0.0, 0.0]},
+                    "bounds": {"extents_m": [0.05, 0.05, 0.1]},
+                    "visual_representation": {"source": "asset", "visible": True},
+                    "physics": {
+                        "state_kind": "rigid",
+                        "body_type": "dynamic",
+                        "collision_required": True,
+                        "collider": "box",
+                        "collision_profile": "PhysicsActor",
+                        "mass_kg": 0.2,
+                    },
+                    "asset_binding": {},
+                }
+            ],
+            "camera_plan": {"views": [{"id": "front"}]},
+        }
+
+        placement = compile_runtime_actor_placement(case, scene_layout, target_backend="ue")
+        report = verify_runtime_actor_placement(case, placement)
+
+        self.assertEqual(report["status"], "fail")
+        self.assertEqual(report["failure_type"], "F2_asset_missing")
+        self.assertEqual(report["first_failure"]["metric"], "missing_asset_or_proxy_binding")
+
     def test_verifier_rejects_fracture_proxy_before_starting_ue(self) -> None:
         import tempfile
         from pathlib import Path

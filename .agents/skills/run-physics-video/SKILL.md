@@ -51,7 +51,7 @@ python3 scripts/harness_agent_job.py --jsonl advance-until-blocked <job_id>
 
 Use JSONL for long operations. After the command stops or is interrupted, run `inspect` again. Read the manifest's `state`, `current_stage`, `blocker`, and `allowed_next_actions`, then use `current_leaf_stage_result`, which includes the authoritative leaf `harness_stage_result_v1` path and Controller-validated content. Do not search run directories or select a Stage Result by recency.
 
-Controller commands that can launch a Provider, importer, UE, a simulation backend, or the isolated Reviewer are long operations. When invoking `advance-until-blocked`, `resume`, `apply-revision`, or `review` through a Codex shell tool, set its host `timeout_ms` to at least `2100000` (35 minutes); do not rely on the host's default 20-second timeout. The Controller's own bounded subprocess and budget limits remain authoritative. A host timeout is not a structured Job result.
+Controller commands that can launch a Provider, importer, UE, a simulation backend, or the isolated Reviewer are long operations. When invoking `advance-until-blocked`, `register-local-asset`, `resume`, `apply-revision`, or `review` through a Codex shell tool, set its host `timeout_ms` to at least `2100000` (35 minutes); do not rely on the host's default 20-second timeout. The Controller's own bounded subprocess and budget limits remain authoritative. A host timeout is not a structured Job result.
 
 Real UE importer and render child processes require execution outside the Codex workspace sandbox on macOS. For every Controller command that may reach a UE importer or UE render stage, request sandbox escalation for the entire Controller command before launching it. The Skill does not grant that permission. If the current session uses `approval_policy=never` or otherwise cannot request escalation, stop before running the Controller and tell the user to restart the project session with an interactive approval policy such as `codex -a on-request -s workspace-write`. Never consume a UE launch or retry merely to test whether the sandbox permits it, and never replace this targeted approval with a blanket `danger-full-access` instruction.
 
@@ -68,6 +68,14 @@ When generation stops with `native_generation_submission_required`, read only th
 The submission contains exactly `intent_draft`, `case_spec`, and `agent_reported` plus its schema, Job identity, and generation-context digest. Report TUI thread/model/provider/turn information only when known; use `null` when unknown. These fields are audit declarations and are not Controller-observed usage. Report image input IDs as used only when the context marks planning images required and the Job authorization permits their use; optional images remain metadata-only.
 
 For local procedural assets, the built-in recipes are exactly `box_mesh_v1`, `sphere_mesh_v1`, and `cylinder_mesh_v1`; their CaseSpec `shape_hint` values are exactly `box`, `sphere`, and `cylinder`. Express proportions and orientation through `approx_size_m` and UE `[pitch, yaw, roll]`, never by putting prose into `shape_hint`. When the user has not required local procedural generation, treat these recipes as an efficient option for matching primitives, not as a mandatory route; for non-primitive assets prefer an authorized Catalog/external/model source when it better matches the request. Do not claim that a custom procedural recipe exists when the Controller has not registered one.
+
+When the user explicitly provides a local FBX, OBJ, or archive as the required asset, register it through the Controller before composing the native submission:
+
+```bash
+python3 scripts/harness_agent_job.py register-local-asset <job_id> --path '<user-file-or-archive>'
+```
+
+This action hashes and materializes the input, safely extracts an archive, imports and qualifies the asset, records it in the Provider Input Manifest and Catalog, and returns the exact `asset_id`, hashes, `source_uri`, and `case_spec_reference`. Copy that returned acquisition object into the matching CaseSpec asset request. A required `source_uri_hint` is exact: never replace it with the raw filesystem path, a semantic query, a proxy, or a similar Catalog/Meshy asset. If registration or qualification fails, stop before `submit-generation`; do not hand-edit the Catalog or call the importer directly. `inspect.local_asset_registrations` is the durable identity source in later sessions.
 
 Write the candidate submission to a temporary file outside the Git worktree and Job artifact tree, then submit it only through the Controller:
 

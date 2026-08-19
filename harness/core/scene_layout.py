@@ -162,6 +162,7 @@ def build_object_node(
             "source": visual_source,
             "visible": visual_representation.get("visible") is not False,
         },
+        "solver_declared": isinstance(obj.get("solver"), dict),
         "physics": {
             "state_kind": state_kind,
             "body_type": body_type,
