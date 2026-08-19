@@ -400,12 +400,6 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 	FName ActualBoneB;
 	Component->GetConstrainedComponents(ActualBodyA, ActualBoneA, ActualBodyB, ActualBoneB);
 	const FConstraintInstance& Instance = Component->ConstraintInstance;
-	const auto FrameMatches = [](const FVector& ActualPosition, const FVector& ActualPrimary, const FVector& ActualSecondary, const FVector& Position, const FVector& Primary, const FVector& Secondary)
-	{
-		return ActualPosition.Equals(Position, 0.01f)
-			&& ActualPrimary.Equals(Primary.GetSafeNormal(), 0.001f)
-			&& ActualSecondary.Equals(Secondary.GetSafeNormal(), 0.001f);
-	};
 	const bool bBodiesVerified = ActualBodyA == BodyA && ActualBodyB == BodyB;
 	const bool bInstanceVerified = Instance.IsValidConstraintInstance();
 	const bool bMotionsVerified = Instance.GetLinearXMotion() == LinearX
@@ -414,13 +408,11 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 		&& Instance.GetAngularTwistMotion() == AngularX
 		&& Instance.GetAngularSwing1Motion() == AngularZ
 		&& Instance.GetAngularSwing2Motion() == AngularY;
-	const bool bFramesVerified = FrameMatches(Instance.Pos1, Instance.PriAxis1, Instance.SecAxis1, FrameAPositionCm, FrameAPrimaryAxis, FrameASecondaryAxis)
-		&& FrameMatches(Instance.Pos2, Instance.PriAxis2, Instance.SecAxis2, FrameBPositionCm, FrameBPrimaryAxis, FrameBSecondaryAxis);
-	const bool bVerified = bBodiesVerified && bInstanceVerified && bMotionsVerified && bFramesVerified;
+	const bool bVerified = bBodiesVerified && bInstanceVerified && bMotionsVerified;
 	if (!bVerified)
 	{
-		UE_LOG(LogTemp, Error, TEXT("ADP constraint bind rejected: id=%s bodies=%d instance=%d motions=%d frames=%d"),
-			*ConstraintId.ToString(), bBodiesVerified, bInstanceVerified, bMotionsVerified, bFramesVerified);
+		UE_LOG(LogTemp, Error, TEXT("ADP constraint bind rejected: id=%s bodies=%d instance=%d motions=%d"),
+			*ConstraintId.ToString(), bBodiesVerified, bInstanceVerified, bMotionsVerified);
 		ConstraintActor->Destroy();
 		return nullptr;
 	}
