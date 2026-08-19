@@ -9,6 +9,7 @@ from harness.core.scene_layout import (
     build_object_node,
     is_support_role,
     object_position,
+    rotate_local_vector_ue,
     round_vec,
 )
 from harness.runtime.camera_planner import camera_plan_from_case_spec, camera_plan_to_dict
@@ -666,15 +667,9 @@ def projected_object_radius(node: dict[str, Any], direction: list[float]) -> flo
 
 def object_local_axes(node: dict[str, Any]) -> list[list[float]]:
     rotation = ((node.get("transform") or {}).get("rotation_deg") or [0.0, 0.0, 0.0])
-    pitch, yaw, roll = [math.radians(float(value)) for value in [*rotation, 0.0, 0.0, 0.0][:3]]
-    cp, sp = math.cos(pitch), math.sin(pitch)
-    cy, sy = math.cos(yaw), math.sin(yaw)
-    cr, sr = math.cos(roll), math.sin(roll)
-    # UE Rotator semantics: yaw about Z, pitch about Y, roll about X.
     return [
-        [cy * cp, sy * cp, -sp],
-        [cy * sp * sr - sy * cr, sy * sp * sr + cy * cr, cp * sr],
-        [cy * sp * cr + sy * sr, sy * sp * cr - cy * sr, cp * cr],
+        rotate_local_vector_ue(axis, rotation)
+        for axis in ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0])
     ]
 
 

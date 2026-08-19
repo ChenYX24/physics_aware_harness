@@ -251,9 +251,9 @@ def rotate_local_vector_ue(vector: list[float], rotation_deg: list[float]) -> li
     cy, sy = math.cos(yaw), math.sin(yaw)
     cr, sr = math.cos(roll), math.sin(roll)
     axes = [
-        [cy * cp, sy * cp, -sp],
-        [cy * sp * sr - sy * cr, sy * sp * sr + cy * cr, cp * sr],
-        [cy * sp * cr + sy * sr, sy * sp * cr - cy * sr, cp * cr],
+        [cy * cp, sy * cp, sp],
+        [cy * sp * sr - sy * cr, sy * sp * sr + cy * cr, -cp * sr],
+        [-(cy * sp * cr + sy * sr), cy * sr - sy * sp * cr, cp * cr],
     ]
     return [sum(axes[axis][component] * vector[axis] for axis in range(3)) for component in range(3)]
 

@@ -13,6 +13,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class StaticScenePlacementTests(unittest.TestCase):
+    def test_local_vector_rotation_matches_ue_pitch_and_roll_convention(self) -> None:
+        from harness.core.scene_layout import rotate_local_vector_ue
+
+        pitch_result = rotate_local_vector_ue([1.0, 0.0, 0.0], [90.0, 0.0, 0.0])
+        roll_result = rotate_local_vector_ue([0.0, 1.0, 0.0], [0.0, 0.0, 90.0])
+
+        for actual, expected in zip(pitch_result, [0.0, 0.0, 1.0], strict=True):
+            self.assertAlmostEqual(actual, expected)
+        for actual, expected in zip(roll_result, [0.0, 0.0, -1.0], strict=True):
+            self.assertAlmostEqual(actual, expected)
+
     def test_constraint_pair_collision_flag_controls_initial_overlap_check(self) -> None:
         from harness.planning.static_scene_builder import find_overlap_pairs
 
