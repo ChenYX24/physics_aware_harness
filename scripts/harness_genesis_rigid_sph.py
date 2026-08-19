@@ -44,10 +44,11 @@ def simulate_rigid_sph_scene(case_spec: dict[str, Any]) -> dict[str, Any]:
     compiled = compile_rigid_sph_scene(case_spec)
     options = case_spec.get("backend_options") if isinstance(case_spec.get("backend_options"), dict) else {}
     physical = case_spec.get("physical_parameters") if isinstance(case_spec.get("physical_parameters"), dict) else {}
-    fps = int(options.get("fps") or 24)
-    duration_s = float(options.get("duration_s") or 2.0)
+    simulation_settings = rigid_sph_simulation_settings(case_spec)
+    fps = simulation_settings["fps"]
+    duration_s = simulation_settings["duration_s"]
     particle_size = float(options.get("particle_size_m") or 0.006)
-    steps_per_frame = int(options.get("steps_per_frame") or 145)
+    steps_per_frame = simulation_settings["steps_per_frame"]
     initialization = compiled.get("initialization") if isinstance(compiled.get("initialization"), dict) else {}
     pre_roll_s = (
         float(initialization.get("pre_roll_s") or 0.0)
@@ -143,9 +144,9 @@ def simulate_rigid_sph_scene(case_spec: dict[str, Any]) -> dict[str, Any]:
         elif body["id"] in dynamic_entities:
             set_dynamic_body_initial_state(dynamic_entities[body["id"]], body, hold=False)
 
-    frame_count = max(1, int(round(duration_s * fps)))
+    frame_count = simulation_settings["frame_count"]
     frames: list[dict[str, Any]] = []
-    for frame_index in range(frame_count + 1):
+    for frame_index in range(simulation_settings["output_frame_count"]):
         positions = tensor_rows(liquid.get_particles_pos())
         velocities = tensor_rows(liquid.get_particles_vel())
         bodies_at_frame: dict[str, dict[str, Any]] = {}
@@ -313,6 +314,27 @@ def simulate_rigid_sph_scene(case_spec: dict[str, Any]) -> dict[str, Any]:
             "ue_next_step": "replay surface and declared rigid-body transforms",
         },
         "frames": frames,
+    }
+
+
+def rigid_sph_simulation_settings(case_spec: dict[str, Any]) -> dict[str, Any]:
+    """Resolve the physical observation window independently of render profile."""
+    scene = case_spec.get("scene") if isinstance(case_spec.get("scene"), dict) else {}
+    options = case_spec.get("backend_options") if isinstance(case_spec.get("backend_options"), dict) else {}
+    fps = int(options.get("fps") or 24)
+    steps_per_frame = int(options.get("steps_per_frame") or 145)
+    if scene.get("duration_s") is None:
+        raise ValueError("rigid_sph requires scene.duration_s")
+    duration_s = float(scene["duration_s"])
+    if fps <= 0 or steps_per_frame <= 0 or duration_s <= 0.0:
+        raise ValueError("rigid_sph fps, steps_per_frame, and scene.duration_s must be positive")
+    frame_count = max(1, int(round(duration_s * fps)))
+    return {
+        "fps": fps,
+        "duration_s": duration_s,
+        "steps_per_frame": steps_per_frame,
+        "frame_count": frame_count,
+        "output_frame_count": frame_count + 1,
     }
 
 
@@ -588,7 +610,10 @@ def main() -> int:
     )
     report = write_fluid_cache(simulate_rigid_sph_scene(case.data), output_dir)
     print(json.dumps({"status": report["status"], "output_dir": str(output_dir), **report["checks"]}, indent=2))
-    return 0 if report["status"] == "pass" else 2
+    # Physical assertions are represented by fluid_report.json and the
+    # verifier Stage Result. Reaching this point means execution and artifact
+    # generation succeeded, regardless of the assertion verdict.
+    return 0
 
 
 if __name__ == "__main__":

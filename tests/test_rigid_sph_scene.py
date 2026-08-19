@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from harness.core.case_spec import load_case_spec, validate_case_spec
 from harness.runtime.genesis_sph_backend import genesis_command, genesis_parameters
@@ -19,7 +22,9 @@ from harness.runtime.rigid_sph_scene import (
 )
 from scripts.harness_genesis_rigid_sph import (
     evaluate_measurements,
+    main as rigid_sph_main,
     rigid_body_pose_at_time,
+    rigid_sph_simulation_settings,
     set_dynamic_body_initial_state,
     set_rigid_body_pose,
 )
@@ -31,6 +36,42 @@ COFFEE_CASE = ROOT / "cases/fluid/container_to_surface_spill/v001_coffee_mug_tab
 
 
 class RigidSPHSceneTests(unittest.TestCase):
+    def test_scene_duration_controls_full_physical_frame_window(self) -> None:
+        settings = rigid_sph_simulation_settings(
+            {
+                "scene": {"duration_s": 4.0},
+                "backend_options": {"duration_s": 2.0, "fps": 24, "steps_per_frame": 10},
+            }
+        )
+
+        self.assertEqual(settings["duration_s"], 4.0)
+        self.assertEqual(settings["frame_count"], 96)
+        self.assertEqual(settings["output_frame_count"], 97)
+        with self.assertRaisesRegex(ValueError, "scene.duration_s"):
+            rigid_sph_simulation_settings({"backend_options": {"duration_s": 2.0}})
+
+    def test_runner_exit_code_does_not_encode_physics_assertion_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary) / "run"
+            case = SimpleNamespace(data={})
+            report = {"status": "fail", "checks": {"declared_assertions_passed": False}}
+            with patch.object(sys, "argv", ["harness_genesis_rigid_sph.py", "--case", "case.json", "--output-dir", str(output_dir)]), patch(
+                "scripts.harness_genesis_rigid_sph.load_runtime_case", return_value=case
+            ), patch(
+                "scripts.harness_genesis_rigid_sph.workspace_path", return_value=output_dir
+            ), patch(
+                "scripts.harness_genesis_rigid_sph.compile_rigid_sph_scene", return_value={"schema_version": "test"}
+            ), patch(
+                "scripts.harness_genesis_rigid_sph.simulate_rigid_sph_scene", return_value={}
+            ), patch(
+                "scripts.harness_genesis_rigid_sph.write_fluid_cache", return_value=report
+            ), patch(
+                "builtins.print"
+            ):
+                returncode = rigid_sph_main()
+
+        self.assertEqual(returncode, 0)
+
     def test_dynamic_body_uses_qualified_asset_collision_and_structured_initial_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "irregular.obj"

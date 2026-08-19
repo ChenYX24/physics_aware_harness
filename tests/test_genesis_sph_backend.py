@@ -7,18 +7,21 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from harness.core.artifact_schema import read_json, write_json
 from harness.core.case_spec import load_case_spec
 from harness.runtime.genesis_sph_backend import (
     GenesisSPHBackend,
+    GenesisSPHExecutionError,
     genesis_command,
     genesis_parameters,
     genesis_python,
     run_ue_surface_replay,
     write_genesis_artifacts,
 )
+from harness.runtime.stage_executor import execute_runtime_plan
 from scripts.harness_genesis_fluid import apply_negative_mode, confine_surface_vertices, initial_velocity_rows, percentile, surface_component_metrics
 
 
@@ -175,6 +178,129 @@ class GenesisSPHBackendTests(unittest.TestCase):
             trajectory = read_json(run_dir / "trajectory.json")
             self.assertEqual(trajectory[0]["objects"]["water"]["particle_count"], 2)
             self.assertEqual(read_json(run_dir / "contact_events.json"), [])
+
+    def test_physics_assertion_failure_keeps_execute_completed_and_verifier_failed(self) -> None:
+        case = load_case_spec(ROOT / "cases/fluid/fluid_drop_in_basin.json")
+        compilation = SimpleNamespace(
+            selected_backend="genesis_sph",
+            artifacts={
+                "runtime_plan": {
+                    "stages": [
+                        {"id": "solve_render", "kind": "solve_render", "backend": "genesis_sph"}
+                    ]
+                }
+            },
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "python"
+            executable.touch()
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                run_dir = Path(command[command.index("--output-dir") + 1])
+                write_valid_cache(run_dir, falling=False)
+                return subprocess.CompletedProcess(command, 0, "assertions failed", "")
+
+            with patch("harness.runtime.genesis_sph_backend.genesis_python", return_value=executable), patch(
+                "harness.runtime.genesis_sph_backend.subprocess.run", side_effect=fake_run
+            ):
+                run_dir = execute_runtime_plan(
+                    case,
+                    Path(tmp) / "runs",
+                    compilation=compilation,
+                    requested_views=None,
+                    render_passes=None,
+                    camera_strategy="bounds_auto_v1",
+                    profile="smoke",
+                    width=320,
+                    height=180,
+                    complete_sensor_contract=False,
+                )
+
+            execute_result = read_json(run_dir / "stage_results" / "execute.json")
+            verifier_result = read_json(run_dir / "stage_results" / "verifier.json")
+            backend_report = read_json(run_dir / "genesis_sph_backend_report.json")
+
+        self.assertEqual(execute_result["status"], "completed")
+        self.assertEqual(verifier_result["failure_class"], "verification_failed")
+        self.assertIn("revise_case_spec", verifier_result["allowed_next_actions"])
+        self.assertEqual(backend_report["status"], "completed")
+        self.assertEqual(backend_report["verification_status"], "fail")
+
+    def test_nonzero_process_exit_remains_execution_failure(self) -> None:
+        case = load_case_spec(ROOT / "cases/fluid/fluid_drop_in_basin.json")
+        compilation = SimpleNamespace(
+            selected_backend="genesis_sph",
+            artifacts={
+                "runtime_plan": {
+                    "stages": [
+                        {"id": "solve_render", "kind": "solve_render", "backend": "genesis_sph"}
+                    ]
+                }
+            },
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "python"
+            executable.touch()
+            completed = subprocess.CompletedProcess([], 7, "", "solver crashed")
+            with patch("harness.runtime.genesis_sph_backend.genesis_python", return_value=executable), patch(
+                "harness.runtime.genesis_sph_backend.subprocess.run", return_value=completed
+            ):
+                with self.assertRaises(GenesisSPHExecutionError):
+                    execute_runtime_plan(
+                        case,
+                        Path(tmp) / "runs",
+                        compilation=compilation,
+                        requested_views=None,
+                        render_passes=None,
+                        camera_strategy="bounds_auto_v1",
+                        profile="smoke",
+                        width=320,
+                        height=180,
+                        complete_sensor_contract=False,
+                    )
+            run_dir = Path(tmp) / "runs" / "fluid_drop_in_basin_genesis_sph"
+            execute_result = read_json(run_dir / "stage_results" / "execute.json")
+
+        self.assertEqual(execute_result["failure_code"], "genesis_sph_process_failed")
+        self.assertEqual(execute_result["failure_class"], "execution_failed")
+
+    def test_missing_core_output_remains_artifact_execution_failure(self) -> None:
+        case = load_case_spec(ROOT / "cases/fluid/fluid_drop_in_basin.json")
+        compilation = SimpleNamespace(
+            selected_backend="genesis_sph",
+            artifacts={
+                "runtime_plan": {
+                    "stages": [
+                        {"id": "solve_render", "kind": "solve_render", "backend": "genesis_sph"}
+                    ]
+                }
+            },
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "python"
+            executable.touch()
+            completed = subprocess.CompletedProcess([], 0, "completed", "")
+            with patch("harness.runtime.genesis_sph_backend.genesis_python", return_value=executable), patch(
+                "harness.runtime.genesis_sph_backend.subprocess.run", return_value=completed
+            ):
+                with self.assertRaises(GenesisSPHExecutionError):
+                    execute_runtime_plan(
+                        case,
+                        Path(tmp) / "runs",
+                        compilation=compilation,
+                        requested_views=None,
+                        render_passes=None,
+                        camera_strategy="bounds_auto_v1",
+                        profile="smoke",
+                        width=320,
+                        height=180,
+                        complete_sensor_contract=False,
+                    )
+            run_dir = Path(tmp) / "runs" / "fluid_drop_in_basin_genesis_sph"
+            execute_result = read_json(run_dir / "stage_results" / "execute.json")
+
+        self.assertEqual(execute_result["failure_code"], "genesis_sph_output_missing")
+        self.assertEqual(execute_result["failure_class"], "artifact_incomplete")
 
     def test_completed_cache_can_enter_existing_ue_replay_without_publishing_solver_preview(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

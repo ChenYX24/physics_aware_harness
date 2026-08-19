@@ -6,12 +6,55 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class FluidBatchVerifierTests(unittest.TestCase):
+    def test_ue_replay_loads_runtime_case_v2_without_legacy_case_validation(self) -> None:
+        from scripts.harness_render_fluid_ue import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            replay = root / "replay.json"
+            cache = root / "particle_cache.json"
+            case = root / "case_spec.json"
+            replay.write_text("{}", encoding="utf-8")
+            cache.write_text(json.dumps({"environment": {"type": "rigid_sph_scene"}}), encoding="utf-8")
+            case.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "harness_runtime_case_v2",
+                        "case_id": "runtime_fluid_replay",
+                        "capability_id": "fluid_particle_dynamics",
+                        "prompt": "runtime fluid replay",
+                        "should_pass": True,
+                        "objects": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            arguments = [
+                "harness_render_fluid_ue.py",
+                str(replay),
+                "--particle-cache",
+                str(cache),
+                "--case",
+                str(case),
+                "--run-dir",
+                str(root / "run"),
+                "--ue-project",
+                str(root / "test.uproject"),
+                "--profile",
+                "smoke",
+            ]
+            with patch.object(sys, "argv", arguments), self.assertRaisesRegex(
+                SystemExit, "invalid fluid surface replay timebase"
+            ):
+                main()
+
     def test_fluid_local_preview_profile_remains_terminal_rgb(self) -> None:
         from scripts.harness_render_fluid_ue import fluid_execution_profile
 

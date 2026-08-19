@@ -21,6 +21,12 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_UE_MAP = "/Engine/Maps/Templates/Template_Default.Template_Default"
 
 
+class GenesisSPHExecutionError(RuntimeError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 class GenesisSPHBackend:
     name = "genesis_sph"
 
@@ -71,18 +77,73 @@ class GenesisSPHBackend:
             "returncode": result.returncode,
             "stdout": result.stdout,
             "stderr": result.stderr,
+            "failure_code": "genesis_sph_process_failed" if result.returncode != 0 else None,
         }
         write_json(run_dir / "genesis_sph_backend_report.json", report)
+        if result.returncode != 0:
+            raise GenesisSPHExecutionError(
+                "genesis_sph_process_failed",
+                f"Genesis SPH backend failed with exit code {result.returncode}; "
+                f"see {run_dir / 'genesis_sph_backend_report.json'}",
+            )
+        try:
+            validate_genesis_execution_artifacts(run_dir)
+        except GenesisSPHExecutionError as exc:
+            report["status"] = "failed"
+            report["failure_code"] = exc.code
+            write_json(run_dir / "genesis_sph_backend_report.json", report)
+            raise
         verifier = write_genesis_artifacts(case, run_dir)
         report["verification_status"] = verifier["status"]
-        if result.returncode == 0 and verifier["status"] != "pass":
-            report["status"] = "failed_verification"
         write_json(run_dir / "genesis_sph_backend_report.json", report)
-        if result.returncode != 0:
-            raise RuntimeError(f"Genesis SPH backend failed with exit code {result.returncode}; see {run_dir / 'genesis_sph_backend_report.json'}")
-        if verifier["status"] != "pass":
-            raise RuntimeError(f"Genesis SPH artifacts failed verification; see {run_dir / 'harness_verifier.json'}")
         return run_dir
+
+
+def validate_genesis_execution_artifacts(run_dir: str | Path) -> None:
+    """Require the solver products needed by verification and replay."""
+    run_dir = Path(run_dir)
+    cache_path = run_dir / "particle_cache.json"
+    video_path = run_dir / "video.mp4"
+    missing: list[str] = []
+    if not cache_path.is_file() or cache_path.stat().st_size == 0:
+        missing.append("particle_cache.json")
+    if not video_path.is_file() or video_path.stat().st_size == 0:
+        missing.append("video.mp4")
+    if missing:
+        raise GenesisSPHExecutionError(
+            "genesis_sph_output_missing",
+            f"Genesis SPH execution did not produce required artifacts: {missing}",
+        )
+    try:
+        cache = read_json(cache_path)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise GenesisSPHExecutionError(
+            "genesis_sph_output_invalid",
+            f"Genesis SPH particle cache is unreadable: {exc}",
+        ) from exc
+    frames = cache.get("frames") if isinstance(cache, dict) else None
+    if (
+        not isinstance(cache, dict)
+        or cache.get("schema_version") != "harness_particle_cache_v1"
+        or not isinstance(frames, list)
+        or not frames
+    ):
+        raise GenesisSPHExecutionError(
+            "genesis_sph_output_invalid",
+            "Genesis SPH particle cache must be a non-empty harness_particle_cache_v1 artifact",
+        )
+    missing_surfaces: list[str] = []
+    for index, frame in enumerate(frames):
+        surface = frame.get("surface") if isinstance(frame, dict) and isinstance(frame.get("surface"), dict) else {}
+        relative = str(surface.get("path") or "")
+        surface_path = run_dir / relative if relative else None
+        if surface_path is None or not surface_path.is_file() or surface_path.stat().st_size == 0:
+            missing_surfaces.append(relative or f"frame[{index}].surface.path")
+    if missing_surfaces:
+        raise GenesisSPHExecutionError(
+            "genesis_sph_output_missing",
+            f"Genesis SPH execution did not produce surface frames: {missing_surfaces[:8]}",
+        )
 
 
 def run_ue_surface_replay(

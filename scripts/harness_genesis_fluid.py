@@ -615,7 +615,10 @@ def main() -> int:
         report["published_videos"] = [str(path) for path in published]
         (output_dir / "fluid_report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps({"status": report["status"], "output_dir": str(output_dir), **report["checks"]}, indent=2))
-    return 0 if report["status"] == "pass" else 2
+    # The process exit status describes execution/artifact generation only.
+    # Physical assertion failures remain in fluid_report.json and are consumed
+    # by the verifier stage.
+    return 0
 
 
 if __name__ == "__main__":

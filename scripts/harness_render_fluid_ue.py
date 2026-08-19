@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 
 from harness.core.artifact_manager import ArtifactManager
 from harness.core.artifact_schema import read_json, write_json
-from harness.core.case_spec import load_case_spec
+from harness.core.runtime_case import load_runtime_case
 from harness.runtime.camera_planner import camera_plan_from_case_spec
 from harness.runtime.fluid_surface_adapter import particle_centers_m
 from harness.runtime.render_pass_contract import camera_plan_to_dict
@@ -50,7 +50,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Replay a Genesis surface sequence through native UE RGB/depth/segmentation capture.")
     parser.add_argument("replay_manifest")
     parser.add_argument("--particle-cache", required=True)
-    parser.add_argument("--case", default="cases/fluid/fluid_drop_in_basin.json")
+    parser.add_argument("--case", required=True)
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--ue-project", required=True)
     parser.add_argument("--ue-executable", default=str(DEFAULT_UE_EXECUTABLE))
@@ -114,7 +114,7 @@ def main() -> int:
         if not all((args.basin_asset, args.basin_geometry, basin_scale_xyz, args.basin_pivot_to_rim_m)):
             raise SystemExit("legacy basin replay requires --basin-asset/geometry/scale-or-scale-xyz/pivot-to-rim-m")
         asset_geometry_match = args.basin_geometry == solver_basin_geometry
-    case = load_case_spec(ROOT / args.case if not Path(args.case).is_absolute() else args.case)
+    case = load_runtime_case(ROOT / args.case if not Path(args.case).is_absolute() else args.case)
     case_spec = dict(case.data)
     fluid_visual = fluid_visual_parameters(case_spec)
     fps = int((replay.get("timebase") or {}).get("fps") or 0)
