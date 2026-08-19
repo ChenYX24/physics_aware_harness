@@ -1317,6 +1317,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
                 "physics": {
                     "simulate_physics": True,
                     "collider": "sphere",
+                    "initial_angular_velocity_rad_s": [0.0, 0.0, 26.179939],
                     "material": {"static_friction": 0.05, "dynamic_friction": 0.035, "restitution": 0.88},
                 },
             }],
@@ -1338,6 +1339,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual(dynamic[0]["physics_properties"]["restitution"], 0.88)
         self.assertIsNone(dynamic[0]["physics_properties"]["linear_damping"])
         self.assertIsNone(dynamic[0]["physics_properties"]["angular_damping"])
+        self.assertEqual(dynamic[0]["physics_properties"]["initial_angular_velocity_rad_s"], [0.0, 0.0, 26.179939])
         self.assertEqual(dynamic[0]["params"]["visual_material_path"], "/Game/Materials/MI_Glass.MI_Glass")
 
     def test_domino_case_compiles_as_valid_initial_state_only_chaos_scene(self) -> None:

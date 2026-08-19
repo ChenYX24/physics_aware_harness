@@ -8865,53 +8865,34 @@ def vector_from_sequence(values, scale: float = 1.0) -> unreal.Vector:
 
 
 def apply_runtime_initial_angular_velocity(actor_id: str, actor, properties: dict, status: dict) -> None:
-    raw = (
-        properties.get("initial_angular_velocity_deg_s")
-        or properties.get("initial_angular_velocity_degrees_per_second")
-        or properties.get("initial_angular_velocity")
-    )
+    raw = properties.get("initial_angular_velocity_rad_s")
     if not isinstance(raw, list) or len(raw) < 3:
         return
     component = getattr(actor, "static_mesh_component", None) if actor else None
     if not component:
-        status.setdefault("errors", []).append(f"initial_angular_velocity:{actor_id}:missing_static_mesh_component")
-        return
-    angular_deg = vector_from_sequence(raw, 1.0)
-    if max(abs(angular_deg.x), abs(angular_deg.y), abs(angular_deg.z)) <= 1e-6:
+        raise RuntimeError(
+            f"F_RUNTIME_INITIAL_ANGULAR_VELOCITY_FAILED:{actor_id}:missing_static_mesh_component"
+        )
+    angular_rad = vector_from_sequence(raw, 1.0)
+    if max(abs(angular_rad.x), abs(angular_rad.y), abs(angular_rad.z)) <= 1e-9:
         return
     try:
         component.wake_all_rigid_bodies()
     except Exception:
         pass
-    attempts = [
-        ("set_physics_angular_velocity_in_degrees", angular_deg, "deg_s"),
-        (
-            "set_physics_angular_velocity_in_radians",
-            unreal.Vector(math.radians(angular_deg.x), math.radians(angular_deg.y), math.radians(angular_deg.z)),
-            "rad_s",
-        ),
-    ]
-    errors = []
-    for method_name, vector, units in attempts:
-        method = getattr(component, method_name, None)
-        if not method:
-            errors.append(f"{method_name}:missing")
-            continue
-        for args in ((vector, False, ""), (vector, False), (vector,)):
-            try:
-                method(*args)
-                status.setdefault("initial_angular_velocities", []).append(
-                    {
-                        "id": actor_id,
-                        "deg_s": [float(raw[0]), float(raw[1]), float(raw[2])],
-                        "method": method_name,
-                        "units": units,
-                    }
-                )
-                return
-            except Exception as exc:
-                errors.append(f"{method_name}:{exc}")
-    status.setdefault("errors", []).append(f"initial_angular_velocity:{actor_id}:{errors[-3:]}")
+    try:
+        component.set_physics_angular_velocity_in_radians(angular_rad, False, "")
+    except Exception as exc:
+        raise RuntimeError(
+            f"F_RUNTIME_INITIAL_ANGULAR_VELOCITY_FAILED:{actor_id}:{exc}"
+        ) from exc
+    status.setdefault("initial_angular_velocities", []).append(
+        {
+            "id": actor_id,
+            "rad_s": [float(raw[0]), float(raw[1]), float(raw[2])],
+            "method": "set_physics_angular_velocity_in_radians",
+        }
+    )
 
 
 def prepare_cpp_runtime_driver(actors: dict, runtime_scene: dict | None, status: dict, max_frames: int) -> bool:
@@ -9125,6 +9106,20 @@ def start_cpp_runtime_driver(actors: dict, runtime_scene: dict | None, status: d
 
 def cpp_capture_to_runtime_trajectory(capture: dict, actors: dict, runtime_scene: dict | None, scene_origin: unreal.Vector) -> tuple[list[dict], list[dict], list[dict], dict]:
     dynamic_ids, _static_ids = runtime_object_ids(runtime_scene)
+    declared_angular_velocity_ids = {
+        str(obj.get("id"))
+        for obj in (runtime_scene.get("dynamic_objects") if runtime_scene else []) or []
+        if obj.get("id")
+        and max(
+            abs(float(value))
+            for value in [
+                *((obj.get("physics_properties") or {}).get("initial_angular_velocity_rad_s") or [0.0, 0.0, 0.0]),
+                0.0,
+                0.0,
+                0.0,
+            ][:3]
+        ) > 1e-9
+    }
     ground_offsets = actors.get("runtime_ground_offsets") or {}
     solver_trajectory = []
     for frame in capture.get("frames") or []:
@@ -9159,6 +9154,13 @@ def cpp_capture_to_runtime_trajectory(capture: dict, actors: dict, runtime_scene
             rot = raw.get("rotation_degrees") or [0.0, 0.0, 0.0]
             if len(pos_cm) < 3:
                 continue
+            angular_velocity_rad_s = raw.get("angular_velocity_rad_s")
+            if actor_id in declared_angular_velocity_ids and not (
+                isinstance(angular_velocity_rad_s, list) and len(angular_velocity_rad_s) >= 3
+            ):
+                raise RuntimeError(
+                    f"F_RUNTIME_ANGULAR_VELOCITY_CAPTURE_FAILED:{actor_id}:missing_angular_velocity_rad_s"
+                )
             z_offset_cm = float_control(ground_offsets.get(actor_id), 0.0, 0.0, None)
             runtime_frame["objects"][actor_id] = {
                 "position": [
@@ -9170,6 +9172,11 @@ def cpp_capture_to_runtime_trajectory(capture: dict, actors: dict, runtime_scene
                 "rotation_degrees": [round(float(rot[0]), 4), round(float(rot[1]), 4), round(float(rot[2]), 4)] if len(rot) >= 3 else [0.0, 0.0, 0.0],
                 "velocity_cm_s": raw.get("velocity_cm_s") or [0.0, 0.0, 0.0],
                 "velocity_m_s": [round(float(value) / 100.0, 6) for value in (raw.get("velocity_cm_s") or [0.0, 0.0, 0.0])[:3]],
+                "angular_velocity_rad_s": (
+                    [round(float(value), 6) for value in angular_velocity_rad_s[:3]]
+                    if isinstance(angular_velocity_rad_s, list) and len(angular_velocity_rad_s) >= 3
+                    else None
+                ),
                 "source": "adp_cpp_runtime_driver",
             }
         solver_trajectory.append(runtime_frame)

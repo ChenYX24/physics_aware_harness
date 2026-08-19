@@ -74,6 +74,9 @@ struct ADPPHYSICSRUNTIME_API FADPTransformSample
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "ADP Physics")
 	FVector VelocityCmPerSec = FVector::ZeroVector;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "ADP Physics")
+	FVector AngularVelocityRadPerSec = FVector::ZeroVector;
 };
 
 USTRUCT(BlueprintType)

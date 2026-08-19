@@ -610,6 +610,7 @@ void AADPPhysicsRuntimeDriver::CaptureFrame()
 		if (Primitive != nullptr)
 		{
 			Transform.VelocityCmPerSec = Primitive->GetPhysicsLinearVelocity(NAME_None);
+			Transform.AngularVelocityRadPerSec = Primitive->GetPhysicsAngularVelocityInRadians(NAME_None);
 		}
 
 		Frame.Transforms.Add(Transform);
@@ -803,6 +804,7 @@ FString AADPPhysicsRuntimeDriver::BuildCaptureJson() const
 			TransformObject->SetArrayField(TEXT("position_cm"), VectorToJsonArray(Transform.LocationCm));
 			TransformObject->SetArrayField(TEXT("rotation_degrees"), RotatorToJsonArray(Transform.RotationDegrees));
 			TransformObject->SetArrayField(TEXT("velocity_cm_s"), VectorToJsonArray(Transform.VelocityCmPerSec));
+			TransformObject->SetArrayField(TEXT("angular_velocity_rad_s"), VectorToJsonArray(Transform.AngularVelocityRadPerSec));
 			TransformObject->SetStringField(TEXT("source"), TEXT("adp_cpp_runtime_driver"));
 			ObjectsObject->SetObjectField(Transform.BodyId.ToString(), TransformObject);
 		}

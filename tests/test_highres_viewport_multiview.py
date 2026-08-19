@@ -164,6 +164,11 @@ class HighresViewportMultiviewTests(unittest.TestCase):
         self.assertIn("Instance.IsValidConstraintInstance()", implementation)
         self.assertIn("FPhysicsInterface::GetLocalPose", implementation)
         self.assertIn("bVerified = bBodiesVerified && bInstanceVerified && bMotionsVerified && bFramesVerified && bSolverFramesVerified", implementation)
+        self.assertIn("FVector AngularVelocityRadPerSec", header)
+        self.assertIn("GetPhysicsAngularVelocityInRadians", implementation)
+        self.assertIn('TEXT("angular_velocity_rad_s")', implementation)
+        self.assertIn('properties.get("initial_angular_velocity_rad_s")', native_scene)
+        self.assertIn("F_RUNTIME_ANGULAR_VELOCITY_CAPTURE_FAILED", native_scene)
         self.assertLess(
             implementation.index("Component->SetConstrainedComponents(BodyA, NAME_None, BodyB, NAME_None);"),
             implementation.index("Component->SetConstraintReferenceFrame(EConstraintFrame::Frame1"),

@@ -2704,7 +2704,7 @@ class AgentJobControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "frozen verification assertions"):
             controller.resume("job_frozen_assertion", revised_case_spec=weakened, revision_reason="weaken")
 
-    def test_revision_cannot_change_frozen_asset_policy_or_unlisted_path(self) -> None:
+    def test_revision_preserves_frozen_asset_policy_and_opens_mass_but_not_topology(self) -> None:
         controller, _ = self.controller(SuccessfulHarness(fail_verifier=True))
         controller.create(
             self.request,
@@ -2719,9 +2719,14 @@ class AgentJobControllerTests(unittest.TestCase):
             controller.resume("job_frozen_policy", revised_case_spec=downgraded, revision_reason="change tier")
 
         unlisted = case_spec_v2_fixture()
-        unlisted["objects"][0]["physics"]["mass_kg"] = 0.2
+        unlisted["objects"][0]["physics"]["body_type"] = "kinematic"
         with self.assertRaisesRegex(ValueError, "allowed_adjustments"):
-            controller.resume("job_frozen_policy", revised_case_spec=unlisted, revision_reason="change mass")
+            controller.resume("job_frozen_policy", revised_case_spec=unlisted, revision_reason="change topology")
+
+        revised = case_spec_v2_fixture()
+        revised["objects"][0]["physics"]["mass_kg"] = 0.2
+        resumed = controller.resume("job_frozen_policy", revised_case_spec=revised, revision_reason="change mass")
+        self.assertEqual(resumed["job"]["current_attempt_id"], "attempt_002")
 
     def test_object_leaf_adjustment_uses_stable_object_id_path(self) -> None:
         before = case_spec_v2_fixture()
@@ -2757,13 +2762,36 @@ class AgentJobControllerTests(unittest.TestCase):
 
     def test_case_spec_revision_policy_opens_bounded_layout_fields_by_semantics(self) -> None:
         case_spec = case_spec_v2_fixture()
+        cue = case_spec["objects"][0]
+        cue["initial_state"]["angular_velocity_deg_s"] = [0.0, 0.0, 1500.0]
+        cue["physics"].update(
+            {
+                "linear_damping": 0.02,
+                "angular_damping": 0.24,
+                "enable_gravity": True,
+                "use_ccd": False,
+            }
+        )
+        cue["physics"]["material"]["static_friction"] = 0.04
 
         policy = AgentJobController._case_spec_revision_policy(case_spec)
 
         self.assertIn("$.objects.cue_ball.initial_state.position_m", policy["paths"])
         self.assertIn("$.objects.cue_ball.initial_state.rotation_deg", policy["paths"])
+        self.assertIn("$.objects.cue_ball.initial_state.linear_velocity_m_s", policy["paths"])
+        self.assertIn("$.objects.cue_ball.initial_state.angular_velocity_deg_s", policy["paths"])
+        self.assertIn("$.objects.cue_ball.physics.mass_kg", policy["paths"])
+        self.assertIn("$.objects.cue_ball.physics.linear_damping", policy["paths"])
+        self.assertIn("$.objects.cue_ball.physics.angular_damping", policy["paths"])
+        self.assertIn("$.objects.cue_ball.physics.enable_gravity", policy["paths"])
+        self.assertIn("$.objects.cue_ball.physics.use_ccd", policy["paths"])
+        self.assertIn("$.objects.cue_ball.physics.material.static_friction", policy["paths"])
+        self.assertIn("$.objects.cue_ball.physics.material.dynamic_friction", policy["paths"])
+        self.assertIn("$.objects.cue_ball.physics.material.restitution", policy["paths"])
         self.assertIn("$.objects.floor.geometry.approx_size_m", policy["paths"])
         self.assertNotIn("$.objects.cue_ball.geometry.approx_size_m", policy["paths"])
+        self.assertNotIn("$.objects.cue_ball.physics.body_type", policy["paths"])
+        self.assertNotIn("$.objects.cue_ball.physics.collision_required", policy["paths"])
         AgentJobController._validate_revision_changes(
             [
                 {
@@ -2789,6 +2817,19 @@ class AgentJobControllerTests(unittest.TestCase):
                 policy,
                 repair_layer="case_spec_source",
             )
+
+        AgentJobController._validate_revision_changes(
+            [
+                {
+                    "path": "$.objects.cue_ball.physics.angular_damping",
+                    "operation": "replace",
+                    "before": 0.24,
+                    "after": 0.1,
+                }
+            ],
+            policy,
+            repair_layer="case_spec_source",
+        )
 
     def test_case_spec_revision_policy_excludes_hard_parameter_paths(self) -> None:
         path = "$.objects.cue_ball.initial_state.position_m"

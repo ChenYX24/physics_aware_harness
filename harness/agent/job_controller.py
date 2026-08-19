@@ -4589,7 +4589,7 @@ class AgentJobController:
         *,
         excluded_paths: set[str] | None = None,
     ) -> dict[str, Any]:
-        """Open bounded layout leaves without weakening task or execution identity."""
+        """Open bounded layout and tunable physics leaves without changing topology."""
         excluded = excluded_paths or set()
         raw_bounds = (case_spec.get("scene") or {}).get("bounds_hint_m")
         scene_bounds = (
@@ -4606,6 +4606,11 @@ class AgentJobController:
             else [20.0, 20.0, 20.0]
         )
         constraints: dict[str, Any] = {}
+
+        def add_constraint(path: str, value: Any, constraint: Mapping[str, Any]) -> None:
+            if path not in excluded and value is not None:
+                constraints[path] = dict(constraint)
+
         for obj in case_spec.get("objects") or []:
             if not isinstance(obj, Mapping):
                 continue
@@ -4634,20 +4639,75 @@ class AgentJobController:
                     "max": [180.0, 180.0, 180.0],
                 }
             physics = obj.get("physics") if isinstance(obj.get("physics"), Mapping) else {}
-            if str(physics.get("body_type") or "").casefold() not in {"static", "kinematic"}:
-                continue
-            geometry = obj.get("geometry") if isinstance(obj.get("geometry"), Mapping) else {}
-            size = geometry.get("approx_size_m")
-            size_path = f"$.objects.{object_id}.geometry.approx_size_m"
-            if size_path not in excluded and cls._finite_numeric_vector(size, length=3):
-                constraints[size_path] = {
-                    "kind": "numeric_vector",
-                    "min": [0.001, 0.001, 0.001],
-                    "max": [
-                        max(scene_bounds[index] * 2.0, float(size[index]))
-                        for index in range(3)
-                    ],
-                }
+            body_type = str(physics.get("body_type") or "").casefold()
+            if body_type in {"static", "kinematic"}:
+                geometry = obj.get("geometry") if isinstance(obj.get("geometry"), Mapping) else {}
+                size = geometry.get("approx_size_m")
+                size_path = f"$.objects.{object_id}.geometry.approx_size_m"
+                if size_path not in excluded and cls._finite_numeric_vector(size, length=3):
+                    constraints[size_path] = {
+                        "kind": "numeric_vector",
+                        "min": [0.001, 0.001, 0.001],
+                        "max": [
+                            max(scene_bounds[index] * 2.0, float(size[index]))
+                            for index in range(3)
+                        ],
+                    }
+
+            if body_type == "dynamic":
+                for field, limit in (
+                    ("linear_velocity_m_s", 1000.0),
+                    ("angular_velocity_rad_s", 10000.0),
+                    ("angular_velocity_deg_s", math.degrees(10000.0)),
+                ):
+                    value = initial.get(field)
+                    if not cls._finite_numeric_vector(value, length=3):
+                        continue
+                    bound = max(limit, *(abs(float(component)) for component in value))
+                    add_constraint(
+                        f"$.objects.{object_id}.initial_state.{field}",
+                        value,
+                        {
+                            "kind": "numeric_vector",
+                            "min": [-bound, -bound, -bound],
+                            "max": [bound, bound, bound],
+                        },
+                    )
+
+                for field, minimum, maximum in (
+                    ("mass_kg", 1e-9, 1e6),
+                    ("linear_damping", 0.0, 1000.0),
+                    ("angular_damping", 0.0, 1000.0),
+                ):
+                    value = physics.get(field)
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)):
+                        add_constraint(
+                            f"$.objects.{object_id}.physics.{field}",
+                            value,
+                            {"kind": "numeric", "min": minimum, "max": max(maximum, float(value))},
+                        )
+                for field in ("enable_gravity", "use_ccd"):
+                    value = physics.get(field)
+                    if isinstance(value, bool):
+                        add_constraint(
+                            f"$.objects.{object_id}.physics.{field}",
+                            value,
+                            {"kind": "enum", "values": [False, True]},
+                        )
+
+            material = physics.get("material") if isinstance(physics.get("material"), Mapping) else {}
+            for field, maximum in (
+                ("static_friction", 100.0),
+                ("dynamic_friction", 100.0),
+                ("restitution", 1.0),
+            ):
+                value = material.get(field)
+                if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)):
+                    add_constraint(
+                        f"$.objects.{object_id}.physics.material.{field}",
+                        value,
+                        {"kind": "numeric", "min": 0.0, "max": max(maximum, float(value))},
+                    )
         paths = sorted(constraints)
         return {
             "paths": paths,

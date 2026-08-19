@@ -843,6 +843,21 @@ class CaseSpecV2Tests(unittest.TestCase):
 
         self.assertIn("misplaced_physics_field", {issue.code for issue in context.exception.issues})
 
+    def test_object_angular_velocity_degrees_compiles_to_canonical_radians(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["initial_state"]["angular_velocity_deg_s"] = [0.0, 0.0, 1500.0]
+
+        projected = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data)).data
+        cue = next(obj for obj in projected["objects"] if obj["id"] == "cue_ball")
+
+        self.assertAlmostEqual(cue["initial_angular_velocity_rad_s"][2], 26.17993877991494)
+        self.assertNotIn("initial_angular_velocity_deg_s", cue)
+
+        data["objects"][0]["initial_state"]["angular_velocity_rad_s"] = [0.0, 0.0, 1.0]
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("ambiguous_angular_velocity_units", {issue.code for issue in context.exception.issues})
+
     def test_release_event_velocity_overrides_zero_hold_velocity(self) -> None:
         data = case_spec_v2_fixture()
         data["objects"][0]["initial_state"]["linear_velocity_m_s"] = [0.0, 0.0, 0.0]

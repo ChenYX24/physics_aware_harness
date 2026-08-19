@@ -635,9 +635,22 @@ def collect_case_spec_v2_issues(
                         "collision_geometry cannot be declared when collision_required is false",
                     )
         initial = _mapping(obj.get("initial_state"), f"{path}/initial_state", issues, required=False)
-        for field in ("position_m", "rotation_deg", "linear_velocity_m_s", "angular_velocity_rad_s"):
+        for field in (
+            "position_m",
+            "rotation_deg",
+            "linear_velocity_m_s",
+            "angular_velocity_rad_s",
+            "angular_velocity_deg_s",
+        ):
             if initial.get(field) is not None:
                 _finite_vec3(initial.get(field), f"{path}/initial_state/{field}", issues)
+        if initial.get("angular_velocity_rad_s") is not None and initial.get("angular_velocity_deg_s") is not None:
+            _issue(
+                issues,
+                f"{path}/initial_state",
+                "ambiguous_angular_velocity_units",
+                "declare angular velocity in either rad/s or deg/s, not both",
+            )
         behavior = _mapping(obj.get("behavior"), f"{path}/behavior", issues, required=False)
         if behavior.get("use_ccd") is not None:
             _issue(
@@ -1026,6 +1039,10 @@ def _project_object(
         projected["use_ccd"] = True
     if initial.get("angular_velocity_rad_s") is not None:
         projected["initial_angular_velocity_rad_s"] = copy.deepcopy(initial["angular_velocity_rad_s"])
+    elif initial.get("angular_velocity_deg_s") is not None:
+        projected["initial_angular_velocity_rad_s"] = [
+            math.radians(float(value)) for value in initial["angular_velocity_deg_s"]
+        ]
     fracture = behavior.get("fracture") if isinstance(behavior.get("fracture"), Mapping) else None
     if fracture:
         projected["fracture_response"] = copy.deepcopy(dict(fracture))
