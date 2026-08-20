@@ -175,19 +175,20 @@ def build_evidence_bundle(
                     mime_type="image/png",
                 )
             )
-        montage = montages_dir / f"{label}.png"
-        _render_montage(ffmpeg_path, point_images, montage, runner)
-        artifacts.append(
-            _bundle_artifact(
-                bundle_dir,
-                f"montage_{label}",
-                "multi_view_montage",
-                montage,
-                source_ref=None,
-                time_s=time_s,
-                mime_type="image/png",
+        if len(point_images) > 1:
+            montage = montages_dir / f"{label}.png"
+            _render_montage(ffmpeg_path, point_images, montage, runner)
+            artifacts.append(
+                _bundle_artifact(
+                    bundle_dir,
+                    f"montage_{label}",
+                    "multi_view_montage",
+                    montage,
+                    source_ref=None,
+                    time_s=time_s,
+                    mime_type="image/png",
+                )
             )
-        )
 
     manifest = EvidenceBundleManifest.from_dict(
         {

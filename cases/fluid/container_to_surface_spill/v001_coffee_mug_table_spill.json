@@ -127,18 +127,6 @@
   ],
   "verifier_expectation": {"status": "pass"},
   "should_pass": true,
-  "backend_options": {
-    "fps": 24,
-    "duration_s": 3.0,
-    "particle_size_m": 0.005,
-    "steps_per_frame": 100,
-    "pre_roll_s": 0.25,
-    "surface_reconstruction": {
-      "smoothing_length_in_particle_radii": 2.0,
-      "cube_size_in_particle_radii": 0.75,
-      "iso_surface_threshold": 0.65
-    }
-  },
   "solver_scene": {
     "type": "rigid_sph",
     "measurements": [
@@ -158,6 +146,7 @@
     ]
   },
   "scene": {
+    "duration_s": 3.0,
     "map_preference": "/Game/HarnessGenerated/Maps/BallBoardSmoke.BallBoardSmoke",
     "event_window_s": 1.5,
     "post_event_tail_s": 1.0

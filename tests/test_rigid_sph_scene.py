@@ -20,6 +20,7 @@ from harness.runtime.rigid_sph_scene import (
     rotation_matrix_xyz,
     ue_rotation_pyr_from_solver_xyz,
 )
+from harness.runtime.rigid_sph_configuration import compile_rigid_sph_solver_configuration
 from scripts.harness_genesis_rigid_sph import (
     evaluate_measurements,
     main as rigid_sph_main,
@@ -59,6 +60,9 @@ class RigidSPHSceneTests(unittest.TestCase):
                 "scripts.harness_genesis_rigid_sph.load_runtime_case", return_value=case
             ), patch(
                 "scripts.harness_genesis_rigid_sph.workspace_path", return_value=output_dir
+            ), patch(
+                "scripts.harness_genesis_rigid_sph.compile_rigid_sph_solver_configuration",
+                return_value=compile_rigid_sph_solver_configuration({"scene": {"duration_s": 1.0}}),
             ), patch(
                 "scripts.harness_genesis_rigid_sph.compile_rigid_sph_scene", return_value={"schema_version": "test"}
             ), patch(

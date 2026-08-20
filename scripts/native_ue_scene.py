@@ -5665,6 +5665,43 @@ def create_generated_material(
         return None
 
 
+def create_translucent_fluid_material(color, roughness: float, opacity: float, refraction: float):
+    package_path = "/Game/AgenticGenerated/Materials"
+    asset_name = f"M_Harness_UnifiedFluidTranslucent_V1_{GENERATED_MATERIAL_VERSION}"
+    asset_path = f"{package_path}/{asset_name}.{asset_name}"
+    existing = unreal.load_asset(asset_path)
+    if existing:
+        unreal.MaterialEditingLibrary.recompile_material(existing)
+        return existing
+    try:
+        unreal.EditorAssetLibrary.make_directory(package_path)
+        material = unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+            asset_name,
+            package_path,
+            unreal.Material,
+            unreal.MaterialFactoryNew(),
+        )
+        if not material:
+            return None
+        material.set_editor_property("two_sided", True)
+        material.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
+        expressions = [
+            (unreal.MaterialExpressionConstant3Vector, "constant", color, unreal.MaterialProperty.MP_BASE_COLOR, -160),
+            (unreal.MaterialExpressionConstant, "r", roughness, unreal.MaterialProperty.MP_ROUGHNESS, 40),
+            (unreal.MaterialExpressionConstant, "r", opacity, unreal.MaterialProperty.MP_OPACITY, 140),
+            (unreal.MaterialExpressionConstant, "r", refraction, unreal.MaterialProperty.MP_REFRACTION, 240),
+        ]
+        for expression_class, property_name, value, material_property, y in expressions:
+            node = unreal.MaterialEditingLibrary.create_material_expression(material, expression_class, -420, y)
+            node.set_editor_property(property_name, value)
+            unreal.MaterialEditingLibrary.connect_material_property(node, "", material_property)
+        unreal.MaterialEditingLibrary.recompile_material(material)
+        unreal.EditorAssetLibrary.save_asset(asset_path)
+        return material
+    except Exception:
+        return None
+
+
 def create_generated_depth_post_process_material():
     package_path = "/Game/AgenticGenerated/Materials"
     asset_name = "M_Agentic_LinearSceneDepthScaled_V2"
@@ -6210,7 +6247,18 @@ def setup_scene(runtime_scene: dict | None = None):
         has_material_profile = bool(obj.get("material_profile"))
         force_library_mesh = prefers_material_library_mesh(obj)
         visual_material_path = str(params.get("visual_material_path") or "")
-        if params.get("generate_solid_material") is True:
+        if params.get("generate_translucent_fluid_material") is True:
+            material = create_translucent_fluid_material(
+                runtime_object_color(obj, unreal.LinearColor(0.03, 0.28, 0.48, 1.0)),
+                float(params["roughness"]),
+                float(params["opacity"]),
+                float(params["refraction"]),
+            )
+            if not material:
+                raise RuntimeError(f"failed to create translucent fluid material: {obj.get('id')}")
+            set_actor_material(actor, material)
+            material_override = True
+        elif params.get("generate_solid_material") is True:
             material = create_generated_material(
                 str(params.get("generated_material_name") or f"M_Harness_{obj.get('id')}_Solid"),
                 runtime_object_color(obj, unreal.LinearColor(0.05, 0.32, 0.82, 1.0)),

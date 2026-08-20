@@ -30,7 +30,6 @@ from harness.runtime.execution_profile import (
 from harness.verification.render_sync_checker import check_render_sync
 from harness.verification.physics_verifier import PhysicsVerifier
 from harness.verification.rgb_observability import verify_expected_color_observability
-from harness.verification.run_quality import evaluate_run
 from scripts.harness_local_ue_runner import (
     DEFAULT_UE_EXECUTABLE,
     camera_runtime_from_plan,
@@ -72,7 +71,6 @@ def main() -> int:
     requested_views = camera_ids_from_observation_plan(observation_plan)
     render_passes = render_passes_from_observation_plan(observation_plan)
     render_mode = render_mode_for_passes(render_passes)
-    complete_sensor_contract = {"rgb", "depth", "segmentation"}.issubset(render_passes)
     if not requested_views:
         raise SystemExit("compiled Observation Plan contains no cameras")
     ue_project = Path(args.ue_project).expanduser().resolve()
@@ -82,6 +80,11 @@ def main() -> int:
     environment = particle_cache.get("environment") if isinstance(particle_cache.get("environment"), dict) else {}
     basin_scale_xyz = args.basin_scale_xyz or ([args.basin_scale] * 3 if args.basin_scale is not None else None)
     rigid_scene_mode = environment.get("type") == "rigid_sph_scene"
+    fps = int((replay.get("timebase") or {}).get("fps") or 0)
+    frame_count = int((replay.get("timebase") or {}).get("frame_count") or 0)
+    if fps <= 0 or frame_count <= 0 or len(replay.get("frames") or []) != frame_count:
+        raise SystemExit("invalid fluid surface replay timebase")
+    runtime_actor_placement = read_json(run_dir / "runtime_actor_placement.json") if rigid_scene_mode else {}
     solver_basin_geometry = (
         "declared_rigid_bodies"
         if rigid_scene_mode
@@ -89,14 +92,10 @@ def main() -> int:
     )
     if rigid_scene_mode:
         declared_rigid_bodies = [item for item in environment.get("rigid_bodies") or [] if isinstance(item, dict)]
+        placement_by_id = runtime_placement_by_object_id(runtime_actor_placement)
         asset_geometry_match = bool(declared_rigid_bodies) and all(
-            isinstance(item, dict)
-            and ((item.get("collision") or {}).get("asset_geometry_match") is True)
-            and str(((item.get("asset") or {}).get("ue_path") or "")).startswith("/Game/")
-            and len((item.get("transform") or {}).get("position_m") or []) == 3
-            and len((item.get("transform") or {}).get("ue_rotation_pyr_deg") or []) == 3
-            and len((item.get("transform") or {}).get("scale") or []) == 3
-            and all(float(value) > 0.0 for value in ((item.get("transform") or {}).get("scale") or []))
+            ((item.get("collision") or {}).get("asset_geometry_match") is True)
+            and valid_visual_placement(placement_by_id.get(str(item.get("id") or "")))
             for item in declared_rigid_bodies
         )
     else:
@@ -107,10 +106,6 @@ def main() -> int:
     case = load_runtime_case(ROOT / args.case if not Path(args.case).is_absolute() else args.case)
     case_spec = dict(case.data)
     fluid_visual = fluid_visual_parameters(case_spec)
-    fps = int((replay.get("timebase") or {}).get("fps") or 0)
-    frame_count = int((replay.get("timebase") or {}).get("frame_count") or 0)
-    if fps <= 0 or frame_count <= 0 or len(replay.get("frames") or []) != frame_count:
-        raise SystemExit("invalid fluid surface replay timebase")
     ensure_ue_surface_assets(
         replay,
         replay_manifest=Path(args.replay_manifest).expanduser().resolve(),
@@ -183,7 +178,11 @@ def main() -> int:
             )
         )
     declared_dynamic_runtime, declared_static_runtime = (
-        rigid_body_runtime_objects(particle_cache, render_z_offset_m=args.scene_z_offset_m)
+        rigid_body_runtime_objects(
+            particle_cache,
+            runtime_actor_placement,
+            render_z_offset_m=args.scene_z_offset_m,
+        )
         if rigid_scene_mode
         else ([], [])
     )
@@ -280,14 +279,14 @@ def main() -> int:
                     "preserve_authored_scale": True,
                     "disallow_nanite": True,
                     "preserve_material": False,
-                    "generate_solid_material": True,
+                    "generate_translucent_fluid_material": True,
                     "generated_material_name": fluid_visual["generated_material_name"],
                     "fixed_material_color": True,
                     "two_sided_material": True,
                     "color_rgb": fluid_visual["color_rgb"],
                     "roughness": fluid_visual["roughness"],
-                    "metallic": 0.0,
-                    "emissive": fluid_visual["emissive"],
+                    "opacity": fluid_visual["opacity"],
+                    "refraction": fluid_visual["refraction"],
                     "segmentation_identity": "fluid_surface",
                 },
             ),
@@ -553,9 +552,6 @@ def main() -> int:
     inputs_dir.mkdir(exist_ok=True)
     write_json(inputs_dir / "render_config.json", render_config)
     write_json(inputs_dir / "case_spec.json", case_spec)
-    quality = evaluate_run(run_dir, write=True) if complete_sensor_contract else {"status": "not_required"}
-    if complete_sensor_contract and quality.get("status") != "pass":
-        verified = False
     readiness = read_json(run_dir / "run_readiness.json")
     readiness.update(
         {
@@ -563,7 +559,7 @@ def main() -> int:
             "publication_tier": "local_preview" if verified else "rejected",
             "visual_ready": report.get("rgb_real_ue") is True and rgb_observability.get("status") == "pass",
             "sensor_ready": render_sync.get("status") == "pass",
-            "quality_gate_passed": quality.get("status") in {"pass", "not_required"},
+            "quality_gate_passed": None,
         }
     )
     write_json(run_dir / "run_readiness.json", readiness)
@@ -574,7 +570,7 @@ def main() -> int:
             "physics_verifier_status": verifier.get("status"),
             "render_sync_status": render_sync.get("status"),
             "rgb_observability_status": rgb_observability.get("status"),
-            "quality_gate_status": quality.get("status"),
+            "quality_gate_status": "deferred_to_controller",
             "runtime_pose_registration_status": pose_registration.get("status"),
             "state_truth": "particle_cache.json",
             "surface_replay": "fluid_surface_replay.json",
@@ -753,23 +749,12 @@ def replay_scene_bounds(environment: dict, *, render_z_offset_m: float) -> dict:
 
 
 def fluid_visual_parameters(case_spec: dict) -> dict:
-    fluid = next(
-        (
-            item
-            for item in case_spec.get("objects") or []
-            if isinstance(item, dict) and str(item.get("role") or "") in {"fluid", "fluid_volume"}
-        ),
-        {},
-    )
-    visual = fluid.get("visual") if isinstance(fluid.get("visual"), dict) else {}
-    color = visual.get("color_rgb", [0.03, 0.30, 0.78])
-    if not isinstance(color, list) or len(color) != 3:
-        raise ValueError("fluid visual color_rgb must contain three values")
     return {
-        "generated_material_name": f"M_Harness_FluidSurface_{str(case_spec.get('case_id') or 'Fluid')}_V1",
-        "color_rgb": [float(value) for value in color],
-        "roughness": float(visual.get("roughness", 0.12)),
-        "emissive": float(visual.get("emissive", 0.18)),
+        "generated_material_name": "M_Harness_UnifiedFluid",
+        "color_rgb": [0.03, 0.28, 0.48],
+        "roughness": 0.08,
+        "opacity": 0.32,
+        "refraction": 1.333,
     }
 
 
@@ -834,25 +819,60 @@ def runtime_object(object_id: str, path: str, position: list[float], scale: list
     }
 
 
-def rigid_body_runtime_objects(cache: dict, *, render_z_offset_m: float) -> tuple[list[dict], list[dict]]:
+def runtime_placement_by_object_id(placement: dict) -> dict[str, dict]:
+    return {
+        str(binding.get("object_id") or ""): binding
+        for binding in placement.get("actor_bindings") or []
+        if isinstance(binding, dict) and binding.get("object_id")
+    }
+
+
+def placement_visual_scale(binding: dict) -> list[float]:
+    asset = binding.get("asset") if isinstance(binding.get("asset"), dict) else {}
+    declared = binding.get("declared_object_transform") if isinstance(binding.get("declared_object_transform"), dict) else {}
+    scale = asset.get("instance_scale") or declared.get("scale")
+    if not isinstance(scale, list) or len(scale) != 3 or any(float(value) <= 0.0 for value in scale):
+        raise ValueError(f"runtime placement has no positive visual scale: {binding.get('object_id')}")
+    return [float(value) for value in scale]
+
+
+def valid_visual_placement(binding: object) -> bool:
+    if not isinstance(binding, dict):
+        return False
+    asset = binding.get("asset") if isinstance(binding.get("asset"), dict) else {}
+    try:
+        return str(asset.get("ue_path") or "").startswith("/Game/") and bool(placement_visual_scale(binding))
+    except (TypeError, ValueError):
+        return False
+
+
+def rigid_body_runtime_objects(
+    cache: dict,
+    runtime_actor_placement: dict,
+    *,
+    render_z_offset_m: float,
+) -> tuple[list[dict], list[dict]]:
     environment = cache.get("environment") if isinstance(cache.get("environment"), dict) else {}
+    placement_by_id = runtime_placement_by_object_id(runtime_actor_placement)
     dynamic_objects: list[dict] = []
     static_objects: list[dict] = []
     for body in environment.get("rigid_bodies") or []:
         if not isinstance(body, dict):
             continue
-        asset = body.get("asset") if isinstance(body.get("asset"), dict) else {}
+        body_id = str(body.get("id") or "")
+        binding = placement_by_id.get(body_id)
+        if not isinstance(binding, dict):
+            raise ValueError(f"declared rigid body has no runtime placement binding: {body_id}")
+        asset = binding.get("asset") if isinstance(binding.get("asset"), dict) else {}
         transform = body.get("transform") if isinstance(body.get("transform"), dict) else {}
         if len(transform.get("position_m") or []) != 3 or len(transform.get("ue_rotation_pyr_deg") or []) != 3:
             raise ValueError(f"declared rigid body is missing an explicit UE transform: {body.get('id')}")
-        scale = transform.get("scale") or []
-        if len(scale) != 3 or any(float(value) <= 0.0 for value in scale):
-            raise ValueError(f"declared rigid body has invalid scale: {body.get('id')}")
+        scale = placement_visual_scale(binding)
         runtime = runtime_object(
             str(body.get("id") or "rigid_body"),
             str(asset.get("ue_path") or ""),
             offset_z(ue_position_m(transform.get("position_m") or [0.0, 0.0, 0.0]), render_z_offset_m),
-            [float(value) for value in scale],
+            scale,
             {
                 "base_rotation_degrees": (
                     [0.0, 0.0, 0.0]

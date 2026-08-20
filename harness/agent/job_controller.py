@@ -2556,6 +2556,13 @@ class AgentJobController:
             self._record_controller_ue_launch(manifest, kind="runtime", stage=stage_name)
             manifest = self._reconcile_ue_launch_usage(manifest)
         compilation.write(expected_run)
+        handoff_contract = compilation.backend_selection.get("handoff_contract")
+        particle_handoff_root = (
+            attempt_dir / "physics_handoff"
+            if isinstance(handoff_contract, Mapping)
+            and handoff_contract.get("contract_id") == "particle_surface_cache_v1"
+            else None
+        )
         started = self.hooks.monotonic()
         if execution_reusable:
             run_dir = expected_run
@@ -2574,6 +2581,7 @@ class AgentJobController:
                             width=profile.width,
                             height=profile.height,
                             complete_sensor_contract={"rgb", "depth", "segmentation"}.issubset(planned_passes),
+                            physics_handoff_root=particle_handoff_root,
                         )
                     )
             except BaseException as exc:

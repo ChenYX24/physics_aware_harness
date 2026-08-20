@@ -171,6 +171,102 @@ class StageExecutorTests(unittest.TestCase):
     def test_backends_without_shared_contract_are_rejected(self) -> None:
         self.assertIsNone(stage_handoff_contract("genesis_fem", "fallback"))
 
+    def test_particle_handoff_solves_once_and_is_immutable_across_profiles(self) -> None:
+        handoff = {
+            "contract_id": "particle_surface_cache_v1",
+            "schema_version": "harness_particle_cache_v1",
+            "producer_backend": "solver_p",
+            "consumer_backend": "renderer_p",
+            "required_artifacts": ["particle_cache.json"],
+            "adapter_contract": "surface_mesh_sequence_replay_v1",
+        }
+        solver_configuration = {
+            "schema_version": "harness_rigid_sph_solver_configuration_v1",
+            "qualification_policy_id": "genesis_wcsph_surface_v1",
+            "parameters": {"duration_s": 1.0},
+        }
+        compilation = SimpleNamespace(
+            selected_backend="solver_p",
+            artifacts={
+                "solver_configuration": solver_configuration,
+                "runtime_plan": {
+                    "stages": [
+                        {"id": "solve", "kind": "solve", "backend": "solver_p", "handoff_contract": handoff},
+                        {"id": "render", "kind": "render", "backend": "renderer_p", "handoff_contract": handoff},
+                    ]
+                },
+            },
+        )
+        particle_case = RuntimeCase({**self.case.data, "capability_id": "fluid_particle_dynamics"})
+        solve_count = 0
+
+        class _ParticleBackend:
+            def run_case(inner_self, case: RuntimeCase, output_root: str | Path) -> Path:
+                nonlocal solve_count
+                solve_count += 1
+                run_dir = Path(output_root) / f"{case.case_id}_solver_p"
+                (run_dir / "surface_frames").mkdir(parents=True)
+                (run_dir / "surface_frames" / "frame_0000.obj").write_text("v 0 0 0\nf 1 1 1\n", encoding="utf-8")
+                write_json(run_dir / "solver_configuration.json", solver_configuration)
+                write_json(
+                    run_dir / "particle_cache.json",
+                    {
+                        "schema_version": "harness_particle_cache_v1",
+                        "frames": [{"frame": 0, "surface": {"path": "surface_frames/frame_0000.obj"}}],
+                    },
+                )
+                return run_dir
+
+        rendered: list[str] = []
+
+        def render(_run_dir: str | Path, *, profile: str, **_kwargs: object) -> dict:
+            rendered.append(profile)
+            return {"status": "completed"}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            handoff_root = root / "physics_handoff"
+            for profile in ("smoke", "candidate"):
+                execute_runtime_plan(
+                    particle_case,
+                    root / profile,
+                    compilation=compilation,
+                    requested_views=None,
+                    render_passes=None,
+                    camera_strategy="bounds_auto_v1",
+                    profile=profile,
+                    width=320,
+                    height=180,
+                    complete_sensor_contract=False,
+                    backend_factories={"solver_p": _ParticleBackend},
+                    render_adapters={"renderer_p": render},
+                    physics_handoff_root=handoff_root,
+                )
+
+            self.assertEqual(solve_count, 1)
+            self.assertEqual(rendered, ["smoke", "candidate"])
+            self.assertTrue((root / "candidate" / "generic_staged_case_solver_p" / "physics_handoff.json").is_file())
+
+            manifest = read_json(handoff_root / "manifest.json")
+            cached = handoff_root / "files" / manifest["files"][0]["path"]
+            cached.write_bytes(cached.read_bytes() + b"mutated")
+            with self.assertRaisesRegex(StageExecutionError, "changed"):
+                execute_runtime_plan(
+                    particle_case,
+                    root / "publish",
+                    compilation=compilation,
+                    requested_views=None,
+                    render_passes=None,
+                    camera_strategy="bounds_auto_v1",
+                    profile="candidate",
+                    width=320,
+                    height=180,
+                    complete_sensor_contract=False,
+                    backend_factories={"solver_p": _ParticleBackend},
+                    render_adapters={"renderer_p": render},
+                    physics_handoff_root=handoff_root,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

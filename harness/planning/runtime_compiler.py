@@ -30,6 +30,7 @@ from harness.planning.static_scene_builder import build_static_scene_layout
 from harness.planning.verification_compiler import compile_verification_plan
 from harness.runtime.actor_placement import compile_runtime_actor_placement
 from harness.runtime.observation_planner import camera_plan_from_observation_plan, compile_observation_plan
+from harness.runtime.rigid_sph_configuration import compile_rigid_sph_solver_configuration
 from harness.verification.runtime_actor_placement_verifier import verify_runtime_actor_placement
 from harness.verification.static_scene_verifier import verify_static_scene_layout
 
@@ -44,6 +45,7 @@ ARTIFACT_FILENAMES = {
     "runtime_actor_placement": "runtime_actor_placement.json",
     "runtime_actor_placement_report": "runtime_actor_placement_report.json",
     "runtime_plan": "runtime_plan.json",
+    "solver_configuration": "solver_configuration.json",
     "asset_provider_batch": "asset_provider_batch.json",
     "provider_input_manifest": "provider_input_manifest.json",
 }
@@ -300,8 +302,9 @@ def _compile_runtime_case_impl(
         camera_plan={},
     )
     verification_plan = compile_verification_plan(runtime_case.data, source_case_spec=case_spec)
+    observation_case = _observation_case_for_handoff(runtime_case.data, backend_selection.get("handoff_contract"))
     observation_plan = compile_observation_plan(
-        runtime_case.data,
+        observation_case,
         scene_layout,
         verification_plan,
         source_case_spec=case_spec,
@@ -348,6 +351,8 @@ def _compile_runtime_case_impl(
         "runtime_actor_placement_report": actor_report,
         "runtime_plan": runtime_plan,
     }
+    if _is_particle_surface_handoff(backend_selection.get("handoff_contract")):
+        artifacts["solver_configuration"] = compile_rigid_sph_solver_configuration(runtime_case.data)
     artifacts["asset_provider_batch"] = provider_orchestration.batch
     if provider_input_manifest is not None:
         artifacts["provider_input_manifest"] = copy.deepcopy(dict(provider_input_manifest))
@@ -387,6 +392,44 @@ def _compile_runtime_case_impl(
         report=report,
         provider_receipts=provider_orchestration.receipts,
     )
+
+
+def _is_particle_surface_handoff(value: Any) -> bool:
+    return isinstance(value, Mapping) and value.get("contract_id") == "particle_surface_cache_v1"
+
+
+def _observation_case_for_handoff(
+    runtime_case: Mapping[str, Any],
+    handoff_contract: Any,
+) -> dict[str, Any]:
+    result = copy.deepcopy(dict(runtime_case))
+    if not _is_particle_surface_handoff(handoff_contract):
+        return result
+    workspace = result.get("workspace_bounds_m") if isinstance(result.get("workspace_bounds_m"), Mapping) else {}
+    minimum = workspace.get("min_m")
+    maximum = workspace.get("max_m")
+    if not (
+        isinstance(minimum, list)
+        and isinstance(maximum, list)
+        and len(minimum) == 3
+        and len(maximum) == 3
+    ):
+        raise ValueError("particle surface handoff requires workspace_bounds_m for compiled camera framing")
+    lower = [float(value) for value in minimum]
+    upper = [float(value) for value in maximum]
+    if not all(math.isfinite(value) for value in [*lower, *upper]) or not all(
+        high > low for low, high in zip(lower, upper, strict=True)
+    ):
+        raise ValueError("particle surface handoff workspace bounds must be finite and positive")
+    scene = result.get("scene") if isinstance(result.get("scene"), dict) else {}
+    result["scene"] = {
+        **scene,
+        "scene_bounds": {
+            "center": [(low + high) / 2.0 for low, high in zip(lower, upper, strict=True)],
+            "extent": [high - low for low, high in zip(lower, upper, strict=True)],
+        },
+    }
+    return result
 
 
 def _begin_compilation_transaction(

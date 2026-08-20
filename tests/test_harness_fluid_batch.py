@@ -153,13 +153,15 @@ class FluidBatchVerifierTests(unittest.TestCase):
         self.assertIn("run_ue_import_until_report", renderer)
         self.assertIn("process.terminate()", renderer)
 
-    def test_ue_replay_uses_a_uv_independent_opaque_surface_material(self) -> None:
+    def test_ue_replay_uses_unified_translucent_surface_material(self) -> None:
         from scripts.harness_render_fluid_ue import fluid_visual_parameters
 
         renderer = (ROOT / "scripts" / "harness_render_fluid_ue.py").read_text(encoding="utf-8")
         native = (ROOT / "scripts" / "native_ue_scene.py").read_text(encoding="utf-8")
 
-        self.assertEqual(fluid_visual_parameters({"case_id": "water", "objects": []})["color_rgb"], [0.03, 0.30, 0.78])
+        self.assertEqual(fluid_visual_parameters({"case_id": "water", "objects": []})["color_rgb"], [0.03, 0.28, 0.48])
+        self.assertIn('"generate_translucent_fluid_material": True', renderer)
+        self.assertNotIn('"generate_solid_material": True,\n                    "generated_material_name": fluid_visual', renderer)
         self.assertIn('"generated_material_name": fluid_visual["generated_material_name"]', renderer)
         self.assertIn('"fixed_material_color": True', renderer)
         self.assertIn('"two_sided_material": True', renderer)
@@ -291,8 +293,21 @@ class FluidBatchVerifierTests(unittest.TestCase):
             },
         ]
         cache = {"environment": {"rigid_bodies": bodies}}
+        placement = {
+            "actor_bindings": [
+                {
+                    "object_id": body["id"],
+                    "asset": {
+                        "ue_path": body["asset"]["ue_path"],
+                        "instance_scale": body["transform"]["scale"],
+                    },
+                    "declared_object_transform": body["transform"],
+                }
+                for body in bodies
+            ]
+        }
 
-        dynamic, static = rigid_body_runtime_objects(cache, render_z_offset_m=0.025)
+        dynamic, static = rigid_body_runtime_objects(cache, placement, render_z_offset_m=0.025)
         resolution = rigid_body_asset_resolution_entries(bodies)
 
         self.assertEqual(dynamic[0]["ue5_path"], bodies[0]["asset"]["ue_path"])
@@ -333,7 +348,7 @@ class FluidBatchVerifierTests(unittest.TestCase):
 
         del bodies[0]["transform"]["ue_rotation_pyr_deg"]
         with self.assertRaisesRegex(ValueError, "missing an explicit UE transform"):
-            rigid_body_runtime_objects(cache, render_z_offset_m=0.0)
+            rigid_body_runtime_objects(cache, placement, render_z_offset_m=0.0)
 
         registration = runtime_pose_registration_report(
             {

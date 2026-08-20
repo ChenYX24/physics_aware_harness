@@ -15,6 +15,9 @@ def verify_particle_cache(
     frames = cache.get("frames") if isinstance(cache.get("frames"), list) else []
     particles = cache.get("particles") if isinstance(cache.get("particles"), dict) else {}
     expected_count = int(particles.get("count") or 0)
+    stable_ids = particles.get("stable_ids") if isinstance(particles.get("stable_ids"), list) else []
+    if stable_ids != list(range(expected_count)):
+        failures.append(failure("particle_ids_unstable", 0, {"count": len(stable_ids), "expected": expected_count}))
     previous_time = -math.inf
     environment = cache.get("environment") if isinstance(cache.get("environment"), dict) else {}
     if environment.get("type") != "rigid_sph_scene":
@@ -68,6 +71,7 @@ def verify_particle_cache(
         failures.append(failure("particle_cache_schema", 0, cache.get("schema_version")))
     if expected_count <= 0 or not frames:
         failures.append(failure("particle_cache_empty", 0, {"particle_count": expected_count, "frame_count": len(frames)}))
+    surface_volume_error = verify_surface_volume(frames, environment, failures)
     declared_checks = verify_declared_measurements(frames, environment, failures)
     return {
         "schema_version": "harness_particle_cache_report_v1",
@@ -78,6 +82,7 @@ def verify_particle_cache(
             "frame_count": len(frames),
             "particle_count": expected_count,
             "stable_particle_count": not any(item["code"] == "particle_count_changed" for item in failures),
+            "stable_particle_ids": not any(item["code"] == "particle_ids_unstable" for item in failures),
             "surface_frame_count": sum(1 for frame in frames if int((frame.get("surface") or {}).get("triangle_count") or 0) > 0),
             "surface_topology_consistent": not any(item["code"] == "surface_topology_invalid" for item in failures),
             "container_bounds_respected": not any(item["code"] == "container_penetration" for item in failures),
@@ -87,9 +92,42 @@ def verify_particle_cache(
                 if environment.get("surface_container_intersection_metric") != "not_applied_for_boundary_contacting_fluid"
                 else None
             ),
+            "final_surface_volume_relative_error": surface_volume_error,
             **declared_checks,
         },
     }
+
+
+def verify_surface_volume(
+    frames: list[dict[str, Any]],
+    environment: dict[str, Any],
+    failures: list[dict[str, Any]],
+) -> float | None:
+    if not frames:
+        return None
+    expected = environment.get("initial_liquid_volume_m3")
+    tolerances = environment.get("verification_tolerances") if isinstance(environment.get("verification_tolerances"), dict) else {}
+    maximum = tolerances.get("surface_volume_relative_error_max")
+    surface = frames[-1].get("surface") if isinstance(frames[-1].get("surface"), dict) else {}
+    actual = surface.get("enclosed_volume_m3")
+    if maximum is None:
+        return None
+    if not all(isinstance(value, (int, float)) and math.isfinite(float(value)) for value in (expected, maximum, actual)):
+        failures.append(failure("surface_volume_evidence_missing", int(frames[-1].get("frame") or 0), None))
+        return None
+    if float(expected) <= 0.0 or float(maximum) < 0.0:
+        failures.append(failure("surface_volume_contract_invalid", int(frames[-1].get("frame") or 0), {"expected": expected, "maximum": maximum}))
+        return None
+    error = abs(float(actual) - float(expected)) / float(expected)
+    if error > float(maximum):
+        failures.append(
+            failure(
+                "surface_volume_error_exceeded",
+                int(frames[-1].get("frame") or 0),
+                {"relative_error": error, "maximum": float(maximum)},
+            )
+        )
+    return error
 
 
 def verify_declared_measurements(

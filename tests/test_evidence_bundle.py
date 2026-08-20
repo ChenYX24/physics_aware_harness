@@ -126,6 +126,27 @@ class EvidenceBundleTests(unittest.TestCase):
         self.assertTrue(Path(result["manifest_path"]).is_file())
         self.assertEqual(result["stage_result"]["status"], "completed")
 
+    def test_single_view_bundle_uses_keyframes_without_montage(self) -> None:
+        quality = read_json(self.run_dir / "quality_report.json")
+        quality["media"]["views"] = {"front": {"status": "pass"}}
+        write_json(self.run_dir / "quality_report.json", quality)
+
+        result = build_evidence_bundle(
+            job_id="job_single_view_evidence",
+            attempt=self.attempt,
+            attempt_dir=self.attempt_dir,
+            candidate_run_dir=self.run_dir,
+            request=self.request,
+            intent_contract=self.intent,
+            result_provenance=self.result_provenance,
+            ffmpeg="/usr/bin/true",
+            command_runner=self.fake_ffmpeg,
+        )
+
+        artifacts = result["manifest"]["artifacts"]
+        self.assertEqual(len([row for row in artifacts if row["kind"] == "keyframe"]), 3)
+        self.assertEqual([row for row in artifacts if row["kind"] == "multi_view_montage"], [])
+
     def test_declared_contact_ignores_earlier_contact_and_preserves_constraint_states(self) -> None:
         write_json(
             self.run_dir / "trajectory.json",

@@ -28,6 +28,7 @@ from harness.runtime.rigid_sph_scene import (
     subtract,
     ue_rotation_pyr_from_solver_xyz,
 )
+from harness.runtime.rigid_sph_configuration import compile_rigid_sph_solver_configuration, rigid_sph_parameters
 from scripts.harness_genesis_fluid import (
     surface_component_metrics,
     surface_shape_metrics,
@@ -37,19 +38,23 @@ from scripts.harness_genesis_fluid import (
 )
 
 
-def simulate_rigid_sph_scene(case_spec: dict[str, Any]) -> dict[str, Any]:
+def simulate_rigid_sph_scene(
+    case_spec: dict[str, Any],
+    solver_configuration: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     wake_macos_display()
     gs = import_headless_genesis()
     import numpy as np
     import pysplashsurf
 
-    compiled = compile_rigid_sph_scene(case_spec)
-    options = case_spec.get("backend_options") if isinstance(case_spec.get("backend_options"), dict) else {}
+    solver_configuration = solver_configuration or compile_rigid_sph_solver_configuration(case_spec)
+    compiled = compile_rigid_sph_scene(case_spec, solver_configuration)
+    options = rigid_sph_parameters(solver_configuration)
     physical = case_spec.get("physical_parameters") if isinstance(case_spec.get("physical_parameters"), dict) else {}
-    simulation_settings = rigid_sph_simulation_settings(case_spec)
+    simulation_settings = rigid_sph_simulation_settings(case_spec, solver_configuration)
     fps = simulation_settings["fps"]
     duration_s = simulation_settings["duration_s"]
-    particle_size = float(options.get("particle_size_m") or 0.006)
+    particle_size = float(options["particle_size_m"])
     steps_per_frame = simulation_settings["steps_per_frame"]
     initialization = compiled.get("initialization") if isinstance(compiled.get("initialization"), dict) else {}
     pre_roll_s = (
@@ -59,10 +64,11 @@ def simulate_rigid_sph_scene(case_spec: dict[str, Any]) -> dict[str, Any]:
     )
     solver_dt = 1.0 / (fps * steps_per_frame)
     gravity = physical.get("gravity_m_s2") or [0.0, 0.0, -9.81]
-    reconstruction_options = options.get("surface_reconstruction") if isinstance(options.get("surface_reconstruction"), dict) else {}
-    smoothing = float(reconstruction_options.get("smoothing_length_in_particle_radii") or 2.0)
-    cube_size = float(reconstruction_options.get("cube_size_in_particle_radii") or 0.75)
-    iso_threshold = float(reconstruction_options.get("iso_surface_threshold") or 0.65)
+    reconstruction_options = options["surface_reconstruction"]
+    smoothing = float(reconstruction_options["smoothing_length_in_particle_radii"])
+    cube_size = float(reconstruction_options["cube_size_in_particle_radii"])
+    iso_threshold = float(reconstruction_options["iso_surface_threshold"])
+    material_options = options["sph_material"]
     lower = compiled["workspace_bounds_m"]["min_m"]
     upper = compiled["workspace_bounds_m"]["max_m"]
 
@@ -126,7 +132,14 @@ def simulate_rigid_sph_scene(case_spec: dict[str, Any]) -> dict[str, Any]:
             pos=tuple(fluid_spec["world_position_m"]),
             quat=tuple(fluid_spec["world_quaternion_wxyz"]),
         ),
-        material=gs.materials.SPH.Liquid(sampler="regular"),
+        material=gs.materials.SPH.Liquid(
+            sampler="regular",
+            rho=float(material_options["rest_density_kg_m3"]),
+            stiffness=float(material_options["stiffness_pa"]),
+            exponent=float(material_options["equation_of_state_exponent"]),
+            mu=float(material_options["viscosity_pa_s"]),
+            gamma=float(material_options["surface_tension_n_m"]),
+        ),
     )
     scene.build()
     for body in compiled["rigid_bodies"]:
@@ -262,6 +275,8 @@ def simulate_rigid_sph_scene(case_spec: dict[str, Any]) -> dict[str, Any]:
             "pressure_solver": "WCSPH",
             "solver_dt_s": solver_dt,
             "gravity_m_s2": list(gravity),
+            "qualification_policy_id": solver_configuration["qualification_policy_id"],
+            "configuration": options,
         },
         "timebase": {
             "fps": fps,
@@ -280,7 +295,8 @@ def simulate_rigid_sph_scene(case_spec: dict[str, Any]) -> dict[str, Any]:
             "type": "rigid_sph_scene",
             "floor_z_m": floor_z,
             "workspace_bounds_m": compiled["workspace_bounds_m"],
-            "penetration_tolerance_m": particle_size,
+            "penetration_tolerance_m": float(options["verification"]["penetration_tolerance_m"]),
+            "verification_tolerances": options["verification"],
             "collision_backend": "genesis_rigid_sph_coupler",
             "collision_representation": "declared_rigid_body_colliders",
             "rigid_bodies": [without_parts(body) for body in compiled["rigid_bodies"]],
@@ -310,12 +326,16 @@ def simulate_rigid_sph_scene(case_spec: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def rigid_sph_simulation_settings(case_spec: dict[str, Any]) -> dict[str, Any]:
+def rigid_sph_simulation_settings(
+    case_spec: dict[str, Any],
+    solver_configuration: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Resolve the physical observation window independently of render profile."""
     scene = case_spec.get("scene") if isinstance(case_spec.get("scene"), dict) else {}
-    options = case_spec.get("backend_options") if isinstance(case_spec.get("backend_options"), dict) else {}
-    fps = int(options.get("fps") or 24)
-    steps_per_frame = int(options.get("steps_per_frame") or 145)
+    solver_configuration = solver_configuration or compile_rigid_sph_solver_configuration(case_spec)
+    options = rigid_sph_parameters(solver_configuration)
+    fps = int(options["fps"])
+    steps_per_frame = int(options["steps_per_frame"])
     if scene.get("duration_s") is None:
         raise ValueError("rigid_sph requires scene.duration_s")
     duration_s = float(scene["duration_s"])
@@ -547,17 +567,23 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run a declarative Genesis rigid-body/SPH scene and export canonical truth.")
     parser.add_argument("--case", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--solver-configuration")
     parser.add_argument("--skip-publish", action="store_true")
     args = parser.parse_args()
     case = load_runtime_case(args.case)
+    solver_configuration = (
+        json.loads(Path(args.solver_configuration).read_text(encoding="utf-8"))
+        if args.solver_configuration
+        else compile_rigid_sph_solver_configuration(case.data)
+    )
     output_dir = workspace_path(args.output_dir, default_relative="runs/fluid/rigid_sph")
-    compiled = compile_rigid_sph_scene(case.data)
+    compiled = compile_rigid_sph_scene(case.data, solver_configuration)
     (output_dir / "rigid_sph_scene.json").parent.mkdir(parents=True, exist_ok=True)
     (output_dir / "rigid_sph_scene.json").write_text(
         json.dumps(compiled, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    report = write_fluid_cache(simulate_rigid_sph_scene(case.data), output_dir)
+    report = write_fluid_cache(simulate_rigid_sph_scene(case.data, solver_configuration), output_dir)
     print(json.dumps({"status": report["status"], "output_dir": str(output_dir), **report["checks"]}, indent=2))
     # Physical assertions are represented by fluid_report.json and the
     # verifier Stage Result. Reaching this point means execution and artifact

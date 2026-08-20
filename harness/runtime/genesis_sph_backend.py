@@ -11,6 +11,7 @@ from harness.core.runtime_case import RuntimeCase
 from harness.core.physics_contract import infer_scene_domain
 from harness.core.workspace import workspace_root
 from harness.runtime.rigid_sph_scene import compile_rigid_sph_scene
+from harness.runtime.rigid_sph_configuration import compile_rigid_sph_solver_configuration
 from harness.runtime.fluid_surface_adapter import file_sha256, prepare_ue_surface_replay
 from harness.verification.physics_verifier import PhysicsVerifier
 
@@ -36,13 +37,22 @@ class GenesisSPHBackend:
         requested_views: list[str] | None = None,
         render_passes: list[str] | None = None,
         camera_strategy: str = "bounds_auto_v1",
+        compilation: Any | None = None,
     ) -> Path:
         if infer_scene_domain(case.data) != "particle":
             raise ValueError("genesis_sph requires a particle-domain scene contract")
         run_dir = Path(output_root) / f"{case.case_id}_{self.name}"
         run_dir.mkdir(parents=True, exist_ok=True)
         write_json(run_dir / "case_spec.json", case.data)
-        parameters = genesis_parameters(case.data)
+        solver_configuration = (
+            compilation.artifacts.get("solver_configuration")
+            if compilation is not None and isinstance(getattr(compilation, "artifacts", None), dict)
+            else None
+        )
+        if not isinstance(solver_configuration, dict):
+            solver_configuration = compile_rigid_sph_solver_configuration(case.data)
+        write_json(run_dir / "solver_configuration.json", solver_configuration)
+        parameters = genesis_parameters(case.data, solver_configuration)
         executable = genesis_python()
         if not executable.is_file():
             report = {
@@ -203,8 +213,11 @@ def genesis_python() -> Path:
     return workspace_root() / "envs" / "genesis" / "bin" / "python"
 
 
-def genesis_parameters(case_spec: dict[str, Any]) -> dict[str, Any]:
-    return compile_rigid_sph_scene(case_spec)
+def genesis_parameters(
+    case_spec: dict[str, Any],
+    solver_configuration: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return compile_rigid_sph_scene(case_spec, solver_configuration)
 
 
 def genesis_command(executable: Path, run_dir: Path, parameters: Mapping[str, Any]) -> list[str]:
@@ -217,6 +230,8 @@ def genesis_command(executable: Path, run_dir: Path, parameters: Mapping[str, An
         str(run_dir / "case_spec.json"),
         "--output-dir",
         str(run_dir),
+        "--solver-configuration",
+        str(run_dir / "solver_configuration.json"),
         "--skip-publish",
     ]
 

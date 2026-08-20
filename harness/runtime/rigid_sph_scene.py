@@ -5,6 +5,8 @@ import math
 from pathlib import Path
 from typing import Any
 
+from harness.runtime.rigid_sph_configuration import compile_rigid_sph_solver_configuration, rigid_sph_parameters
+
 
 PORTABLE_COLLISION_MESH_SCHEMA_VERSION = "harness_portable_collision_mesh_v1"
 
@@ -13,7 +15,10 @@ class RigidSphCapabilityMissing(ValueError):
     """The declared rigid/SPH scene cannot be represented without changing its physics truth."""
 
 
-def compile_rigid_sph_scene(case_spec: dict[str, Any]) -> dict[str, Any]:
+def compile_rigid_sph_scene(
+    case_spec: dict[str, Any],
+    solver_configuration: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Compile declarations into one backend-neutral rigid/SPH execution contract."""
     scene = case_spec.get("solver_scene") if isinstance(case_spec.get("solver_scene"), dict) else {}
     if scene.get("type") != "rigid_sph":
@@ -28,8 +33,14 @@ def compile_rigid_sph_scene(case_spec: dict[str, Any]) -> dict[str, Any]:
     fluids = [item for item in objects if item.get("role") in {"fluid", "fluid_volume"}]
     if len(fluids) != 1:
         raise ValueError("rigid_sph scene currently requires exactly one fluid")
-    options = case_spec.get("backend_options") if isinstance(case_spec.get("backend_options"), dict) else {}
-    particle_size_m = positive(options.get("particle_size_m", 0.006), "backend_options.particle_size_m")
+    if solver_configuration is None:
+        validation_case = dict(case_spec)
+        validation_scene = dict(case_spec.get("scene") or {})
+        validation_scene.setdefault("duration_s", 1.0)
+        validation_case["scene"] = validation_scene
+        solver_configuration = compile_rigid_sph_solver_configuration(validation_case)
+    parameters = rigid_sph_parameters(solver_configuration)
+    particle_size_m = positive(parameters.get("particle_size_m"), "solver_configuration.parameters.particle_size_m")
     fluid = compile_fluid(fluids[0], body_by_id, particle_radius_m=particle_size_m / 2.0)
     workspace = case_spec.get("workspace_bounds_m")
     if not isinstance(workspace, dict):
@@ -50,6 +61,7 @@ def compile_rigid_sph_scene(case_spec: dict[str, Any]) -> dict[str, Any]:
         "assertions": assertions,
         "initialization": initialization,
         "workspace_bounds_m": {"min_m": minimum, "max_m": maximum},
+        "solver_configuration": solver_configuration,
     }
 
 

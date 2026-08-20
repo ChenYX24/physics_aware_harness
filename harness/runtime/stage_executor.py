@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import inspect
+import hashlib
+import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -55,6 +58,7 @@ def execute_runtime_plan(
     complete_sensor_contract: bool,
     backend_factories: Mapping[str, BackendFactory] | None = None,
     render_adapters: Mapping[str, RenderAdapter] | None = None,
+    physics_handoff_root: str | Path | None = None,
 ) -> Path:
     """Execute the compiled stage DAG in order using artifact contracts.
 
@@ -72,10 +76,19 @@ def execute_runtime_plan(
             raise StageExecutionError("runtime_plan_empty", "runtime_plan contains no executable stages")
         factories = dict(backend_factories or BACKEND_FACTORIES)
         adapters = dict(render_adapters or {"ue": render_ue_handoff})
+        particle_handoff = _particle_surface_handoff(stages)
+        handoff_root = Path(physics_handoff_root) if physics_handoff_root is not None and particle_handoff else None
+        reuse_handoff = bool(handoff_root is not None and (handoff_root / "manifest.json").is_file())
         for stage in stages:
             kind = str(stage.get("kind") or "")
             backend_name = str(stage.get("backend") or "")
             if kind in {"solve", "solve_render"}:
+                if kind == "solve" and reuse_handoff:
+                    run_dir = Path(output_root) / f"{case.case_id}_{compilation.selected_backend}"
+                    run_dir.mkdir(parents=True, exist_ok=True)
+                    _materialize_particle_handoff(handoff_root, run_dir, case, compilation, particle_handoff)
+                    completed.append({"id": stage.get("id"), "kind": kind, "backend": backend_name, "mode": "handoff_reuse"})
+                    continue
                 factory = factories.get(backend_name)
                 if factory is None:
                     raise StageExecutionError(
@@ -92,6 +105,9 @@ def execute_runtime_plan(
                     compilation=compilation,
                     complete_sensor_contract=complete_sensor_contract,
                 )
+                if kind == "solve" and handoff_root is not None:
+                    _validate_handoff_artifacts(run_dir, particle_handoff)
+                    _commit_particle_handoff(handoff_root, run_dir, case, compilation, particle_handoff)
             elif kind == "render":
                 if run_dir is None:
                     raise StageExecutionError("render_before_solve", "render stage has no completed solver stage")
@@ -175,6 +191,109 @@ def _validate_handoff_artifacts(run_dir: Path, handoff: Mapping[str, Any]) -> No
                 "stage_handoff_schema_mismatch",
                 f"{manifest_name} schema is {payload.get('schema_version')!r}, expected {expected!r}",
             )
+
+
+def _particle_surface_handoff(stages: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for stage in stages:
+        contract = stage.get("handoff_contract")
+        if isinstance(contract, Mapping) and contract.get("contract_id") == "particle_surface_cache_v1":
+            return dict(contract)
+    return None
+
+
+def _particle_handoff_identity(
+    case: RuntimeCase,
+    compilation: RuntimeCompilation,
+    handoff: Mapping[str, Any],
+) -> str:
+    payload = {
+        "case_spec": case.data,
+        "solver_configuration": compilation.artifacts.get("solver_configuration"),
+        "handoff_contract": dict(handoff),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _particle_handoff_files(run_dir: Path) -> list[str]:
+    cache = read_json(run_dir / "particle_cache.json")
+    paths = {"particle_cache.json", "solver_configuration.json"}
+    if (run_dir / "rigid_sph_scene.json").is_file():
+        paths.add("rigid_sph_scene.json")
+    for frame in cache.get("frames") or []:
+        surface = frame.get("surface") if isinstance(frame, Mapping) else None
+        relative = str((surface or {}).get("path") or "") if isinstance(surface, Mapping) else ""
+        if not relative:
+            raise StageExecutionError("stage_handoff_incomplete", "particle cache frame has no surface artifact")
+        source = (run_dir / relative).resolve()
+        if not source.is_relative_to(run_dir.resolve()) or not source.is_file():
+            raise StageExecutionError("stage_handoff_incomplete", f"particle surface artifact is invalid: {relative}")
+        paths.add(relative)
+    return sorted(paths)
+
+
+def _commit_particle_handoff(
+    handoff_root: Path,
+    run_dir: Path,
+    case: RuntimeCase,
+    compilation: RuntimeCompilation,
+    handoff: Mapping[str, Any],
+) -> None:
+    manifest_path = handoff_root / "manifest.json"
+    if manifest_path.is_file() or (handoff_root.exists() and any(handoff_root.iterdir())):
+        raise StageExecutionError("physics_handoff_already_exists", "attempt physics handoff is immutable")
+    files = []
+    for relative in _particle_handoff_files(run_dir):
+        source = run_dir / relative
+        destination = handoff_root / "files" / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        files.append({"path": relative, "sha256": _file_sha256(destination), "byte_size": destination.stat().st_size})
+    write_json(
+        manifest_path,
+        {
+            "schema_version": "harness_particle_surface_handoff_manifest_v1",
+            "contract_id": "particle_surface_cache_v1",
+            "physics_identity": _particle_handoff_identity(case, compilation, handoff),
+            "files": files,
+        },
+    )
+
+
+def _materialize_particle_handoff(
+    handoff_root: Path,
+    run_dir: Path,
+    case: RuntimeCase,
+    compilation: RuntimeCompilation,
+    handoff: Mapping[str, Any],
+) -> None:
+    manifest = read_json(handoff_root / "manifest.json")
+    if (
+        manifest.get("schema_version") != "harness_particle_surface_handoff_manifest_v1"
+        or manifest.get("contract_id") != "particle_surface_cache_v1"
+        or manifest.get("physics_identity") != _particle_handoff_identity(case, compilation, handoff)
+    ):
+        raise StageExecutionError("physics_handoff_identity_mismatch", "attempt physics handoff does not match compilation")
+    for row in manifest.get("files") or []:
+        relative = str(row.get("path") or "")
+        source = (handoff_root / "files" / relative).resolve()
+        if not source.is_relative_to((handoff_root / "files").resolve()) or not source.is_file():
+            raise StageExecutionError("physics_handoff_incomplete", f"physics handoff file is missing: {relative}")
+        if source.stat().st_size != int(row.get("byte_size") or -1) or _file_sha256(source) != row.get("sha256"):
+            raise StageExecutionError("physics_handoff_mutated", f"physics handoff file changed: {relative}")
+        destination = run_dir / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+    write_json(run_dir / "physics_handoff.json", manifest)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def render_ue_handoff(

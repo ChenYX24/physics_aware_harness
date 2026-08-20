@@ -586,6 +586,15 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
             water_binding["render_binding"]["cache_contract"]["contract_id"],
             "particle_surface_cache_v1",
         )
+        solver_configuration = compilation.artifacts["solver_configuration"]
+        self.assertEqual(solver_configuration["qualification_policy_id"], "genesis_wcsph_surface_v1")
+        self.assertEqual(solver_configuration["parameters"]["steps_per_frame"], 100)
+        workspace = compilation.runtime_case.data["workspace_bounds_m"]
+        expected_extent = [
+            high - low
+            for low, high in zip(workspace["min_m"], workspace["max_m"], strict=True)
+        ]
+        self.assertEqual(list(compilation.artifacts["camera_plan"]["scene_bounds"]["extent"]), expected_extent)
 
     def test_rigid_sph_solver_targets_ue_replay_asset_bindings(self) -> None:
         source = CaseSpecV2(
@@ -847,6 +856,7 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
             compilation.artifacts["camera_plan"],
         )
         self.assertEqual(compilation.artifacts["runtime_plan"]["backend_selection"]["selected_backend"], "fallback")
+        self.assertNotIn("solver_configuration", compilation.artifacts)
         self.assertEqual(
             compilation.artifacts["runtime_plan"]["backend_selection"]["required_case_capabilities"],
             ["rigid_body_dynamics"],
