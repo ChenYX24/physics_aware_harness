@@ -4772,6 +4772,34 @@ class AgentJobController:
                 "max": [component + delta for component, delta in zip(current, deltas)],
             }
 
+        def add_vector_bounds(path: str, value: Any, *, minimum: float, maximum: float) -> None:
+            if path in excluded or not cls._finite_numeric_vector(value, length=3):
+                return
+            constraints[path] = {
+                "kind": "numeric_vector",
+                "min": [minimum, minimum, minimum],
+                "max": [maximum, maximum, maximum],
+            }
+
+        def add_enum(path: str, value: Any, *, values: list[str]) -> None:
+            if path in excluded or value not in values:
+                return
+            constraints[path] = {"kind": "enum", "values": values}
+
+        add_numeric_window(
+            "$.scene.duration_s",
+            (case_spec.get("scene") or {}).get("duration_s"),
+            relative=0.5,
+            floor=0.5,
+        )
+        cameras = (case_spec.get("observation_requirements") or {}).get("cameras")
+        if "$.observation_requirements.cameras" not in excluded and isinstance(cameras, list) and cameras:
+            constraints["$.observation_requirements.cameras"] = {
+                "kind": "list",
+                "min_items": len(cameras),
+                "max_items": len(cameras),
+            }
+
         for obj in case_spec.get("objects") or []:
             if not isinstance(obj, Mapping):
                 continue
@@ -4854,19 +4882,102 @@ class AgentJobController:
                         "min": max(0.0, current - 0.15),
                         "max": min(1.0, current + 0.15),
                     }
-            if body_type in {"static", "kinematic"}:
-                geometry = obj.get("geometry") if isinstance(obj.get("geometry"), Mapping) else {}
-                size = geometry.get("approx_size_m")
-                size_path = f"$.objects.{object_id}.geometry.approx_size_m"
-                if size_path not in excluded and cls._finite_numeric_vector(size, length=3):
-                    constraints[size_path] = {
-                        "kind": "numeric_vector",
-                        "min": [0.001, 0.001, 0.001],
-                        "max": [
-                            max(scene_bounds[index] * 2.0, float(size[index]))
-                            for index in range(3)
-                        ],
-                    }
+                add_numeric_window(
+                    f"$.objects.{object_id}.physics.material.density_kg_m3",
+                    material.get("density_kg_m3"),
+                    relative=0.5,
+                )
+            geometry = obj.get("geometry") if isinstance(obj.get("geometry"), Mapping) else {}
+            size = geometry.get("approx_size_m")
+            size_path = f"$.objects.{object_id}.geometry.approx_size_m"
+            if size_path not in excluded and cls._finite_numeric_vector(size, length=3):
+                constraints[size_path] = {
+                    "kind": "numeric_vector",
+                    "min": [0.001, 0.001, 0.001],
+                    "max": [
+                        max(scene_bounds[index] * 2.0, float(size[index]))
+                        for index in range(3)
+                    ],
+                }
+            solver = obj.get("solver") if isinstance(obj.get("solver"), Mapping) else {}
+            motion = solver.get("motion") if isinstance(solver.get("motion"), Mapping) else {}
+            motion_path = f"$.objects.{object_id}.solver.motion"
+            add_numeric_window(
+                f"{motion_path}.start_time_s",
+                motion.get("start_time_s"),
+                relative=0.5,
+                floor=0.25,
+            )
+            add_numeric_window(
+                f"{motion_path}.duration_s",
+                motion.get("duration_s"),
+                relative=0.5,
+                floor=0.25,
+            )
+            add_vector_window(
+                f"{motion_path}.pivot_local_m",
+                motion.get("pivot_local_m"),
+                relative=0.5,
+                floor=0.05,
+            )
+            for field in ("solver_end_rotation_xyz_deg", "ue_end_rotation_pyr_deg"):
+                add_vector_bounds(
+                    f"{motion_path}.{field}",
+                    motion.get(field),
+                    minimum=-180.0,
+                    maximum=180.0,
+                )
+
+        for constraint in case_spec.get("constraints") or []:
+            if not isinstance(constraint, Mapping):
+                continue
+            constraint_id = str(constraint.get("id") or "")
+            if not _CANONICAL_OBJECT_PATH_SEGMENT.fullmatch(constraint_id):
+                continue
+            constraint_path = f"$.constraints.{constraint_id}"
+            for frame_name in ("frame_a", "frame_b"):
+                frame = constraint.get(frame_name) if isinstance(constraint.get(frame_name), Mapping) else {}
+                frame_path = f"{constraint_path}.{frame_name}"
+                add_vector_window(
+                    f"{frame_path}.position_m",
+                    frame.get("position_m"),
+                    relative=0.5,
+                    floor=0.05,
+                )
+                for axis_name in ("primary_axis", "secondary_axis"):
+                    add_vector_bounds(
+                        f"{frame_path}.{axis_name}",
+                        frame.get(axis_name),
+                        minimum=-1.0,
+                        maximum=1.0,
+                    )
+            add_numeric_window(
+                f"{constraint_path}.linear_limit_m",
+                constraint.get("linear_limit_m"),
+                relative=0.5,
+            )
+            angular_limits = (
+                constraint.get("angular_limits_deg")
+                if isinstance(constraint.get("angular_limits_deg"), Mapping)
+                else {}
+            )
+            for axis_name in ("x", "y", "z"):
+                add_numeric_window(
+                    f"{constraint_path}.angular_limits_deg.{axis_name}",
+                    angular_limits.get(axis_name),
+                    relative=0.5,
+                    floor=5.0,
+                )
+            axial_visual = (
+                constraint.get("axial_visual")
+                if isinstance(constraint.get("axial_visual"), Mapping)
+                else {}
+            )
+            add_enum(
+                f"{constraint_path}.axial_visual.mesh_forward_axis",
+                axial_visual.get("mesh_forward_axis"),
+                values=["x", "y", "z"],
+            )
 
         paths = sorted(constraints)
         return {

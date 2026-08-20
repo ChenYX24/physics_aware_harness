@@ -2866,9 +2866,39 @@ class AgentJobControllerTests(unittest.TestCase):
             }
         )
         cue["physics"]["material"]["static_friction"] = 0.04
+        cue["physics"]["material"]["density_kg_m3"] = 1200.0
+        cue["solver"] = {
+            "motion": {
+                "start_time_s": 0.2,
+                "duration_s": 0.8,
+                "pivot_local_m": [0.0, 0.0, 0.1],
+                "solver_end_rotation_xyz_deg": [0.0, 90.0, 0.0],
+                "ue_end_rotation_pyr_deg": [-90.0, 0.0, 0.0],
+            }
+        }
+        case_spec["constraints"] = [
+            {
+                "id": "cue_hinge",
+                "frame_a": {
+                    "position_m": [0.0, 0.0, 0.1],
+                    "primary_axis": [1.0, 0.0, 0.0],
+                    "secondary_axis": [0.0, 1.0, 0.0],
+                },
+                "frame_b": {
+                    "position_m": [0.0, 0.0, 0.1],
+                    "primary_axis": [1.0, 0.0, 0.0],
+                    "secondary_axis": [0.0, 1.0, 0.0],
+                },
+                "linear_limit_m": 0.1,
+                "angular_limits_deg": {"x": 45.0},
+                "axial_visual": {"object_id": "floor", "mesh_forward_axis": "x"},
+            }
+        ]
 
         policy = AgentJobController._case_spec_revision_policy(case_spec)
 
+        self.assertIn("$.scene.duration_s", policy["paths"])
+        self.assertIn("$.observation_requirements.cameras", policy["paths"])
         self.assertIn("$.objects.cue_ball.initial_state.position_m", policy["paths"])
         self.assertIn("$.objects.cue_ball.initial_state.rotation_deg", policy["paths"])
         self.assertIn("$.objects.cue_ball.initial_state.linear_velocity_m_s", policy["paths"])
@@ -2881,8 +2911,20 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertIn("$.objects.cue_ball.physics.material.static_friction", policy["paths"])
         self.assertIn("$.objects.cue_ball.physics.material.dynamic_friction", policy["paths"])
         self.assertIn("$.objects.cue_ball.physics.material.restitution", policy["paths"])
+        self.assertIn("$.objects.cue_ball.physics.material.density_kg_m3", policy["paths"])
         self.assertIn("$.objects.floor.geometry.approx_size_m", policy["paths"])
-        self.assertNotIn("$.objects.cue_ball.geometry.approx_size_m", policy["paths"])
+        self.assertIn("$.objects.cue_ball.geometry.approx_size_m", policy["paths"])
+        self.assertIn("$.objects.cue_ball.solver.motion.start_time_s", policy["paths"])
+        self.assertIn("$.objects.cue_ball.solver.motion.duration_s", policy["paths"])
+        self.assertIn("$.objects.cue_ball.solver.motion.pivot_local_m", policy["paths"])
+        self.assertIn("$.objects.cue_ball.solver.motion.solver_end_rotation_xyz_deg", policy["paths"])
+        self.assertIn("$.objects.cue_ball.solver.motion.ue_end_rotation_pyr_deg", policy["paths"])
+        self.assertIn("$.constraints.cue_hinge.frame_a.position_m", policy["paths"])
+        self.assertIn("$.constraints.cue_hinge.frame_a.primary_axis", policy["paths"])
+        self.assertIn("$.constraints.cue_hinge.frame_b.secondary_axis", policy["paths"])
+        self.assertIn("$.constraints.cue_hinge.linear_limit_m", policy["paths"])
+        self.assertIn("$.constraints.cue_hinge.angular_limits_deg.x", policy["paths"])
+        self.assertIn("$.constraints.cue_hinge.axial_visual.mesh_forward_axis", policy["paths"])
         self.assertNotIn("$.objects.cue_ball.physics.body_type", policy["paths"])
         self.assertNotIn("$.objects.cue_ball.physics.collision_required", policy["paths"])
         self.assertEqual(
@@ -2896,6 +2938,22 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertEqual(
             policy["ranges"]["$.objects.cue_ball.physics.material.restitution"],
             {"kind": "numeric", "min": 0.71, "max": 1.0},
+        )
+        self.assertEqual(
+            policy["ranges"]["$.constraints.cue_hinge.axial_visual.mesh_forward_axis"],
+            {"kind": "enum", "values": ["x", "y", "z"]},
+        )
+        AgentJobController._validate_revision_changes(
+            [
+                {
+                    "path": "$.constraints.cue_hinge.axial_visual.mesh_forward_axis",
+                    "operation": "replace",
+                    "before": "x",
+                    "after": "z",
+                }
+            ],
+            policy,
+            repair_layer="case_spec_source",
         )
         AgentJobController._validate_revision_changes(
             [
