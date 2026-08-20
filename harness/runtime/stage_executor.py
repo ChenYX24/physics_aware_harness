@@ -195,6 +195,7 @@ def render_ue_handoff(
         raise StageExecutionError("ue_handoff_unsupported", f"UE cannot consume handoff contract: {contract_id}")
     return adapter(
         Path(run_dir),
+        handoff_contract=handoff_contract,
         profile=profile,
         width=width,
         height=height,
@@ -204,12 +205,14 @@ def render_ue_handoff(
 def _render_particle_surface_cache_in_ue(
     run_dir: Path,
     *,
+    handoff_contract: Mapping[str, Any],
     profile: str,
     width: int,
     height: int,
 ) -> dict[str, Any]:
     return run_ue_surface_replay(
         run_dir,
+        handoff_contract=handoff_contract,
         profile=profile,
         width=width,
         height=height,
@@ -219,6 +222,7 @@ def _render_particle_surface_cache_in_ue(
 def _render_deformable_mesh_cache_in_ue(
     run_dir: Path,
     *,
+    handoff_contract: Mapping[str, Any],
     profile: str,
     width: int,
     height: int,

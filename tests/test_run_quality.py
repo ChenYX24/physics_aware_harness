@@ -87,8 +87,9 @@ class RunQualityTests(unittest.TestCase):
             run_dir = self.make_run(Path(tmp))
             self.write_json(
                 run_dir / "execution_profile.json",
-                {"name": "local_preview", "render_passes": ["rgb"]},
+                {"name": "local_preview"},
             )
+            self.write_json(run_dir / "inputs" / "render_config.json", {"passes": ["rgb"]})
             for path in (
                 run_dir / "views" / "front_static" / "depth.exr",
                 run_dir / "views" / "front_static" / "segmentation.exr",
@@ -680,6 +681,10 @@ class RunQualityTests(unittest.TestCase):
             },
         )
         self.write_json(run_dir / "harness_verifier.json", {"status": "pass", "failure_type": None})
+        self.write_json(
+            run_dir / "inputs" / "render_config.json",
+            {"passes": ["rgb", "depth", "segmentation"]},
+        )
         self.write_json(
             run_dir / "render_sync_report.json",
             {

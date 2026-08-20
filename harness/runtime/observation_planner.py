@@ -104,6 +104,12 @@ def render_passes_from_observation_plan(observation_plan: Mapping[str, Any]) -> 
     return _normalize_modalities([str(value) for value in observation_plan.get("modalities") or []])
 
 
+def render_mode_for_passes(render_passes: list[str]) -> str:
+    has_rgb = "rgb" in render_passes
+    has_data = bool({"depth", "segmentation"}.intersection(render_passes))
+    return "both" if has_rgb and has_data else "data" if has_data else "rgb"
+
+
 def camera_ids_from_observation_plan(observation_plan: Mapping[str, Any]) -> list[str]:
     return [
         str(camera.get("camera_id"))

@@ -19,6 +19,7 @@ from harness.core.workspace import workspace_path
 from harness.runtime.genesis_headless import import_headless_genesis
 from harness.runtime.rigid_sph_scene import (
     compile_rigid_sph_scene,
+    evaluate_measurements,
     matrix_vector,
     profile_collision_parts,
     point_inside_profile,
@@ -536,50 +537,6 @@ def rigid_body_at_pose(
             "ue_rotation_pyr_deg": list(ue_rotation),
         },
     }
-
-
-def evaluate_measurements(
-    positions: list[list[float]],
-    bodies: dict[str, dict[str, Any]],
-    rigid_states: dict[str, dict[str, Any]],
-    definitions: list[dict[str, Any]],
-) -> dict[str, float]:
-    total = max(1, len(positions))
-    result: dict[str, float] = {}
-    for definition in definitions:
-        kind = definition["type"]
-        if kind == "body_interior_fraction":
-            count = sum(point_inside_profile(row, bodies[definition["body_id"]]) for row in positions)
-            value = count / total
-        elif kind == "outside_body_interiors_fraction":
-            selected = [bodies[body_id] for body_id in definition["body_ids"]]
-            count = sum(not any(point_inside_profile(row, body) for body in selected) for row in positions)
-            value = count / total
-        elif kind == "plane_proximity_fraction":
-            collision = bodies[definition["body_id"]]["collision"]
-            normal_length = math.sqrt(sum(float(value) ** 2 for value in collision["normal"]))
-            normal = [float(value) / normal_length for value in collision["normal"]]
-            origin = collision["position_m"]
-            distance = float(definition["distance_m"])
-            count = sum(abs(sum((float(row[axis]) - float(origin[axis])) * normal[axis] for axis in range(3))) <= distance for row in positions)
-            value = count / total
-        elif kind == "axis_span":
-            axis_indices = {"x": 0, "y": 1, "z": 2}
-            value = max(
-                max(float(row[axis_indices[axis]]) for row in positions) - min(float(row[axis_indices[axis]]) for row in positions)
-                for axis in definition["axes"]
-            ) if positions else 0.0
-        else:
-            state = rigid_states[definition["body_id"]]
-            vector = [float(component) for component in state[definition["field"]]]
-            component = definition["component"]
-            value = (
-                math.sqrt(sum(item * item for item in vector))
-                if component == "magnitude"
-                else vector[{"x": 0, "y": 1, "z": 2}[component]]
-            )
-        result[definition["id"]] = value
-    return result
 
 
 def without_parts(body: dict[str, Any]) -> dict[str, Any]:

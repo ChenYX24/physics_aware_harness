@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
 from harness.core.artifact_manager import ArtifactManager
 from harness.core.artifact_schema import read_json, write_json
 from harness.core.case_spec import load_case_spec
-from harness.runtime.observation_planner import camera_ids_from_observation_plan, render_passes_from_observation_plan
+from harness.runtime.observation_planner import camera_ids_from_observation_plan, render_mode_for_passes, render_passes_from_observation_plan
 from harness.runtime.execution_profile import (
     execution_profile,
     execution_profile_names,
@@ -33,7 +33,7 @@ from scripts.harness_local_ue_runner import (
     DEFAULT_UE_EXECUTABLE,
     camera_runtime_from_plan,
     quantize_native_instance_segmentation,
-    run_ue_until_artifacts,
+    run_precompiled_ue_scene,
     standardize_native_output,
 )
 from scripts.harness_render_fluid_ue import ensure_ue_surface_assets
@@ -61,13 +61,14 @@ def main() -> int:
     profile = execution_profile(args.profile)
     width = int(args.width or profile.width)
     height = int(args.height or profile.height)
-    render_mode = profile.render_mode
     run_dir = Path(args.run_dir).expanduser().resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
     observation_plan = read_json(run_dir / "observation_plan.json")
     camera_payload = read_json(run_dir / "camera_plan.json")
     requested_views = camera_ids_from_observation_plan(observation_plan)
     render_passes = render_passes_from_observation_plan(observation_plan)
+    render_mode = render_mode_for_passes(render_passes)
+    complete_sensor_contract = {"rgb", "depth", "segmentation"}.issubset(render_passes)
     if not requested_views:
         raise SystemExit("compiled Observation Plan contains no cameras")
     logs = run_dir / "logs"
@@ -322,11 +323,7 @@ def main() -> int:
         "-FullStdOutLogOutput",
         f"-ExecutePythonScript={ROOT / 'scripts' / 'native_ue_scene.py'}",
     ]
-    env = os.environ.copy()
-    env.update({
-        "OUTPUT_DIR": str(native_output),
-        "SCENE_SPEC": str(studio_path),
-        "SCENE_RUNTIME_JSON": str(runtime_path),
+    environment = {
         "SCENE_MAP": args.map.split(".", 1)[0],
         "WIDTH": str(width),
         "HEIGHT": str(height),
@@ -342,8 +339,15 @@ def main() -> int:
         "VIDEO_CRF": "18",
         "VIDEO_PRESET": "fast",
         "RENDER_SURFACE_REPLAY_MATERIAL_WARMUP_SECONDS": "4.0" if profile.name == "smoke" else "0.5",
-    })
-    process = run_ue_until_artifacts(command, env=env, native_output=native_output, timeout=1200)
+    }
+    process = run_precompiled_ue_scene(
+        command,
+        studio_scene_path=studio_path,
+        runtime_scene_path=runtime_path,
+        native_output=native_output,
+        environment=environment,
+        timeout=1200,
+    )
     if process.get("status") != "completed":
         write_json(run_dir / "deformable_ue_render_report.json", {"status": "failed", "process": process})
         return 2
@@ -370,7 +374,7 @@ def main() -> int:
     observability = verify_expected_color_observability(run_dir, expected_rgb=surface_color, view_ids=requested_views, write=True)
     solver_verifier = read_json(run_dir / "harness_verifier.json")
     ue_render_real = report.get("rgb_real_ue") is True and (
-        sync.get("ue_render_real") is True or not profile.complete_sensor_contract
+        sync.get("ue_render_real") is True or not complete_sensor_contract
     )
     verified = report.get("status") == "completed" and report.get("rgb_real_ue") is True and sync.get("status") == "pass" and observability.get("status") == "pass" and solver_verifier.get("status") == "pass"
     inputs = run_dir / "inputs"
@@ -393,9 +397,9 @@ def main() -> int:
         "render_representation": "deformable_surface_replay.json",
     }
     write_json(run_dir / "run_readiness.json", readiness)
-    quality = evaluate_run(run_dir, write=True) if profile.complete_sensor_contract else {"status": "not_required"}
-    overall = ArtifactManager(run_dir).publish_run_overall() if profile.complete_sensor_contract else {}
-    if profile.complete_sensor_contract and quality.get("status") != "pass":
+    quality = evaluate_run(run_dir, write=True) if complete_sensor_contract else {"status": "not_required"}
+    overall = ArtifactManager(run_dir).publish_run_overall() if complete_sensor_contract else {}
+    if complete_sensor_contract and quality.get("status") != "pass":
         verified = False
     readiness.update({
         "local_preview_ready": verified,

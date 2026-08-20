@@ -6,7 +6,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from harness.core.artifact_schema import read_json, runtime_summary, write_json
 from harness.core.runtime_case import RuntimeCase
@@ -112,6 +112,7 @@ def genesis_child_environment(run_dir: str | Path) -> dict[str, str]:
 def run_ue_surface_replay(
     run_dir: str | Path,
     *,
+    handoff_contract: Mapping[str, Any],
     profile: str,
     width: int | None = None,
     height: int | None = None,
@@ -139,10 +140,14 @@ def run_ue_surface_replay(
 
     replay_input = run_dir / "ue_replay_input"
     cache_digest = file_sha256(particle_cache)
+    tolerances = handoff_contract.get("numeric_tolerances") if isinstance(handoff_contract.get("numeric_tolerances"), Mapping) else {}
+    if "spatial_measurement_absolute" not in tolerances:
+        raise RuntimeError("particle surface handoff contract is missing spatial_measurement_absolute tolerance")
     replay = prepare_ue_surface_replay(
         particle_cache,
         replay_input,
         ue_asset_root=f"/Game/HarnessGenerated/Fluid/Cache_{cache_digest[:16]}",
+        spatial_measurement_tolerance=float(tolerances["spatial_measurement_absolute"]),
     )
     replay_manifest = replay_input / "fluid_surface_replay.json"
     solver_preview = run_dir / "video.mp4"

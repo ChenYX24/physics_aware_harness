@@ -22,6 +22,7 @@ BACKEND_STAGE_IO: dict[str, dict[str, dict[str, dict[str, Any]]]] = {
             "particle_surface_cache_v1": {
                 "schema_version": "harness_particle_cache_v1",
                 "required_artifacts": ["particle_cache.json"],
+                "numeric_tolerances": {"spatial_measurement_absolute": 1e-6},
             }
         },
         "consumes": {},
@@ -69,4 +70,5 @@ def stage_handoff_contract(producer: str, consumer: str) -> dict[str, Any] | Non
         "consumer_backend": consumer,
         "required_artifacts": list(producer_contract.get("required_artifacts") or []),
         "adapter_contract": consumer_contract.get("adapter_contract"),
+        "numeric_tolerances": dict(producer_contract.get("numeric_tolerances") or {}),
     }

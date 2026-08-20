@@ -167,8 +167,13 @@ class SuccessfulHarness:
             if isinstance(camera, dict) and camera.get("role")
         )
         views = requested_views or declared_views
-        passes = tuple(kwargs.get("render_passes") or ())
-        self.compile_calls.append((requested_views, passes))
+        requested_passes = tuple(kwargs.get("render_passes") or ())
+        declared_passes = tuple(
+            str(modality)
+            for modality in (case_spec.data.get("observation_requirements") or {}).get("modalities") or []
+        )
+        passes = requested_passes or declared_passes
+        self.compile_calls.append((requested_views, requested_passes))
         self.provider_manifests.append(copy.deepcopy(kwargs.get("provider_input_manifest")))
         runtime_case = compile_case_spec_v2_runtime(case_spec)
         backend = self.selected_backend
@@ -775,7 +780,7 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertEqual(fake.compile_calls[0], fake.compile_calls[-1])
         self.assertEqual(
             fake.compile_calls[-1],
-            ((), ("rgb",)),
+            ((), ()),
         )
         self.assertEqual(
             [row["role"] for row in read_json(attempt_root / "compilation" / "observation_plan.json")["cameras"]],
@@ -2165,7 +2170,7 @@ class AgentJobControllerTests(unittest.TestCase):
         before = controller.inspect("job_map_config_recompile")
         usage_before = copy.deepcopy(before["job"]["usage"])
         provider_before = read_json(attempt_dir / "compilation" / "asset_provider_batch.json")
-        compile_count_before_reopen = fake.compile_calls.count(((), ("rgb",)))
+        compile_count_before_reopen = fake.compile_calls.count(((), ()))
 
         reopened = controller.recompile_after_config(
             "job_map_config_recompile",
@@ -2183,12 +2188,12 @@ class AgentJobControllerTests(unittest.TestCase):
         receipt = read_json(root / "receipts" / "configuration_recompile_001.json")
         self.assertNotEqual(receipt["old_compile_config_digest"], receipt["new_compile_config_digest"])
         self.assertEqual(receipt["provider_checkpoint"]["request_identities"], [])
-        self.assertEqual(fake.compile_calls.count(((), ("rgb",))), compile_count_before_reopen)
+        self.assertEqual(fake.compile_calls.count(((), ())), compile_count_before_reopen)
 
         resumed = controller.resume("job_map_config_recompile")
         self.assertEqual(resumed["job"]["state"], "awaiting_semantic_review")
         self.assertEqual(resumed["job"]["current_attempt_id"], "attempt_001")
-        self.assertGreater(fake.compile_calls.count(((), ("rgb",))), compile_count_before_reopen)
+        self.assertGreater(fake.compile_calls.count(((), ())), compile_count_before_reopen)
         self.assertGreaterEqual(
             resumed["job"]["usage"]["active_elapsed_seconds"],
             usage_before["active_elapsed_seconds"],

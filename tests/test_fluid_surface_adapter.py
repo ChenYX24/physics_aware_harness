@@ -30,7 +30,12 @@ class FluidSurfaceAdapterTests(unittest.TestCase):
                 },
             )
 
-            manifest = prepare_ue_surface_replay(cache, root / "ue_replay", ue_asset_root="/Game/Test/Fluid")
+            manifest = prepare_ue_surface_replay(
+                cache,
+                root / "ue_replay",
+                ue_asset_root="/Game/Test/Fluid",
+                spatial_measurement_tolerance=1e-6,
+            )
 
             converted = (root / "ue_replay" / "obj_frames_cm_lh" / "frame_0000.obj").read_text(encoding="utf-8")
             self.assertIn("v 100.00000000 -200.00000000 300.00000000", converted)
@@ -43,7 +48,38 @@ class FluidSurfaceAdapterTests(unittest.TestCase):
             root = Path(tmp)
             write_json(root / "particle_cache.json", {"timebase": {"fps": 24}, "frames": [{"frame": 2}]})
             with self.assertRaisesRegex(FluidSurfaceAdapterError, "contiguous"):
-                prepare_ue_surface_replay(root / "particle_cache.json", root / "out", ue_asset_root="/Game/Test")
+                prepare_ue_surface_replay(
+                    root / "particle_cache.json",
+                    root / "out",
+                    ue_asset_root="/Game/Test",
+                    spatial_measurement_tolerance=1e-6,
+                )
+
+    def test_replay_adapter_rejects_spatial_measurement_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_json(
+                root / "particle_cache.json",
+                {
+                    "timebase": {"fps": 24},
+                    "environment": {"measurements": [{"id": "span", "type": "axis_span", "axes": ["x"]}]},
+                    "frames": [
+                        {
+                            "frame": 0,
+                            "positions_m": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+                            "measurements": {"span": 0.5},
+                        }
+                    ],
+                },
+            )
+            with self.assertRaisesRegex(FluidSurfaceAdapterError, "exceeds handoff tolerance") as raised:
+                prepare_ue_surface_replay(
+                    root / "particle_cache.json",
+                    root / "out",
+                    ue_asset_root="/Game/Test",
+                    spatial_measurement_tolerance=1e-6,
+                )
+            self.assertEqual(raised.exception.code, "handoff_spatial_registration_failed")
 
     def test_particle_centers_drive_camera_without_moving_world_space_surface_mesh(self) -> None:
         centers = particle_centers_m(

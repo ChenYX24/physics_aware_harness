@@ -26,6 +26,7 @@ from harness.assets.providers.remote import MeshyModelGenerationAdapter, PolyHav
 from harness.planning.runtime_compiler import compile_runtime_case
 from harness.runtime.stage_executor import execute_runtime_plan
 from harness.runtime.execution_profile import EXECUTION_PROFILES, execution_profile, verified_run_status, write_execution_reports
+from harness.runtime.observation_planner import render_mode_for_passes, render_passes_from_observation_plan
 from harness.runtime.ue_backend import UEBackendUnavailable
 
 
@@ -156,8 +157,8 @@ def main() -> int:
             provider_input_manifest = loaded_manifest
     pre_run_stage_dir = Path(output_root) / "_planning" / source_case.case_id
     requested_views = parse_csv(args.views) if args.views else None
-    render_passes = list(profile.render_passes) if profile else parse_csv(args.render_passes) if args.render_passes else None
-    render_mode = profile.render_mode if profile else args.mode
+    render_passes = parse_csv(args.render_passes) if args.render_passes else None
+    render_mode = args.mode
     provider_orchestrator = None
     if args.resume_meshy_request:
         resume_path = Path(args.resume_meshy_request)
@@ -186,6 +187,8 @@ def main() -> int:
     )
     case = compilation.runtime_case
     selected_backend = compilation.selected_backend
+    render_passes = render_passes_from_observation_plan(compilation.artifacts["observation_plan"])
+    render_mode = render_mode_for_passes(render_passes)
     run_dir = Path(output_root) / f"{case.case_id}_{selected_backend}"
     compilation.write(run_dir)
     if generation is not None:
@@ -265,7 +268,7 @@ def main() -> int:
             profile=profile.name if profile else "smoke",
             width=width,
             height=height,
-            complete_sensor_contract=profile.complete_sensor_contract if profile else False,
+            complete_sensor_contract={"rgb", "depth", "segmentation"}.issubset(render_passes),
         )
     except UEBackendUnavailable as exc:
         write_run_control_page(

@@ -11,7 +11,6 @@ from typing import Any
 from harness.core.artifact_schema import write_json
 from harness.core.stage_result import stage_result_from_quality_report, write_stage_result
 from harness.runtime.backend_policy import backend_plan
-from harness.runtime.execution_profile import EXECUTION_PROFILES, execution_profile
 from harness.verification.depth_geometry_verifier import verify_depth_geometry
 from harness.verification.render_sync_checker import depth_pixel_statistics, sequence_evidence_for_view
 
@@ -182,7 +181,7 @@ def refresh_ue_readiness_summary(
     )
     if not all(key in readiness for key in detailed_execution_keys):
         return
-    modalities = required_modalities or {"rgb", "depth", "segmentation"}
+    modalities = required_modalities if required_modalities is not None else {"rgb", "depth", "segmentation"}
     required_execution_keys = [
         key
         for key in detailed_execution_keys
@@ -393,7 +392,7 @@ def validate_source_gates(
     *,
     required_modalities: set[str] | None = None,
 ) -> None:
-    modalities = required_modalities or {"rgb", "depth", "segmentation"}
+    modalities = required_modalities if required_modalities is not None else {"rgb", "depth", "segmentation"}
     for name in ("run_readiness", "verifier", "render_sync", "map_report", "asset_resolution", "sensor_state"):
         summary = summaries[name]
         if not summary.get("present"):
@@ -496,7 +495,7 @@ def validate_media(
     *,
     required_modalities: set[str] | None = None,
 ) -> dict[str, Any]:
-    modalities = required_modalities or {"rgb", "depth", "segmentation"}
+    modalities = required_modalities if required_modalities is not None else {"rgb", "depth", "segmentation"}
     if not view_ids:
         failures.append(issue("F_VIEW_MISSING", "no canonical views were found"))
     views: dict[str, Any] = {}
@@ -641,7 +640,7 @@ def validate_sensor_sequences(
     *,
     required_modalities: set[str] | None = None,
 ) -> dict[str, Any]:
-    modalities = required_modalities or {"rgb", "depth", "segmentation"}
+    modalities = required_modalities if required_modalities is not None else {"rgb", "depth", "segmentation"}
     views: dict[str, Any] = {}
     for camera_id in view_ids:
         meta = read_optional_json(run_dir / "views" / camera_id / "meta.json")
@@ -682,19 +681,13 @@ def quality_contract_for_run(run_dir: Path) -> dict[str, Any]:
     render_config = read_optional_json(run_dir / "inputs" / "render_config.json")
     profile_name = str(profile.get("name") or "")
     actual_modalities = render_config.get("passes") if isinstance(render_config.get("passes"), list) else []
-    if profile_name in EXECUTION_PROFILES:
-        raw_modalities = [*execution_profile(profile_name).render_passes, *actual_modalities]
-        source = "registered_execution_profile+inputs/render_config.json"
-    else:
-        raw_modalities = ["rgb", "depth", "segmentation"]
-        source = "legacy_complete_sensor_default"
+    raw_modalities = list(actual_modalities)
+    source = "inputs/render_config.json"
     modalities = []
     for value in raw_modalities:
         modality = str(value).strip().casefold()
         if modality and modality not in modalities:
             modalities.append(modality)
-    if "rgb" not in modalities:
-        modalities.insert(0, "rgb")
     return {
         "execution_profile": profile_name or "legacy",
         "required_modalities": modalities,

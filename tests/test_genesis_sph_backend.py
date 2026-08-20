@@ -346,6 +346,7 @@ class GenesisSPHBackendTests(unittest.TestCase):
             ), patch("harness.runtime.genesis_sph_backend.subprocess.run", return_value=completed) as runner:
                 report = run_ue_surface_replay(
                     run_dir,
+                    handoff_contract={"numeric_tolerances": {"spatial_measurement_absolute": 1e-6}},
                     profile="smoke",
                     width=1280,
                     height=720,

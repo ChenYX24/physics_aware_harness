@@ -162,6 +162,12 @@ class StageExecutorTests(unittest.TestCase):
         self.assertIsNotNone(handoff)
         self.assertEqual(handoff["contract_id"], "deformable_mesh_cache_v1")
 
+        particle_handoff = stage_handoff_contract("genesis_sph", "ue")
+        self.assertEqual(
+            particle_handoff["numeric_tolerances"],
+            {"spatial_measurement_absolute": 1e-6},
+        )
+
     def test_backends_without_shared_contract_are_rejected(self) -> None:
         self.assertIsNone(stage_handoff_contract("genesis_fem", "fallback"))
 

@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--profile",
         choices=sorted(EXECUTION_PROFILES),
-        help="Named UE capture cost/quality contract; overrides views, passes, mode, resolution, and FPS.",
+        help="Named UE capture cost/quality contract controlling resolution and FPS.",
     )
     return parser.parse_args()
 
@@ -78,9 +78,6 @@ def run_one_case(
     started = time.perf_counter()
     case = load_case_spec(case_path)
     profile = execution_profile(profile_name) if profile_name else None
-    if profile:
-        render_passes = list(profile.render_passes)
-        render_mode = profile.render_mode
     if backend_name == "ue":
         import os
 
@@ -119,7 +116,7 @@ def run_one_case(
             "camera_strategy": camera_strategy,
         }
         if backend_name == "ue":
-            run_kwargs["complete_sensor_contract"] = profile.complete_sensor_contract if profile else False
+            run_kwargs["complete_sensor_contract"] = {"rgb", "depth", "segmentation"}.issubset(render_passes)
         run_dir = backend.run_case(case, output_root, **run_kwargs)
         report = read_optional_json(run_dir / "fluid_report.json") if backend_name == "genesis_sph" else verifier.verify_run_dir(run_dir, write=True)
         status = report["status"]
@@ -305,7 +302,7 @@ def main() -> int:
         "video_count": sum(1 for row in rows if row["video_exists"]),
         "video_missing_expected_count": sum(1 for row in rows if row["video_missing_expected"]),
         "parallel": worker_count,
-        "render_mode": (selected_profile.render_mode if selected_profile else args.mode) if args.backend == "ue" else ("surface_preview" if args.backend == "genesis_sph" else "debug_fallback"),
+        "render_mode": args.mode if args.backend == "ue" else ("surface_preview" if args.backend == "genesis_sph" else "debug_fallback"),
         "execution_profile": args.profile or "custom",
         "cases": rows,
     }

@@ -19,11 +19,8 @@ from harness.core.stage_result import (
 from harness.assets.asset_resolver import requested_map_reference
 from harness.planning.runtime_compiler import RuntimeCompilation, compile_runtime_case
 from harness.runtime.observation_planner import camera_ids_from_observation_plan, render_passes_from_observation_plan
-from harness.runtime.render_pass_contract import enforce_ue_render_passes, normalize_passes, verify_render_observability, write_render_contract_artifacts
+from harness.runtime.render_pass_contract import normalize_passes, verify_render_observability, write_render_contract_artifacts
 from harness.verification.render_sync_checker import ARTIFACT_SCHEMA_VERSION, check_render_sync
-
-
-DEFAULT_UE_VIEWS = ["front_static", "side_static", "top_down", "tracking_subject", "event_closeup"]
 
 
 class UEBackendUnavailable(RuntimeError):
@@ -62,12 +59,8 @@ class UEBackend:
         # Runtime overrides are already folded into observation_plan.  Do not
         # reuse the raw values here or verifier evidence merged by the planner
         # can be dropped at execution time.
-        ue_requested_views = planned_views or DEFAULT_UE_VIEWS
-        ue_render_passes = (
-            enforce_ue_render_passes(planned_passes)
-            if complete_sensor_contract
-            else normalize_passes(planned_passes)
-        )
+        ue_requested_views = planned_views
+        ue_render_passes = normalize_passes(planned_passes)
         camera_plan = compilation.artifacts["camera_plan"]
         asset_resolution = compilation.artifacts["asset_resolution"]
         static_report = compilation.artifacts["static_scene_report"]

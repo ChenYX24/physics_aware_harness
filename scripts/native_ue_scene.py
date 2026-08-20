@@ -20,7 +20,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from harness.core.case_spec import fracture_center_from_contact, fracture_response_for_energy
 from harness.core.timebase import build_timebase
-from harness.runtime.camera_planner import DYNAMIC_CAMERA_FOLLOW_GAINS, DYNAMIC_CAMERA_PROFILE
 from harness.verification.render_sync_checker import depth_pixel_statistics
 
 STUDIO_TOOLS = Path(__file__).resolve().parents[1] / "simulator_studio" / "tools"
@@ -7774,118 +7773,40 @@ def vector_payload(value: unreal.Vector) -> list[float]:
     return [round(float(value.x), 4), round(float(value.y), 4), round(float(value.z), 4)]
 
 
-def canonical_camera_view_specs(
-    base_location: unreal.Vector,
-    target: unreal.Vector,
-    extent: unreal.Vector,
-    main_fov: float,
-    runtime_scene: dict | None,
-) -> list[dict]:
-    scene_radius = max_axis(extent)
-    radius = max(320.0, scene_radius)
-    subject_offset = unreal.Vector(max(90.0, radius * 0.16), 0.0, max(20.0, radius * 0.05))
-    event_offset = unreal.Vector(max(65.0, radius * 0.12), 0.0, max(16.0, radius * 0.04))
-    side_height = max(280.0, radius * 0.70)
-    views = [
-        {
-            "id": "front_static",
-            "view_id": "front_static",
-            "suffix": "",
-            "label": "Front fixed",
-            "camera_mode": "fixed",
-            "lock_policy": "world-space pose fixed across counterfactual group",
-            "location": base_location,
-            "target": target,
-            "fov": float(main_fov),
-        },
-        {
-            "id": "side_static",
-            "view_id": "side_static",
-            "suffix": "_side_static",
-            "label": "Side fixed",
-            "camera_mode": "fixed",
-            "lock_policy": "orthogonal side pose fixed across counterfactual group",
-            "location": target + unreal.Vector(-max(760.0, radius * 1.95), -max(90.0, radius * 0.22), side_height),
-            "target": target + unreal.Vector(max(60.0, radius * 0.12), 0.0, max(12.0, radius * 0.03)),
-            "fov": 62.0,
-        },
-        {
-            "id": "top_down",
-            "view_id": "top_down",
-            "suffix": "_top_down",
-            "label": "Top-down",
-            "camera_mode": "fixed",
-            "lock_policy": "z-axis plan view fixed across counterfactual group",
-            "location": target + unreal.Vector(-max(40.0, scene_radius * 0.10), -max(60.0, scene_radius * 0.15), max(320.0, scene_radius * 2.40)),
-            "target": target,
-            "fov": 50.0,
-        },
-        {
-            "id": "tracking_subject",
-            "view_id": "tracking_subject",
-            "suffix": "_tracking_subject",
-            "label": "Tracking subject",
-            "camera_mode": "object_bound",
-            "lock_policy": "target object id fixed; relative offset fixed",
-            "dynamic_camera_profile": DYNAMIC_CAMERA_PROFILE,
-            "subject_follow_location_gain": DYNAMIC_CAMERA_FOLLOW_GAINS["tracking_subject"][0],
-            "subject_follow_target_gain": DYNAMIC_CAMERA_FOLLOW_GAINS["tracking_subject"][1],
-            "location": target + unreal.Vector(-max(430.0, radius * 1.15), -max(500.0, radius * 1.32), max(240.0, radius * 0.60)),
-            "target": target + subject_offset,
-            "fov": 56.0,
-        },
-        {
-            "id": "event_closeup",
-            "view_id": "event_closeup",
-            "suffix": "_event_closeup",
-            "label": "Event close-up",
-            "camera_mode": "trajectory",
-            "lock_policy": "event window and spline knots fixed across counterfactual group",
-            "dynamic_camera_profile": DYNAMIC_CAMERA_PROFILE,
-            "subject_follow_location_gain": DYNAMIC_CAMERA_FOLLOW_GAINS["event_closeup"][0],
-            "subject_follow_target_gain": DYNAMIC_CAMERA_FOLLOW_GAINS["event_closeup"][1],
-            "location": target + unreal.Vector(-max(260.0, radius * 0.68), -max(330.0, radius * 0.82), max(150.0, radius * 0.38)),
-            "target": target + event_offset,
-            "fov": 46.0,
-        },
-    ]
+def compiled_camera_view_specs(runtime_scene: dict, scene_origin: unreal.Vector) -> list[dict]:
     camera = runtime_scene.get("camera") if isinstance((runtime_scene or {}).get("camera"), dict) else {}
     planned = [item for item in camera.get("views") or [] if isinstance(item, dict) and item.get("camera_id")]
     if not planned:
-        return views
-    planned_by_id = {str(item["camera_id"]): item for item in planned}
-    anchor = planned_by_id.get("front_static") or planned[0]
-    anchor_location = anchor.get("location") or [0.0, 0.0, 0.0]
-    origin = unreal.Vector(
-        base_location.x - float(anchor_location[0]) * 100.0,
-        base_location.y - float(anchor_location[1]) * 100.0,
-        base_location.z - float(anchor_location[2]) * 100.0,
-    )
-    result = []
-    for view in views:
-        spec = planned_by_id.get(str(view.get("view_id")))
-        if not spec:
-            result.append(view)
-            continue
+        raise RuntimeError("compiled camera plan contains no views")
+    result: list[dict] = []
+    for index, spec in enumerate(planned):
+        camera_id = str(spec["camera_id"])
         location = spec.get("location") or [0.0, 0.0, 0.0]
         planned_target = spec.get("target") or [0.0, 0.0, 0.0]
+        if len(location) != 3 or len(planned_target) != 3:
+            raise RuntimeError(f"compiled camera view has an invalid pose: {camera_id}")
         result.append(
             {
-                **view,
-                "location": origin + unreal.Vector(*[float(value) * 100.0 for value in location[:3]]),
-                "target": origin + unreal.Vector(*[float(value) * 100.0 for value in planned_target[:3]]),
-                "fov": float(spec.get("fov") or view["fov"]),
-                "camera_mode": str(spec.get("camera_mode") or view["camera_mode"]),
-                "dynamic_camera_profile": spec.get("dynamic_camera_profile") or view.get("dynamic_camera_profile"),
+                "id": camera_id,
+                "view_id": camera_id,
+                "suffix": "" if index == 0 else f"_{camera_id}",
+                "label": str(spec.get("role") or camera_id),
+                "location": ue_vec_from_meters(location, origin=scene_origin),
+                "target": ue_vec_from_meters(planned_target, origin=scene_origin),
+                "fov": float(spec.get("fov") or 60.0),
+                "near_clip": spec.get("near_clip"),
+                "far_clip": spec.get("far_clip"),
+                "camera_mode": str(spec.get("camera_mode") or "fixed"),
+                "dynamic_camera_profile": spec.get("dynamic_camera_profile"),
                 "subject_follow_location_gain": float(
-                    spec.get("subject_follow_location_gain")
+                    spec["subject_follow_location_gain"]
                     if spec.get("subject_follow_location_gain") is not None
-                    else view.get("subject_follow_location_gain", 1.0)
+                    else 1.0
                 ),
                 "subject_follow_target_gain": float(
-                    spec.get("subject_follow_target_gain")
+                    spec["subject_follow_target_gain"]
                     if spec.get("subject_follow_target_gain") is not None
-                    else view.get("subject_follow_target_gain", 1.0)
+                    else 1.0
                 ),
                 "plan_source": "camera_plan.json",
             }
@@ -7894,6 +7815,9 @@ def canonical_camera_view_specs(
 
 
 def camera_view_specs(actors: dict, runtime_scene: dict | None) -> list[dict]:
+    if runtime_scene:
+        scene_origin = unreal.Vector(*actors.get("scene_origin", [0.0, 0.0, 0.0]))
+        return compiled_camera_view_specs(runtime_scene, scene_origin)
     pose = actors.get("camera_pose") or {}
     location_values = pose.get("location") or [0.0, -520.0, 260.0]
     target_values = pose.get("target") or [0.0, 0.0, 120.0]
@@ -7906,10 +7830,6 @@ def camera_view_specs(actors: dict, runtime_scene: dict | None) -> list[dict]:
     main_fov = camera_fov_override(runtime_scene)
     if main_fov is None:
         main_fov = 52.0 if case_type == "gear_collision_chain" else (68.0 if case_type in {"balloon_wind_drift", "bottle_domino_chain"} else (64.0 if case_type == "barrel_impact_cascade" else (66.0 if case_type == "third_person_box_throw" else 62.0)))
-    if MULTI_VIEW and CANONICAL_MULTI_VIEW and runtime_scene:
-        views = canonical_camera_view_specs(base_location, target, extent, float(main_fov), runtime_scene)
-        requested = set(runtime_scene.get("requested_views") or [])
-        return [view for view in views if view["view_id"] in requested] or views
     views = [
         {"id": "main", "view_id": "main", "suffix": "", "label": "main tracking view", "camera_mode": "fixed", "location": base_location, "target": target, "fov": main_fov},
     ]

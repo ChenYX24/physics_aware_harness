@@ -22,6 +22,38 @@ class Vector:
 
 
 class HighresViewportMultiviewTests(unittest.TestCase):
+    def test_compiled_camera_plan_is_the_exact_view_set(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        functions = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name in {"ue_vec_from_meters", "compiled_camera_view_specs"}
+        ]
+        namespace = {"unreal": types.SimpleNamespace(Vector=Vector)}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"), namespace)
+        runtime_scene = {
+            "camera": {
+                "views": [
+                    {
+                        "camera_id": "overview",
+                        "role": "overview",
+                        "location": [1.5, -1.5, 1.5],
+                        "target": [0.0, 0.0, 0.0],
+                        "fov": 60.0,
+                    }
+                ]
+            }
+        }
+
+        views = namespace["compiled_camera_view_specs"](runtime_scene, Vector(10.0, 20.0, 30.0))
+
+        self.assertEqual([view["view_id"] for view in views], ["overview"])
+        self.assertEqual((views[0]["location"].x, views[0]["location"].y, views[0]["location"].z), (160.0, -130.0, 300.0))
+        with self.assertRaisesRegex(RuntimeError, "contains no views"):
+            namespace["compiled_camera_view_specs"]({"camera": {"views": []}}, Vector(0.0, 0.0, 0.0))
+
     def test_runtime_constraint_is_bound_by_registered_cpp_driver(self) -> None:
         source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))

@@ -13,8 +13,6 @@ class ExecutionProfile:
     """One small interface for the capture cost/quality contract."""
 
     name: str
-    render_passes: tuple[str, ...]
-    render_mode: str
     width: int
     height: int
     render_fps: int
@@ -22,58 +20,45 @@ class ExecutionProfile:
     artifact_eligibility: str
     purpose: str
 
-    @property
-    def complete_sensor_contract(self) -> bool:
-        return set(self.render_passes) == {"rgb", "depth", "segmentation"}
-
     def environment(self) -> dict[str, str]:
         return {
             "SIM_STUDIO_UE_WIDTH": str(self.width),
             "SIM_STUDIO_UE_HEIGHT": str(self.height),
             "SIM_STUDIO_UE_FPS": str(self.render_fps),
             "SIM_STUDIO_UE_PHYSICS_HZ": str(self.physics_hz),
-            "SIM_STUDIO_UE_RENDER_MODE": self.render_mode,
         }
 
 
 EXECUTION_PROFILES: dict[str, ExecutionProfile] = {
     "smoke": ExecutionProfile(
         name="smoke",
-        render_passes=("rgb",),
-        render_mode="rgb",
         width=1280,
         height=720,
         render_fps=24,
         physics_hz=120,
         artifact_eligibility="diagnostic_only",
-        purpose="HD event and causality preflight before complete sensor capture.",
+        purpose="HD low-cost technical preflight.",
     ),
     "candidate": ExecutionProfile(
         name="candidate",
-        render_passes=("rgb", "depth", "segmentation"),
-        render_mode="both",
         width=1920,
         height=1080,
         render_fps=24,
         physics_hz=120,
         artifact_eligibility="review_candidate",
-        purpose="Full-HD multimodal review candidate.",
+        purpose="Full-HD review candidate.",
     ),
     "local_preview": ExecutionProfile(
         name="local_preview",
-        render_passes=("rgb",),
-        render_mode="rgb",
         width=1280,
         height=720,
         render_fps=24,
         physics_hz=120,
         artifact_eligibility="local_preview",
-        purpose="HD RGB preview with physics, camera, and semantic verification.",
+        purpose="HD local preview with physics, camera, and semantic verification.",
     ),
     "publish": ExecutionProfile(
         name="publish",
-        render_passes=("rgb", "depth", "segmentation"),
-        render_mode="both",
         width=3840,
         height=2160,
         render_fps=24,
@@ -108,7 +93,6 @@ def write_execution_reports(
     profile_payload = {
         "schema_version": "harness_execution_profile_v1",
         **asdict(profile),
-        "complete_sensor_contract": profile.complete_sensor_contract,
     }
     write_json(run_dir / "execution_profile.json", profile_payload)
 
@@ -124,7 +108,11 @@ def write_execution_reports(
             if isinstance(camera, dict) and camera.get("camera_id")
         ]
     )
-    actual_passes = render_config.get("passes") if isinstance(render_config.get("passes"), list) else list(profile.render_passes)
+    actual_passes = (
+        list(render_config["passes"])
+        if isinstance(render_config.get("passes"), list)
+        else list(observation_plan.get("modalities") or [])
+    )
     work_units = frame_count * len(actual_views) * len(actual_passes)
     native_timing, native_summary = native_timing_for_run(run_dir)
     measured_total = positive_float(native_timing.get("total_seconds")) or max(0.0, float(wall_seconds))

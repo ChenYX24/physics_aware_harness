@@ -985,6 +985,27 @@ def native_output_dir(run_dir: Path, pass_mode: str, requested_mode: str) -> Pat
     return run_dir / "ue_native_output"
 
 
+def run_precompiled_ue_scene(
+    command: list[str],
+    *,
+    studio_scene_path: Path,
+    runtime_scene_path: Path,
+    native_output: Path,
+    environment: dict[str, str],
+    timeout: int,
+) -> dict[str, Any]:
+    env = os.environ.copy()
+    env.update(
+        {
+            "OUTPUT_DIR": str(native_output),
+            "SCENE_SPEC": str(studio_scene_path),
+            "SCENE_RUNTIME_JSON": str(runtime_scene_path),
+            **environment,
+        }
+    )
+    return run_ue_until_artifacts(command, env=env, native_output=native_output, timeout=timeout)
+
+
 def run_native_pass(
     command: list[str],
     *,
@@ -996,47 +1017,43 @@ def run_native_pass(
     native_output: Path,
     pass_mode: str,
 ) -> dict[str, Any]:
-    env = os.environ.copy()
     precomputed = (runtime_scene.get("physics_controls") or {}).get("runtime_driver_backend") == "precomputed_trajectory"
     live_rgb_solver = pass_mode in {"rgb", "combined"} and not precomputed
-    env.update(
-        {
-            "OUTPUT_DIR": str(native_output),
-            "SCENE_SPEC": str(studio_scene_path),
-            "SCENE_RUNTIME_JSON": str(runtime_scene_path),
-            "ASSET_DATABASE_ONLY_ASSETS": "0",
-            "GITLAB_ONLY_ASSETS": "0",
-            "SCENE_MAP": args.map or "/Game/Maps/MarketEnvironment/Maps/Day",
-            "SCENE_DESCRIPTION": str(case_spec.get("prompt") or case_spec.get("case_id") or "Harness UE render"),
-            "ASSET_ROOT": str((ROOT / "assets").resolve()),
-            "WIDTH": os.environ.get("SIM_STUDIO_UE_WIDTH", "1920"),
-            "HEIGHT": os.environ.get("SIM_STUDIO_UE_HEIGHT", "1080"),
-            "FPS": os.environ.get("SIM_STUDIO_UE_FPS", "24"),
-            "DURATION": str(runtime_scene["simulation"]["duration_s"]),
-            "MULTI_VIEW": "1",
-            "CANONICAL_MULTI_VIEW": "1",
-            "RENDER_DATA_PASSES": "1" if pass_mode in {"data", "combined"} else "0",
-            "AUDIO_PASS_ENABLED": "0",
-            "KEEP_RENDER_FRAMES": os.environ.get("SIM_STUDIO_KEEP_RENDER_FRAMES", "0"),
-            "CHAOS_RIGID_BODY_SETUP": "1",
-            "CHAOS_SIMULATION_ENABLED": "0" if precomputed else "1",
-            "RENDER_QUALITY_PRESET": os.environ.get("SIM_STUDIO_UE_RENDER_QUALITY", "medium"),
-            "VISUAL_REALISM_PROFILE": os.environ.get("SIM_STUDIO_UE_VISUAL_REALISM_PROFILE", "editor_parity"),
-            "RENDER_VIEWPORT_SETTLE_SECONDS": os.environ.get("SIM_STUDIO_UE_VIEWPORT_SETTLE_SECONDS", "0.5"),
-            "RENDER_WARMUP_FRAMES": os.environ.get("SIM_STUDIO_UE_WARMUP_FRAMES", "2"),
-            "RENDER_FIRST_FRAME_STABILITY_SAMPLES": os.environ.get("SIM_STUDIO_UE_FIRST_FRAME_STABILITY_SAMPLES", "1"),
-            "RENDER_SCREENSHOT_STABLE_TICKS": os.environ.get("SIM_STUDIO_UE_SCREENSHOT_STABLE_TICKS", "1"),
-            "VIDEO_CRF": os.environ.get("SIM_STUDIO_UE_VIDEO_CRF", "18"),
-            "VIDEO_PRESET": os.environ.get("SIM_STUDIO_UE_VIDEO_PRESET", "slow"),
-            "SIM_STUDIO_UE_CAPTURE_BACKEND": "highres_viewport" if live_rgb_solver else (os.environ.get("SIM_STUDIO_UE_RGB_CAPTURE_BACKEND", "highres_viewport") if pass_mode == "rgb" else "scene_capture"),
-            "WORLD_MODEL_RENDER_PASS_MODE": "both" if pass_mode == "combined" else pass_mode,
-            "SIM_STUDIO_SEED": str(os.environ.get("SIM_STUDIO_SEED", case_spec.get("seed") or "0")),
-        }
-    )
-    return run_ue_until_artifacts(
+    environment = {
+        "ASSET_DATABASE_ONLY_ASSETS": "0",
+        "GITLAB_ONLY_ASSETS": "0",
+        "SCENE_MAP": args.map or "/Game/Maps/MarketEnvironment/Maps/Day",
+        "SCENE_DESCRIPTION": str(case_spec.get("prompt") or case_spec.get("case_id") or "Harness UE render"),
+        "ASSET_ROOT": str((ROOT / "assets").resolve()),
+        "WIDTH": os.environ.get("SIM_STUDIO_UE_WIDTH", "1920"),
+        "HEIGHT": os.environ.get("SIM_STUDIO_UE_HEIGHT", "1080"),
+        "FPS": os.environ.get("SIM_STUDIO_UE_FPS", "24"),
+        "DURATION": str(runtime_scene["simulation"]["duration_s"]),
+        "MULTI_VIEW": "1",
+        "CANONICAL_MULTI_VIEW": "1",
+        "RENDER_DATA_PASSES": "1" if pass_mode in {"data", "combined"} else "0",
+        "AUDIO_PASS_ENABLED": "0",
+        "KEEP_RENDER_FRAMES": os.environ.get("SIM_STUDIO_KEEP_RENDER_FRAMES", "0"),
+        "CHAOS_RIGID_BODY_SETUP": "1",
+        "CHAOS_SIMULATION_ENABLED": "0" if precomputed else "1",
+        "RENDER_QUALITY_PRESET": os.environ.get("SIM_STUDIO_UE_RENDER_QUALITY", "medium"),
+        "VISUAL_REALISM_PROFILE": os.environ.get("SIM_STUDIO_UE_VISUAL_REALISM_PROFILE", "editor_parity"),
+        "RENDER_VIEWPORT_SETTLE_SECONDS": os.environ.get("SIM_STUDIO_UE_VIEWPORT_SETTLE_SECONDS", "0.5"),
+        "RENDER_WARMUP_FRAMES": os.environ.get("SIM_STUDIO_UE_WARMUP_FRAMES", "2"),
+        "RENDER_FIRST_FRAME_STABILITY_SAMPLES": os.environ.get("SIM_STUDIO_UE_FIRST_FRAME_STABILITY_SAMPLES", "1"),
+        "RENDER_SCREENSHOT_STABLE_TICKS": os.environ.get("SIM_STUDIO_UE_SCREENSHOT_STABLE_TICKS", "1"),
+        "VIDEO_CRF": os.environ.get("SIM_STUDIO_UE_VIDEO_CRF", "18"),
+        "VIDEO_PRESET": os.environ.get("SIM_STUDIO_UE_VIDEO_PRESET", "slow"),
+        "SIM_STUDIO_UE_CAPTURE_BACKEND": "highres_viewport" if live_rgb_solver else (os.environ.get("SIM_STUDIO_UE_RGB_CAPTURE_BACKEND", "highres_viewport") if pass_mode == "rgb" else "scene_capture"),
+        "WORLD_MODEL_RENDER_PASS_MODE": "both" if pass_mode == "combined" else pass_mode,
+        "SIM_STUDIO_SEED": str(os.environ.get("SIM_STUDIO_SEED", case_spec.get("seed") or "0")),
+    }
+    return run_precompiled_ue_scene(
         command,
-        env=env,
+        studio_scene_path=studio_scene_path,
+        runtime_scene_path=runtime_scene_path,
         native_output=native_output,
+        environment=environment,
         timeout=int(os.environ.get("SIM_STUDIO_UE_TIMEOUT_SECONDS", "1800")),
     )
 
@@ -1139,6 +1156,10 @@ def camera_runtime_from_plan(camera_plan: dict[str, Any]) -> dict[str, Any]:
                 "fov": view.get("fov"),
                 "near_clip": view.get("near_clip"),
                 "far_clip": view.get("far_clip"),
+                "camera_mode": view.get("camera_mode"),
+                "dynamic_camera_profile": view.get("dynamic_camera_profile"),
+                "subject_follow_location_gain": view.get("subject_follow_location_gain"),
+                "subject_follow_target_gain": view.get("subject_follow_target_gain"),
             }
             for view in views
             if isinstance(view, dict) and view.get("camera_id")

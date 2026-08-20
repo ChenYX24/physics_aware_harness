@@ -11,7 +11,6 @@ from harness.runtime.execution_profile import (
     verified_run_status,
     write_execution_reports,
 )
-from harness.runtime.render_pass_contract import enforce_ue_render_passes, normalize_passes
 
 
 class ExecutionProfileTests(unittest.TestCase):
@@ -22,6 +21,8 @@ class ExecutionProfileTests(unittest.TestCase):
         )
         for name in execution_profile_names():
             self.assertFalse(hasattr(execution_profile(name), "views"))
+            self.assertFalse(hasattr(execution_profile(name), "render_passes"))
+            self.assertFalse(hasattr(execution_profile(name), "render_mode"))
 
     def test_profiles_make_capture_cost_and_delivery_eligibility_explicit(self) -> None:
         smoke = execution_profile("smoke")
@@ -29,7 +30,6 @@ class ExecutionProfileTests(unittest.TestCase):
         candidate = execution_profile("candidate")
         publish = execution_profile("publish")
 
-        self.assertEqual(smoke.render_passes, ("rgb",))
         self.assertEqual(smoke.render_fps, 24)
         self.assertEqual((smoke.width, smoke.height), (1280, 720))
         self.assertEqual((candidate.width, candidate.height), (1920, 1080))
@@ -37,14 +37,8 @@ class ExecutionProfileTests(unittest.TestCase):
         self.assertEqual(smoke.physics_hz, 120)
         self.assertEqual(candidate.physics_hz, smoke.physics_hz)
         self.assertEqual(publish.physics_hz, smoke.physics_hz)
-        self.assertFalse(smoke.complete_sensor_contract)
-        self.assertFalse(local_preview.complete_sensor_contract)
-        self.assertEqual(local_preview.render_passes, ("rgb",))
         self.assertEqual((local_preview.width, local_preview.height), (1280, 720))
-        self.assertTrue(candidate.complete_sensor_contract)
         self.assertLess(candidate.width, publish.width)
-        self.assertEqual(normalize_passes(smoke.render_passes), ["rgb"])
-        self.assertEqual(enforce_ue_render_passes(smoke.render_passes), ["rgb", "depth", "segmentation"])
 
     def test_local_preview_is_a_terminal_rgb_profile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

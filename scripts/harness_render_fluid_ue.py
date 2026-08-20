@@ -19,8 +19,8 @@ if str(ROOT) not in sys.path:
 from harness.core.artifact_manager import ArtifactManager
 from harness.core.artifact_schema import read_json, write_json
 from harness.core.runtime_case import load_runtime_case
-from harness.runtime.fluid_surface_adapter import particle_centers_m
-from harness.runtime.observation_planner import camera_ids_from_observation_plan, render_passes_from_observation_plan
+from harness.runtime.fluid_surface_adapter import particle_centers_m, ue_position_m
+from harness.runtime.observation_planner import camera_ids_from_observation_plan, render_mode_for_passes, render_passes_from_observation_plan
 from harness.runtime.render_pass_contract import write_render_contract_artifacts
 from harness.runtime.execution_profile import (
     execution_profile,
@@ -35,7 +35,7 @@ from scripts.harness_local_ue_runner import (
     DEFAULT_UE_EXECUTABLE,
     camera_runtime_from_plan,
     quantize_native_instance_segmentation,
-    run_ue_until_artifacts,
+    run_precompiled_ue_scene,
     standardize_native_output,
 )
 
@@ -64,7 +64,6 @@ def main() -> int:
     profile = execution_profile(args.profile)
     width = int(args.width or profile.width)
     height = int(args.height or profile.height)
-    render_mode = profile.render_mode
     run_dir = Path(args.run_dir).expanduser().resolve()
     native_output = run_dir / "logs" / "native_combined"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -72,6 +71,8 @@ def main() -> int:
     camera_plan_payload = read_json(run_dir / "camera_plan.json")
     requested_views = camera_ids_from_observation_plan(observation_plan)
     render_passes = render_passes_from_observation_plan(observation_plan)
+    render_mode = render_mode_for_passes(render_passes)
+    complete_sensor_contract = {"rgb", "depth", "segmentation"}.issubset(render_passes)
     if not requested_views:
         raise SystemExit("compiled Observation Plan contains no cameras")
     ue_project = Path(args.ue_project).expanduser().resolve()
@@ -144,7 +145,7 @@ def main() -> int:
     ]
     basin_floor_material = "/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"
     basin_wall_material = basin_floor_material
-    particle_centers = [offset_z(value, args.scene_z_offset_m) for value in particle_centers_m(particle_cache)]
+    particle_centers = [offset_z(ue_position_m(value), args.scene_z_offset_m) for value in particle_centers_m(particle_cache)]
     if len(particle_centers) != frame_count:
         raise SystemExit("particle cache and surface replay frame counts differ")
     rigid_specs = (
@@ -165,7 +166,7 @@ def main() -> int:
             runtime_object(
                 str(item["id"]),
                 visual_asset,
-                offset_z(item["position_m"], args.scene_z_offset_m),
+                offset_z(ue_position_m(item["position_m"]), args.scene_z_offset_m),
                 [visual_scale] * 3,
                 {
                     "preserve_authored_scale": True,
@@ -205,11 +206,11 @@ def main() -> int:
                 **{
                     str(item["id"]): {
                         "position": offset_z(
-                            particle_cache["frames"][index]["rigid_objects"][str(item["id"])]["position_m"],
+                            ue_position_m(particle_cache["frames"][index]["rigid_objects"][str(item["id"])]["position_m"]),
                             args.scene_z_offset_m,
                         ),
                         "rotation_degrees": [0.0, 0.0, 0.0],
-                        "velocity": list(particle_cache["frames"][index]["rigid_objects"][str(item["id"])]["velocity_m_s"]),
+                        "velocity": ue_position_m(particle_cache["frames"][index]["rigid_objects"][str(item["id"])]["velocity_m_s"]),
                         "source": "genesis_rigid_sph_frame",
                     }
                     for item in rigid_specs
@@ -407,12 +408,7 @@ def main() -> int:
         "-FullStdOutLogOutput",
         f"-ExecutePythonScript={ROOT / 'scripts' / 'native_ue_scene.py'}",
     ]
-    env = os.environ.copy()
-    env.update(
-        {
-            "OUTPUT_DIR": str(native_output),
-            "SCENE_SPEC": str(studio_path),
-            "SCENE_RUNTIME_JSON": str(runtime_path),
+    environment = {
             "SCENE_MAP": args.map.split(".", 1)[0],
             "WIDTH": str(width),
             "HEIGHT": str(height),
@@ -434,8 +430,14 @@ def main() -> int:
                 "4.0" if profile.name == "smoke" else "0.5"
             ),
         }
+    result = run_precompiled_ue_scene(
+        command,
+        studio_scene_path=studio_path,
+        runtime_scene_path=runtime_path,
+        native_output=native_output,
+        environment=environment,
+        timeout=1200,
     )
-    result = run_ue_until_artifacts(command, env=env, native_output=native_output, timeout=1200)
     if result.get("status") != "completed":
         write_json(run_dir / "fluid_ue_render_report.json", {"status": "failed", "process": result})
         print(json.dumps({"status": "failed", "run_dir": str(run_dir)}, indent=2))
@@ -551,8 +553,8 @@ def main() -> int:
     inputs_dir.mkdir(exist_ok=True)
     write_json(inputs_dir / "render_config.json", render_config)
     write_json(inputs_dir / "case_spec.json", case_spec)
-    quality = evaluate_run(run_dir, write=True) if profile.complete_sensor_contract else {"status": "not_required"}
-    if profile.complete_sensor_contract and quality.get("status") != "pass":
+    quality = evaluate_run(run_dir, write=True) if complete_sensor_contract else {"status": "not_required"}
+    if complete_sensor_contract and quality.get("status") != "pass":
         verified = False
     readiness = read_json(run_dir / "run_readiness.json")
     readiness.update(
@@ -741,7 +743,7 @@ def replay_scene_bounds(environment: dict, *, render_z_offset_m: float) -> dict:
         if all(math.isfinite(value) for value in lower_values + upper_values) and all(
             high > low for low, high in zip(lower_values, upper_values, strict=True)
         ):
-            center = [(low + high) / 2.0 for low, high in zip(lower_values, upper_values, strict=True)]
+            center = ue_position_m([(low + high) / 2.0 for low, high in zip(lower_values, upper_values, strict=True)])
             center[2] += render_z_offset_m
             return {
                 "center": center,
@@ -849,7 +851,7 @@ def rigid_body_runtime_objects(cache: dict, *, render_z_offset_m: float) -> tupl
         runtime = runtime_object(
             str(body.get("id") or "rigid_body"),
             str(asset.get("ue_path") or ""),
-            offset_z(transform.get("position_m") or [0.0, 0.0, 0.0], render_z_offset_m),
+            offset_z(ue_position_m(transform.get("position_m") or [0.0, 0.0, 0.0]), render_z_offset_m),
             [float(value) for value in scale],
             {
                 "base_rotation_degrees": (
@@ -892,10 +894,10 @@ def rigid_body_trajectory_objects(
         if any(len(state.get(field) or []) != 3 for field in required_fields):
             raise ValueError(f"moving rigid body is missing a complete solver state: {body_id}")
         result[body_id] = {
-            "position": offset_z(state["position_m"], render_z_offset_m),
+            "position": offset_z(ue_position_m(state["position_m"]), render_z_offset_m),
             "rotation_degrees": list(state["ue_rotation_pyr_deg"]),
             "velocity": (
-                list(state["linear_velocity_m_s"])
+                ue_position_m(state["linear_velocity_m_s"])
                 if body.get("mobility") == "dynamic"
                 else [0.0, 0.0, 0.0]
             ),

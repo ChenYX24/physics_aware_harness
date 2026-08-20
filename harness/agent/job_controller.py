@@ -2460,7 +2460,7 @@ class AgentJobController:
             case_spec,
             requested_backend=requested,
             requested_views=None,
-            render_passes=list(execution_profile("smoke").render_passes),
+            render_passes=None,
             registry=self._registry(),
             provider_orchestrator=self._provider_orchestrator(manifest),
             provider_input_manifest=provider_manifest,
@@ -2573,7 +2573,7 @@ class AgentJobController:
                             profile=profile.name,
                             width=profile.width,
                             height=profile.height,
-                            complete_sensor_contract=profile.complete_sensor_contract,
+                            complete_sensor_contract={"rgb", "depth", "segmentation"}.issubset(planned_passes),
                         )
                     )
             except BaseException as exc:
@@ -2603,8 +2603,8 @@ class AgentJobController:
                 else dict(
                     self.hooks.render_sync(
                         run_dir,
-                        require_depth="depth" in profile.render_passes,
-                        require_segmentation="segmentation" in profile.render_passes,
+                        require_depth="depth" in planned_passes,
+                        require_segmentation="segmentation" in planned_passes,
                         write=True,
                     )
                 )
@@ -2842,7 +2842,7 @@ class AgentJobController:
             case_spec,
             requested_backend=requested,
             requested_views=None,
-            render_passes=list(execution_profile(profile_name).render_passes),
+            render_passes=None,
             registry=self._registry(),
             provider_orchestrator=self._provider_orchestrator(manifest),
             provider_input_manifest=self._effective_provider_input_manifest(key[0]),
