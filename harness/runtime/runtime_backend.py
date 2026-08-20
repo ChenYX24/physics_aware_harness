@@ -6,6 +6,12 @@ from typing import Protocol
 from harness.core.case_spec import CaseSpec
 
 
+def require_executable_case(case: CaseSpec) -> None:
+    options = case.data.get("backend_options")
+    if isinstance(options, dict) and options.get("execution_status") == "blocked":
+        raise RuntimeError(str(options.get("blocked_reason") or "case execution is blocked by its contract"))
+
+
 class RuntimeBackend(Protocol):
     name: str
 

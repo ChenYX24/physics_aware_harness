@@ -6,7 +6,8 @@ from pathlib import Path
 
 from harness.core.case_spec import load_case_spec
 from harness.runtime.taichi_cloth_backend import TaichiClothBackend
-from scripts.harness_run_case import reject_blocked_execution
+from harness.runtime.fallback_backend import FallbackBackend
+from harness.runtime.runtime_backend import require_executable_case
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,7 +21,9 @@ class RoboDojoGarmentCaseTests(unittest.TestCase):
         self.assertTrue(screened["materialized"])
         self.assertEqual(screened["decision"], "rejected_for_robodojo_fold")
         with self.assertRaisesRegex(RuntimeError, "bimanual garment"):
-            reject_blocked_execution(case)
+            require_executable_case(case)
+        with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(RuntimeError, "bimanual garment"):
+            FallbackBackend().run_case(case, directory)
         with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(RuntimeError, "self-collision"):
             TaichiClothBackend().run_case(case, directory)
 

@@ -5,11 +5,12 @@ import ipaddress
 import os
 import socket
 import tempfile
+from http.client import HTTPSConnection
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 
 
 REFERENCE_SCHEMA_VERSION = "harness_external_reference_v1"
@@ -33,7 +34,11 @@ def capture_external_reference(
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     request = Request(url, headers={"User-Agent": "PhysicsAwareHarness/1.0"}, method="GET")
-    opener = opener or build_opener(_PublicHTTPSRedirectHandler(resolver)).open
+    opener = opener or build_opener(
+        ProxyHandler({}),
+        _PublicHTTPSRedirectHandler(resolver),
+        _PinnedHTTPSHandler(resolver),
+    ).open
     descriptor, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)
     digest = hashlib.sha256()
     byte_size = 0
@@ -91,7 +96,37 @@ class _PublicHTTPSRedirectHandler(HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def _validate_public_https(url: str, resolver: Callable[..., Any] = socket.getaddrinfo) -> None:
+class _PinnedHTTPSConnection(HTTPSConnection):
+    def __init__(self, host: str, *, pinned_address: str, **kwargs: Any) -> None:
+        super().__init__(host, **kwargs)
+        create_connection = self._create_connection
+        self._create_connection = lambda address, *args, **options: create_connection(
+            (pinned_address, address[1]), *args, **options
+        )
+
+
+class _PinnedHTTPSHandler(HTTPSHandler):
+    def __init__(self, resolver: Callable[..., Any]) -> None:
+        self._resolver = resolver
+        super().__init__()
+
+    def https_open(self, request: Request) -> Any:
+        address = _validate_public_https(request.full_url, self._resolver)[0]
+        connection = lambda host, **kwargs: _PinnedHTTPSConnection(
+            host, pinned_address=address, **kwargs
+        )
+        return self.do_open(
+            connection,
+            request,
+            context=self._context,
+            check_hostname=self._check_hostname,
+        )
+
+
+def _validate_public_https(
+    url: str,
+    resolver: Callable[..., Any] = socket.getaddrinfo,
+) -> tuple[str, ...]:
     parsed = urlsplit(url)
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
         raise ValueError("external references must use public HTTPS without credentials or fragments")
@@ -103,6 +138,7 @@ def _validate_public_https(url: str, resolver: Callable[..., Any] = socket.getad
         raise ValueError("external reference host could not be resolved") from error
     if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
         raise ValueError("external reference host must be public")
+    return tuple(sorted(addresses))
 
 
 def _without_query(url: str) -> str:

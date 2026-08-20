@@ -53,8 +53,13 @@ class VideoRefinerTests(unittest.TestCase):
 
     def test_comparison_contract_enforces_shared_canonical_and_refiner_prompts(self) -> None:
         temporary = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        teacher_video = temporary / "ue.mp4"
+        teacher_video = temporary / "views/front_static/rgb.mp4"
+        teacher_video.parent.mkdir(parents=True)
         teacher_video.write_bytes(b"validated UE teacher")
+        (temporary / "render_sync_report.json").write_text(
+            json.dumps({"views": {"front_static": {"rgb_path": "views/front_static/rgb.mp4"}}}),
+            encoding="utf-8",
+        )
         quality_path = temporary / "quality_report.json"
         quality_path.write_text(
             json.dumps(
@@ -144,9 +149,15 @@ class VideoRefinerTests(unittest.TestCase):
             }
         )
 
-        report = validate_comparison_jobs([direct, refined])
+        with patch(
+            "harness.refinement.video_refiner.evaluate_run",
+            return_value={"status": "pass", "hard_gate_passed": True, "hard_gate": {"passed": True}},
+        ):
+            report = validate_comparison_jobs([direct, refined])
 
         self.assertEqual(report["status"], "pass")
+        with self.assertRaisesRegex(ValueError, "UE teacher validation"):
+            validate_comparison_jobs([refined])
         unclassified_reference = RefinementJob.from_dict(
             {
                 **common,

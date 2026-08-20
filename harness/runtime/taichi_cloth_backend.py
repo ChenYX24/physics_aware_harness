@@ -7,6 +7,7 @@ from pathlib import Path
 from harness.core.artifact_schema import read_json, write_json
 from harness.core.case_spec import CaseSpec
 from harness.core.workspace import workspace_root
+from harness.runtime.runtime_backend import require_executable_case
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -21,11 +22,9 @@ class TaichiClothBackend:
         output_root: str | Path,
         **_: object,
     ) -> Path:
+        require_executable_case(case)
         if case.capability_id != "soft_body_deformation":
             raise ValueError(f"taichi_cloth only supports soft_body_deformation, got {case.capability_id}")
-        options = case.data.get("backend_options") or {}
-        if options.get("execution_status") == "blocked":
-            raise RuntimeError(str(options.get("blocked_reason") or "case requires unsupported cloth features"))
         run_dir = Path(output_root) / f"{case.case_id}_{self.name}"
         run_dir.mkdir(parents=True, exist_ok=True)
         write_json(run_dir / "case_spec.json", case.data)

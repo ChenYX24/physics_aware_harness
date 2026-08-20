@@ -4,11 +4,31 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from harness.core.review_feedback import compile_review_feedback, verified_execution_evidence_from_run_dirs
 
 
 class ReviewFeedbackTests(unittest.TestCase):
+    def test_hand_written_passing_quality_report_is_not_execution_evidence(self) -> None:
+        run_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (run_dir / "case_spec.json").write_text(json.dumps({"case_id": "forged"}), encoding="utf-8")
+        (run_dir / "quality_report.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "harness_run_quality_v1",
+                    "run_dir": str(run_dir.resolve()),
+                    "status": "pass",
+                    "hard_gate_passed": True,
+                    "hard_gate": {"status": "pass", "passed": True},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ValueError, "inconsistent case or hard-gate evidence"):
+            verified_execution_evidence_from_run_dirs([run_dir])
+
     def test_every_case_becomes_weekly_or_regression_knowledge(self) -> None:
         payload = {
             "schema_version": "physics_harness_case_curation_decisions_v2",
@@ -78,8 +98,18 @@ class ReviewFeedbackTests(unittest.TestCase):
                 encoding="utf-8",
             )
             run_dirs.append(run_dir)
-        evidence = verified_execution_evidence_from_run_dirs(run_dirs)
-        compiled = compile_review_feedback(payload, verified_execution_evidence=evidence)
+        with patch(
+            "harness.core.review_feedback.evaluate_run",
+            side_effect=lambda run_dir, write=False: json.loads((Path(run_dir) / "quality_report.json").read_text()),
+        ):
+            evidence = verified_execution_evidence_from_run_dirs(run_dirs)
+        for case_id in ("pass_case", "fail_case"):
+            payload["case_index"][case_id]["case_spec_sha256"] = evidence[case_id]["case_spec_sha256"]
+        with patch(
+            "harness.core.review_feedback.evaluate_run",
+            side_effect=lambda run_dir, write=False: json.loads((Path(run_dir) / "quality_report.json").read_text()),
+        ):
+            compiled = compile_review_feedback(payload, verified_execution_evidence=evidence)
 
         self.assertEqual(len(compiled["case_lessons"]), 3)
         self.assertEqual([row["case_id"] for row in compiled["weekly_candidates"]], ["pass_case", "fail_case"])
@@ -90,6 +120,16 @@ class ReviewFeedbackTests(unittest.TestCase):
         self.assertEqual(compiled["regression_candidates"]["pending_evidence"], ["legacy_case"])
         self.assertIn("hard_gate_failed", {row["issue_id"] for row in compiled["rules"]})
         self.assertIn("source_label_corrected", {row["issue_id"] for row in compiled["rules"]})
+
+        payload["case_index"]["pass_case"]["case_spec_sha256"] = "0" * 64
+        with (
+            patch(
+                "harness.core.review_feedback.evaluate_run",
+                side_effect=lambda run_dir, write=False: json.loads((Path(run_dir) / "quality_report.json").read_text()),
+            ),
+            self.assertRaisesRegex(ValueError, "does not match the reviewed CaseSpec"),
+        ):
+            compile_review_feedback(payload, verified_execution_evidence=evidence)
 
         unverified = compile_review_feedback(payload)
         self.assertEqual(unverified["regression_candidates"]["positive"], [])

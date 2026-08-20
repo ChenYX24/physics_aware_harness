@@ -5,8 +5,16 @@ import socket
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+from urllib.request import Request
 
-from harness.core.external_reference import _PublicHTTPSRedirectHandler, capture_external_reference
+from harness.core.external_reference import (
+    _PinnedHTTPSConnection,
+    _PinnedHTTPSHandler,
+    _PublicHTTPSRedirectHandler,
+    _validate_public_https,
+    capture_external_reference,
+)
 
 
 def public_resolver(*_args: object, **_kwargs: object) -> list[tuple]:
@@ -80,6 +88,22 @@ class ExternalReferenceTests(unittest.TestCase):
             handler.redirect_request(
                 object(), None, 302, "Found", {}, "https://redirect.example/private"
             )
+
+    def test_connection_uses_the_validated_ip_without_reresolving(self) -> None:
+        with patch("socket.create_connection") as connect:
+            connection = _PinnedHTTPSConnection("docs.example", pinned_address="93.184.216.34")
+            connection._create_connection(("docs.example", 443), 10)
+        connect.assert_called_once_with(("93.184.216.34", 443), 10)
+
+    def test_actual_open_revalidates_after_an_earlier_public_answer(self) -> None:
+        answers = iter((public_resolver(), [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.8", 443))]))
+        resolver = lambda *_args, **_kwargs: next(answers)
+        self.assertEqual(
+            _validate_public_https("https://docs.example", resolver),
+            ("93.184.216.34",),
+        )
+        with self.assertRaises(ValueError):
+            _PinnedHTTPSHandler(resolver).https_open(Request("https://docs.example/spec"))
 
 
 if __name__ == "__main__":

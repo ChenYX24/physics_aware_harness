@@ -9,6 +9,7 @@ from harness.core.case_spec import CaseSpec
 from harness.planning.runtime_compiler import RuntimeCompilation, compile_runtime_case
 from harness.runtime.artifact_collector import write_runtime_artifacts
 from harness.runtime.observation_planner import camera_ids_from_observation_plan, render_passes_from_observation_plan
+from harness.runtime.runtime_backend import require_executable_case
 
 
 class FallbackBackend:
@@ -24,6 +25,7 @@ class FallbackBackend:
         camera_strategy: str = "bounds_auto_v1",
         compilation: RuntimeCompilation | None = None,
     ) -> Path:
+        require_executable_case(case)
         run_id = f"{case.case_id}_fallback"
         run_dir = Path(output_root) / run_id
         compilation = compilation or compile_runtime_case(

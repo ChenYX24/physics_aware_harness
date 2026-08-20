@@ -14,6 +14,7 @@ from harness.assets.asset_resolver import requested_map_reference
 from harness.planning.runtime_compiler import RuntimeCompilation, compile_runtime_case
 from harness.runtime.observation_planner import camera_ids_from_observation_plan, render_passes_from_observation_plan
 from harness.runtime.render_pass_contract import enforce_ue_render_passes, normalize_passes, verify_render_observability, write_render_contract_artifacts
+from harness.runtime.runtime_backend import require_executable_case
 from harness.verification.render_sync_checker import ARTIFACT_SCHEMA_VERSION, check_render_sync
 
 
@@ -42,6 +43,7 @@ class UEBackend:
         complete_sensor_contract: bool = True,
         compilation: RuntimeCompilation | None = None,
     ) -> Path:
+        require_executable_case(case)
         run_id = f"{case.case_id}_ue"
         run_dir = Path(output_root) / run_id
         output_dir = run_dir / "ue_output"

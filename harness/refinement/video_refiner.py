@@ -21,6 +21,7 @@ from harness.core.artifact_schema import read_json, write_json
 from harness.core.prompt_lineage import prompt_digest, prompt_stage_text, validate_prompt_lineage
 from harness.core.video_repair_spec import load_video_repair_spec
 from harness.core.workspace import workspace_root
+from harness.verification.run_quality import evaluate_run
 
 
 JOB_SCHEMA_VERSION = "harness_video_refinement_job_v1"
@@ -312,6 +313,28 @@ def validate_ue_teacher(job: RefinementJob) -> dict[str, Any]:
     quality_path_value = receipt.get("quality_report_path")
     quality_path = Path(quality_path_value) if isinstance(quality_path_value, str) else None
     quality = read_json(quality_path) if quality_path and quality_path.is_file() else {}
+    run_dir = quality_path.parent.resolve() if quality_path else None
+    recomputed_quality = evaluate_run(run_dir, write=False) if run_dir else {}
+    declared_videos: set[str] = set()
+    if run_dir:
+        render_sync_path = run_dir / "render_sync_report.json"
+        render_sync = read_json(render_sync_path) if render_sync_path.is_file() else {}
+        views = render_sync.get("views") if isinstance(render_sync, dict) else None
+        if isinstance(views, dict):
+            declared_videos.update(
+                str(row.get("rgb_path"))
+                for row in views.values()
+                if isinstance(row, dict) and isinstance(row.get("rgb_path"), str)
+            )
+        artifact_path = run_dir / "artifact_manifest.json"
+        artifact = read_json(artifact_path) if artifact_path.is_file() else {}
+        artifacts = artifact.get("artifacts") if isinstance(artifact, dict) else None
+        if isinstance(artifacts, dict) and isinstance(artifacts.get("video"), str):
+            declared_videos.add(str(artifacts["video"]))
+    try:
+        teacher_relative = job.input_video.resolve().relative_to(run_dir).as_posix() if run_dir else None
+    except ValueError:
+        teacher_relative = None
     required_checks = {"canonical_prompt_match", "event_contract", "physics_hard_gate", "no_penetration"}
     checks = receipt.get("checks")
     canonical_prompt = prompt_stage_text(job.prompt_lineage or {}, str((job.prompt_lineage or {}).get("canonical_stage_id") or ""))
@@ -328,6 +351,11 @@ def validate_ue_teacher(job: RefinementJob) -> dict[str, Any]:
         or not isinstance(quality.get("hard_gate"), dict)
         or quality["hard_gate"].get("passed") is not True
         or Path(str(quality.get("run_dir") or "")).resolve() != quality_path.parent.resolve()
+        or recomputed_quality.get("status") != "pass"
+        or recomputed_quality.get("hard_gate_passed") is not True
+        or not isinstance(recomputed_quality.get("hard_gate"), dict)
+        or recomputed_quality["hard_gate"].get("passed") is not True
+        or teacher_relative not in declared_videos
         or not isinstance(checks, dict)
         or any(checks.get(name) != "pass" for name in required_checks)
     ):

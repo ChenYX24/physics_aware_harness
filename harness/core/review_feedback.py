@@ -7,6 +7,8 @@ import re
 from pathlib import Path
 from typing import Any, Mapping
 
+from harness.verification.run_quality import evaluate_run
+
 
 REVIEW_FEEDBACK_SCHEMA_VERSION = "harness_review_feedback_v1"
 REVIEW_FEEDBACK_ENV = "SIM_HARNESS_REVIEW_FEEDBACK"
@@ -194,6 +196,11 @@ def compile_review_feedback(
             })
         execution_status = str(index_row.get("execution_status") or "unknown")
         verified_execution_status = verified_execution_statuses.get(str(case_id))
+        if verified_execution_status is not None:
+            expected_case_sha256 = index_row.get("case_spec_sha256")
+            evidence_case_sha256 = verified_execution_evidence[str(case_id)].get("case_spec_sha256")
+            if expected_case_sha256 != evidence_case_sha256:
+                raise ValueError(f"verified execution evidence does not match the reviewed CaseSpec: {case_id}")
         lesson = {
             "case_id": str(case_id),
             "title": str(index_row.get("title") or case_id),
@@ -260,7 +267,7 @@ def compile_review_feedback(
         "pending_diagnosis": sorted(pending_diagnosis),
         "freeform_feedback": feedback,
         "unknown_issue_ids": sorted(unknown_issue_ids),
-        "claim_boundary": "Kept cases become weekly candidates. Browser-reported status remains descriptive only; hashed local case_spec.json and quality_report.json evidence is required before positive or negative regression classification. Legacy media remains pending until revalidated. Known tags become constraints; free-form feedback remains traceable until mapped to a tested rule.",
+        "claim_boundary": "Kept cases become weekly candidates. Browser-reported status remains descriptive only; the canonical evaluator must reproduce the local hard-gate result and its case_spec.json hash must equal the frozen reviewed CaseSpec hash before positive or negative regression classification. Legacy media remains pending until revalidated. Known tags become constraints; free-form feedback remains traceable until mapped to a tested rule.",
     }
 
 
@@ -278,6 +285,8 @@ def verified_execution_evidence_from_run_dirs(run_dirs: list[str | Path]) -> dic
             raise ValueError(f"verified run evidence must contain JSON objects: {run_dir}")
         case_id = str(case.get("case_id") or "")
         hard_gate = quality.get("hard_gate")
+        recomputed = evaluate_run(run_dir, write=False)
+        recomputed_gate = recomputed.get("hard_gate") if isinstance(recomputed, dict) else None
         passed = (
             quality.get("schema_version") == "harness_run_quality_v1"
             and quality.get("run_dir") == str(run_dir)
@@ -286,6 +295,10 @@ def verified_execution_evidence_from_run_dirs(run_dirs: list[str | Path]) -> dic
             and quality.get("status") == "pass"
             and hard_gate.get("passed") is True
             and hard_gate.get("status") == "pass"
+            and recomputed.get("status") == "pass"
+            and recomputed.get("hard_gate_passed") is True
+            and isinstance(recomputed_gate, dict)
+            and recomputed_gate.get("passed") is True
         )
         failed = (
             quality.get("schema_version") == "harness_run_quality_v1"
@@ -295,6 +308,10 @@ def verified_execution_evidence_from_run_dirs(run_dirs: list[str | Path]) -> dic
             and quality.get("status") == "fail"
             and hard_gate.get("passed") is False
             and hard_gate.get("status") == "fail"
+            and recomputed.get("status") == "fail"
+            and recomputed.get("hard_gate_passed") is False
+            and isinstance(recomputed_gate, dict)
+            and recomputed_gate.get("passed") is False
         )
         if not case_id or not (passed or failed):
             raise ValueError(f"verified run has inconsistent case or hard-gate evidence: {run_dir}")

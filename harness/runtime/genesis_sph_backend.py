@@ -11,6 +11,7 @@ from harness.core.artifact_schema import read_json, runtime_summary, write_json
 from harness.core.case_spec import CaseSpec
 from harness.core.workspace import workspace_root
 from harness.runtime.fluid_container_geometry import compile_container_transfer
+from harness.runtime.runtime_backend import require_executable_case
 from harness.verification.physics_verifier import PhysicsVerifier
 
 
@@ -29,6 +30,7 @@ class GenesisSPHBackend:
         render_passes: list[str] | None = None,
         camera_strategy: str = "bounds_auto_v1",
     ) -> Path:
+        require_executable_case(case)
         if case.capability_id != "fluid_particle_dynamics":
             raise ValueError(f"genesis_sph only supports fluid_particle_dynamics, got {case.capability_id}")
         run_dir = Path(output_root) / f"{case.case_id}_{self.name}"

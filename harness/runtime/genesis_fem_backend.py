@@ -6,6 +6,7 @@ from pathlib import Path
 from harness.core.artifact_schema import read_json, write_json
 from harness.core.case_spec import CaseSpec
 from harness.runtime.genesis_sph_backend import genesis_python
+from harness.runtime.runtime_backend import require_executable_case
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -15,6 +16,7 @@ class GenesisFEMBackend:
     name = "genesis_fem"
 
     def run_case(self, case: CaseSpec, output_root: str | Path, **_: object) -> Path:
+        require_executable_case(case)
         if case.capability_id != "soft_body_deformation":
             raise ValueError(f"genesis_fem only supports soft_body_deformation, got {case.capability_id}")
         run_dir = Path(output_root) / f"{case.case_id}_{self.name}"
