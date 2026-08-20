@@ -67,15 +67,51 @@ class ReviewFeedbackTests(unittest.TestCase):
                 "failure_count": 1,
                 "failures": [{"code": "F_TEST", "message": "expected failure"}],
             },
+            "media": {"videos": [{"path": "failure.mp4", "status": "pass"}]},
         }
         (run_dir / "quality_report.json").write_text(json.dumps(report), encoding="utf-8")
-        (run_dir / "failure.mp4").write_bytes(b"not an mp4")
+        (run_dir / "failure.mp4").write_bytes(b"\x00\x00\x00\x18ftypisom")
         (run_dir / "artifact_manifest.json").write_text(
             json.dumps(
                 {
                     "schema_version": "harness_artifact_manifest_v1",
                     "case_id": "fake_media",
                     "artifacts": {"video": "failure.mp4"},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("harness.core.review_feedback.evaluate_run", return_value=report),
+            self.assertRaisesRegex(ValueError, "representative media"),
+        ):
+            verified_execution_evidence_from_run_dirs([run_dir])
+
+    def test_unprobed_manifest_video_is_not_representative_media(self) -> None:
+        run_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (run_dir / "case_spec.json").write_text(json.dumps({"case_id": "unprobed"}), encoding="utf-8")
+        report = {
+            "schema_version": "harness_run_quality_v1",
+            "run_dir": str(run_dir.resolve()),
+            "status": "fail",
+            "hard_gate_passed": False,
+            "hard_gate": {
+                "status": "fail",
+                "passed": False,
+                "failure_count": 1,
+                "failures": [{"code": "F_TEST", "message": "expected failure"}],
+            },
+            "media": {"videos": [{"path": "views/front/rgb.mp4", "status": "pass"}]},
+        }
+        (run_dir / "quality_report.json").write_text(json.dumps(report), encoding="utf-8")
+        (run_dir / "unrelated.mp4").write_bytes(b"\x00\x00\x00\x18ftypisom")
+        (run_dir / "artifact_manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "harness_artifact_manifest_v1",
+                    "case_id": "unprobed",
+                    "artifacts": {"video": "unrelated.mp4"},
                 }
             ),
             encoding="utf-8",
@@ -195,6 +231,7 @@ class ReviewFeedbackTests(unittest.TestCase):
                         "status": "pass" if passed else "fail",
                         "hard_gate_passed": passed,
                         "hard_gate": hard_gate,
+                        "media": {"videos": [] if passed else [{"path": "failure.mp4", "status": "pass"}]},
                     }
                 ),
                 encoding="utf-8",
@@ -215,14 +252,14 @@ class ReviewFeedbackTests(unittest.TestCase):
         with patch(
             "harness.core.review_feedback.evaluate_run",
             side_effect=lambda run_dir, write=False: json.loads((Path(run_dir) / "quality_report.json").read_text()),
-        ):
+        ), patch("harness.core.review_feedback.validate_video", return_value={"status": "pass"}):
             evidence = verified_execution_evidence_from_run_dirs(run_dirs)
         for case_id in ("pass_case", "fail_case"):
             payload["case_index"][case_id]["case_spec_sha256"] = evidence[case_id]["case_spec_sha256"]
         with patch(
             "harness.core.review_feedback.evaluate_run",
             side_effect=lambda run_dir, write=False: json.loads((Path(run_dir) / "quality_report.json").read_text()),
-        ):
+        ), patch("harness.core.review_feedback.validate_video", return_value={"status": "pass"}):
             compiled = compile_review_feedback(payload, verified_execution_evidence=evidence)
 
         self.assertEqual(len(compiled["case_lessons"]), 3)
@@ -230,6 +267,8 @@ class ReviewFeedbackTests(unittest.TestCase):
         self.assertEqual(compiled["weekly_candidates"][0]["artifacts"][0]["path"], "front.mp4")
         self.assertEqual(compiled["regression_candidates"]["positive"], ["pass_case"])
         self.assertEqual(compiled["regression_candidates"]["negative"], ["fail_case"])
+        self.assertEqual(compiled["verified_execution_evidence"], evidence)
+        self.assertEqual(compiled["verified_execution_evidence"]["fail_case"]["negative_evidence"]["failure_codes"], ["F_TEST"])
         self.assertEqual(compiled["regression_candidates"]["quarantined_legacy"], [])
         self.assertEqual(compiled["regression_candidates"]["pending_evidence"], ["legacy_case"])
         self.assertIn("hard_gate_failed", {row["issue_id"] for row in compiled["rules"]})
@@ -241,6 +280,7 @@ class ReviewFeedbackTests(unittest.TestCase):
                 "harness.core.review_feedback.evaluate_run",
                 side_effect=lambda run_dir, write=False: json.loads((Path(run_dir) / "quality_report.json").read_text()),
             ),
+            patch("harness.core.review_feedback.validate_video", return_value={"status": "pass"}),
             self.assertRaisesRegex(ValueError, "does not match the reviewed CaseSpec"),
         ):
             compile_review_feedback(payload, verified_execution_evidence=evidence)

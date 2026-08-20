@@ -7,8 +7,7 @@ import re
 from pathlib import Path
 from typing import Any, Mapping
 
-from harness.core.artifact_manager import is_mp4
-from harness.verification.run_quality import evaluate_run, read_case_spec
+from harness.verification.run_quality import evaluate_run, read_case_spec, validate_video
 
 
 REVIEW_FEEDBACK_SCHEMA_VERSION = "harness_review_feedback_v1"
@@ -259,6 +258,7 @@ def compile_review_feedback(
         "rules": rules,
         "case_lessons": case_lessons,
         "weekly_candidates": weekly_candidates,
+        "verified_execution_evidence": {str(case_id): dict(record) for case_id, record in sorted(verified_execution_evidence.items())},
         "regression_candidates": {
             "positive": sorted(positive_regressions),
             "negative": sorted(negative_regressions),
@@ -332,7 +332,7 @@ def verified_execution_evidence_from_run_dirs(run_dirs: list[str | Path]) -> dic
             "evaluator_schema": "harness_run_quality_v1",
         }
         if failed:
-            record["negative_evidence"] = _negative_execution_evidence(run_dir, case_id, recomputed_gate)
+            record["negative_evidence"] = _negative_execution_evidence(run_dir, case_id, recomputed)
         evidence[case_id] = record
     return evidence
 
@@ -368,7 +368,10 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _negative_execution_evidence(run_dir: Path, case_id: str, hard_gate: Mapping[str, Any]) -> dict[str, Any]:
+def _negative_execution_evidence(run_dir: Path, case_id: str, report: Mapping[str, Any]) -> dict[str, Any]:
+    hard_gate = report.get("hard_gate")
+    if not isinstance(hard_gate, Mapping):
+        raise ValueError(f"negative execution evidence requires a canonical hard gate: {run_dir}")
     failures = hard_gate.get("failures")
     if not isinstance(failures, list) or not failures:
         raise ValueError(f"negative execution evidence requires failing gate details: {run_dir}")
@@ -388,7 +391,13 @@ def _negative_execution_evidence(run_dir: Path, case_id: str, hard_gate: Mapping
     ):
         raise ValueError(f"negative execution evidence has an invalid artifact_manifest.json: {run_dir}")
 
-    media = _representative_media(run_dir, manifest["artifacts"])
+    canonical_videos = (report.get("media") or {}).get("videos") if isinstance(report.get("media"), Mapping) else None
+    probed_paths = {
+        str(row.get("path"))
+        for row in canonical_videos or []
+        if isinstance(row, Mapping) and row.get("status") == "pass" and row.get("path")
+    }
+    media = _representative_media(run_dir, manifest["artifacts"], probed_paths)
     if not media:
         raise ValueError(f"negative execution evidence requires representative media declared by artifact_manifest.json: {run_dir}")
     return {
@@ -401,18 +410,24 @@ def _negative_execution_evidence(run_dir: Path, case_id: str, hard_gate: Mapping
     }
 
 
-def _representative_media(run_dir: Path, artifacts: Mapping[str, Any]) -> list[dict[str, Any]]:
-    candidates: list[Path] = []
+def _representative_media(run_dir: Path, artifacts: Mapping[str, Any], probed_paths: set[str]) -> list[dict[str, Any]]:
+    declared_paths: list[Path] = []
     for value in artifacts.values():
         if not isinstance(value, str) or not value:
             continue
         declared = run_dir / value
-        if not _real_path_within(run_dir, declared):
+        if _real_path_within(run_dir, declared):
+            declared_paths.append(declared)
+
+    candidates = []
+    for relative_path in sorted(probed_paths):
+        candidate = run_dir / relative_path
+        if not _real_path_within(run_dir, candidate) or candidate.suffix.lower() != ".mp4":
             continue
-        if declared.is_file() and declared.suffix.lower() == ".mp4" and is_mp4(declared):
-            candidates.append(declared)
-        elif declared.is_dir():
-            candidates.extend(path for path in declared.rglob("*.mp4") if _real_path_within(run_dir, path) and is_mp4(path))
+        if not any(candidate == declared or (declared.is_dir() and candidate.is_relative_to(declared)) for declared in declared_paths):
+            continue
+        if validate_video(candidate, run_dir, "ffprobe", [], []).get("status") == "pass":
+            candidates.append(candidate)
     rows = []
     # ponytail: eight files keep evidence records bounded; raise only if a protocol requires denser media coverage.
     for path in sorted(set(candidates), key=lambda value: value.as_posix())[:8]:
