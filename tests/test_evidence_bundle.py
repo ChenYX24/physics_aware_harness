@@ -47,7 +47,20 @@ class EvidenceBundleTests(unittest.TestCase):
         )
         for stage in ("verifier", "render_sync", "quality_gate"):
             write_stage_result(self.run_dir, build_stage_result(stage=stage, status="completed"))
-        self.case_spec = {"schema_version": "harness_case_spec_v2", "case_id": "evidence_case"}
+        self.case_spec = {
+            "schema_version": "harness_case_spec_v2",
+            "case_id": "evidence_case",
+            "verification_requirements": {
+                "assertions": [
+                    {
+                        "id": "ball_contacts_floor",
+                        "type": "event_exists",
+                        "event": "contact",
+                        "objects": ["ball", "floor"],
+                    }
+                ]
+            },
+        }
         write_json(self.attempt_dir / "case_spec.json", self.case_spec)
         write_json(self.attempt_dir / "candidate_run.json", {"run_dir": str(self.run_dir), "fingerprint": "f" * 64})
         self.attempt = {
@@ -112,6 +125,75 @@ class EvidenceBundleTests(unittest.TestCase):
         self.assertEqual(summary["result_provenance"], self.result_provenance)
         self.assertTrue(Path(result["manifest_path"]).is_file())
         self.assertEqual(result["stage_result"]["status"], "completed")
+
+    def test_declared_contact_ignores_earlier_contact_and_preserves_constraint_states(self) -> None:
+        write_json(
+            self.run_dir / "trajectory.json",
+            [
+                {
+                    "frame": index,
+                    "time_s": index * 0.5,
+                    "objects": {
+                        "ball": {"position": [float(index), 0, 0]},
+                        "target": {"position": [2.0, 0, 0]},
+                    },
+                    "constraints": [
+                        {
+                            "constraint_id": "constraint_a",
+                            "position_target_m": [1.0, 0.0, 0.0],
+                            "stiffness_n_m": [20.0, 0.0, 0.0],
+                            "deformation_m": [0.5 - index * 0.1, 0.0, 0.0],
+                            "source": "runtime_driver",
+                        }
+                    ],
+                }
+                for index in range(5)
+            ],
+        )
+        write_json(
+            self.run_dir / "contact_events.json",
+            {
+                "events": [
+                    {"frame": 0, "time_s": 0.0, "objects": ["ball", "floor"], "kind": "support"},
+                    {"frame": 2, "time_s": 1.0, "objects": ["ball", "target"], "kind": "contact"},
+                    {"frame": 3, "time_s": 1.5, "objects": ["ball", "target"], "kind": "contact"},
+                ]
+            },
+        )
+        self.case_spec["verification_requirements"] = {
+            "assertions": [
+                {
+                    "id": "declared_contact",
+                    "type": "event_exists",
+                    "event": "contact",
+                    "objects": ["ball", "target"],
+                }
+            ]
+        }
+        write_json(self.attempt_dir / "case_spec.json", self.case_spec)
+        self.attempt["case_spec_digest"] = stable_digest(self.case_spec)
+
+        result = build_evidence_bundle(
+            job_id="job_declared_contact",
+            attempt=self.attempt,
+            attempt_dir=self.attempt_dir,
+            candidate_run_dir=self.run_dir,
+            request=self.request,
+            intent_contract=self.intent,
+            result_provenance=self.result_provenance,
+            ffmpeg="/usr/bin/true",
+            command_runner=self.fake_ffmpeg,
+        )
+
+        selection = result["manifest"]["event_selection"]
+        self.assertEqual(selection["reason"], "anchored to verification assertion declared_contact")
+        self.assertEqual([point["frame_index"] for point in selection["points"]], [1, 2, 4])
+        self.assertEqual(selection["points"][1]["event_refs"], ["contact_001"])
+        summary = read_json(self.attempt_dir / "evidence_bundle" / "evidence_summary.json")
+        self.assertEqual(summary["constraint_states"]["constraint_ids"], ["constraint_a"])
+        first_state = summary["constraint_states"]["sampled_frames"][0]["constraints"][0]
+        self.assertEqual(first_state["stiffness_n_m"], [20.0, 0.0, 0.0])
+        self.assertEqual(first_state["source"], "runtime_driver")
 
     def test_ambiguity_decision_projects_to_stable_semantic_requirement(self) -> None:
         ambiguity_id = "ambiguity_001_fixture"

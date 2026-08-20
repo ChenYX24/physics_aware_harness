@@ -87,7 +87,7 @@ def build_evidence_bundle(
     technical_gates = _technical_gates(attempt_dir, run_dir)
     trajectory_path, _, frames = _trajectory(run_dir)
     timeline = _contact_timeline(run_dir, frames)
-    selection = _select_event_points(frames, timeline)
+    selection = _select_event_points(frames, timeline, snapshots["case_spec"])
     views = _canonical_views(run_dir)
     if not views:
         raise EvidenceBundleError("evidence_canonical_view_missing", "Candidate contains no canonical RGB views")
@@ -137,6 +137,7 @@ def build_evidence_bundle(
             "semantic_requirements": semantic_review_requirements(intent_contract, intent_amendments),
             "event_selection": selection,
             "trajectory": trajectory_summary,
+            "constraint_states": _constraint_state_summary(frames, trajectory_summary),
             "contacts": timeline,
             "technical_gates": technical_gates,
             "result_provenance": dict(result_provenance),
@@ -582,16 +583,53 @@ def _contact_timeline(run_dir: Path, frames: list[dict[str, Any]]) -> list[dict[
     return timeline
 
 
-def _select_event_points(frames: list[dict[str, Any]], timeline: list[dict[str, Any]]) -> dict[str, Any]:
-    if timeline:
-        during = min(max(0, int(timeline[0]["frame_index"])), len(frames) - 1)
-        indices = [max(0, during - 1), during, min(len(frames) - 1, during + 1)]
+def _select_event_points(
+    frames: list[dict[str, Any]],
+    timeline: list[dict[str, Any]],
+    case_spec: Mapping[str, Any],
+) -> dict[str, Any]:
+    selected_events: list[dict[str, Any]] = []
+    selected_assertion_id = ""
+    verification = case_spec.get("verification_requirements")
+    assertions = verification.get("assertions") if isinstance(verification, Mapping) else []
+    for assertion in assertions or []:
+        if (
+            not isinstance(assertion, Mapping)
+            or assertion.get("type") != "event_exists"
+            or assertion.get("event") != "contact"
+        ):
+            continue
+        objects = assertion.get("objects")
+        if not isinstance(objects, list) or len(objects) != 2 or any(not isinstance(value, str) for value in objects):
+            continue
+        target = set(objects)
+        selected_events = [event for event in timeline if set(event.get("objects") or []) == target]
+        if selected_events:
+            selected_assertion_id = str(assertion.get("id") or "event_exists")
+            break
+
+    if selected_events:
+        selected_events.sort(key=lambda event: int(event["frame_index"]))
+        episode = [selected_events[0]]
+        last_index = int(selected_events[0]["frame_index"])
+        for event in selected_events[1:]:
+            frame_index = int(event["frame_index"])
+            if frame_index > last_index + 1:
+                break
+            episode.append(event)
+            last_index = max(last_index, frame_index)
+        start_index = int(episode[0]["frame_index"])
+        during = (start_index + last_index) // 2
+        during_event = min(episode, key=lambda event: abs(int(event["frame_index"]) - during))
+        indices = [max(0, start_index - 1), during, min(len(frames) - 1, last_index + 1)]
+        event_ref = str(during_event["event_id"])
         strategy = "event_anchored"
-        reason = f"anchored to {timeline[0]['event_id']}"
+        reason = f"anchored to verification assertion {selected_assertion_id}"
     else:
         indices = [0, (len(frames) - 1) // 2, len(frames) - 1]
+        event_ref = ""
         strategy = "start_mid_end"
-        reason = "no locatable contact/event existed; deterministic start/mid/end fallback"
+        reason = "no contact event matched a declared verification assertion; deterministic start/mid/end selection"
     labels = ("before", "during", "after")
     return {
         "strategy": strategy,
@@ -601,10 +639,44 @@ def _select_event_points(frames: list[dict[str, Any]], timeline: list[dict[str, 
                 "label": label,
                 "time_s": float(_frame_time(frames[index]) or 0.0),
                 "frame_index": index,
-                "event_refs": [timeline[0]["event_id"]] if timeline and label == "during" else [],
+                "event_refs": [event_ref] if event_ref and label == "during" else [],
             }
             for label, index in zip(labels, indices)
         ],
+    }
+
+
+def _constraint_state_summary(
+    frames: list[dict[str, Any]],
+    trajectory_summary: Mapping[str, Any],
+) -> dict[str, Any]:
+    sampled_indices = {
+        int(sample["frame_index"])
+        for sample in trajectory_summary.get("sampled_frames") or []
+        if isinstance(sample, Mapping) and isinstance(sample.get("frame_index"), int)
+    }
+    constraint_ids: set[str] = set()
+    samples: list[dict[str, Any]] = []
+    for frame_index in sorted(sampled_indices):
+        constraints = frames[frame_index].get("constraints")
+        rows = (
+            [dict(value) for value in constraints if isinstance(value, Mapping)]
+            if isinstance(constraints, list)
+            else []
+        )
+        if not rows:
+            continue
+        constraint_ids.update(str(value.get("constraint_id")) for value in rows if value.get("constraint_id"))
+        samples.append(
+            {
+                "frame_index": frame_index,
+                "time_s": float(_frame_time(frames[frame_index]) or 0.0),
+                "constraints": rows,
+            }
+        )
+    return {
+        "constraint_ids": sorted(constraint_ids),
+        "sampled_frames": samples,
     }
 
 
