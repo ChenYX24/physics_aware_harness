@@ -53,6 +53,40 @@ class ReviewFeedbackTests(unittest.TestCase):
         ):
             verified_execution_evidence_from_run_dirs([run_dir])
 
+    def test_fake_mp4_bytes_are_not_representative_media(self) -> None:
+        run_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (run_dir / "case_spec.json").write_text(json.dumps({"case_id": "fake_media"}), encoding="utf-8")
+        report = {
+            "schema_version": "harness_run_quality_v1",
+            "run_dir": str(run_dir.resolve()),
+            "status": "fail",
+            "hard_gate_passed": False,
+            "hard_gate": {
+                "status": "fail",
+                "passed": False,
+                "failure_count": 1,
+                "failures": [{"code": "F_TEST", "message": "expected failure"}],
+            },
+        }
+        (run_dir / "quality_report.json").write_text(json.dumps(report), encoding="utf-8")
+        (run_dir / "failure.mp4").write_bytes(b"not an mp4")
+        (run_dir / "artifact_manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "harness_artifact_manifest_v1",
+                    "case_id": "fake_media",
+                    "artifacts": {"video": "failure.mp4"},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("harness.core.review_feedback.evaluate_run", return_value=report),
+            self.assertRaisesRegex(ValueError, "representative media"),
+        ):
+            verified_execution_evidence_from_run_dirs([run_dir])
+
     def test_stored_failure_signature_must_match_recomputed_report(self) -> None:
         run_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
         (run_dir / "case_spec.json").write_text(json.dumps({"case_id": "drifted"}), encoding="utf-8")
@@ -166,7 +200,7 @@ class ReviewFeedbackTests(unittest.TestCase):
                 encoding="utf-8",
             )
             if not passed:
-                (run_dir / "failure.mp4").write_bytes(b"representative failure")
+                (run_dir / "failure.mp4").write_bytes(b"\x00\x00\x00\x18ftypisom")
                 (run_dir / "artifact_manifest.json").write_text(
                     json.dumps(
                         {

@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Any, Mapping
 
+from harness.core.artifact_manager import is_mp4
 from harness.verification.run_quality import evaluate_run, read_case_spec
 
 
@@ -401,7 +402,6 @@ def _negative_execution_evidence(run_dir: Path, case_id: str, hard_gate: Mapping
 
 
 def _representative_media(run_dir: Path, artifacts: Mapping[str, Any]) -> list[dict[str, Any]]:
-    supported = {".avi", ".exr", ".gif", ".jpeg", ".jpg", ".mkv", ".mov", ".mp4", ".png", ".webm"}
     candidates: list[Path] = []
     for value in artifacts.values():
         if not isinstance(value, str) or not value:
@@ -409,13 +409,13 @@ def _representative_media(run_dir: Path, artifacts: Mapping[str, Any]) -> list[d
         declared = run_dir / value
         if not _real_path_within(run_dir, declared):
             continue
-        if declared.is_file() and declared.suffix.lower() in supported:
+        if declared.is_file() and declared.suffix.lower() == ".mp4" and is_mp4(declared):
             candidates.append(declared)
         elif declared.is_dir():
-            candidates.extend(path for path in declared.rglob("*") if path.is_file() and path.suffix.lower() in supported and _real_path_within(run_dir, path))
+            candidates.extend(path for path in declared.rglob("*.mp4") if _real_path_within(run_dir, path) and is_mp4(path))
     rows = []
     # ponytail: eight files keep evidence records bounded; raise only if a protocol requires denser media coverage.
-    for path in sorted(set(candidates), key=lambda value: (value.suffix.lower() not in {".mp4", ".mov", ".webm", ".mkv"}, value.as_posix()))[:8]:
+    for path in sorted(set(candidates), key=lambda value: value.as_posix())[:8]:
         rows.append(
             {
                 "path": path.resolve().relative_to(run_dir).as_posix(),
