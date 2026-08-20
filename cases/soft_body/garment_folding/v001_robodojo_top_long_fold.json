@@ -1,0 +1,105 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "robodojo_top_long_bimanual_fold_v001",
+  "capability_id": "soft_body_deformation",
+  "prompt": "Two robot grippers fold a photorealistic long-sleeve top on a real worktable: fold both sleeves across the chest, bring both hem corners toward the shoulders, release the garment, and return both grippers home. Cloth must preserve identity, wrinkle naturally, self-collide, remain supported by the table, and never pass through the grippers or table.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "phenomenon": "bimanual_garment_folding",
+    "landmark_map": ["left_sleeve", "right_sleeve", "left_chest", "right_chest", "left_hem", "right_hem", "left_shoulder", "right_shoulder"],
+    "maximum_sleeve_to_opposite_chest_distance_m": 0.25,
+    "maximum_hem_to_same_side_shoulder_xy_distance_m": 0.25,
+    "maximum_hem_shoulder_line_angle_deg": 45.0,
+    "maximum_table_penetration_m": 0.002,
+    "maximum_gripper_penetration_m": 0.002,
+    "maximum_structural_edge_stretch_ratio": 1.15,
+    "self_collision_required": true,
+    "bimanual_grasp_constraints_required": true,
+    "terminal_grippers_open": true,
+    "terminal_grippers_at_home": true
+  },
+  "objects": [
+    {
+      "id": "long_sleeve_top",
+      "role": "deformable_cloth",
+      "shape": "garment_top_long",
+      "initial_center_m": [0.0, -0.22, 0.81],
+      "total_mass_kg": 0.32,
+      "material": {
+        "areal_density_kg_m2": 0.24,
+        "warp_stiffness_n_m": 120.0,
+        "weft_stiffness_n_m": 95.0,
+        "bending_stiffness_n_m": 0.035,
+        "damping_ratio": 0.08,
+        "static_friction": 0.48,
+        "dynamic_friction": 0.36,
+        "thickness_m": 0.0025
+      },
+      "asset_contract": {
+        "required": true,
+        "photorealistic_material": true,
+        "source": "RoboDojo fold_clothes task geometry and success-condition reference only",
+        "source_url": "https://github.com/RoboDojo-Benchmark/RoboDojo/tree/main/task/RoboDojo",
+        "binary_asset_ingested": false,
+        "license_status": "review_required_before_asset_ingestion",
+        "local_catalog_screening": {
+          "candidate_asset_id": "game_characters_boyadventurer_assets_cloth_sm_redcloth_sim",
+          "ue_path": "/Game/Characters/BoyAdventurer/Assets/Cloth/SM_RedCloth_sim.SM_RedCloth_sim",
+          "sha256": "ae750260602f297e26a6519b73d5d74e0c9e44293dece0ae1c457b982b1185ca",
+          "materialized": true,
+          "license_tier": "local_preview",
+          "decision": "rejected_for_robodojo_fold",
+          "reasons": [
+            "static mesh rather than a cloth asset with simulation weights",
+            "cape/scarf topology rather than a Top_Long garment",
+            "no landmark map or self-collision evidence"
+          ]
+        }
+      }
+    },
+    {
+      "id": "left_gripper",
+      "role": "kinematic_gripper",
+      "collision_shape": "asset_matched",
+      "contact_mode": "two_way"
+    },
+    {
+      "id": "right_gripper",
+      "role": "kinematic_gripper",
+      "collision_shape": "asset_matched",
+      "contact_mode": "two_way"
+    },
+    {
+      "id": "worktable",
+      "role": "support_surface",
+      "shape": "asset_matched_table",
+      "z_m": 0.8,
+      "friction": 0.42,
+      "restitution": 0.0
+    }
+  ],
+  "active_objects": ["left_gripper", "right_gripper"],
+  "passive_objects": ["long_sleeve_top", "worktable"],
+  "required_assets": ["licensed long-sleeve garment mesh with landmark map", "two collision-matched robot grippers", "photorealistic worktable and studio scene"],
+  "required_signals": ["vertex_positions", "vertex_velocities", "triangle_topology", "self_contact_pairs", "gripper_contact_impulses", "grasp_state", "garment_landmarks", "robot_joint_state", "rgb", "metric_depth", "instance_segmentation"],
+  "verifier_expectation": {"status": "pass"},
+  "should_pass": true,
+  "backend_options": {
+    "execution_status": "blocked",
+    "blocked_reason": "bimanual garment folding requires gripper-cloth coupling, cloth self-collision, landmark tracking, and a garment mesh; the current Taichi backend only supports drape/flag grids",
+    "fps": 24,
+    "duration_s": 20.0,
+    "substeps_per_frame": 100,
+    "seed": 20260815
+  },
+  "benchmark_reference": {
+    "name": "RoboDojo fold_clothes",
+    "website": "https://robodojo-benchmark.com/",
+    "task_config": "https://github.com/RoboDojo-Benchmark/RoboDojo/blob/main/task/RoboDojo/config/fold_clothes.yml",
+    "task_code": "https://github.com/RoboDojo-Benchmark/RoboDojo/blob/main/task/RoboDojo/tasks/fold_clothes.py",
+    "license": "https://github.com/RoboDojo-Benchmark/RoboDojo/blob/main/LICENSE",
+    "license_scope": "MIT software license; benchmark assets and third-party data still require separate provenance review before ingestion",
+    "adaptation": "success geometry and task structure only; no third-party binary asset is copied"
+  },
+  "notes": "Contract-only case. It must remain fail-closed until two-way gripper contact, self-collision, garment landmarks, licensed realistic assets, and a native run are available. The benchmark task uses Top_Long garments and evaluates sleeve-to-opposite-chest, hem-to-shoulder, fold angle, open grippers, and return-to-home conditions. Laplace's unified local catalog was screened: its high-density SM_RedCloth_sim is useful as a drape/cape visual candidate but is rejected here because it is a static cape mesh without Top_Long landmarks, cloth weights, or self-collision evidence."
+}

@@ -7,7 +7,11 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping
 
-from harness.core.case_spec_v2 import CaseSpecV2ValidationError, case_spec_v2_from_dict
+from harness.core.case_spec_v2 import (
+    CaseSpecV2ValidationError,
+    case_spec_v2_from_dict,
+    project_case_spec_v2_to_v1,
+)
 from harness.planning.case_generation import (
     LLMJSONResponse,
     build_case_request,
@@ -71,6 +75,7 @@ class CaseGenerationV2Tests(unittest.TestCase):
             self.assertTrue((Path(temporary) / "case_spec_v2.json").is_file())
             self.assertTrue((Path(temporary) / "case_spec_generation_raw.json").is_file())
             self.assertTrue((Path(temporary) / "case_spec_generation_call_receipt.json").is_file())
+            self.assertTrue((Path(temporary) / "prompt_lineage.json").is_file())
 
         self.assertEqual([call["purpose"] for call in client.calls], ["expansion", "case_spec_generation"])
         contract = client.calls[1]["payload"]["case_spec_contract"]
@@ -118,6 +123,11 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertEqual(case_spec_v2_from_dict(structure_example).case_id, "example")
         self.assertEqual(result.case_spec.case_id, "generated_v2")
         self.assertEqual(result.repair_count, 0)
+        lineage = result.case_spec.data["provenance"]["prompt_lineage"]
+        self.assertEqual(lineage["canonical_stage_id"], "canonical_generation_prompt")
+        projected = project_case_spec_v2_to_v1(result.case_spec)
+        self.assertEqual(projected.data["prompt"], "Make one ball hit another.")
+        self.assertIn("Appearance-only edit", projected.data["refiner_prompt"])
 
     def test_common_mapping_shaped_analysis_is_canonicalized_without_losing_keys(self) -> None:
         expansion = expansion_fixture()

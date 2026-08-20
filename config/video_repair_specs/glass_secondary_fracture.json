@@ -1,0 +1,82 @@
+{
+  "schema_version": "video_repair_spec_v1",
+  "repair_id": "glass_secondary_fracture",
+  "source": {
+    "locator": "workspace-run://brittle_fracture/glass_panel/v005_floor_collision_cascade/smoke_02/event_closeup/rgb.mp4",
+    "sha256": "ee29b028e94a1b9307165cdeba42aff431cee9bedd28d3a6a99266d09c04dcb4",
+    "duration_s": 4.041667,
+    "fps": 24.0,
+    "resolution_px": [1280, 720]
+  },
+  "diagnosis": {
+    "failure_family": "missing_secondary_fracture",
+    "repairability": "grounded",
+    "error_interval_s": [0.416667, 3.0],
+    "roi_tracks": [
+      {
+        "asset_id": "glass_panel_and_fragments",
+        "interval_s": [0.0, 3.0],
+        "bbox_normalized": [0.12, 0.04, 0.88, 0.98],
+        "role": "primary_and_secondary_fracture_lineage"
+      },
+      {
+        "asset_id": "impact_floor",
+        "interval_s": [0.333333, 3.0],
+        "bbox_normalized": [0.0, 0.58, 1.0, 1.0],
+        "role": "secondary_impact_surface"
+      }
+    ]
+  },
+  "core_assets": [
+    {
+      "asset_id": "steel_ball",
+      "asset_type": "dynamic_rigid_impactor",
+      "identity_constraints": ["same mass and radius", "same initial state", "native glass contact"]
+    },
+    {
+      "asset_id": "glass_panel_and_fragments",
+      "asset_type": "hierarchical_brittle_body",
+      "identity_constraints": ["root panel lineage", "coarse primary fragments", "fine secondary shards linked to one impacted parent"]
+    },
+    {
+      "asset_id": "impact_floor",
+      "asset_type": "static_contact_surface",
+      "identity_constraints": ["same position and material", "native fragment contact", "no hidden trigger volume"]
+    }
+  ],
+  "boundary_states": {
+    "before": {
+      "time_s": 0.375,
+      "state_assertions": ["primary steel-ball impact has fractured the root panel", "coarse fragments exist", "no secondary fracture has occurred"]
+    },
+    "after": {
+      "time_s": 3.0,
+      "state_assertions": ["at least one floor-impacting coarse fragment has split into finer shards", "parent-child lineage is retained", "all shards remain collision-valid"]
+    }
+  },
+  "target_event_graph": {
+    "nodes": [
+      {"id": "steel_glass_contact", "type": "native_contact"},
+      {"id": "primary_break", "type": "native_fracture"},
+      {"id": "coarse_fragment_floor_contact", "type": "native_contact"},
+      {"id": "secondary_break", "type": "native_fracture"},
+      {"id": "fine_shard_settle", "type": "terminal_state"}
+    ],
+    "edges": [
+      ["steel_glass_contact", "primary_break", "causes"],
+      ["primary_break", "coarse_fragment_floor_contact", "precedes"],
+      ["coarse_fragment_floor_contact", "secondary_break", "causes"],
+      ["secondary_break", "fine_shard_settle", "precedes"]
+    ]
+  },
+  "stage3_contract": {
+    "required_evidence": ["two distinct native break events", "floor contact and impulse on the secondary parent", "fragment count increase", "parent-child lineage", "collision-valid shard trajectories"],
+    "pass_criteria": ["secondary break occurs after floor contact", "below-threshold floor impact stays intact", "above-threshold floor impact produces exactly one bounded secondary level", "no spontaneous or infinite cascade"],
+    "forbidden_shortcuts": ["labeling floor contact as secondary fracture", "time-triggered second break", "replacing fragments without lineage", "visual particles without collision bodies"]
+  },
+  "stage4_contract": {
+    "must_preserve": ["steel-ball trajectory", "primary contact and break timing", "secondary parent identity", "floor contact", "fragment lineage and count change", "camera"],
+    "forbidden_changes": ["merge shards back together", "add break before contact", "remove the second break", "change impact location", "hide fragments with dust"] ,
+    "success_criteria": ["glass appearance becomes photorealistic", "both fracture stages remain temporally legible", "refinement preserves the two native event timestamps within one frame"]
+  }
+}

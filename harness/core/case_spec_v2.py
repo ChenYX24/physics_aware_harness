@@ -10,6 +10,7 @@ from typing import Any, Iterable, Mapping
 
 from harness.core.capability import CapabilityStore, canonical_capability_id
 from harness.core.case_spec import CaseSpec, validate_case_spec
+from harness.core.prompt_lineage import prompt_stage_text, validate_prompt_lineage
 
 
 CASE_SPEC_V2_SCHEMA_VERSION = "harness_case_spec_v2"
@@ -526,6 +527,14 @@ def collect_case_spec_v2_issues(
 
 def project_case_spec_v2_to_v1(case_spec: CaseSpecV2) -> CaseSpec:
     data = case_spec.data
+    prompt_lineage = (data.get("provenance") or {}).get("prompt_lineage")
+    if isinstance(prompt_lineage, dict):
+        validate_prompt_lineage(prompt_lineage)
+        canonical_prompt = prompt_stage_text(prompt_lineage, str(prompt_lineage["canonical_stage_id"]))
+        refiner_prompt = prompt_stage_text(prompt_lineage, str(prompt_lineage["refiner_stage_id"]))
+    else:
+        canonical_prompt = str((data.get("identity") or {}).get("source_request") or (data.get("identity") or {}).get("title") or "")
+        refiner_prompt = None
     allow_analytic_proxy = bool((data.get("asset_policy") or {}).get("allow_analytic_proxy"))
     projected_objects = [
         _project_object(
@@ -561,8 +570,9 @@ def project_case_spec_v2_to_v1(case_spec: CaseSpecV2) -> CaseSpec:
         "schema_version": "harness_case_spec_v1",
         "case_id": case_spec.case_id,
         "capability_id": capability_id,
-        "prompt": str((data.get("identity") or {}).get("source_request") or (data.get("identity") or {}).get("title") or ""),
+        "prompt": canonical_prompt,
         "expanded_prompt": str((data.get("identity") or {}).get("title") or ""),
+        **({"refiner_prompt": refiner_prompt, "prompt_lineage": copy.deepcopy(prompt_lineage)} if isinstance(prompt_lineage, dict) else {}),
         "task_type": str(variant.get("task_type") or capability_id),
         "scene": {
             "layout": str(scene.get("layout") or "v2_semantic_layout"),

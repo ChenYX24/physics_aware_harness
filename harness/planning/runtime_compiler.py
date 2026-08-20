@@ -80,6 +80,9 @@ class RuntimeCompilation:
         destination.mkdir(parents=True, exist_ok=True)
         write_json(destination / "case_spec.json", self.runtime_case.data)
         write_json(destination / "runtime_case_spec_v1.json", self.runtime_case.data)
+        prompt_lineage = self.runtime_case.data.get("prompt_lineage")
+        if isinstance(prompt_lineage, dict):
+            write_json(destination / "prompt_lineage.json", prompt_lineage)
         if self.source_case_spec.get("schema_version") == "harness_case_spec_v2":
             write_json(destination / "case_spec_v2.json", self.source_case_spec)
         for key, filename in ARTIFACT_FILENAMES.items():

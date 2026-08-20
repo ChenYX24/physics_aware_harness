@@ -702,7 +702,7 @@ def run_runner_process_group(
     cwd: Path,
     timeout: int,
 ) -> subprocess.CompletedProcess[str]:
-    """Run the bridge and ensure a timeout also terminates its UnrealEditor child."""
+    """Run the bridge and terminate its UnrealEditor child on timeout or interruption."""
     proc = subprocess.Popen(
         command,
         cwd=cwd,
@@ -713,7 +713,7 @@ def run_runner_process_group(
     )
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
         if os.name == "posix":
             os.killpg(proc.pid, signal.SIGTERM)
         else:  # pragma: no cover - Windows is not a supported native-UE host yet.
@@ -726,6 +726,8 @@ def run_runner_process_group(
             else:  # pragma: no cover
                 proc.kill()
             stdout, stderr = proc.communicate()
+        if isinstance(error, KeyboardInterrupt):
+            raise
         raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
     return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
 

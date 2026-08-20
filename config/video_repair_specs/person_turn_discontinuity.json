@@ -1,0 +1,86 @@
+{
+  "schema_version": "video_repair_spec_v1",
+  "repair_id": "person_turn_discontinuity",
+  "source": {
+    "locator": "user-provided://012aa70b98e396444f0b1505546e2975.mp4",
+    "sha256": "c814861b91555552aa5738259adc27485f10be580e206e6e8f34e0f51cf0b51f",
+    "duration_s": 15.069002,
+    "fps": 24.0,
+    "resolution_px": [1280, 720]
+  },
+  "diagnosis": {
+    "failure_family": "human_front_back_semantic_and_pose_discontinuity",
+    "repairability": "grounded",
+    "error_interval_s": [8.791667, 8.833333],
+    "roi_tracks": [
+      {
+        "asset_id": "person",
+        "interval_s": [8.5, 8.791667],
+        "bbox_normalized": [0.17, 0.04, 0.36, 0.98],
+        "role": "pre_turn_identity_and_pose"
+      },
+      {
+        "asset_id": "person",
+        "interval_s": [8.791667, 9.125],
+        "bbox_normalized": [0.68, 0.12, 0.91, 1.0],
+        "role": "post_turn_identity_and_pose"
+      }
+    ]
+  },
+  "edit_plan": {
+    "source_failure_frame_range": [211, 212],
+    "source_replacement_frame_range": [123, 219],
+    "source_replacement_interval_s": [5.125, 9.125],
+    "ue_case_spec": "cases/video_repair/video_a_person_turn_in_place.json",
+    "asset_selection": "config/video_repair_assets/laplace_asset_selection.json",
+    "insert_policy": "replace the front/back body swap with a continuous articulated turn while preserving the source boundary frames"
+  },
+  "core_assets": [
+    {
+      "asset_id": "person",
+      "asset_type": "articulated_human",
+      "identity_constraints": ["same face", "same clothing", "same body proportions", "same headdress and hair"]
+    },
+    {
+      "asset_id": "stone_platform",
+      "asset_type": "static_support",
+      "identity_constraints": ["same silhouette", "same world position", "feet remain supported"]
+    },
+    {
+      "asset_id": "river_background",
+      "asset_type": "static_background",
+      "identity_constraints": ["same camera", "same bridge and river geometry", "no background cut"]
+    }
+  ],
+  "boundary_states": {
+    "before": {
+      "time_s": 8.75,
+      "state_assertions": ["the person's front-side body topology is visible", "both feet contact the stone", "identity and costume are visible"]
+    },
+    "after": {
+      "time_s": 8.875,
+      "state_assertions": ["the person's back-side body topology is visible without an observed turning transition", "both feet remain on the same stone", "camera and background remain unchanged"]
+    }
+  },
+  "target_event_graph": {
+    "nodes": [
+      {"id": "pre_pose", "type": "boundary_state"},
+      {"id": "continuous_turn_in_place", "type": "articulated_motion"},
+      {"id": "post_pose", "type": "boundary_state"}
+    ],
+    "edges": [
+      ["pre_pose", "continuous_turn_in_place", "starts_from"],
+      ["continuous_turn_in_place", "post_pose", "ends_at"]
+    ]
+  },
+  "stage3_contract": {
+    "required_evidence": ["per-frame root yaw", "pelvis/head/hand/foot landmarks", "foot-support contacts", "identity binding"],
+    "pass_criteria": ["root yaw changes continuously", "front, side, and back body topology appear in temporal order", "no body-part or mesh teleport", "foot support remains plausible", "pre/post identities match"],
+    "forbidden_shortcuts": ["hard cut", "cross-fade", "front/back texture swap", "whole-body rigid rotation without articulated transition"]
+  },
+  "stage4_contract": {
+    "must_preserve": ["person identity", "costume and headdress", "stone support", "camera", "river and bridge background", "turn direction"],
+    "forbidden_changes": ["identity substitution", "background regeneration drift", "new camera cut", "foot penetration", "reversed motion"],
+    "success_criteria": ["the turn is temporally smooth at 24 fps", "the same person occupies the interpolated poses", "the boundary frames remain visually compatible"]
+  }
+}

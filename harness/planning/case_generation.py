@@ -14,6 +14,13 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from harness.core.artifact_schema import write_json
+from harness.core.prompt_lineage import (
+    append_prompt_stage,
+    build_refiner_prompt,
+    new_prompt_lineage,
+    prompt_digest,
+    validate_prompt_lineage,
+)
 from harness.core.case_spec_v2 import (
     ASSET_MUST_FIELDS,
     ASSET_MUST_NOT_FIELDS,
@@ -26,6 +33,7 @@ from harness.core.case_spec_v2 import (
     VERIFICATION_ASSERTION_TYPES,
     CaseSpecV2,
     CaseSpecV2ValidationError,
+    asset_requests,
     case_spec_v2_from_dict,
     normalize_case_spec_v2,
     stable_case_spec_digest,
@@ -36,6 +44,7 @@ REQUEST_SCHEMA_VERSION = "harness_case_request_v1"
 EXPANSION_SCHEMA_VERSION = "harness_expansion_v1"
 EXPANSION_FIELDS = (
     "request_summary",
+    "canonical_generation_prompt",
     "capability_analysis",
     "scene_analysis",
     "object_analysis",
@@ -217,15 +226,34 @@ def generate_case_spec_v2(
     if destination is not None:
         write_json(destination / "request.json", validated_request)
     images = [dict(item) for item in validated_request.get("inputs") or [] if item.get("kind") == "image"]
-    expansion_response = client.complete_json(
-        system_prompt=_expansion_system_prompt(),
-        user_payload={
-            "request": _request_for_model(validated_request),
-            "planning_contract": {
-                "executable_primary_capabilities": _executable_primary_capabilities(),
-            },
-            "expansion_contract": _expansion_contract(),
+    lineage = new_prompt_lineage(
+        str(validated_request["case_id"]),
+        {
+            "text": str(validated_request.get("text") or ""),
+            "reference_input_ids": [str(item["input_id"]) for item in validated_request.get("inputs") or []],
         },
+    )
+    expansion_system_prompt = _expansion_system_prompt()
+    expansion_user_payload = {
+        "request": _request_for_model(validated_request),
+        "planning_contract": {
+            "executable_primary_capabilities": _executable_primary_capabilities(),
+        },
+        "expansion_contract": _expansion_contract(),
+    }
+    append_prompt_stage(
+        lineage,
+        stage_id="expansion_request",
+        stage_kind="llm_request",
+        content={"system_prompt": expansion_system_prompt, "user_payload": expansion_user_payload},
+        producer="case_generation_v2",
+        purpose="Exact expansion prompt and user payload submitted to the planning model.",
+        parent_stage_ids=("user_request",),
+        artifact_path="prompt_lineage.json",
+    )
+    expansion_response = client.complete_json(
+        system_prompt=expansion_system_prompt,
+        user_payload=expansion_user_payload,
         images=images,
         purpose="expansion",
     )
@@ -233,15 +261,47 @@ def generate_case_spec_v2(
         write_json(destination / "expansion_raw.json", expansion_response.payload)
         write_json(destination / "expansion_call_receipt.json", expansion_response.receipt)
     expansion = _normalize_expansion(expansion_response.payload)
+    canonical_prompt = str(
+        expansion.get("canonical_generation_prompt")
+        or validated_request.get("text")
+        or expansion.get("request_summary")
+    ).strip()
+    if not canonical_prompt:
+        raise ValueError("expansion must produce canonical_generation_prompt for an image-only request")
+    expansion["canonical_generation_prompt"] = canonical_prompt
+    append_prompt_stage(
+        lineage,
+        stage_id="canonical_generation_prompt",
+        stage_kind="canonical_generation",
+        content=canonical_prompt,
+        producer="case_generation_v2",
+        purpose="Shared verbatim scene intent for UE and every prompt-only video model.",
+        parent_stage_ids=("expansion_request",),
+        artifact_path="prompt_lineage.json",
+    )
+    lineage["canonical_stage_id"] = "canonical_generation_prompt"
     if destination is not None:
         write_json(destination / "expansion.json", expansion)
+    generation_system_prompt = _case_spec_system_prompt()
+    generation_user_payload = {
+        "request": _request_for_model(validated_request),
+        "canonical_generation_prompt": canonical_prompt,
+        "expansion": expansion,
+        "case_spec_contract": _case_spec_contract(),
+    }
+    append_prompt_stage(
+        lineage,
+        stage_id="case_spec_generation_request",
+        stage_kind="llm_request",
+        content={"system_prompt": generation_system_prompt, "user_payload": generation_user_payload},
+        producer="case_generation_v2",
+        purpose="Exact prompt used to construct the executable CaseSpec.",
+        parent_stage_ids=("canonical_generation_prompt",),
+        artifact_path="prompt_lineage.json",
+    )
     generation_response = client.complete_json(
-        system_prompt=_case_spec_system_prompt(),
-        user_payload={
-            "request": _request_for_model(validated_request),
-            "expansion": expansion,
-            "case_spec_contract": _case_spec_contract(),
-        },
+        system_prompt=generation_system_prompt,
+        user_payload=generation_user_payload,
         images=None,
         purpose="case_spec_generation",
     )
@@ -260,18 +320,30 @@ def generate_case_spec_v2(
     except CaseSpecV2ValidationError as validation_error:
         if destination is not None:
             write_json(destination / "case_spec_validation_errors.json", validation_error.to_dict())
-        repair_response = client.complete_json(
-            system_prompt=_repair_system_prompt(),
-            user_payload={
-                "invalid_case_spec": normalize_case_spec_v2(raw_case_spec),
-                "validation_errors": validation_error.to_dict(),
-                "repair_constraints": {
-                    "maximum_repairs": 1,
-                    "preserve_user_intent": True,
-                    "do_not_change_valid_fields_unless_required_by_an_error": True,
-                },
-                "case_spec_contract": _case_spec_contract(),
+        repair_system_prompt = _repair_system_prompt()
+        repair_user_payload = {
+            "invalid_case_spec": normalize_case_spec_v2(raw_case_spec),
+            "validation_errors": validation_error.to_dict(),
+            "repair_constraints": {
+                "maximum_repairs": 1,
+                "preserve_user_intent": True,
+                "do_not_change_valid_fields_unless_required_by_an_error": True,
             },
+            "case_spec_contract": _case_spec_contract(),
+        }
+        append_prompt_stage(
+            lineage,
+            stage_id="case_spec_validation_repair_request",
+            stage_kind="llm_repair_request",
+            content={"system_prompt": repair_system_prompt, "user_payload": repair_user_payload},
+            producer="case_generation_v2",
+            purpose="Exact bounded repair prompt after CaseSpec validation failed.",
+            parent_stage_ids=("case_spec_generation_request",),
+            artifact_path="prompt_lineage.json",
+        )
+        repair_response = client.complete_json(
+            system_prompt=repair_system_prompt,
+            user_payload=repair_user_payload,
             images=None,
             purpose="case_spec_validation_repair",
         )
@@ -290,7 +362,28 @@ def generate_case_spec_v2(
             if destination is not None:
                 write_json(destination / "case_spec_repair_validation_errors.json", repair_error.to_dict())
             raise
+    appearance_requirements, preservation_requirements = _refiner_requirements(case_spec)
+    refiner_prompt = build_refiner_prompt(
+        canonical_prompt,
+        appearance_requirements=appearance_requirements,
+        preservation_requirements=preservation_requirements,
+    )
+    append_prompt_stage(
+        lineage,
+        stage_id="refiner_appearance_prompt",
+        stage_kind="appearance_only_refinement",
+        content=refiner_prompt,
+        producer="case_generation_v2",
+        purpose="Provider-independent appearance prompt derived from the same canonical scene intent.",
+        parent_stage_ids=("canonical_generation_prompt",),
+        artifact_path="prompt_lineage.json",
+    )
+    lineage["refiner_stage_id"] = "refiner_appearance_prompt"
+    validate_prompt_lineage(lineage)
     provenance = case_spec.data.setdefault("provenance", {})
+    provenance["prompt_lineage"] = lineage
+    provenance["canonical_generation_prompt_sha256"] = prompt_digest(canonical_prompt)
+    provenance["refiner_prompt_sha256"] = prompt_digest(refiner_prompt)
     provenance["case_generation"] = {
         "workflow": "expansion_then_single_case_spec_with_one_bounded_repair_v1",
         "expansion_digest": stable_case_spec_digest(expansion),
@@ -299,6 +392,7 @@ def generate_case_spec_v2(
         "execution_constraints": copy.deepcopy(validated_request.get("execution_constraints") or {}),
     }
     if destination is not None:
+        write_json(destination / "prompt_lineage.json", lineage)
         write_json(destination / "case_spec_v2.json", case_spec.data)
         write_json(
             destination / "case_generation_trace.json",
@@ -307,6 +401,7 @@ def generate_case_spec_v2(
                 "normal_call_count": 2,
                 "repair_count": repair_count,
                 "calls": receipts,
+                "prompt_lineage_sha256": prompt_digest(lineage),
             },
         )
     return CaseGenerationResult(
@@ -318,8 +413,34 @@ def generate_case_spec_v2(
             "normal_call_count": 2,
             "repair_count": repair_count,
             "calls": receipts,
+            "prompt_lineage_sha256": prompt_digest(lineage),
         },
     )
+
+
+def _refiner_requirements(case_spec: CaseSpecV2) -> tuple[list[str], list[str]]:
+    asset_descriptions = list(
+        dict.fromkeys(
+            str(request.get("description") or "").strip()
+            for obj in case_spec.objects
+            for request in asset_requests(obj.get("asset"))
+            if str(request.get("description") or "").strip()
+        )
+    )
+    appearance = [
+        "photorealistic qualified materials, textures, lighting, reflections, shadows, and anti-aliased edges",
+        "remove blockout geometry, flat proxy shading, and synthetic background cues",
+        "natural exposure and motion blur without changing positions or timing",
+    ]
+    if asset_descriptions:
+        appearance.append("real-scale asset appearance for " + "; ".join(asset_descriptions))
+    object_ids = [str(obj.get("id") or "") for obj in case_spec.objects if str(obj.get("id") or "")]
+    preservation = [
+        "camera path, framing, duration, resolution, and frame cadence",
+        "object identities and count: " + ", ".join(object_ids),
+        "all contacts, trajectories, velocities, deformation, event timing, and final state",
+    ]
+    return appearance, preservation
 
 
 def _validate_request(request: Mapping[str, Any]) -> dict[str, Any]:
@@ -370,9 +491,13 @@ def _normalize_expansion(payload: Mapping[str, Any]) -> dict[str, Any]:
     expansion["schema_version"] = EXPANSION_SCHEMA_VERSION
     for field in EXPANSION_FIELDS:
         if field not in expansion:
-            expansion[field] = [] if field in {"object_analysis", "event_and_relation_analysis", "asset_analysis", "ambiguities", "assumptions"} else {}
-    if not isinstance(expansion.get("request_summary"), str):
-        raise ValueError("expansion.request_summary must be a string")
+            if field in {"request_summary", "canonical_generation_prompt"}:
+                expansion[field] = ""
+            else:
+                expansion[field] = [] if field in {"object_analysis", "event_and_relation_analysis", "asset_analysis", "ambiguities", "assumptions"} else {}
+    for field in ("request_summary", "canonical_generation_prompt"):
+        if not isinstance(expansion.get(field), str):
+            raise ValueError(f"expansion.{field} must be a string")
     for field in ("object_analysis", "event_and_relation_analysis", "asset_analysis", "ambiguities", "assumptions"):
         value = expansion.get(field)
         if isinstance(value, Mapping):
@@ -511,29 +636,33 @@ its value is empty.
 FIELD-BY-FIELD INSTRUCTIONS
 1. request_summary: one concise string stating the requested physical phenomenon, scene, requested
    output, and any explicit local-preview/reference intent.
-2. capability_analysis: an object describing the physical invariant to execute and the best primary
+2. canonical_generation_prompt: one provider-neutral text prompt that preserves the user's intent while
+   making object identity/count, scene topology, initial event, physical invariants, camera continuity,
+   and visual requirements explicit. This exact string will be shared verbatim by UE scene construction
+   and every prompt-only video-model baseline; do not mention a provider or model.
+3. capability_analysis: an object describing the physical invariant to execute and the best primary
    capability from planning_contract.executable_primary_capabilities. Do not invent capability IDs.
-3. scene_analysis: an object describing the semantic environment, scale, coordinate assumptions,
+4. scene_analysis: an object describing the semantic environment, scale, coordinate assumptions,
    approximate duration, and necessary support objects. Keep it engine-neutral.
-4. object_analysis: an array with one object per distinct simulated or rendered object. For each, propose
+5. object_analysis: an array with one object per distinct simulated or rendered object. For each, propose
    a stable machine-friendly suggested_id, semantic role, geometry and dimensions, body behavior,
    material/physics needs, initial-state intent, and whether it requires an asset.
-5. event_and_relation_analysis: an array of temporal events and relations among proposed objects, such
+6. event_and_relation_analysis: an array of temporal events and relations among proposed objects, such
    as falling, contact, collision order, support, attachment, fracture, or settling. Refer to proposed
    object IDs consistently.
-6. asset_analysis: an array with one entry per asset need. Separate the logical object from its asset.
+7. asset_analysis: an array with one entry per asset need. Separate the logical object from its asset.
    State whether the need is satisfied by default/local Catalog retrieval, external_site acquisition,
    procedural_generation, or model_generation. Preserve explicit routes; inferred routes are soft.
    Prefer procedural_generation for simple rule-based primitives that can be described exactly as a
    box, sphere, or z-axis cylinder; plates/walls are thin boxes and rods/poles/columns/discs are cylinders.
-7. expected_behavior_analysis: an object describing observable preconditions, event ordering, causal
+8. expected_behavior_analysis: an object describing observable preconditions, event ordering, causal
    response, and postconditions without claiming that the run passed.
-8. observation_analysis: an object describing useful camera roles, modalities (RGB/depth/segmentation),
+9. observation_analysis: an object describing useful camera roles, modalities (RGB/depth/segmentation),
    solver signals, and what evidence is needed. Do not emit exact camera transforms.
-9. backend_constraints: an object describing required solver capabilities and the explicit requested
+10. backend_constraints: an object describing required solver capabilities and the explicit requested
    backend, if any. Never contradict request.execution_constraints.requested_backend.
-10. ambiguities: an array of unresolved questions that could materially change the case.
-11. assumptions: an array of conservative assumptions used to make the case executable. Assumptions
+11. ambiguities: an array of unresolved questions that could materially change the case.
+12. assumptions: an array of conservative assumptions used to make the case executable. Assumptions
     must not grant permissions, licenses, or evidence.
 
 TEXT, IMAGE, AND ASSET RULES
@@ -559,6 +688,7 @@ def _expansion_contract() -> dict[str, Any]:
         "required_fields": list(EXPANSION_FIELDS),
         "field_types": {
             "request_summary": "string",
+            "canonical_generation_prompt": "string",
             "capability_analysis": "object",
             "scene_analysis": "object",
             "object_analysis": "array",

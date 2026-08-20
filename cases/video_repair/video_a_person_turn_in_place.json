@@ -1,0 +1,97 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "video_a_person_turn_in_place",
+  "capability_id": "agent_rigidbody_action_coupling",
+  "prompt": "A single person turns continuously in place from a front-facing pose to a back-facing pose while both feet remain supported on the same stone. There is no cut, cross-fade, texture swap, or rigid whole-body teleport.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "coupling_type": "turn_in_place",
+    "action_actor_id": "person",
+    "target_object_id": "person",
+    "action_frame": 72,
+    "action_time_s": 3.0,
+    "duration_s": 4.0,
+    "post_event_tail_s": 0.0,
+    "required_action_sequence": ["turn"],
+    "human_motion_contract": {
+      "required_landmarks": ["pelvis", "foot_l", "foot_r", "hand_r"],
+      "maximum_root_yaw_step_deg": 20.0,
+      "maximum_heading_motion_error_deg": 180.0
+    },
+    "turn_contract": {
+      "start_time_s": 3.0,
+      "end_time_s": 3.75,
+      "start_yaw_degrees": 180.0,
+      "end_yaw_degrees": 0.0,
+      "animation_ref": "/Game/DD_Vehicles_Advanced/Animations/Mannequin_UE5/Quinn/MF_Idle.MF_Idle",
+      "idle_animation_ref": "/Game/DD_Vehicles_Advanced/Animations/Mannequin_UE5/Quinn/MF_Idle.MF_Idle",
+      "require_articulated_animation": true,
+      "require_fixed_support_region": true,
+      "maximum_endpoint_yaw_error_deg": 5.0,
+      "maximum_root_displacement_m": 0.05,
+      "maximum_foot_support_radius_m": 0.425,
+      "motion_warping_required": false
+    },
+    "action_trace": [
+      {"frame": 72, "time_s": 3.0, "actor_id": "person", "target_id": "person", "action_type": "turn"}
+    ],
+    "support": {"person": "stone_platform"}
+  },
+  "objects": [
+    {
+      "id": "person",
+      "role": "active_agent",
+      "shape": "capsule",
+      "radius_m": 0.25,
+      "height_m": 1.85,
+      "initial_position_m": [0.0, 0.0, 1.425],
+      "initial_velocity_m_s": [0.0, 0.0, 0.0],
+      "ue5_path": "/Game/DD_Vehicles_Advanced/Meshes/Mannequin_UE5/SKM_Quinn.SKM_Quinn"
+    },
+    {
+      "id": "stone_platform",
+      "role": "foot_support",
+      "shape": "mesh",
+      "initial_position_m": [0.0, 0.0, 0.5],
+      "support_top_m": 0.5,
+      "desired_extent_cm": 85.0,
+      "ue5_path": "/Game/Maps/UrbanDowntown/Meshes/Rock_D.Rock_D"
+    },
+    {
+      "id": "bridge_background",
+      "role": "visual_background",
+      "shape": "mesh",
+      "initial_position_m": [0.0, 3.5, 0.3],
+      "desired_extent_cm": 400.0,
+      "ue5_path": "/Game/Maps/TropicalIsland/Meshes/SM_WoodenBridge_01.SM_WoodenBridge_01"
+    },
+    {
+      "id": "river_surface",
+      "role": "visual_background",
+      "shape": "mesh",
+      "initial_position_m": [0.0, 1.2, 0.32],
+      "desired_extent_cm": 1200.0,
+      "ue5_path": "/Game/Maps/TropicalIsland/Meshes/SM_WaterPlane.SM_WaterPlane"
+    }
+  ],
+  "active_objects": ["person"],
+  "passive_objects": [],
+  "camera_overrides": {
+    "front_static": {"location": [-0.15, -6.2, 2.8], "target": [0.0, 0.0, 2.35], "fov": 38.0}
+  },
+  "video_repair": {
+    "repair_spec": "config/video_repair_specs/person_turn_discontinuity.json",
+    "asset_selection": "workspace://review/assets/laplace_asset_selection.json",
+    "source_failure_frame_range": [211, 212],
+    "source_replacement_frame_range": [123, 219],
+    "source_replacement_interval_s": [5.125, 9.125],
+    "scene_map": "/Game/Maps/TropicalIsland/Maps/Level_Scene_01",
+    "ue_output_role": "articulated_motion_and_support_reference",
+    "identity_restoration_role": "stage4_refiner"
+  },
+  "required_assets": ["quinn_motion_proxy", "quinn_idle_turn_proxy", "stone_support", "bridge_background", "river_surface"],
+  "required_signals": ["trajectory", "action_trace", "pose_landmarks", "foot_support_contacts", "root_yaw"],
+  "verifier_expectation": {"status": "pass"},
+  "should_pass": true,
+  "notes": "UE uses a female Quinn proxy in the Tropical Island map, explicitly places the Laplace wooden bridge and water plane behind the Rock_D foot support, and applies continuous 0-to-180-degree root yaw over the final 0.75 seconds while a compatible authored idle supplies non-rigid body motion. The catalog has no compatible authored 180-degree turn clip, so this remains a motion proxy; Stage 4 must restore the source person's exact identity, costume, and natural turn cadence."
+}

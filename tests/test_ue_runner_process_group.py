@@ -33,3 +33,14 @@ class UERunnerProcessGroupTests(unittest.TestCase):
         killpg.assert_called_once()
         self.assertEqual(raised.exception.stdout, "partial stdout")
         self.assertEqual(raised.exception.stderr, "partial stderr")
+
+    def test_keyboard_interrupt_terminates_the_whole_process_group(self) -> None:
+        proc = MagicMock(pid=4242)
+        proc.communicate.side_effect = [KeyboardInterrupt(), ("", "")]
+        with patch("harness.runtime.ue_backend.subprocess.Popen", return_value=proc), patch(
+            "harness.runtime.ue_backend.os.killpg"
+        ) as killpg:
+            with self.assertRaises(KeyboardInterrupt):
+                run_runner_process_group(["runner"], cwd=Path("/tmp"), timeout=1)
+
+        killpg.assert_called_once()

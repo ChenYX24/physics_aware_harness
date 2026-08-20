@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from harness.core.prompt_lineage import prompt_stage_text, validate_prompt_lineage
+
 
 CASE_SPEC_SCHEMA_VERSION = "harness_case_spec_v1"
 
@@ -79,6 +81,15 @@ def validate_case_spec(data: dict[str, Any]) -> None:
             raise ValueError(f"case spec field must be list: {key}")
     if not isinstance(data["should_pass"], bool):
         raise ValueError("case spec should_pass must be boolean")
+    lineage = data.get("prompt_lineage")
+    if lineage is not None:
+        if not isinstance(lineage, dict):
+            raise ValueError("case spec prompt_lineage must be an object")
+        validate_prompt_lineage(lineage)
+        if data["prompt"] != prompt_stage_text(lineage, str(lineage.get("canonical_stage_id") or "")):
+            raise ValueError("case spec prompt must equal the canonical prompt lineage stage")
+        if data.get("refiner_prompt") != prompt_stage_text(lineage, str(lineage.get("refiner_stage_id") or "")):
+            raise ValueError("case spec refiner_prompt must equal the refiner prompt lineage stage")
     if data.get("capability_id") == "sequential_contact_propagation":
         validate_domino_parameter_consistency(data)
     if data.get("capability_id") == "fluid_particle_dynamics":

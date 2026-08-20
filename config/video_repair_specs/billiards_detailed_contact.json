@@ -1,0 +1,76 @@
+{
+  "schema_version": "video_repair_spec_v1",
+  "repair_id": "billiards_detailed_contact",
+  "source": {
+    "locator": "user-provided://downloads/rgb.mp4",
+    "sha256": "6fc74a8a784a1f41dde2c7855fb8edc8b253e4012ace0fbff26c457e06c9e486",
+    "duration_s": 5.041667,
+    "fps": 24.0,
+    "resolution_px": [1600, 360]
+  },
+  "diagnosis": {
+    "failure_family": "rigid_contact_motion_realism",
+    "repairability": "grounded",
+    "error_interval_s": [0.0, 5.0],
+    "roi_tracks": [
+      {
+        "asset_id": "ball_set",
+        "interval_s": [0.0, 5.0],
+        "bbox_normalized": [0.0, 0.0, 1.0, 1.0],
+        "role": "multiview_ball_trajectory_and_spin"
+      }
+    ]
+  },
+  "core_assets": [
+    {
+      "asset_id": "cue_ball",
+      "asset_type": "dynamic_rigid_sphere",
+      "identity_constraints": ["regulation-scale sphere", "analytic sphere collider", "visible angular motion"]
+    },
+    {
+      "asset_id": "ball_set",
+      "asset_type": "dynamic_rigid_sphere_set",
+      "identity_constraints": ["15 tightly racked balls", "stable per-ball identity", "numbered visual bound separately from collider"]
+    },
+    {
+      "asset_id": "billiards_table",
+      "asset_type": "static_contact_environment",
+      "identity_constraints": ["cloth support", "rails and pockets", "fixed scale and camera registration"]
+    }
+  ],
+  "boundary_states": {
+    "before": {
+      "time_s": 0.0,
+      "state_assertions": ["15 target balls form a tight rack", "cue ball approaches at a 5-degree oblique angle", "all passive balls are stationary"]
+    },
+    "after": {
+      "time_s": 5.0,
+      "state_assertions": ["all moved balls remain on or within table bounds", "motion decays under friction and rolling resistance", "ball identities persist"]
+    }
+  },
+  "target_event_graph": {
+    "nodes": [
+      {"id": "oblique_cue_roll", "type": "rolling_motion"},
+      {"id": "cue_rack_contact", "type": "native_contact"},
+      {"id": "rack_propagation", "type": "contact_cascade"},
+      {"id": "rail_and_cloth_response", "type": "frictional_contact"},
+      {"id": "settled_spread", "type": "terminal_state"}
+    ],
+    "edges": [
+      ["oblique_cue_roll", "cue_rack_contact", "causes"],
+      ["cue_rack_contact", "rack_propagation", "causes"],
+      ["rack_propagation", "rail_and_cloth_response", "precedes"],
+      ["rail_and_cloth_response", "settled_spread", "dissipates_to"]
+    ]
+  },
+  "stage3_contract": {
+    "required_evidence": ["per-ball position and angular velocity", "native ball-ball and ball-rail contacts", "visual-collider lineage", "final speed envelope"],
+    "pass_criteria": ["15/15 passive balls move only after native contact", "vertical jump remains bounded", "spin and translation decay plausibly", "numbered visuals follow analytic colliders exactly"],
+    "forbidden_shortcuts": ["pre-authored target trajectories", "passive pre-contact motion", "visual-only ball rotation", "replacing pockets with a closed rectangular box"]
+  },
+  "stage4_contract": {
+    "must_preserve": ["per-ball identity", "contact ordering", "trajectory and spin", "5-degree cue approach", "tight initial rack", "fixed multiview timing"],
+    "forbidden_changes": ["invented collisions", "ball teleportation", "identity swaps", "changed table geometry", "changed event timing"],
+    "success_criteria": ["materials and numbered balls look real", "motion remains synchronized with solver evidence", "the refined video passes the same contact and identity checks"]
+  }
+}

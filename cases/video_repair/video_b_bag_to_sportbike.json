@@ -1,0 +1,165 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "video_b_bag_to_sportbike",
+  "capability_id": "agent_rigidbody_action_coupling",
+  "prompt": "A man already holding two translucent grocery bags lowers the bag in his left hand onto the black parked scooter beside him, releases it only after vehicle contact, withdraws his empty left hand, and leaves that bag visibly supported on the same scooter while the right-hand bag remains carried until the original source-video cut.",
+  "expected_physics": {
+    "coordinate_system": "z_up",
+    "humanoid_adapter": "ddv",
+    "coupling_type": "pick_place",
+    "action_actor_id": "person",
+    "target_object_id": "plastic_bag",
+    "action_frame": 0,
+    "action_time_s": 0.0,
+    "duration_s": 7.0,
+    "post_event_tail_s": 0.0,
+    "locomotion_mode": "deterministic_walk",
+    "locomotion_animation_ref": "/Game/DD_Vehicles_Advanced/Animations/Mannequin_UE5/Manny/MM_Walk_InPlace.MM_Walk_InPlace",
+    "turn_animation_ref": "/Game/DD_Vehicles_Advanced/Animations/Mannequin_UE5/Manny/MM_Walk_InPlace.MM_Walk_InPlace",
+    "carry_route_style": "direct",
+    "start_with_object_held": true,
+    "attachment_socket": "hand_l",
+    "disable_carrier_collision_on_release": true,
+    "carry_walk_duration_s": 0.0,
+    "support_style": "pads",
+    "support_top_m": 0.5,
+    "support_footprint_m": [0.45, 0.4],
+    "goal_stand_position_m": [0.45, -0.2, 0.0],
+    "gasp_interaction_yaw_bias_degrees": 0.0,
+    "place_turn_duration_s": 0.0,
+    "place_clip_duration_s": 0.5,
+    "place_animation_ref": "/Game/DD_Vehicles_Advanced/Animations/Mannequin_UE5/Sequences/Objects/A_Drop_BIEN.A_Drop_BIEN",
+    "place_animation_reverse": false,
+    "goal_support_id": "scooter_support",
+    "expected_min_target_displacement_m": 0.15,
+    "passive_pre_action_velocity_epsilon_m_s": 0.05,
+    "required_action_sequence": ["grasp", "release"],
+    "interaction_contract": {
+      "require_runtime_attachment": true,
+      "require_native_socket_attachment": true,
+      "minimum_held_frames": 12,
+      "minimum_native_socket_held_frames": 12,
+      "maximum_grasp_gap_cm": 10.0,
+      "maximum_carry_collision_blocked_frames": 0
+    },
+    "human_motion_contract": {
+      "required_landmarks": ["pelvis", "foot_l", "foot_r", "hand_l", "hand_r"],
+      "maximum_root_yaw_step_deg": 35.0,
+      "maximum_heading_motion_error_deg": 45.0
+    },
+    "object_effect": {
+      "minimum_lift_height_m": 0.0,
+      "final_goal_region": {"center_m": [0.68, -0.49, 0.5], "half_extent_m": [0.2, 0.2, 0.2]},
+      "required_final_contact": ["plastic_bag", "scooter_support"],
+      "maximum_final_speed_m_s": 0.05
+    },
+    "action_trace": [
+      {"frame": 0, "time_s": 0.0, "actor_id": "person", "target_id": "plastic_bag", "action_type": "grasp"},
+      {"frame": 12, "time_s": 0.5, "actor_id": "person", "target_id": "plastic_bag", "action_type": "release", "release": true}
+    ],
+    "support": {"person": "street"}
+  },
+  "objects": [
+    {
+      "id": "person",
+      "role": "active_agent",
+      "shape": "capsule",
+      "radius_m": 0.25,
+      "height_m": 1.85,
+      "initial_position_m": [0.45, -0.2, 0.925],
+      "initial_velocity_m_s": [0.0, 0.0, 0.0],
+      "ue5_path": "/Game/DD_Vehicles_Advanced/Meshes/Mannequin_UE5/SKM_Manny.SKM_Manny"
+    },
+    {
+      "id": "plastic_bag",
+      "role": "action_coupled_body",
+      "shape": "box",
+      "size_m": [0.24, 0.12, 0.34],
+      "desired_extent_cm": 17.0,
+      "force_material_library_mesh": false,
+      "mass_kg": 1.2,
+      "static_friction": 0.62,
+      "dynamic_friction": 0.48,
+      "initial_position_m": [0.68, -0.14, 0.7],
+      "initial_velocity_m_s": [0.0, 0.0, 0.0],
+      "ue5_path": "/Engine/BasicShapes/Cube.Cube",
+      "visual_ue5_path": "/Game/Maps/MarketEnvironment/Mesh/SM_Trash_bug_1.SM_Trash_bug_1"
+    },
+    {
+      "id": "scooter_support",
+      "role": "goal_support",
+      "shape": "box",
+      "size_m": [0.55, 0.9, 0.16],
+      "initial_position_m": [0.68, -0.49, 0.5],
+      "support_top_m": 0.5,
+      "static_friction": 0.85,
+      "dynamic_friction": 0.7,
+      "collision_only": true
+    },
+    {
+      "id": "sportbike",
+      "role": "visual_vehicle",
+      "shape": "mesh",
+      "initial_position_m": [1.1, -0.4, 0.0],
+      "rotation_degrees": [0.0, 90.0, 0.0],
+      "desired_extent_cm": 100.0,
+      "ue5_path": "/Game/DD_Vehicles_Advanced/Meshes/extraBikes/SM_Sportbike.SM_Sportbike"
+    },
+    {
+      "id": "sportbike_02",
+      "role": "visual_vehicle",
+      "shape": "mesh",
+      "initial_position_m": [1.9, -0.32, 0.0],
+      "rotation_degrees": [0.0, 90.0, 0.0],
+      "desired_extent_cm": 100.0,
+      "ue5_path": "/Game/DD_Vehicles_Advanced/Meshes/extraBikes/SM_Sportbike.SM_Sportbike"
+    },
+    {
+      "id": "sportbike_03",
+      "role": "visual_vehicle",
+      "shape": "mesh",
+      "initial_position_m": [2.7, -0.24, 0.0],
+      "rotation_degrees": [0.0, 90.0, 0.0],
+      "desired_extent_cm": 100.0,
+      "ue5_path": "/Game/DD_Vehicles_Advanced/Meshes/extraBikes/SM_Sportbike.SM_Sportbike"
+    },
+    {
+      "id": "sportbike_04",
+      "role": "visual_vehicle",
+      "shape": "mesh",
+      "initial_position_m": [3.5, -0.16, 0.0],
+      "rotation_degrees": [0.0, 90.0, 0.0],
+      "desired_extent_cm": 100.0,
+      "ue5_path": "/Game/DD_Vehicles_Advanced/Meshes/extraBikes/SM_Sportbike.SM_Sportbike"
+    },
+    {
+      "id": "street",
+      "role": "ground",
+      "shape": "mesh",
+      "initial_position_m": [0.6, 0.0, 0.0],
+      "desired_extent_cm": 500.0,
+      "ue5_path": "/Game/Maps/UrbanDowntown/Meshes/Road_Large_A.Road_Large_A"
+    }
+  ],
+  "active_objects": ["person"],
+  "passive_objects": ["plastic_bag"],
+  "camera_overrides": {
+    "front_static": {"location": [2.0, -4.0, 1.7], "target": [1.8, -0.05, 0.95], "fov": 52.0}
+  },
+  "video_repair": {
+    "repair_spec": "config/video_repair_specs/bag_vehicle_disappearance.json",
+    "asset_selection": "workspace://review/assets/laplace_asset_selection.json",
+    "source_failure_frame_range": [75, 76],
+    "source_replacement_frame_range": [54, 222],
+    "source_replacement_interval_s": [2.25, 9.25],
+    "scene_map": "/Game/Maps/MarketEnvironment/Maps/Day",
+    "ue_preroll_crop": "none: the UE guide begins with the left bag already attached, reproduces the observed immediate placement, and retains the supported bag through the cut",
+    "ue_output_role": "attachment_contact_release_support_reference",
+    "identity_and_bag_appearance_restoration_role": "stage4_refiner"
+  },
+  "required_assets": ["manny_motion_proxy", "blue_plastic_bag_visual", "a_drop_bien", "sportbike_support", "street_surface"],
+  "required_signals": ["trajectory", "action_trace", "pose_landmarks", "interaction_evidence", "contact_events", "final_object_state"],
+  "verifier_expectation": {"status": "pass"},
+  "should_pass": true,
+  "notes": "The source visibly grounds the left-hand placement on the black scooter: frame 75 retains contact and frame 76 is the first missing-bag frame. UE starts with the Laplace bag mesh itself already held, reproduces only contact-release-support at scooter-seat height, and Stage 4 restores the source man, both bags, restaurant, and scooter row without inventing a walk-up."
+}

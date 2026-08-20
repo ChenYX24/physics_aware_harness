@@ -1,0 +1,97 @@
+{
+  "schema_version": "video_repair_spec_v1",
+  "repair_id": "bag_vehicle_disappearance",
+  "source": {
+    "locator": "user-provided://1df3bbd3fe0759fddb92e92b3238bf75.mp4",
+    "sha256": "ca8983b4de01f3addf0d3eaf6c89f276e910824cd9b3fad2d569efacef2e923e",
+    "duration_s": 15.104,
+    "fps": 24.0,
+    "resolution_px": [1280, 720]
+  },
+  "diagnosis": {
+    "failure_family": "semantic_object_persistence_after_observed_vehicle_placement",
+    "repairability": "grounded",
+    "uncertainty_note": "The placement is visible in the continuous outdoor shot: the man's left hand lowers the translucent bag onto the black scooter. Frame 75 still shows the bag at the hand/vehicle contact; frame 76 is the first frame where the released bag is absent. The later 9.250 s kitchen cut is natural and is not the defect.",
+    "error_interval_s": [3.125, 3.166667],
+    "roi_tracks": [
+      {
+        "asset_id": "person",
+        "interval_s": [2.25, 9.25],
+        "bbox_normalized": [0.47, 0.24, 0.72, 0.98],
+        "role": "carrier"
+      },
+      {
+        "asset_id": "plastic_bag",
+        "interval_s": [2.25, 9.25],
+        "bbox_normalized": [0.58, 0.48, 0.70, 0.77],
+        "role": "disappearing_core_asset"
+      },
+      {
+        "asset_id": "scooter",
+        "interval_s": [2.25, 9.25],
+        "bbox_normalized": [0.59, 0.43, 0.79, 0.98],
+        "role": "candidate_receiver"
+      }
+    ]
+  },
+  "edit_plan": {
+    "source_failure_frame_range": [75, 76],
+    "source_replacement_frame_range": [54, 222],
+    "source_replacement_interval_s": [2.25, 9.25],
+    "ue_case_spec": "cases/video_repair/video_b_bag_to_sportbike.json",
+    "asset_selection": "config/video_repair_assets/laplace_asset_selection.json",
+    "insert_policy": "repair the observed left-hand placement in the continuous outdoor shot: retain the original carry and hand-to-vehicle motion, then keep the released bag visibly supported on the same black scooter through frame 221; preserve the natural kitchen cut at frame 222"
+  },
+  "core_assets": [
+    {
+      "asset_id": "person",
+      "asset_type": "articulated_human",
+      "identity_constraints": ["same person", "same shirt and shoulder strap", "continuous hand trajectory"]
+    },
+    {
+      "asset_id": "plastic_bag",
+      "asset_type": "deformable_carried_object",
+      "identity_constraints": ["same translucent bag", "same visible contents", "continuous deformation and occupancy"]
+    },
+    {
+      "asset_id": "scooter",
+      "asset_type": "static_receiver",
+      "identity_constraints": ["same scooter", "same parking pose", "no geometry replacement"]
+    }
+  ],
+  "boundary_states": {
+    "before": {
+      "time_s": 3.125,
+      "state_assertions": ["left hand and bag are at the black scooter", "bag contents remain visible", "the right-hand bag and parked scooters remain unchanged"]
+    },
+    "after": {
+      "time_s": 3.166667,
+      "state_assertions": ["left hand has released or is withdrawing", "the placed bag must remain on the same black scooter", "the outdoor shot remains continuous"]
+    }
+  },
+  "target_event_graph": {
+    "nodes": [
+      {"id": "bag_held", "type": "boundary_state"},
+      {"id": "hand_to_receiver", "type": "articulated_motion"},
+      {"id": "bag_receiver_contact", "type": "contact"},
+      {"id": "hand_release", "type": "release"},
+      {"id": "bag_supported", "type": "support_state"}
+    ],
+    "edges": [
+      ["bag_held", "hand_to_receiver", "precedes"],
+      ["hand_to_receiver", "bag_receiver_contact", "causes"],
+      ["bag_receiver_contact", "hand_release", "enables"],
+      ["hand_release", "bag_supported", "results_in"]
+    ]
+  },
+  "stage3_contract": {
+    "required_evidence": ["hand-bag attachment state", "bag-scooter contact", "bag occupancy mask", "bag support after release", "scene-cut timestamp"],
+    "pass_criteria": ["bag exists in every synthesized pre-cut frame", "release occurs only after receiver contact", "bag remains supported until the original cut"],
+    "forbidden_shortcuts": ["alpha fade", "instant disappearance", "reverse A_GrabMid used as placement", "release without vehicle contact", "inventing a new walk-up or replacing the observed placement action"]
+  },
+  "stage4_contract": {
+    "must_preserve": ["person identity", "bag appearance and contents", "scooter identity and layout", "original hard cut at 9.250 s"],
+    "forbidden_changes": ["remove the bag early", "replace the receiver", "move parked scooters", "extend the generated shot past the original edit without labeling it"] ,
+    "success_criteria": ["the inserted placement is physically continuous", "the bag remains visible and supported through the final pre-cut frame", "the original post-cut kitchen shot is untouched"]
+  }
+}
