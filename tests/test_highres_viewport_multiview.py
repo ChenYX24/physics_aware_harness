@@ -50,7 +50,8 @@ class HighresViewportMultiviewTests(unittest.TestCase):
         views = namespace["compiled_camera_view_specs"](runtime_scene, Vector(10.0, 20.0, 30.0))
 
         self.assertEqual([view["view_id"] for view in views], ["overview"])
-        self.assertEqual((views[0]["location"].x, views[0]["location"].y, views[0]["location"].z), (160.0, -130.0, 300.0))
+        self.assertEqual((views[0]["location"].x, views[0]["location"].y, views[0]["location"].z), (160.0, -130.0, 180.0))
+        self.assertEqual((views[0]["target"].x, views[0]["target"].y, views[0]["target"].z), (10.0, 20.0, 30.0))
         with self.assertRaisesRegex(RuntimeError, "contains no views"):
             namespace["compiled_camera_view_specs"]({"camera": {"views": []}}, Vector(0.0, 0.0, 0.0))
 
