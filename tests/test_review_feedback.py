@@ -10,6 +10,68 @@ from harness.core.review_feedback import compile_review_feedback, verified_execu
 
 
 class ReviewFeedbackTests(unittest.TestCase):
+    def test_evidence_rejects_a_different_evaluator_case_spec(self) -> None:
+        run_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (run_dir / "inputs").mkdir()
+        (run_dir / "case_spec.json").write_text(json.dumps({"case_id": "reviewed"}), encoding="utf-8")
+        (run_dir / "inputs" / "case.json").write_text(json.dumps({"case_id": "evaluated"}), encoding="utf-8")
+        report = {
+            "schema_version": "harness_run_quality_v1",
+            "run_dir": str(run_dir.resolve()),
+            "status": "pass",
+            "hard_gate_passed": True,
+            "hard_gate": {"status": "pass", "passed": True, "failure_count": 0, "failures": []},
+        }
+        (run_dir / "quality_report.json").write_text(json.dumps(report), encoding="utf-8")
+
+        with (
+            patch("harness.core.review_feedback.evaluate_run", return_value=report),
+            self.assertRaisesRegex(ValueError, "evaluated CaseSpec differs"),
+        ):
+            verified_execution_evidence_from_run_dirs([run_dir])
+
+    def test_incomplete_failure_is_not_negative_execution_evidence(self) -> None:
+        run_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (run_dir / "case_spec.json").write_text(json.dumps({"case_id": "incomplete"}), encoding="utf-8")
+        report = {
+            "schema_version": "harness_run_quality_v1",
+            "run_dir": str(run_dir.resolve()),
+            "status": "fail",
+            "hard_gate_passed": False,
+            "hard_gate": {
+                "status": "fail",
+                "passed": False,
+                "failure_count": 1,
+                "failures": [{"code": "F_VIDEO_MISSING", "message": "video missing"}],
+            },
+        }
+        (run_dir / "quality_report.json").write_text(json.dumps(report), encoding="utf-8")
+
+        with (
+            patch("harness.core.review_feedback.evaluate_run", return_value=report),
+            self.assertRaisesRegex(ValueError, "artifact_manifest.json"),
+        ):
+            verified_execution_evidence_from_run_dirs([run_dir])
+
+    def test_stored_failure_signature_must_match_recomputed_report(self) -> None:
+        run_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (run_dir / "case_spec.json").write_text(json.dumps({"case_id": "drifted"}), encoding="utf-8")
+        stored = {
+            "schema_version": "harness_run_quality_v1",
+            "run_dir": str(run_dir.resolve()),
+            "status": "fail",
+            "hard_gate_passed": False,
+            "hard_gate": {"status": "fail", "passed": False, "failures": [{"code": "F_A"}]},
+        }
+        recomputed = {**stored, "hard_gate": {"status": "fail", "passed": False, "failures": [{"code": "F_B"}]}}
+        (run_dir / "quality_report.json").write_text(json.dumps(stored), encoding="utf-8")
+
+        with (
+            patch("harness.core.review_feedback.evaluate_run", return_value=recomputed),
+            self.assertRaisesRegex(ValueError, "does not match canonical recomputation"),
+        ):
+            verified_execution_evidence_from_run_dirs([run_dir])
+
     def test_hand_written_passing_quality_report_is_not_execution_evidence(self) -> None:
         run_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
         (run_dir / "case_spec.json").write_text(json.dumps({"case_id": "forged"}), encoding="utf-8")
@@ -26,7 +88,7 @@ class ReviewFeedbackTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        with self.assertRaisesRegex(ValueError, "inconsistent case or hard-gate evidence"):
+        with self.assertRaisesRegex(ValueError, "does not match canonical recomputation"):
             verified_execution_evidence_from_run_dirs([run_dir])
 
     def test_every_case_becomes_weekly_or_regression_knowledge(self) -> None:
@@ -85,6 +147,12 @@ class ReviewFeedbackTests(unittest.TestCase):
             run_dir = root / case_id
             run_dir.mkdir()
             (run_dir / "case_spec.json").write_text(json.dumps({"case_id": case_id}), encoding="utf-8")
+            hard_gate = {
+                "status": "pass" if passed else "fail",
+                "passed": passed,
+                "failure_count": 0 if passed else 1,
+                "failures": [] if passed else [{"code": "F_TEST", "message": "expected failure"}],
+            }
             (run_dir / "quality_report.json").write_text(
                 json.dumps(
                     {
@@ -92,11 +160,23 @@ class ReviewFeedbackTests(unittest.TestCase):
                         "run_dir": str(run_dir.resolve()),
                         "status": "pass" if passed else "fail",
                         "hard_gate_passed": passed,
-                        "hard_gate": {"status": "pass" if passed else "fail", "passed": passed},
+                        "hard_gate": hard_gate,
                     }
                 ),
                 encoding="utf-8",
             )
+            if not passed:
+                (run_dir / "failure.mp4").write_bytes(b"representative failure")
+                (run_dir / "artifact_manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "schema_version": "harness_artifact_manifest_v1",
+                            "case_id": case_id,
+                            "artifacts": {"video": "failure.mp4"},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
             run_dirs.append(run_dir)
         with patch(
             "harness.core.review_feedback.evaluate_run",

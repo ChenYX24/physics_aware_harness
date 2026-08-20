@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any, Mapping
 
-from harness.verification.run_quality import evaluate_run
+from harness.verification.run_quality import evaluate_run, read_case_spec
 
 
 REVIEW_FEEDBACK_SCHEMA_VERSION = "harness_review_feedback_v1"
@@ -283,9 +283,13 @@ def verified_execution_evidence_from_run_dirs(run_dirs: list[str | Path]) -> dic
         quality = json.loads(quality_path.read_text(encoding="utf-8"))
         if not isinstance(case, dict) or not isinstance(quality, dict):
             raise ValueError(f"verified run evidence must contain JSON objects: {run_dir}")
+        if read_case_spec(run_dir) != case:
+            raise ValueError(f"evaluated CaseSpec differs from case_spec.json: {run_dir}")
         case_id = str(case.get("case_id") or "")
         hard_gate = quality.get("hard_gate")
         recomputed = evaluate_run(run_dir, write=False)
+        if quality != recomputed:
+            raise ValueError(f"stored quality report does not match canonical recomputation: {run_dir}")
         recomputed_gate = recomputed.get("hard_gate") if isinstance(recomputed, dict) else None
         passed = (
             quality.get("schema_version") == "harness_run_quality_v1"
@@ -317,7 +321,7 @@ def verified_execution_evidence_from_run_dirs(run_dirs: list[str | Path]) -> dic
             raise ValueError(f"verified run has inconsistent case or hard-gate evidence: {run_dir}")
         if case_id in evidence:
             raise ValueError(f"duplicate verified execution evidence for case: {case_id}")
-        evidence[case_id] = {
+        record = {
             "schema_version": EXECUTION_EVIDENCE_SCHEMA_VERSION,
             "case_id": case_id,
             "status": "pass" if passed else "fail",
@@ -326,6 +330,9 @@ def verified_execution_evidence_from_run_dirs(run_dirs: list[str | Path]) -> dic
             "quality_report_sha256": _file_sha256(quality_path),
             "evaluator_schema": "harness_run_quality_v1",
         }
+        if failed:
+            record["negative_evidence"] = _negative_execution_evidence(run_dir, case_id, recomputed_gate)
+        evidence[case_id] = record
     return evidence
 
 
@@ -358,6 +365,81 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _negative_execution_evidence(run_dir: Path, case_id: str, hard_gate: Mapping[str, Any]) -> dict[str, Any]:
+    failures = hard_gate.get("failures")
+    if not isinstance(failures, list) or not failures:
+        raise ValueError(f"negative execution evidence requires failing gate details: {run_dir}")
+    failure_codes = sorted({str(row.get("code")) for row in failures if isinstance(row, Mapping) and row.get("code")})
+    if not failure_codes:
+        raise ValueError(f"negative execution evidence requires failing gate codes: {run_dir}")
+
+    manifest_path = run_dir / "artifact_manifest.json"
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        raise ValueError(f"negative execution evidence requires artifact_manifest.json: {run_dir}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != "harness_artifact_manifest_v1"
+        or manifest.get("case_id") != case_id
+        or not isinstance(manifest.get("artifacts"), Mapping)
+    ):
+        raise ValueError(f"negative execution evidence has an invalid artifact_manifest.json: {run_dir}")
+
+    media = _representative_media(run_dir, manifest["artifacts"])
+    if not media:
+        raise ValueError(f"negative execution evidence requires representative media declared by artifact_manifest.json: {run_dir}")
+    return {
+        "artifact_manifest_sha256": _file_sha256(manifest_path),
+        "failure_codes": failure_codes,
+        "failure_signature_sha256": hashlib.sha256(
+            json.dumps(hard_gate, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest(),
+        "representative_media": media,
+    }
+
+
+def _representative_media(run_dir: Path, artifacts: Mapping[str, Any]) -> list[dict[str, Any]]:
+    supported = {".avi", ".exr", ".gif", ".jpeg", ".jpg", ".mkv", ".mov", ".mp4", ".png", ".webm"}
+    candidates: list[Path] = []
+    for value in artifacts.values():
+        if not isinstance(value, str) or not value:
+            continue
+        declared = run_dir / value
+        if not _real_path_within(run_dir, declared):
+            continue
+        if declared.is_file() and declared.suffix.lower() in supported:
+            candidates.append(declared)
+        elif declared.is_dir():
+            candidates.extend(path for path in declared.rglob("*") if path.is_file() and path.suffix.lower() in supported and _real_path_within(run_dir, path))
+    rows = []
+    # ponytail: eight files keep evidence records bounded; raise only if a protocol requires denser media coverage.
+    for path in sorted(set(candidates), key=lambda value: (value.suffix.lower() not in {".mp4", ".mov", ".webm", ".mkv"}, value.as_posix()))[:8]:
+        rows.append(
+            {
+                "path": path.resolve().relative_to(run_dir).as_posix(),
+                "sha256": _file_sha256(path),
+                "size_bytes": path.stat().st_size,
+            }
+        )
+    return rows
+
+
+def _real_path_within(root: Path, path: Path) -> bool:
+    try:
+        resolved = path.resolve(strict=True)
+        relative = path.relative_to(root)
+    except (FileNotFoundError, ValueError):
+        return False
+    if not resolved.is_relative_to(root):
+        return False
+    cursor = root
+    for part in relative.parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            return False
+    return True
 
 
 def active_review_requirements(capability_id: str) -> dict[str, list[str]]:
