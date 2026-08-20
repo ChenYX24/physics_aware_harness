@@ -19,6 +19,10 @@ def verify_trajectory_assertions(
     constraint_failure, constraint_evidence = verify_rigid_constraint_residuals(case_spec, trajectory)
     if constraint_failure is not None:
         return "F_RUNTIME_CONSTRAINT_ENFORCEMENT_FAILED", constraint_failure, constraint_evidence
+    state_failure, state_evidence = verify_constraint_state_trace(case_spec, trajectory)
+    constraint_evidence.extend(state_evidence)
+    if state_failure is not None:
+        return "F_RUNTIME_CONSTRAINT_STATE_INVALID", state_failure, constraint_evidence
     assertions = [
         item
         for item in case_spec.get("verification_assertions") or []
@@ -161,6 +165,130 @@ def verify_rigid_constraint_residuals(
         result["worst_samples"] = worst_samples
         results.append(result)
     return first_failure, [{"type": "rigid_constraint_residuals", "results": results}]
+
+
+def verify_constraint_state_trace(
+    case_spec: Mapping[str, Any],
+    trajectory: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    configured = {
+        str(item.get("id") or ""): item
+        for item in case_spec.get("constraints") or []
+        if isinstance(item, Mapping)
+        and item.get("id")
+        and any(item.get(field) is not None for field in ("linear_drive", "angular_drive", "break_thresholds"))
+    }
+    if not configured:
+        return None, []
+    results = {
+        constraint_id: {
+            "constraint_id": constraint_id,
+            "sample_count": 0,
+            "max_elastic_energy_residual_j": 0.0,
+            "broken_observed": False,
+            "passed": True,
+        }
+        for constraint_id in configured
+    }
+    first_failure = None
+    for frame_index, frame in enumerate(trajectory):
+        samples = {
+            str(item.get("constraint_id") or ""): item
+            for item in frame.get("constraints") or []
+            if isinstance(item, Mapping) and item.get("constraint_id")
+        }
+        for constraint_id, declaration in configured.items():
+            sample = samples.get(constraint_id)
+            if sample is None:
+                first_failure = first_failure or {
+                    "object_id": constraint_id,
+                    "frame": int(frame.get("frame", frame_index)),
+                    "time": frame.get("time_s", frame.get("time")),
+                    "metric": "constraint_trace_missing",
+                    "value": {"constraint_id": constraint_id},
+                }
+                results[constraint_id]["passed"] = False
+                continue
+            results[constraint_id]["sample_count"] += 1
+            if sample.get("source") != "adp_cpp_runtime_driver":
+                first_failure = first_failure or {
+                    "object_id": constraint_id,
+                    "frame": int(frame.get("frame", frame_index)),
+                    "time": frame.get("time_s", frame.get("time")),
+                    "metric": "constraint_trace_source",
+                    "value": sample.get("source"),
+                }
+                results[constraint_id]["passed"] = False
+                continue
+            required_vectors = (
+                "translation_m",
+                "position_target_m",
+                "deformation_m",
+                "relative_velocity_m_s",
+                "linear_force_n",
+                "angular_torque_n_m",
+                "stiffness_n_m",
+            )
+            if any(not finite_vector(sample.get(field)) or len(sample.get(field)) != 3 for field in required_vectors):
+                first_failure = first_failure or {
+                    "object_id": constraint_id,
+                    "frame": int(frame.get("frame", frame_index)),
+                    "time": frame.get("time_s", frame.get("time")),
+                    "metric": "constraint_trace_shape",
+                    "value": dict(sample),
+                }
+                results[constraint_id]["passed"] = False
+                continue
+            drive = declaration.get("linear_drive") if isinstance(declaration.get("linear_drive"), Mapping) else {}
+            stiffness = [float(value) for value in drive.get("stiffness_n_m") or [0.0, 0.0, 0.0]]
+            deformation = [float(value) for value in sample["deformation_m"]]
+            expected_energy = sum(0.5 * stiffness[index] * deformation[index] ** 2 for index in range(3))
+            actual_energy = sample.get("elastic_potential_j")
+            if not finite_number(actual_energy):
+                energy_residual = math.inf
+            else:
+                energy_residual = abs(float(actual_energy) - expected_energy)
+            results[constraint_id]["max_elastic_energy_residual_j"] = max(
+                float(results[constraint_id]["max_elastic_energy_residual_j"]),
+                energy_residual,
+            )
+            if energy_residual > max(1e-6, abs(expected_energy) * 1e-5):
+                first_failure = first_failure or {
+                    "object_id": constraint_id,
+                    "frame": int(frame.get("frame", frame_index)),
+                    "time": frame.get("time_s", frame.get("time")),
+                    "metric": "constraint_elastic_energy_residual_j",
+                    "value": {
+                        "expected_j": expected_energy,
+                        "actual_j": actual_energy,
+                        "residual_j": energy_residual,
+                    },
+                }
+                results[constraint_id]["passed"] = False
+            broken = sample.get("broken")
+            if not isinstance(broken, bool):
+                first_failure = first_failure or {
+                    "object_id": constraint_id,
+                    "frame": int(frame.get("frame", frame_index)),
+                    "time": frame.get("time_s", frame.get("time")),
+                    "metric": "constraint_broken_state_missing",
+                    "value": broken,
+                }
+                results[constraint_id]["passed"] = False
+            elif broken:
+                results[constraint_id]["broken_observed"] = True
+                if declaration.get("break_thresholds") is None:
+                    first_failure = first_failure or {
+                        "object_id": constraint_id,
+                        "frame": int(frame.get("frame", frame_index)),
+                        "time": frame.get("time_s", frame.get("time")),
+                        "metric": "unbreakable_constraint_broken",
+                        "value": {"constraint_id": constraint_id},
+                    }
+                    results[constraint_id]["passed"] = False
+    for result in results.values():
+        result["max_elastic_energy_residual_j"] = round(float(result["max_elastic_energy_residual_j"]), 9)
+    return first_failure, [{"type": "constraint_state_trace", "results": list(results.values())}]
 
 
 def _constraint_body_pose(

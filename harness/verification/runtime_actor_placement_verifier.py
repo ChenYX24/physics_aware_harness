@@ -148,6 +148,27 @@ def first_bad_constraint_binding(
                     "metric": "invalid_runtime_constraint_body_binding",
                     "value": {"side": side, "object_id": object_id, "binding": body_binding},
                 }
+        for field in (
+            "linear_motion",
+            "linear_limit_m",
+            "angular_motion",
+            "angular_limits_deg",
+            "linear_drive",
+            "angular_drive",
+            "break_thresholds",
+            "axial_visual",
+            "collision_enabled",
+        ):
+            if declaration.get(field) != binding.get(field):
+                return {
+                    "constraint_id": constraint_id,
+                    "metric": "runtime_constraint_configuration_mismatch",
+                    "value": {
+                        "field": field,
+                        "expected": declaration.get(field),
+                        "actual": binding.get(field),
+                    },
+                }
     return None
 
 

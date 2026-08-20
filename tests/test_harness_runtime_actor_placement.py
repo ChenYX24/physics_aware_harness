@@ -28,9 +28,21 @@ class RuntimeActorPlacementTests(unittest.TestCase):
             "body_b": "anchor",
             "frame_a": {"position_m": [0.0, 0.0, 0.5], "primary_axis": [0.0, 1.0, 0.0], "secondary_axis": [0.0, 0.0, 1.0]},
             "frame_b": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [0.0, 1.0, 0.0], "secondary_axis": [0.0, 0.0, 1.0]},
-            "linear_motion": {"x": "locked", "y": "locked", "z": "locked"},
+            "linear_motion": {"x": "free", "y": "locked", "z": "locked"},
             "angular_motion": {"x": "free", "y": "locked", "z": "locked"},
             "angular_limits_deg": {},
+            "linear_drive": {
+                "position_enabled": {"x": True, "y": False, "z": False},
+                "velocity_enabled": {"x": False, "y": False, "z": False},
+                "position_target_m": [0.5, 0.0, 0.0],
+                "velocity_target_m_s": [0.0, 0.0, 0.0],
+                "stiffness_n_m": [100.0, 0.0, 0.0],
+                "damping_n_s_m": [2.0, 0.0, 0.0],
+                "max_force_n": [0.0, 0.0, 0.0],
+                "acceleration_mode": False,
+            },
+            "break_thresholds": {"linear_force_n": 500.0},
+            "axial_visual": {"object_id": "anchor", "mesh_forward_axis": "z"},
             "collision_enabled": False,
         }
         bindings = constraint_bindings_from_case(
@@ -52,6 +64,9 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual(bindings[0]["body_a"]["endpoint_type"], "rigid_body")
         self.assertEqual(bindings[0]["body_b"]["frame_space"], "body_local")
         self.assertNotIn("linear_limit_m", bindings[0])
+        self.assertEqual(bindings[0]["linear_drive"], declaration["linear_drive"])
+        self.assertEqual(bindings[0]["break_thresholds"], declaration["break_thresholds"])
+        self.assertEqual(bindings[0]["axial_visual"], declaration["axial_visual"])
 
         scene = __import__("scripts.harness_local_ue_runner", fromlist=["build_runtime_scene"]).build_runtime_scene(
             {"case_id": "constraint_case"},

@@ -126,6 +126,26 @@ def constraint_bindings_from_case(
             ),
             "angular_motion": constraint["angular_motion"],
             "angular_limits_deg": constraint["angular_limits_deg"],
+            **(
+                {"linear_drive": constraint["linear_drive"]}
+                if constraint.get("linear_drive") is not None
+                else {}
+            ),
+            **(
+                {"angular_drive": constraint["angular_drive"]}
+                if constraint.get("angular_drive") is not None
+                else {}
+            ),
+            **(
+                {"break_thresholds": constraint["break_thresholds"]}
+                if constraint.get("break_thresholds") is not None
+                else {}
+            ),
+            **(
+                {"axial_visual": constraint["axial_visual"]}
+                if constraint.get("axial_visual") is not None
+                else {}
+            ),
             "collision_enabled": constraint["collision_enabled"],
             "target_backend": target_backend,
         })

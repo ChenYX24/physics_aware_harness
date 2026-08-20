@@ -160,6 +160,7 @@ _HARNESS_RENDER_DEFECT_CODES = {
 }
 _HARNESS_RUNTIME_DEFECT_CODES = {
     "f_runtime_constraint_enforcement_failed",
+    "f_runtime_constraint_state_invalid",
 }
 _TRANSIENT_CODES = {
     "backend_importer_timeout",

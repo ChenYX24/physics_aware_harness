@@ -2991,6 +2991,10 @@ def runtime_constraint_binding_details(runtime_scene: dict) -> dict:
             **({"linear_limit_m": binding["linear_limit_m"]} if binding.get("linear_limit_m") is not None else {}),
             "angular_motion": binding["angular_motion"],
             "angular_limits_deg": binding["angular_limits_deg"],
+            **({"linear_drive": binding["linear_drive"]} if binding.get("linear_drive") is not None else {}),
+            **({"angular_drive": binding["angular_drive"]} if binding.get("angular_drive") is not None else {}),
+            **({"break_thresholds": binding["break_thresholds"]} if binding.get("break_thresholds") is not None else {}),
+            **({"axial_visual": binding["axial_visual"]} if binding.get("axial_visual") is not None else {}),
             "collision_enabled": binding["collision_enabled"],
             "configuration_applied": False,
         }
@@ -3028,6 +3032,14 @@ def spawn_runtime_constraints_in_game_world(actors: dict, runtime_scene: dict, s
             frame_a = binding["frame_a"]
             frame_b = binding["frame_b"]
             angular_limits = binding.get("angular_limits_deg") or {}
+            linear_drive = binding.get("linear_drive") or {}
+            linear_position_enabled = linear_drive.get("position_enabled") or {}
+            linear_velocity_enabled = linear_drive.get("velocity_enabled") or {}
+            angular_drive = binding.get("angular_drive") or {}
+            angular_position_enabled = angular_drive.get("position_enabled") or {}
+            angular_velocity_enabled = angular_drive.get("velocity_enabled") or {}
+            break_thresholds = binding.get("break_thresholds") or {}
+            axial_visual = binding.get("axial_visual") or {}
             actor = binder(
                 ue_name(constraint_id),
                 ue_name("None" if body_a_world else body_a_id),
@@ -3050,10 +3062,47 @@ def spawn_runtime_constraints_in_game_world(actors: dict, runtime_scene: dict, s
                     float(angular_limits.get("y") or 0.0),
                     float(angular_limits.get("z") or 0.0),
                 ),
+                unreal.Vector(*[1.0 if linear_position_enabled.get(axis) else 0.0 for axis in ("x", "y", "z")]),
+                unreal.Vector(*[1.0 if linear_velocity_enabled.get(axis) else 0.0 for axis in ("x", "y", "z")]),
+                unreal.Vector(*[float(value) * 100.0 for value in (linear_drive.get("position_target_m") or [0.0, 0.0, 0.0])]),
+                unreal.Vector(*[float(value) * 100.0 for value in (linear_drive.get("velocity_target_m_s") or [0.0, 0.0, 0.0])]),
+                unreal.Vector(*[float(value) for value in (linear_drive.get("stiffness_n_m") or [0.0, 0.0, 0.0])]),
+                unreal.Vector(*[float(value) for value in (linear_drive.get("damping_n_s_m") or [0.0, 0.0, 0.0])]),
+                unreal.Vector(*[float(value) * 100.0 for value in (linear_drive.get("max_force_n") or [0.0, 0.0, 0.0])]),
+                bool(linear_drive.get("acceleration_mode", False)),
+                ue_name(angular_drive.get("mode") or "none"),
+                unreal.Vector(
+                    1.0 if angular_position_enabled.get("twist") else 0.0,
+                    1.0 if angular_position_enabled.get("swing") else 0.0,
+                    1.0 if angular_position_enabled.get("slerp") else 0.0,
+                ),
+                unreal.Vector(
+                    1.0 if angular_velocity_enabled.get("twist") else 0.0,
+                    1.0 if angular_velocity_enabled.get("swing") else 0.0,
+                    1.0 if angular_velocity_enabled.get("slerp") else 0.0,
+                ),
+                unreal.Vector(*[float(value) for value in (angular_drive.get("orientation_target_deg") or [0.0, 0.0, 0.0])]),
+                unreal.Vector(*[float(value) / (2.0 * math.pi) for value in (angular_drive.get("velocity_target_rad_s") or [0.0, 0.0, 0.0])]),
+                float(angular_drive.get("stiffness_n_m_per_rad") or 0.0) * 10000.0,
+                float(angular_drive.get("damping_n_m_s_per_rad") or 0.0) * 10000.0,
+                float(angular_drive.get("max_torque_n_m") or 0.0) * 10000.0,
+                bool(angular_drive.get("acceleration_mode", False)),
+                float(break_thresholds.get("linear_force_n") or -0.01) * 100.0,
+                float(break_thresholds.get("angular_torque_n_m") or -0.0001) * 10000.0,
+                ue_name(axial_visual.get("object_id") or "None"),
+                ue_name(axial_visual.get("mesh_forward_axis") or "x"),
                 bool(binding["collision_enabled"]),
             )
             if not actor:
                 raise RuntimeError("Driver rejected constraint binding or readback")
+            if axial_visual:
+                getter = getattr(driver, "get_constraint_visual_component", None)
+                if not callable(getter):
+                    raise RuntimeError("ADPPhysicsRuntime Driver constraint visual readback is unavailable")
+                visual_component = getter(ue_name(constraint_id))
+                if not visual_component:
+                    raise RuntimeError("Driver did not expose the configured constraint visual")
+                actors.setdefault("constraint_visual_components", {})[str(axial_visual["object_id"])] = visual_component
             constraint_actors[constraint_id] = actor
             configured.append(constraint_id)
             if isinstance(detail, dict):
@@ -6688,13 +6737,26 @@ def setup_scene(runtime_scene: dict | None = None):
                         return str(asset)
             return None
 
-        def runtime_binding_snapshot_for(obj: dict, physics_actor, physics_detail: dict) -> dict:
+        def runtime_binding_snapshot_for(
+            obj: dict,
+            physics_actor,
+            physics_detail: dict,
+            constraint_visual_components: dict,
+        ) -> dict:
             object_id = str(obj.get("id") or "")
             params = obj.get("params") if isinstance(obj.get("params"), dict) else {}
             properties = obj.get("physics_properties") if isinstance(obj.get("physics_properties"), dict) else {}
             visual_actor = runtime_visual_actors.get(object_id)
             render_actor = visual_actor or physics_actor
-            render_component = actor_runtime_component(render_actor)
+            render_component = (
+                constraint_visual_components.get(object_id)
+                or actor_runtime_component(render_actor)
+            )
+            visibility_actor = render_actor
+            try:
+                visibility_actor = render_component.get_owner() or render_actor
+            except Exception:
+                pass
             collision_component = actor_runtime_component(physics_actor)
             location = physics_actor.get_actor_location()
             rotation = physics_actor.get_actor_rotation()
@@ -6741,10 +6803,10 @@ def setup_scene(runtime_scene: dict | None = None):
                 except Exception:
                     component_visible = False
             try:
-                actor_hidden = bool(render_actor.get_actor_hidden_in_game())
+                actor_hidden = bool(visibility_actor.get_actor_hidden_in_game())
             except Exception:
                 try:
-                    actor_hidden = bool(render_actor.get_editor_property("hidden"))
+                    actor_hidden = bool(visibility_actor.get_editor_property("hidden"))
                 except Exception:
                     actor_hidden = False
             try:
@@ -7036,6 +7098,7 @@ def setup_scene(runtime_scene: dict | None = None):
                         obj,
                         actor_bindings[str(obj["id"])],
                         physics_details_by_id.get(str(obj["id"]), {}),
+                        actor_bindings.get("constraint_visual_components") or {},
                     )
                     for obj in [
                         *(runtime_scene.get("static_objects") or []),
@@ -9065,7 +9128,60 @@ def cpp_capture_to_runtime_trajectory(capture: dict, actors: dict, runtime_scene
             "source": "adp_cpp_runtime_driver",
             "objects": {},
             "contacts": derived_contacts,
+            "constraints": [],
         }
+        for raw_constraint in frame.get("constraints") or []:
+            if not isinstance(raw_constraint, dict) or not raw_constraint.get("constraint_id"):
+                continue
+            translation_m = [
+                round(float(value) / 100.0, 7)
+                for value in (raw_constraint.get("translation_cm") or [0.0, 0.0, 0.0])[:3]
+            ]
+            relative_velocity_m_s = [
+                round(float(value) / 100.0, 7)
+                for value in (raw_constraint.get("relative_velocity_cm_s") or [0.0, 0.0, 0.0])[:3]
+            ]
+            position_target_m = [
+                round(float(value) / 100.0, 7)
+                for value in (raw_constraint.get("position_target_cm") or [0.0, 0.0, 0.0])[:3]
+            ]
+            stiffness_n_m = [
+                float(value)
+                for value in (raw_constraint.get("stiffness_n_m") or [0.0, 0.0, 0.0])[:3]
+            ]
+            deformation_m = [
+                round(translation_m[index] - position_target_m[index], 7)
+                for index in range(3)
+            ]
+            runtime_frame["constraints"].append(
+                {
+                    "constraint_id": str(raw_constraint["constraint_id"]),
+                    "translation_m": translation_m,
+                    "position_target_m": position_target_m,
+                    "deformation_m": deformation_m,
+                    "relative_velocity_m_s": relative_velocity_m_s,
+                    "linear_force_n": [
+                        round(float(value) / 100.0, 7)
+                        for value in (raw_constraint.get("linear_force_engine_units") or [0.0, 0.0, 0.0])[:3]
+                    ],
+                    "angular_torque_n_m": [
+                        round(float(value) / 10000.0, 7)
+                        for value in (raw_constraint.get("angular_torque_engine_units") or [0.0, 0.0, 0.0])[:3]
+                    ],
+                    "stiffness_n_m": stiffness_n_m,
+                    "elastic_potential_j": round(
+                        sum(
+                            0.5 * stiffness_n_m[index] * deformation_m[index] * deformation_m[index]
+                            for index in range(3)
+                        ),
+                        8,
+                    ),
+                    "broken": bool(raw_constraint.get("broken")),
+                    "frame": frame_index,
+                    "time_s": round(elapsed, 6),
+                    "source": "adp_cpp_runtime_driver",
+                }
+            )
         for actor_id in dynamic_ids:
             raw = frame_objects.get(actor_id)
             if not isinstance(raw, dict):

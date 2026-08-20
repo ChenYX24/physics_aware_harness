@@ -6,6 +6,7 @@
 
 class APhysicsConstraintActor;
 class UPrimitiveComponent;
+class USplineMeshComponent;
 
 USTRUCT(BlueprintType)
 struct ADPPHYSICSRUNTIME_API FADPDrivenBodyConfig
@@ -115,12 +116,43 @@ struct ADPPHYSICSRUNTIME_API FADPContactSample
 	FVector ImpactNormal = FVector::ZeroVector;
 };
 
+USTRUCT(BlueprintType)
+struct ADPPHYSICSRUNTIME_API FADPConstraintSample
+{
+	GENERATED_BODY()
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "ADP Physics")
+	FName ConstraintId;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "ADP Physics")
+	FVector TranslationCm = FVector::ZeroVector;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "ADP Physics")
+	FVector RelativeVelocityCmPerSec = FVector::ZeroVector;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "ADP Physics")
+	FVector LinearForceEngineUnits = FVector::ZeroVector;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "ADP Physics")
+	FVector AngularTorqueEngineUnits = FVector::ZeroVector;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "ADP Physics")
+	FVector PositionTargetCm = FVector::ZeroVector;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "ADP Physics")
+	FVector Stiffness = FVector::ZeroVector;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "ADP Physics")
+	bool bBroken = false;
+};
+
 struct FADPFrameCapture
 {
 	int32 FrameIndex = 0;
 	float TimeSeconds = 0.0f;
 	TArray<FADPTransformSample> Transforms;
 	TArray<FADPContactSample> Contacts;
+	TArray<FADPConstraintSample> Constraints;
 };
 
 UCLASS(BlueprintType, Blueprintable)
@@ -205,7 +237,31 @@ public:
 		FName AngularYMotion,
 		FName AngularZMotion,
 		FVector AngularLimitsDegrees,
+		FVector LinearPositionDriveEnabled,
+		FVector LinearVelocityDriveEnabled,
+		FVector LinearPositionTargetCm,
+		FVector LinearVelocityTargetCmPerSec,
+		FVector LinearStiffness,
+		FVector LinearDamping,
+		FVector LinearForceLimit,
+		bool bLinearAccelerationMode,
+		FName AngularDriveMode,
+		FVector AngularPositionDriveEnabled,
+		FVector AngularVelocityDriveEnabled,
+		FVector AngularOrientationTargetDegrees,
+		FVector AngularVelocityTargetRevolutionsPerSecond,
+		float AngularStiffness,
+		float AngularDamping,
+		float AngularTorqueLimit,
+		bool bAngularAccelerationMode,
+		float LinearBreakThreshold,
+		float AngularBreakThreshold,
+		FName AxialVisualObjectId,
+		FName AxialVisualForwardAxis,
 		bool bCollisionEnabled);
+
+	UFUNCTION(BlueprintPure, Category = "ADP Physics|Constraints")
+	USplineMeshComponent* GetConstraintVisualComponent(FName ConstraintId) const;
 
 	UFUNCTION(BlueprintCallable, Category = "ADP Physics")
 	bool StartPreparedCapture();
@@ -244,6 +300,14 @@ private:
 	UPROPERTY(Transient)
 	TMap<FName, TObjectPtr<APhysicsConstraintActor>> ConstraintActors;
 
+	UPROPERTY(Transient)
+	TMap<FName, TObjectPtr<USplineMeshComponent>> ConstraintVisuals;
+
+	UPROPERTY(Transient)
+	TMap<FName, TObjectPtr<UPrimitiveComponent>> ConstraintVisualSources;
+
+	TMap<FName, bool> ConstraintVisualSourceVisibility;
+
 	UFUNCTION()
 	void HandleComponentHit(
 		UPrimitiveComponent* HitComponent,
@@ -255,6 +319,8 @@ private:
 	void CaptureManualFrame(float DeltaSeconds);
 	void PrepareBody(const FADPDrivenBodyConfig& Config);
 	void ActivateBody(const FADPDrivenBodyConfig& Config);
+	bool ConfigureAxialVisual(FName ConstraintId, FName ObjectId, FName ForwardAxis);
+	void UpdateConstraintVisuals();
 	void CaptureFrame();
 	UPrimitiveComponent* FindPrimitiveComponent(AActor* Actor) const;
 	UPrimitiveComponent* FindRegisteredPrimitive(FName BodyId) const;

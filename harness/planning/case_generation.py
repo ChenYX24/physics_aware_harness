@@ -1661,11 +1661,20 @@ FIELD-BY-FIELD INSTRUCTIONS
     IDs, an explicit local frame on each body, x/y/z linear and angular motion as locked, limited, or free,
     limits only for limited axes, and whether the two bodies collide. Angular x is rotation around each
     frame's primary axis. Transform both local frame positions and axes by their objects' initial UE
-    [pitch,yaw,roll] transforms: the two world frame origins and corresponding primary/secondary axes must
-    match at the authored initial state. Every constrained dynamic body must keep physics.collision_required=true so the
+    [pitch,yaw,roll] transforms: corresponding primary/secondary axes must match at the authored initial state.
+    Frame origins also match unless a linear position drive explicitly uses separation on its enabled axes as
+    initial preload; non-driven axes must still coincide. Every constrained dynamic body must keep physics.collision_required=true
+    so the
     backend can create its rigid-body physics state; use constraint.collision_enabled=false only to disable
     collision between the connected pair. Require the rigid_constraints solver capability. Do not infer frames
-    from semantic relations and do not emit springs, damping, drives, motors, break thresholds, or named workflow presets.
+    from semantic relations or emit named workflow presets. Optional linear_drive and angular_drive blocks are
+    the only source of spring/damping/drive/motor behavior: a position drive plus stiffness is a spring, and a
+    velocity drive plus damping is a motor. Optional break_thresholds declares linear force and/or angular torque.
+    Optional axial_visual binds one imported static mesh to the two live constraint frames and deforms it only
+    for rendering along its authored forward axis; its object must use physics.body_type=static and
+    physics.collision_required=false, and the constraint remains the sole physics source. Omit an unused
+    optional block and any neutral target/limit/acceleration field; absent members use the documented neutral runtime
+    default. Every enabled drive axis must still declare the corresponding positive stiffness or damping.
 12. relations and events: use canonical reference-bearing objects. A binary relation is
     {"type": string, "source": exact_id, "target": exact_id}; a group relation may use
     {"type": string, "objects": [exact_ids]}; an object event is
@@ -1852,13 +1861,42 @@ def case_spec_generation_contract() -> dict[str, Any]:
                 },
                 "frame_b": "same shape as frame_a, expressed in body_b local coordinates",
                 "initial_frame_consistency": (
-                    "after applying each body's initial UE [pitch,yaw,roll] transform, frame origins and "
-                    "corresponding primary/secondary axes must describe the same world joint frame"
+                    "after applying each body's initial UE [pitch,yaw,roll] transform, corresponding axes match; "
+                    "origins match except for initial preload along explicitly enabled linear position-drive axes"
                 ),
                 "linear_motion": {"x": "locked, limited, or free", "y": "locked, limited, or free", "z": "locked, limited, or free"},
                 "linear_limit_m": "positive shared limit, present exactly when any linear axis is limited",
                 "angular_motion": {"x": "locked, limited, or free around primary axis", "y": "locked, limited, or free around secondary axis", "z": "locked, limited, or free around the derived third axis"},
                 "angular_limits_deg": "object containing exactly the limited angular axes with positive limits",
+                "linear_drive": {
+                    "position_enabled": "exact boolean x/y/z object",
+                    "velocity_enabled": "exact boolean x/y/z object",
+                    "position_target_m": "optional finite target [x,y,z] in constraint-frame meters; default zero",
+                    "velocity_target_m_s": "optional finite target [x,y,z] in constraint-frame meters/second; default zero",
+                    "stiffness_n_m": "non-negative per-axis [x,y,z]; positive on enabled position axes",
+                    "damping_n_s_m": "non-negative per-axis [x,y,z]; positive on enabled velocity axes",
+                    "max_force_n": "optional non-negative per-axis [x,y,z]; absent or zero means unlimited",
+                    "acceleration_mode": "optional boolean; default false is force mode",
+                },
+                "angular_drive": {
+                    "mode": "twist_and_swing or slerp",
+                    "position_enabled": "exact boolean {twist,swing,slerp} object matching mode",
+                    "velocity_enabled": "exact boolean {twist,swing,slerp} object matching mode",
+                    "orientation_target_deg": "optional finite [x twist,y swing2,z swing1] degrees; default zero",
+                    "velocity_target_rad_s": "optional finite [x,y,z] radians/second; default zero",
+                    "stiffness_n_m_per_rad": "non-negative scalar; positive when position drive is enabled",
+                    "damping_n_m_s_per_rad": "non-negative scalar; positive when velocity drive is enabled",
+                    "max_torque_n_m": "optional non-negative scalar; absent or zero means unlimited",
+                    "acceleration_mode": "optional boolean; default false is torque mode",
+                },
+                "break_thresholds": {
+                    "linear_force_n": "optional positive force",
+                    "angular_torque_n_m": "optional positive torque; at least one field is required",
+                },
+                "axial_visual": {
+                    "object_id": "exact object ID of a visible imported static, collision-disabled render-only mesh rendered between the live constraint frames",
+                    "mesh_forward_axis": "authored mesh longitudinal axis: x, y, or z",
+                },
                 "collision_enabled": "boolean controlling collision between the two constrained bodies",
             },
             "constraints": ["zero or more rigid_constraint objects"],
@@ -1979,6 +2017,8 @@ def case_spec_generation_contract() -> dict[str, Any]:
             "coordinate_system": ["z_up"],
             "body_type": ["dynamic", "static", "kinematic"],
             "constraint_motion": ["locked", "limited", "free"],
+            "angular_drive_mode": ["twist_and_swing", "slerp"],
+            "mesh_forward_axis": ["x", "y", "z"],
             "geometry_scale_policy": ["preserve_authored", "fit_uniform_to_approx_size"],
             "backend": ["fallback", "genesis_fem", "genesis_sph", "taichi_cloth", "ue"],
             "solver_capability": sorted(frozenset().union(*BACKEND_SOLVER_CAPABILITIES.values())),
@@ -2026,7 +2066,7 @@ def case_spec_generation_contract() -> dict[str, Any]:
             "relations use only the registered semantic relation_type enum; never emit fixed_to, hinged_to, attached_to, or another mechanical connection relation",
             "constraints require the rigid_constraints solver capability and explicit local frames whose transformed origins and corresponding axes form the same initial world joint frame; never infer frames or encode a named hinge/fixed workflow",
             "every constrained dynamic body requires physics.collision_required=true to create a rigid-body physics state; constraint.collision_enabled=false only disables collision between the connected pair",
-            "constraints support only passive 6-DOF axis locking/limits and inter-body collision; do not emit springs, damping, drives, motors, or break thresholds",
+            "constraint drives are optional complete blocks; enabled axes must be free or limited, position stiffness represents a spring, velocity damping represents a motor, and declared break thresholds must be positive",
             "initial load-bearing support uses supported_by; expected future contacts use collision/impacts relations",
             "event_sequence uses at least two explicit ordered pairs; never use start/end shorthand or next_in_chain, chain_order, or topple_order",
             "an explicitly requested collision surface clearance belongs in relation.surface_gap_m and must survive projection",

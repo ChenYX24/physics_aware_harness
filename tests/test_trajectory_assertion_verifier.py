@@ -86,6 +86,24 @@ class TrajectoryAssertionVerifierTests(unittest.TestCase):
         self.assertEqual(counterexample["frame"], 3)
         self.assertFalse(evidence[0]["results"][0]["passed"])
 
+    def test_driven_constraint_requires_native_state_trace(self) -> None:
+        case_spec = driven_runtime_case()
+        driven_trajectory = [driven_constraint_frame(0, 0.0, 0.2)]
+
+        failure, _, evidence = verify_trajectory_assertions(case_spec, driven_trajectory)
+
+        self.assertIsNone(failure)
+        self.assertEqual(
+            [item["type"] for item in evidence],
+            ["rigid_constraint_residuals", "constraint_state_trace", "trajectory_assertions"],
+        )
+        self.assertEqual(evidence[1]["results"][0]["sample_count"], 1)
+
+        driven_trajectory[0]["constraints"] = []
+        failure, counterexample, _ = verify_trajectory_assertions(case_spec, driven_trajectory)
+        self.assertEqual(failure, "F_RUNTIME_CONSTRAINT_STATE_INVALID")
+        self.assertEqual(counterexample["metric"], "constraint_trace_missing")
+
 
 def constrained_runtime_case() -> dict:
     return {
@@ -136,6 +154,68 @@ def constraint_frame(frame: int, time_s: float, rod_position: list[float]) -> di
                 "rotation_deg": [0.0, 0.0, 0.0],
             }
         },
+    }
+
+
+def driven_runtime_case() -> dict:
+    return {
+        "objects": [
+            {
+                "id": "anchor",
+                "body_type": "static",
+                "initial_position_m": [0.0, 0.0, 0.0],
+                "initial_rotation_deg": [0.0, 0.0, 0.0],
+            },
+            {
+                "id": "cart",
+                "body_type": "dynamic",
+                "initial_position_m": [0.2, 0.0, 0.0],
+                "initial_rotation_deg": [0.0, 0.0, 0.0],
+            },
+        ],
+        "constraints": [
+            {
+                "id": "spring_joint",
+                "body_a": "anchor",
+                "body_b": "cart",
+                "frame_a": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+                "frame_b": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+                "linear_motion": {"x": "free", "y": "locked", "z": "locked"},
+                "linear_drive": {
+                    "stiffness_n_m": [100.0, 0.0, 0.0],
+                },
+            }
+        ],
+        "verification_assertions": [{"id": "integrity", "type": "trajectory_integrity"}],
+    }
+
+
+def driven_constraint_frame(frame: int, time_s: float, cart_x: float) -> dict:
+    deformation = cart_x - 0.3
+    return {
+        "frame": frame,
+        "time_s": time_s,
+        "objects": {
+            "cart": {
+                "position_m": [cart_x, 0.0, 0.0],
+                "rotation_deg": [0.0, 0.0, 0.0],
+            }
+        },
+        "constraints": [
+            {
+                "constraint_id": "spring_joint",
+                "translation_m": [cart_x, 0.0, 0.0],
+                "position_target_m": [0.3, 0.0, 0.0],
+                "deformation_m": [deformation, 0.0, 0.0],
+                "relative_velocity_m_s": [0.0, 0.0, 0.0],
+                "linear_force_n": [-100.0 * deformation, 0.0, 0.0],
+                "angular_torque_n_m": [0.0, 0.0, 0.0],
+                "stiffness_n_m": [100.0, 0.0, 0.0],
+                "elastic_potential_j": 0.5 * 100.0 * deformation * deformation,
+                "broken": False,
+                "source": "adp_cpp_runtime_driver",
+            }
+        ],
     }
 
 

@@ -13,6 +13,119 @@ from tests.case_spec_v2_fixture import case_spec_v2_fixture
 
 
 class CaseSpecV2Tests(unittest.TestCase):
+    def driven_constraint_case(self) -> dict:
+        data = case_spec_v2_fixture()
+        data["backend_constraints"]["required_solver_capabilities"].append("rigid_constraints")
+        data["backend_constraints"]["allowed_solvers"] = ["ue"]
+        data["objects"][2]["physics"]["collision_required"] = False
+        data["constraints"] = [
+            {
+                "id": "driven_joint",
+                "body_a": "cue_ball",
+                "body_b": "floor",
+                "frame_a": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+                "frame_b": {"position_m": [-0.55, 0.0, 0.09], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+                "linear_motion": {"x": "free", "y": "locked", "z": "locked"},
+                "angular_motion": {"x": "free", "y": "locked", "z": "locked"},
+                "angular_limits_deg": {},
+                "linear_drive": {
+                    "position_enabled": {"x": True, "y": False, "z": False},
+                    "velocity_enabled": {"x": True, "y": False, "z": False},
+                    "position_target_m": [0.16, 0.0, 0.0],
+                    "velocity_target_m_s": [0.0, 0.0, 0.0],
+                    "stiffness_n_m": [120.0, 0.0, 0.0],
+                    "damping_n_s_m": [3.0, 0.0, 0.0],
+                    "max_force_n": [0.0, 0.0, 0.0],
+                    "acceleration_mode": False,
+                },
+                "angular_drive": {
+                    "mode": "twist_and_swing",
+                    "position_enabled": {"twist": True, "swing": False, "slerp": False},
+                    "velocity_enabled": {"twist": True, "swing": False, "slerp": False},
+                    "orientation_target_deg": [10.0, 0.0, 0.0],
+                    "velocity_target_rad_s": [0.5, 0.0, 0.0],
+                    "stiffness_n_m_per_rad": 4.0,
+                    "damping_n_m_s_per_rad": 0.5,
+                    "max_torque_n_m": 12.0,
+                    "acceleration_mode": False,
+                },
+                "break_thresholds": {"linear_force_n": 300.0, "angular_torque_n_m": 25.0},
+                "axial_visual": {"object_id": "floor", "mesh_forward_axis": "x"},
+                "collision_enabled": False,
+            }
+        ]
+        return data
+
+    def test_constraint_drives_and_break_thresholds_validate_and_project(self) -> None:
+        data = self.driven_constraint_case()
+
+        case = case_spec_v2_from_dict(data)
+        runtime = compile_case_spec_v2_runtime(case)
+
+        self.assertEqual(runtime.data["constraints"], data["constraints"])
+
+    def test_constraint_drive_rejects_locked_axis_and_unknown_field(self) -> None:
+        data = self.driven_constraint_case()
+        data["constraints"][0]["linear_motion"]["x"] = "locked"
+        data["constraints"][0]["linear_drive"]["unsupported"] = 1
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        codes = {issue.code for issue in context.exception.issues}
+        self.assertIn("constraint_drive_on_locked_axis", codes)
+        self.assertIn("invalid_linear_drive_fields", codes)
+
+    def test_constraint_drive_allows_omitted_neutral_fields(self) -> None:
+        data = self.driven_constraint_case()
+        for field in ("position_target_m", "velocity_target_m_s", "max_force_n", "acceleration_mode"):
+            data["constraints"][0]["linear_drive"].pop(field)
+        for field in ("orientation_target_deg", "velocity_target_rad_s", "max_torque_n_m", "acceleration_mode"):
+            data["constraints"][0]["angular_drive"].pop(field)
+
+        case = case_spec_v2_from_dict(data)
+
+        self.assertEqual(case.data["constraints"], data["constraints"])
+
+    def test_constraint_drive_rejects_nonpositive_enabled_strength_and_bad_break_threshold(self) -> None:
+        data = self.driven_constraint_case()
+        data["constraints"][0]["linear_drive"]["stiffness_n_m"][0] = 0.0
+        data["constraints"][0]["angular_drive"]["damping_n_m_s_per_rad"] = 0.0
+        data["constraints"][0]["break_thresholds"]["linear_force_n"] = -1.0
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        codes = {issue.code for issue in context.exception.issues}
+        self.assertIn("constraint_position_drive_without_stiffness", codes)
+        self.assertIn("constraint_velocity_drive_without_damping", codes)
+        self.assertIn("invalid_number", codes)
+
+    def test_constraint_axial_visual_rejects_unknown_object_and_axis(self) -> None:
+        data = self.driven_constraint_case()
+        data["constraints"][0]["axial_visual"] = {
+            "object_id": "missing_visual",
+            "mesh_forward_axis": "forward",
+        }
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        codes = {issue.code for issue in context.exception.issues}
+        self.assertIn("unknown_object_reference", codes)
+        self.assertIn("invalid_enum", codes)
+
+    def test_constraint_axial_visual_requires_render_only_object(self) -> None:
+        data = self.driven_constraint_case()
+        data["constraints"][0]["axial_visual"]["object_id"] = "cue_ball"
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        codes = {issue.code for issue in context.exception.issues}
+        self.assertIn("constraint_axial_visual_requires_static_object", codes)
+        self.assertIn("constraint_axial_visual_requires_collision_disabled", codes)
+
     def test_generic_rigid_constraint_validates_and_projects_without_inference(self) -> None:
         data = case_spec_v2_fixture()
         data["backend_constraints"]["required_solver_capabilities"].append("rigid_constraints")

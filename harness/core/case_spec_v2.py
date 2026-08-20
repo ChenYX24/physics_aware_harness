@@ -83,6 +83,7 @@ BACKEND_SOLVER_CAPABILITIES = {
     "genesis_fem": {"soft_body", "finite_element", "mesh_cache", "deformable_mesh_cache", "trajectory"},
     "taichi_cloth": {"soft_body", "cloth", "mesh_cache", "trajectory"},
 }
+ANGULAR_DRIVE_MODES = {"twist_and_swing", "slerp"}
 REGISTERED_SOLVER_CAPABILITIES = frozenset().union(*BACKEND_SOLVER_CAPABILITIES.values())
 RESOURCE_KINDS = {
     "mesh_3d",
@@ -2079,6 +2080,11 @@ def _validate_rigid_constraints(
         for obj in objects
         if isinstance(obj, Mapping)
     }
+    objects_by_id = {
+        str(obj.get("id") or ""): obj
+        for obj in objects
+        if isinstance(obj, Mapping) and obj.get("id")
+    }
     constraint_ids: list[str] = []
     allowed_fields = {
         "id",
@@ -2090,6 +2096,10 @@ def _validate_rigid_constraints(
         "linear_limit_m",
         "angular_motion",
         "angular_limits_deg",
+        "linear_drive",
+        "angular_drive",
+        "break_thresholds",
+        "axial_visual",
         "collision_enabled",
     }
     motion_values = {"locked", "limited", "free"}
@@ -2170,11 +2180,287 @@ def _validate_rigid_constraints(
         for axis, limit in angular_limits.items():
             if str(axis) in {"x", "y", "z"}:
                 _positive_number(limit, f"{path}/angular_limits_deg/{axis}", issues)
+        _validate_linear_constraint_drive(
+            constraint.get("linear_drive"),
+            linear,
+            f"{path}/linear_drive",
+            issues,
+        )
+        _validate_angular_constraint_drive(
+            constraint.get("angular_drive"),
+            angular,
+            f"{path}/angular_drive",
+            issues,
+        )
+        _validate_constraint_break_thresholds(
+            constraint.get("break_thresholds"),
+            f"{path}/break_thresholds",
+            issues,
+        )
+        _validate_constraint_axial_visual(
+            constraint.get("axial_visual"),
+            objects_by_id,
+            f"{path}/axial_visual",
+            issues,
+        )
         if not isinstance(constraint.get("collision_enabled"), bool):
             _issue(issues, f"{path}/collision_enabled", "invalid_type", "must be boolean")
     duplicates = sorted({value for value in constraint_ids if constraint_ids.count(value) > 1})
     if duplicates:
         _issue(issues, "/constraints", "duplicate_constraint_ids", f"duplicate ids: {', '.join(duplicates)}")
+
+
+def _validate_linear_constraint_drive(
+    value: Any,
+    motion: Mapping[str, Any],
+    path: str,
+    issues: list[ValidationIssue],
+) -> None:
+    if value is None:
+        return
+    drive = _mapping(value, path, issues)
+    allowed_fields = {
+        "position_enabled",
+        "velocity_enabled",
+        "position_target_m",
+        "velocity_target_m_s",
+        "stiffness_n_m",
+        "damping_n_s_m",
+        "max_force_n",
+        "acceleration_mode",
+    }
+    actual_fields = {str(key) for key in drive}
+    unknown_fields = actual_fields - allowed_fields
+    if unknown_fields:
+        _issue(
+            issues,
+            path,
+            "invalid_linear_drive_fields",
+            f"unsupported fields: {sorted(unknown_fields)}",
+        )
+    position_enabled = (
+        _validate_constraint_axis_flags(drive.get("position_enabled"), f"{path}/position_enabled", issues)
+        if drive.get("position_enabled") is not None
+        else {axis: False for axis in ("x", "y", "z")}
+    )
+    velocity_enabled = (
+        _validate_constraint_axis_flags(drive.get("velocity_enabled"), f"{path}/velocity_enabled", issues)
+        if drive.get("velocity_enabled") is not None
+        else {axis: False for axis in ("x", "y", "z")}
+    )
+    if drive.get("position_target_m") is not None:
+        _finite_vec3(drive.get("position_target_m"), f"{path}/position_target_m", issues)
+    if drive.get("velocity_target_m_s") is not None:
+        _finite_vec3(drive.get("velocity_target_m_s"), f"{path}/velocity_target_m_s", issues)
+    stiffness = (
+        _nonnegative_vec3(drive.get("stiffness_n_m"), f"{path}/stiffness_n_m", issues)
+        if drive.get("stiffness_n_m") is not None
+        else []
+    )
+    damping = (
+        _nonnegative_vec3(drive.get("damping_n_s_m"), f"{path}/damping_n_s_m", issues)
+        if drive.get("damping_n_s_m") is not None
+        else []
+    )
+    if drive.get("max_force_n") is not None:
+        _nonnegative_vec3(drive.get("max_force_n"), f"{path}/max_force_n", issues)
+    if drive.get("acceleration_mode") is not None and not isinstance(drive.get("acceleration_mode"), bool):
+        _issue(issues, f"{path}/acceleration_mode", "invalid_type", "must be boolean")
+    if not any(position_enabled.values()) and not any(velocity_enabled.values()):
+        _issue(issues, path, "constraint_drive_without_enabled_axis", "at least one drive axis must be enabled")
+    for axis_index, axis in enumerate(("x", "y", "z")):
+        if (position_enabled.get(axis) or velocity_enabled.get(axis)) and motion.get(axis) == "locked":
+            _issue(
+                issues,
+                f"{path}/{axis}",
+                "constraint_drive_on_locked_axis",
+                "a drive axis must be free or limited",
+            )
+        if position_enabled.get(axis) and (not stiffness or stiffness[axis_index] <= 0.0):
+            _issue(issues, f"{path}/stiffness_n_m/{axis}", "constraint_position_drive_without_stiffness", "must be positive for an enabled position drive")
+        if velocity_enabled.get(axis) and (not damping or damping[axis_index] <= 0.0):
+            _issue(issues, f"{path}/damping_n_s_m/{axis}", "constraint_velocity_drive_without_damping", "must be positive for an enabled velocity drive")
+
+
+def _validate_angular_constraint_drive(
+    value: Any,
+    motion: Mapping[str, Any],
+    path: str,
+    issues: list[ValidationIssue],
+) -> None:
+    if value is None:
+        return
+    drive = _mapping(value, path, issues)
+    allowed_fields = {
+        "mode",
+        "position_enabled",
+        "velocity_enabled",
+        "orientation_target_deg",
+        "velocity_target_rad_s",
+        "stiffness_n_m_per_rad",
+        "damping_n_m_s_per_rad",
+        "max_torque_n_m",
+        "acceleration_mode",
+    }
+    actual_fields = {str(key) for key in drive}
+    unknown_fields = actual_fields - allowed_fields
+    if unknown_fields:
+        _issue(
+            issues,
+            path,
+            "invalid_angular_drive_fields",
+            f"unsupported fields: {sorted(unknown_fields)}",
+        )
+    mode = drive.get("mode")
+    if mode not in ANGULAR_DRIVE_MODES:
+        _issue(issues, f"{path}/mode", "invalid_angular_drive_mode", f"must be one of {sorted(ANGULAR_DRIVE_MODES)}")
+    position_enabled = (
+        _validate_angular_drive_flags(drive.get("position_enabled"), f"{path}/position_enabled", issues)
+        if drive.get("position_enabled") is not None
+        else {axis: False for axis in ("twist", "swing", "slerp")}
+    )
+    velocity_enabled = (
+        _validate_angular_drive_flags(drive.get("velocity_enabled"), f"{path}/velocity_enabled", issues)
+        if drive.get("velocity_enabled") is not None
+        else {axis: False for axis in ("twist", "swing", "slerp")}
+    )
+    if drive.get("orientation_target_deg") is not None:
+        _finite_vec3(drive.get("orientation_target_deg"), f"{path}/orientation_target_deg", issues)
+    if drive.get("velocity_target_rad_s") is not None:
+        _finite_vec3(drive.get("velocity_target_rad_s"), f"{path}/velocity_target_rad_s", issues)
+    stiffness = (
+        _nonnegative_number(drive.get("stiffness_n_m_per_rad"), f"{path}/stiffness_n_m_per_rad", issues)
+        if drive.get("stiffness_n_m_per_rad") is not None
+        else None
+    )
+    damping = (
+        _nonnegative_number(drive.get("damping_n_m_s_per_rad"), f"{path}/damping_n_m_s_per_rad", issues)
+        if drive.get("damping_n_m_s_per_rad") is not None
+        else None
+    )
+    if drive.get("max_torque_n_m") is not None:
+        _nonnegative_number(drive.get("max_torque_n_m"), f"{path}/max_torque_n_m", issues)
+    if drive.get("acceleration_mode") is not None and not isinstance(drive.get("acceleration_mode"), bool):
+        _issue(issues, f"{path}/acceleration_mode", "invalid_type", "must be boolean")
+    if not any(position_enabled.values()) and not any(velocity_enabled.values()):
+        _issue(issues, path, "constraint_drive_without_enabled_axis", "at least one angular drive must be enabled")
+    else:
+        if mode == "slerp":
+            if any(position_enabled.get(key) or velocity_enabled.get(key) for key in ("twist", "swing")) or not (
+                position_enabled.get("slerp") or velocity_enabled.get("slerp")
+            ):
+                _issue(issues, path, "invalid_slerp_drive_flags", "slerp mode enables only the slerp drive")
+            if any(motion.get(axis) == "locked" for axis in ("x", "y", "z")):
+                _issue(issues, path, "slerp_drive_with_locked_axis", "slerp requires all angular axes to be free or limited")
+        elif mode == "twist_and_swing":
+            if position_enabled.get("slerp") or velocity_enabled.get("slerp"):
+                _issue(issues, path, "invalid_twist_swing_drive_flags", "twist_and_swing mode cannot enable slerp")
+            if (position_enabled.get("twist") or velocity_enabled.get("twist")) and motion.get("x") == "locked":
+                _issue(issues, path, "twist_drive_on_locked_axis", "twist drive requires angular x to be free or limited")
+            if (position_enabled.get("swing") or velocity_enabled.get("swing")) and motion.get("y") == "locked" and motion.get("z") == "locked":
+                _issue(issues, path, "swing_drive_on_locked_axes", "swing drive requires angular y or z to be free or limited")
+        if any(position_enabled.values()) and (stiffness is None or stiffness <= 0.0):
+            _issue(issues, f"{path}/stiffness_n_m_per_rad", "constraint_position_drive_without_stiffness", "must be positive for an enabled position drive")
+        if any(velocity_enabled.values()) and (damping is None or damping <= 0.0):
+            _issue(issues, f"{path}/damping_n_m_s_per_rad", "constraint_velocity_drive_without_damping", "must be positive for an enabled velocity drive")
+
+
+def _validate_constraint_break_thresholds(value: Any, path: str, issues: list[ValidationIssue]) -> None:
+    if value is None:
+        return
+    thresholds = _mapping(value, path, issues)
+    allowed = {"linear_force_n", "angular_torque_n_m"}
+    unknown = {str(key) for key in thresholds} - allowed
+    if unknown:
+        _issue(issues, path, "unknown_constraint_break_fields", f"unsupported fields: {sorted(unknown)}")
+    if not thresholds:
+        _issue(issues, path, "empty_constraint_break_thresholds", "at least one break threshold is required")
+    for field in allowed:
+        if field in thresholds:
+            _positive_number(thresholds.get(field), f"{path}/{field}", issues)
+
+
+def _validate_constraint_axial_visual(
+    value: Any,
+    objects_by_id: Mapping[str, Mapping[str, Any]],
+    path: str,
+    issues: list[ValidationIssue],
+) -> None:
+    if value is None:
+        return
+    visual = _mapping(value, path, issues)
+    if {str(key) for key in visual} != {"object_id", "mesh_forward_axis"}:
+        _issue(
+            issues,
+            path,
+            "invalid_constraint_axial_visual_fields",
+            "must contain exactly object_id and mesh_forward_axis",
+        )
+    object_id = _nonempty_string(visual.get("object_id"), f"{path}/object_id", issues)
+    if object_id and object_id not in objects_by_id:
+        _issue(issues, f"{path}/object_id", "unknown_object_reference", f"unknown object id: {object_id}")
+    elif object_id:
+        visual_object = objects_by_id[object_id]
+        representation = visual_object.get("visual_representation")
+        if not isinstance(representation, Mapping) or representation.get("source") != "asset" or representation.get("visible") is not True:
+            _issue(
+                issues,
+                f"{path}/object_id",
+                "constraint_axial_visual_requires_visible_asset",
+                "must reference an object with visual_representation.source=asset and visible=true",
+            )
+        physics = visual_object.get("physics") if isinstance(visual_object.get("physics"), Mapping) else {}
+        if physics.get("body_type") != "static":
+            _issue(
+                issues,
+                f"{path}/object_id",
+                "constraint_axial_visual_requires_static_object",
+                "must reference a static render-only object",
+            )
+        if physics.get("collision_required") is not False:
+            _issue(
+                issues,
+                f"{path}/object_id",
+                "constraint_axial_visual_requires_collision_disabled",
+                "must reference a render-only object with collision_required=false",
+            )
+    if visual.get("mesh_forward_axis") not in {"x", "y", "z"}:
+        _issue(issues, f"{path}/mesh_forward_axis", "invalid_enum", "must be x, y, or z")
+
+
+def _validate_constraint_axis_flags(value: Any, path: str, issues: list[ValidationIssue]) -> Mapping[str, bool]:
+    flags = _mapping(value, path, issues)
+    if set(str(key) for key in flags) != {"x", "y", "z"}:
+        _issue(issues, path, "invalid_constraint_drive_axes", "must contain exactly x, y, and z")
+    for axis in ("x", "y", "z"):
+        if not isinstance(flags.get(axis), bool):
+            _issue(issues, f"{path}/{axis}", "invalid_type", "must be boolean")
+    return {axis: bool(flags.get(axis)) for axis in ("x", "y", "z")}
+
+
+def _validate_angular_drive_flags(value: Any, path: str, issues: list[ValidationIssue]) -> Mapping[str, bool]:
+    flags = _mapping(value, path, issues)
+    if set(str(key) for key in flags) != {"twist", "swing", "slerp"}:
+        _issue(issues, path, "invalid_angular_drive_axes", "must contain exactly twist, swing, and slerp")
+    for axis in ("twist", "swing", "slerp"):
+        if not isinstance(flags.get(axis), bool):
+            _issue(issues, f"{path}/{axis}", "invalid_type", "must be boolean")
+    return {axis: bool(flags.get(axis)) for axis in ("twist", "swing", "slerp")}
+
+
+def _nonnegative_number(value: Any, path: str, issues: list[ValidationIssue]) -> float | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)) or float(value) < 0.0:
+        _issue(issues, path, "invalid_number", "must be a finite non-negative number")
+        return None
+    return float(value)
+
+
+def _nonnegative_vec3(value: Any, path: str, issues: list[ValidationIssue]) -> list[float]:
+    result = _finite_vec3(value, path, issues)
+    if result and any(component < 0.0 for component in result):
+        _issue(issues, path, "invalid_number", "all components must be non-negative")
+        return []
+    return result
 
 
 def _constraint_object_initial_transform(
@@ -2223,16 +2509,48 @@ def _validate_constraint_initial_frames(
         world_axes = [rotate_local_vector_ue(axis, object_rotation) for axis in local_axes]
         frames.append((world_position, world_axes))
     position_gap = math.dist(frames[0][0], frames[1][0])
-    if position_gap > CONSTRAINT_FRAME_POSITION_TOLERANCE_M:
+    if constraint.get("axial_visual") is not None and position_gap <= CONSTRAINT_FRAME_POSITION_TOLERANCE_M:
         _issue(
             issues,
             path,
-            "constraint_frame_position_mismatch",
-            (
-                f"initial world frame origins differ by {position_gap:.6f} m; "
-                f"maximum is {CONSTRAINT_FRAME_POSITION_TOLERANCE_M:.6f} m"
-            ),
+            "constraint_axial_visual_zero_length",
+            "axial_visual requires distinct initial frame origins",
         )
+    drive = constraint.get("linear_drive") if isinstance(constraint.get("linear_drive"), Mapping) else {}
+    position_enabled = drive.get("position_enabled") if isinstance(drive.get("position_enabled"), Mapping) else {}
+    if any(position_enabled.get(axis) is True for axis in ("x", "y", "z")):
+        primary, secondary = frames[0][1]
+        tertiary = [
+            primary[1] * secondary[2] - primary[2] * secondary[1],
+            primary[2] * secondary[0] - primary[0] * secondary[2],
+            primary[0] * secondary[1] - primary[1] * secondary[0],
+        ]
+        delta = [frames[1][0][axis] - frames[0][0][axis] for axis in range(3)]
+        for axis_name, world_axis in zip(("x", "y", "z"), (primary, secondary, tertiary), strict=True):
+            if position_enabled.get(axis_name) is True:
+                continue
+            offset = abs(sum(delta[index] * world_axis[index] for index in range(3)))
+            if offset > CONSTRAINT_FRAME_POSITION_TOLERANCE_M:
+                _issue(
+                    issues,
+                    path,
+                    "constraint_frame_position_mismatch",
+                    (
+                        f"initial frame offset on non-position-driven {axis_name} is {offset:.6f} m; "
+                        f"maximum is {CONSTRAINT_FRAME_POSITION_TOLERANCE_M:.6f} m"
+                    ),
+                )
+    else:
+        if position_gap > CONSTRAINT_FRAME_POSITION_TOLERANCE_M:
+            _issue(
+                issues,
+                path,
+                "constraint_frame_position_mismatch",
+                (
+                    f"initial world frame origins differ by {position_gap:.6f} m; "
+                    f"maximum is {CONSTRAINT_FRAME_POSITION_TOLERANCE_M:.6f} m"
+                ),
+            )
     minimum_dot = math.cos(math.radians(CONSTRAINT_FRAME_AXIS_TOLERANCE_DEG))
     for axis_name, axis_a, axis_b in zip(
         ("primary_axis", "secondary_axis"),

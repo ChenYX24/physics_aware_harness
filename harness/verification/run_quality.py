@@ -1493,6 +1493,10 @@ def validate_runtime_binding_snapshot(runtime: dict[str, Any], summary: dict[str
             "linear_motion",
             "angular_motion",
             "angular_limits_deg",
+            "linear_drive",
+            "angular_drive",
+            "break_thresholds",
+            "axial_visual",
             "collision_enabled",
         ):
             compare_binding_value(mismatches, constraint_id, f"constraint.{field}", expected.get(field), actual.get(field))

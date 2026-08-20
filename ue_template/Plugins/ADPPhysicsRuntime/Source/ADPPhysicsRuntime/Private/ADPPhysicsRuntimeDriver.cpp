@@ -1,6 +1,8 @@
 #include "ADPPhysicsRuntimeDriver.h"
 
 #include "Components/PrimitiveComponent.h"
+#include "Components/SplineMeshComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "JsonObjectConverter.h"
@@ -125,6 +127,39 @@ bool ParseAngularMotion(FName Name, EAngularConstraintMotion& OutMotion)
 	return false;
 }
 
+bool ParseAngularDriveMode(FName Name, bool& bOutEnabled, EAngularDriveMode::Type& OutMode)
+{
+	const FString Value = Name.ToString().ToLower();
+	if (Value.IsEmpty() || Value == TEXT("none"))
+	{
+		bOutEnabled = false;
+		OutMode = EAngularDriveMode::TwistAndSwing;
+		return true;
+	}
+	if (Value == TEXT("twist_and_swing"))
+	{
+		bOutEnabled = true;
+		OutMode = EAngularDriveMode::TwistAndSwing;
+		return true;
+	}
+	if (Value == TEXT("slerp"))
+	{
+		bOutEnabled = true;
+		OutMode = EAngularDriveMode::SLERP;
+		return true;
+	}
+	return false;
+}
+
+bool ParseSplineMeshAxis(FName Name, ESplineMeshAxis::Type& OutAxis)
+{
+	const FString Value = Name.ToString().ToLower();
+	if (Value == TEXT("x")) { OutAxis = ESplineMeshAxis::X; return true; }
+	if (Value == TEXT("y")) { OutAxis = ESplineMeshAxis::Y; return true; }
+	if (Value == TEXT("z")) { OutAxis = ESplineMeshAxis::Z; return true; }
+	return false;
+}
+
 FTransform MakeConstraintFrame(const FVector& PositionCm, const FVector& PrimaryAxis, const FVector& SecondaryAxis)
 {
 	return FTransform(
@@ -147,6 +182,7 @@ void AADPPhysicsRuntimeDriver::Tick(float DeltaSeconds)
 	{
 		return;
 	}
+	UpdateConstraintVisuals();
 
 	ElapsedSeconds += DeltaSeconds;
 	AccumulatedSeconds += DeltaSeconds;
@@ -166,6 +202,23 @@ void AADPPhysicsRuntimeDriver::Tick(float DeltaSeconds)
 
 void AADPPhysicsRuntimeDriver::ResetDriver()
 {
+	for (const TPair<FName, TObjectPtr<USplineMeshComponent>>& Entry : ConstraintVisuals)
+	{
+		if (Entry.Value != nullptr)
+		{
+			Entry.Value->DestroyComponent();
+		}
+	}
+	for (const TPair<FName, TObjectPtr<UPrimitiveComponent>>& Entry : ConstraintVisualSources)
+	{
+		if (Entry.Value != nullptr)
+		{
+			Entry.Value->SetVisibility(ConstraintVisualSourceVisibility.FindRef(Entry.Key), true);
+		}
+	}
+	ConstraintVisuals.Reset();
+	ConstraintVisualSources.Reset();
+	ConstraintVisualSourceVisibility.Reset();
 	for (const TPair<FName, TObjectPtr<APhysicsConstraintActor>>& Entry : ConstraintActors)
 	{
 		if (Entry.Value != nullptr)
@@ -346,6 +399,27 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 	FName AngularYMotion,
 	FName AngularZMotion,
 	FVector AngularLimitsDegrees,
+	FVector LinearPositionDriveEnabled,
+	FVector LinearVelocityDriveEnabled,
+	FVector LinearPositionTargetCm,
+	FVector LinearVelocityTargetCmPerSec,
+	FVector LinearStiffness,
+	FVector LinearDamping,
+	FVector LinearForceLimit,
+	bool bLinearAccelerationMode,
+	FName AngularDriveMode,
+	FVector AngularPositionDriveEnabled,
+	FVector AngularVelocityDriveEnabled,
+	FVector AngularOrientationTargetDegrees,
+	FVector AngularVelocityTargetRevolutionsPerSecond,
+	float AngularStiffness,
+	float AngularDamping,
+	float AngularTorqueLimit,
+	bool bAngularAccelerationMode,
+	float LinearBreakThreshold,
+	float AngularBreakThreshold,
+	FName AxialVisualObjectId,
+	FName AxialVisualForwardAxis,
 	bool bCollisionEnabled)
 {
 	UWorld* World = GetWorld();
@@ -363,6 +437,8 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 	EAngularConstraintMotion AngularX;
 	EAngularConstraintMotion AngularY;
 	EAngularConstraintMotion AngularZ;
+	EAngularDriveMode::Type ParsedAngularDriveMode;
+	bool bAngularDriveConfigured = false;
 	if ((bBodyAWorld && bBodyBWorld)
 		|| (!bBodyAWorld && BodyA == nullptr)
 		|| (!bBodyBWorld && BodyB == nullptr)
@@ -371,7 +447,8 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 		|| !ParseLinearMotion(LinearZMotion, LinearZ)
 		|| !ParseAngularMotion(AngularXMotion, AngularX)
 		|| !ParseAngularMotion(AngularYMotion, AngularY)
-		|| !ParseAngularMotion(AngularZMotion, AngularZ))
+		|| !ParseAngularMotion(AngularZMotion, AngularZ)
+		|| !ParseAngularDriveMode(AngularDriveMode, bAngularDriveConfigured, ParsedAngularDriveMode))
 	{
 		return nullptr;
 	}
@@ -403,6 +480,43 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 	Component->SetAngularTwistLimit(AngularX, AngularLimitsDegrees.X);
 	Component->SetAngularSwing1Limit(AngularZ, AngularLimitsDegrees.Z);
 	Component->SetAngularSwing2Limit(AngularY, AngularLimitsDegrees.Y);
+	FConstraintInstance& MutableInstance = Component->ConstraintInstance;
+	const bool bLinearPositionX = LinearPositionDriveEnabled.X > 0.5f;
+	const bool bLinearPositionY = LinearPositionDriveEnabled.Y > 0.5f;
+	const bool bLinearPositionZ = LinearPositionDriveEnabled.Z > 0.5f;
+	const bool bLinearVelocityX = LinearVelocityDriveEnabled.X > 0.5f;
+	const bool bLinearVelocityY = LinearVelocityDriveEnabled.Y > 0.5f;
+	const bool bLinearVelocityZ = LinearVelocityDriveEnabled.Z > 0.5f;
+	MutableInstance.SetLinearPositionDrive(bLinearPositionX, bLinearPositionY, bLinearPositionZ);
+	MutableInstance.SetLinearVelocityDrive(bLinearVelocityX, bLinearVelocityY, bLinearVelocityZ);
+	MutableInstance.SetLinearPositionTarget(LinearPositionTargetCm);
+	MutableInstance.SetLinearVelocityTarget(LinearVelocityTargetCmPerSec);
+	MutableInstance.SetLinearDriveParams(LinearStiffness, LinearDamping, LinearForceLimit);
+	MutableInstance.SetLinearDriveAccelerationMode(bLinearAccelerationMode);
+	if (bAngularDriveConfigured)
+	{
+		MutableInstance.SetAngularDriveMode(ParsedAngularDriveMode);
+		if (ParsedAngularDriveMode == EAngularDriveMode::SLERP)
+		{
+			MutableInstance.SetOrientationDriveSLERP(AngularPositionDriveEnabled.Z > 0.5f);
+			MutableInstance.SetAngularVelocityDriveSLERP(AngularVelocityDriveEnabled.Z > 0.5f);
+		}
+		else
+		{
+			MutableInstance.SetOrientationDriveTwistAndSwing(AngularPositionDriveEnabled.X > 0.5f, AngularPositionDriveEnabled.Y > 0.5f);
+			MutableInstance.SetAngularVelocityDriveTwistAndSwing(AngularVelocityDriveEnabled.X > 0.5f, AngularVelocityDriveEnabled.Y > 0.5f);
+		}
+		const FRotator OrientationTarget(
+			AngularOrientationTargetDegrees.Y,
+			AngularOrientationTargetDegrees.Z,
+			AngularOrientationTargetDegrees.X);
+		MutableInstance.SetAngularOrientationTarget(OrientationTarget.Quaternion());
+		MutableInstance.SetAngularVelocityTarget(AngularVelocityTargetRevolutionsPerSecond);
+		MutableInstance.SetAngularDriveParams(AngularStiffness, AngularDamping, AngularTorqueLimit);
+		MutableInstance.SetAngularDriveAccelerationMode(bAngularAccelerationMode);
+	}
+	MutableInstance.SetLinearBreakable(LinearBreakThreshold >= 0.0f, FMath::Max(0.0f, LinearBreakThreshold));
+	MutableInstance.SetAngularBreakable(AngularBreakThreshold >= 0.0f, FMath::Max(0.0f, AngularBreakThreshold));
 	Component->SetDisableCollision(!bCollisionEnabled);
 
 	UPrimitiveComponent* ActualBodyA = nullptr;
@@ -421,6 +535,67 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 		&& Instance.GetAngularSwing2Motion() == AngularY;
 	const bool bFramesVerified = Instance.GetRefFrame(EConstraintFrame::Frame1).Equals(FrameA, 0.001f)
 		&& Instance.GetRefFrame(EConstraintFrame::Frame2).Equals(FrameB, 0.001f);
+	FVector ActualLinearStiffness;
+	FVector ActualLinearDamping;
+	FVector ActualLinearForceLimit;
+	MutableInstance.GetLinearDriveParams(ActualLinearStiffness, ActualLinearDamping, ActualLinearForceLimit);
+	const bool bLinearDriveVerified =
+		Instance.IsLinearPositionDriveXEnabled() == bLinearPositionX
+		&& Instance.IsLinearPositionDriveYEnabled() == bLinearPositionY
+		&& Instance.IsLinearPositionDriveZEnabled() == bLinearPositionZ
+		&& Instance.IsLinearVelocityDriveXEnabled() == bLinearVelocityX
+		&& Instance.IsLinearVelocityDriveYEnabled() == bLinearVelocityY
+		&& Instance.IsLinearVelocityDriveZEnabled() == bLinearVelocityZ
+		&& MutableInstance.GetLinearPositionTarget().Equals(LinearPositionTargetCm, 0.001f)
+		&& MutableInstance.GetLinearVelocityTarget().Equals(LinearVelocityTargetCmPerSec, 0.001f)
+		&& ActualLinearStiffness.Equals(LinearStiffness, 0.001f)
+		&& ActualLinearDamping.Equals(LinearDamping, 0.001f)
+		&& ActualLinearForceLimit.Equals(LinearForceLimit, 0.001f)
+		&& Instance.ProfileInstance.LinearDrive.GetAccelerationMode() == bLinearAccelerationMode;
+	bool bAngularDriveVerified = !bAngularDriveConfigured;
+	if (bAngularDriveConfigured)
+	{
+		float ActualAngularStiffness = 0.0f;
+		float ActualAngularDamping = 0.0f;
+		float ActualAngularTorqueLimit = 0.0f;
+		MutableInstance.GetAngularDriveParams(ActualAngularStiffness, ActualAngularDamping, ActualAngularTorqueLimit);
+		bool bActualPositionTwist = false;
+		bool bActualPositionSwing = false;
+		bool bActualVelocityTwist = false;
+		bool bActualVelocitySwing = false;
+		MutableInstance.GetOrientationDriveTwistAndSwing(bActualPositionTwist, bActualPositionSwing);
+		MutableInstance.GetAngularVelocityDriveTwistAndSwing(bActualVelocityTwist, bActualVelocitySwing);
+		const FRotator ExpectedOrientation(
+			AngularOrientationTargetDegrees.Y,
+			AngularOrientationTargetDegrees.Z,
+			AngularOrientationTargetDegrees.X);
+		bAngularDriveVerified = MutableInstance.GetAngularDriveMode() == ParsedAngularDriveMode
+			&& Instance.GetAngularOrientationTarget().Equals(ExpectedOrientation, 0.001f)
+			&& Instance.GetAngularVelocityTarget().Equals(AngularVelocityTargetRevolutionsPerSecond, 0.001f)
+			&& FMath::IsNearlyEqual(ActualAngularStiffness, AngularStiffness, 0.001f)
+			&& FMath::IsNearlyEqual(ActualAngularDamping, AngularDamping, 0.001f)
+			&& FMath::IsNearlyEqual(ActualAngularTorqueLimit, AngularTorqueLimit, 0.001f)
+			&& Instance.ProfileInstance.AngularDrive.GetAccelerationMode() == bAngularAccelerationMode;
+		if (ParsedAngularDriveMode == EAngularDriveMode::SLERP)
+		{
+			bAngularDriveVerified = bAngularDriveVerified
+				&& MutableInstance.GetOrientationDriveSLERP() == (AngularPositionDriveEnabled.Z > 0.5f)
+				&& MutableInstance.GetAngularVelocityDriveSLERP() == (AngularVelocityDriveEnabled.Z > 0.5f);
+		}
+		else
+		{
+			bAngularDriveVerified = bAngularDriveVerified
+				&& bActualPositionTwist == (AngularPositionDriveEnabled.X > 0.5f)
+				&& bActualPositionSwing == (AngularPositionDriveEnabled.Y > 0.5f)
+				&& bActualVelocityTwist == (AngularVelocityDriveEnabled.X > 0.5f)
+				&& bActualVelocitySwing == (AngularVelocityDriveEnabled.Y > 0.5f);
+		}
+	}
+	const bool bBreakThresholdsVerified =
+		Instance.IsLinearBreakable() == (LinearBreakThreshold >= 0.0f)
+		&& Instance.IsAngularBreakable() == (AngularBreakThreshold >= 0.0f)
+		&& (!Instance.IsLinearBreakable() || FMath::IsNearlyEqual(Instance.GetLinearBreakThreshold(), LinearBreakThreshold, 0.001f))
+		&& (!Instance.IsAngularBreakable() || FMath::IsNearlyEqual(Instance.GetAngularBreakThreshold(), AngularBreakThreshold, 0.001f));
 	bool bSolverFramesVerified = false;
 	if (bInstanceVerified)
 	{
@@ -433,16 +608,122 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 		});
 		bSolverFramesVerified = bSolverFramesRead && bSolverFramesMatch;
 	}
-	const bool bVerified = bBodiesVerified && bInstanceVerified && bMotionsVerified && bFramesVerified && bSolverFramesVerified;
+	const bool bVerified = bBodiesVerified && bInstanceVerified && bMotionsVerified && bFramesVerified
+		&& bLinearDriveVerified && bAngularDriveVerified && bBreakThresholdsVerified && bSolverFramesVerified;
 	if (!bVerified)
 	{
-		UE_LOG(LogTemp, Error, TEXT("ADP constraint bind rejected: id=%s bodies=%d instance=%d motions=%d frames=%d solver_frames=%d"),
-			*ConstraintId.ToString(), bBodiesVerified, bInstanceVerified, bMotionsVerified, bFramesVerified, bSolverFramesVerified);
+		UE_LOG(LogTemp, Error, TEXT("ADP constraint bind rejected: id=%s bodies=%d instance=%d motions=%d frames=%d linear_drive=%d angular_drive=%d break=%d solver_frames=%d"),
+			*ConstraintId.ToString(), bBodiesVerified, bInstanceVerified, bMotionsVerified, bFramesVerified,
+			bLinearDriveVerified, bAngularDriveVerified, bBreakThresholdsVerified, bSolverFramesVerified);
 		ConstraintActor->Destroy();
 		return nullptr;
 	}
 	ConstraintActors.Add(ConstraintId, ConstraintActor);
+	if (!AxialVisualObjectId.IsNone() && !ConfigureAxialVisual(ConstraintId, AxialVisualObjectId, AxialVisualForwardAxis))
+	{
+		ConstraintActors.Remove(ConstraintId);
+		ConstraintActor->Destroy();
+		return nullptr;
+	}
+	UpdateConstraintVisuals();
 	return ConstraintActor;
+}
+
+USplineMeshComponent* AADPPhysicsRuntimeDriver::GetConstraintVisualComponent(FName ConstraintId) const
+{
+	return ConstraintVisuals.FindRef(ConstraintId);
+}
+
+bool AADPPhysicsRuntimeDriver::ConfigureAxialVisual(FName ConstraintId, FName ObjectId, FName ForwardAxis)
+{
+	ESplineMeshAxis::Type ParsedAxis;
+	UStaticMeshComponent* Source = Cast<UStaticMeshComponent>(FindRegisteredPrimitive(ObjectId));
+	APhysicsConstraintActor* ConstraintActor = ConstraintActors.FindRef(ConstraintId);
+	UPhysicsConstraintComponent* ConstraintComponent = ConstraintActor != nullptr ? ConstraintActor->GetConstraintComp() : nullptr;
+	if (!ParseSplineMeshAxis(ForwardAxis, ParsedAxis) || Source == nullptr || Source->GetStaticMesh() == nullptr || ConstraintComponent == nullptr)
+	{
+		return false;
+	}
+	UPrimitiveComponent* BodyA = nullptr;
+	UPrimitiveComponent* BodyB = nullptr;
+	FName BoneA;
+	FName BoneB;
+	ConstraintComponent->GetConstrainedComponents(BodyA, BoneA, BodyB, BoneB);
+	FConstraintInstance& Instance = ConstraintComponent->ConstraintInstance;
+	const FTransform FrameA = BodyA != nullptr
+		? Instance.GetRefFrame(EConstraintFrame::Frame1) * BodyA->GetComponentTransform()
+		: Instance.GetRefFrame(EConstraintFrame::Frame1);
+	const FTransform FrameB = BodyB != nullptr
+		? Instance.GetRefFrame(EConstraintFrame::Frame2) * BodyB->GetComponentTransform()
+		: Instance.GetRefFrame(EConstraintFrame::Frame2);
+	if (FrameA.GetLocation().Equals(FrameB.GetLocation(), KINDA_SMALL_NUMBER))
+	{
+		return false;
+	}
+
+	USplineMeshComponent* Visual = NewObject<USplineMeshComponent>(this);
+	if (Visual == nullptr)
+	{
+		return false;
+	}
+	AddInstanceComponent(Visual);
+	Visual->SetMobility(EComponentMobility::Movable);
+	Visual->SetStaticMesh(Source->GetStaticMesh());
+	Visual->SetForwardAxis(ParsedAxis, false);
+	Visual->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	Visual->SetVisibility(true, true);
+	Visual->SetHiddenInGame(false, true);
+	for (int32 MaterialIndex = 0; MaterialIndex < Source->GetNumMaterials(); ++MaterialIndex)
+	{
+		Visual->SetMaterial(MaterialIndex, Source->GetMaterial(MaterialIndex));
+	}
+	Visual->RegisterComponentWithWorld(GetWorld());
+	Visual->SetWorldTransform(Source->GetComponentTransform());
+	if (Visual->GetStaticMesh() != Source->GetStaticMesh() || Visual->GetForwardAxis() != ParsedAxis)
+	{
+		Visual->DestroyComponent();
+		return false;
+	}
+	ConstraintVisualSourceVisibility.Add(ConstraintId, Source->IsVisible());
+	ConstraintVisualSources.Add(ConstraintId, Source);
+	ConstraintVisuals.Add(ConstraintId, Visual);
+	Source->SetVisibility(false, true);
+	return true;
+}
+
+void AADPPhysicsRuntimeDriver::UpdateConstraintVisuals()
+{
+	for (const TPair<FName, TObjectPtr<USplineMeshComponent>>& Entry : ConstraintVisuals)
+	{
+		USplineMeshComponent* Visual = Entry.Value.Get();
+		APhysicsConstraintActor* ConstraintActor = ConstraintActors.FindRef(Entry.Key);
+		UPhysicsConstraintComponent* Component = ConstraintActor != nullptr ? ConstraintActor->GetConstraintComp() : nullptr;
+		if (Visual == nullptr || Component == nullptr)
+		{
+			continue;
+		}
+		FConstraintInstance& Instance = Component->ConstraintInstance;
+		UPrimitiveComponent* BodyA = nullptr;
+		UPrimitiveComponent* BodyB = nullptr;
+		FName BoneA;
+		FName BoneB;
+		Component->GetConstrainedComponents(BodyA, BoneA, BodyB, BoneB);
+		const FTransform LocalFrameA = Instance.GetRefFrame(EConstraintFrame::Frame1);
+		const FTransform LocalFrameB = Instance.GetRefFrame(EConstraintFrame::Frame2);
+		const FTransform WorldFrameA = BodyA != nullptr ? LocalFrameA * BodyA->GetComponentTransform() : LocalFrameA;
+		const FTransform WorldFrameB = BodyB != nullptr ? LocalFrameB * BodyB->GetComponentTransform() : LocalFrameB;
+		const FTransform VisualTransform = Visual->GetComponentTransform();
+		const FVector StartWorld = WorldFrameA.GetLocation();
+		const FVector EndWorld = WorldFrameB.GetLocation();
+		const FVector TangentWorld = EndWorld - StartWorld;
+		if (!TangentWorld.IsNearlyZero())
+		{
+			const FVector StartLocal = VisualTransform.InverseTransformPosition(StartWorld);
+			const FVector EndLocal = VisualTransform.InverseTransformPosition(EndWorld);
+			const FVector TangentLocal = VisualTransform.InverseTransformVector(TangentWorld);
+			Visual->SetStartAndEnd(StartLocal, TangentLocal, EndLocal, TangentLocal, true);
+		}
+	}
 }
 
 bool AADPPhysicsRuntimeDriver::StartPreparedCapture()
@@ -483,6 +764,7 @@ void AADPPhysicsRuntimeDriver::AdvanceCapture(float DeltaSeconds, bool bTickWorl
 		}
 	}
 
+	UpdateConstraintVisuals();
 	CaptureManualFrame(ClampedDeltaSeconds);
 }
 
@@ -656,6 +938,43 @@ void AADPPhysicsRuntimeDriver::CaptureFrame()
 				}
 			}
 		}
+	}
+
+	for (const TPair<FName, TObjectPtr<APhysicsConstraintActor>>& Entry : ConstraintActors)
+	{
+		APhysicsConstraintActor* ConstraintActor = Entry.Value.Get();
+		UPhysicsConstraintComponent* Component = ConstraintActor != nullptr ? ConstraintActor->GetConstraintComp() : nullptr;
+		if (Component == nullptr)
+		{
+			continue;
+		}
+		FADPConstraintSample Sample;
+		Sample.ConstraintId = Entry.Key;
+		FConstraintInstance& Instance = Component->ConstraintInstance;
+		UPrimitiveComponent* BodyA = nullptr;
+		UPrimitiveComponent* BodyB = nullptr;
+		FName BoneA;
+		FName BoneB;
+		Component->GetConstrainedComponents(BodyA, BoneA, BodyB, BoneB);
+		const FTransform LocalFrameA = Instance.GetRefFrame(EConstraintFrame::Frame1);
+		const FTransform LocalFrameB = Instance.GetRefFrame(EConstraintFrame::Frame2);
+		const FTransform WorldFrameA = BodyA != nullptr ? LocalFrameA * BodyA->GetComponentTransform() : LocalFrameA;
+		const FTransform WorldFrameB = BodyB != nullptr ? LocalFrameB * BodyB->GetComponentTransform() : LocalFrameB;
+		Sample.TranslationCm = WorldFrameA.InverseTransformVectorNoScale(WorldFrameB.GetLocation() - WorldFrameA.GetLocation());
+		const FVector VelocityA = BodyA != nullptr ? BodyA->GetPhysicsLinearVelocityAtPoint(WorldFrameA.GetLocation()) : FVector::ZeroVector;
+		const FVector VelocityB = BodyB != nullptr ? BodyB->GetPhysicsLinearVelocityAtPoint(WorldFrameB.GetLocation()) : FVector::ZeroVector;
+		Sample.RelativeVelocityCmPerSec = WorldFrameA.InverseTransformVectorNoScale(VelocityB - VelocityA);
+		FVector LinearForceWorld = FVector::ZeroVector;
+		FVector AngularTorqueWorld = FVector::ZeroVector;
+		Component->GetConstraintForce(LinearForceWorld, AngularTorqueWorld);
+		Sample.LinearForceEngineUnits = WorldFrameA.InverseTransformVectorNoScale(LinearForceWorld);
+		Sample.AngularTorqueEngineUnits = WorldFrameA.InverseTransformVectorNoScale(AngularTorqueWorld);
+		Sample.PositionTargetCm = Instance.GetLinearPositionTarget();
+		FVector DriveDamping;
+		FVector DriveForceLimit;
+		Instance.GetLinearDriveParams(Sample.Stiffness, DriveDamping, DriveForceLimit);
+		Sample.bBroken = Component->IsBroken();
+		Frame.Constraints.Add(Sample);
 	}
 
 	CapturedFrames.Add(Frame);
@@ -837,6 +1156,23 @@ FString AADPPhysicsRuntimeDriver::BuildCaptureJson() const
 			ContactsJson.Add(MakeShared<FJsonValueObject>(ContactObject));
 		}
 		FrameObject->SetArrayField(TEXT("contacts"), ContactsJson);
+
+		TArray<TSharedPtr<FJsonValue>> ConstraintsJson;
+		for (const FADPConstraintSample& Constraint : Frame.Constraints)
+		{
+			TSharedRef<FJsonObject> ConstraintObject = MakeShared<FJsonObject>();
+			ConstraintObject->SetStringField(TEXT("constraint_id"), Constraint.ConstraintId.ToString());
+			ConstraintObject->SetArrayField(TEXT("translation_cm"), VectorToJsonArray(Constraint.TranslationCm));
+			ConstraintObject->SetArrayField(TEXT("relative_velocity_cm_s"), VectorToJsonArray(Constraint.RelativeVelocityCmPerSec));
+			ConstraintObject->SetArrayField(TEXT("linear_force_engine_units"), VectorToJsonArray(Constraint.LinearForceEngineUnits));
+			ConstraintObject->SetArrayField(TEXT("angular_torque_engine_units"), VectorToJsonArray(Constraint.AngularTorqueEngineUnits));
+			ConstraintObject->SetArrayField(TEXT("position_target_cm"), VectorToJsonArray(Constraint.PositionTargetCm));
+			ConstraintObject->SetArrayField(TEXT("stiffness_n_m"), VectorToJsonArray(Constraint.Stiffness));
+			ConstraintObject->SetBoolField(TEXT("broken"), Constraint.bBroken);
+			ConstraintObject->SetStringField(TEXT("source"), TEXT("adp_cpp_runtime_driver"));
+			ConstraintsJson.Add(MakeShared<FJsonValueObject>(ConstraintObject));
+		}
+		FrameObject->SetArrayField(TEXT("constraints"), ConstraintsJson);
 		FramesJson.Add(MakeShared<FJsonValueObject>(FrameObject));
 	}
 	Root->SetArrayField(TEXT("frames"), FramesJson);
