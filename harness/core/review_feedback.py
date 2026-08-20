@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
 
 REVIEW_FEEDBACK_SCHEMA_VERSION = "harness_review_feedback_v1"
 REVIEW_FEEDBACK_ENV = "SIM_HARNESS_REVIEW_FEEDBACK"
+EXECUTION_EVIDENCE_SCHEMA_VERSION = "harness_execution_evidence_v1"
 
 ISSUE_RULES: dict[str, dict[str, Any]] = {
     "classification_mixed": {
@@ -129,7 +132,7 @@ ISSUE_RULES: dict[str, dict[str, Any]] = {
 def compile_review_feedback(
     payload: Mapping[str, Any],
     *,
-    verified_execution_statuses: Mapping[str, str] | None = None,
+    verified_execution_evidence: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if payload.get("schema_version") not in {
         "physics_harness_case_curation_decisions_v1",
@@ -142,12 +145,8 @@ def compile_review_feedback(
     case_index = payload.get("case_index") or {}
     if not isinstance(case_index, Mapping):
         raise ValueError("case_index must be an object")
-    verified_execution_statuses = verified_execution_statuses or {}
-    if not isinstance(verified_execution_statuses, Mapping) or any(
-        status not in {"pass", "fail", "mixed", "legacy"}
-        for status in verified_execution_statuses.values()
-    ):
-        raise ValueError("verified_execution_statuses must map case IDs to pass, fail, mixed, or legacy")
+    verified_execution_evidence = verified_execution_evidence or {}
+    verified_execution_statuses = _validate_execution_evidence(verified_execution_evidence)
     sources: dict[str, dict[str, set[str]]] = {}
     feedback: list[dict[str, str]] = []
     case_lessons: list[dict[str, Any]] = []
@@ -261,8 +260,87 @@ def compile_review_feedback(
         "pending_diagnosis": sorted(pending_diagnosis),
         "freeform_feedback": feedback,
         "unknown_issue_ids": sorted(unknown_issue_ids),
-        "claim_boundary": "Kept cases become weekly candidates. Browser-reported status remains descriptive only; a separate verified execution-status mapping is required before positive, negative, or legacy regression classification. Known tags become constraints; free-form feedback remains traceable until mapped to a tested rule.",
+        "claim_boundary": "Kept cases become weekly candidates. Browser-reported status remains descriptive only; hashed local case_spec.json and quality_report.json evidence is required before positive or negative regression classification. Legacy media remains pending until revalidated. Known tags become constraints; free-form feedback remains traceable until mapped to a tested rule.",
     }
+
+
+def verified_execution_evidence_from_run_dirs(run_dirs: list[str | Path]) -> dict[str, dict[str, Any]]:
+    evidence: dict[str, dict[str, Any]] = {}
+    for value in run_dirs:
+        run_dir = Path(value).expanduser().resolve()
+        case_path = run_dir / "case_spec.json"
+        quality_path = run_dir / "quality_report.json"
+        if not case_path.is_file() or case_path.is_symlink() or not quality_path.is_file() or quality_path.is_symlink():
+            raise ValueError(f"verified run requires real case_spec.json and quality_report.json: {run_dir}")
+        case = json.loads(case_path.read_text(encoding="utf-8"))
+        quality = json.loads(quality_path.read_text(encoding="utf-8"))
+        if not isinstance(case, dict) or not isinstance(quality, dict):
+            raise ValueError(f"verified run evidence must contain JSON objects: {run_dir}")
+        case_id = str(case.get("case_id") or "")
+        hard_gate = quality.get("hard_gate")
+        passed = (
+            quality.get("schema_version") == "harness_run_quality_v1"
+            and quality.get("run_dir") == str(run_dir)
+            and isinstance(hard_gate, dict)
+            and quality.get("hard_gate_passed") is True
+            and quality.get("status") == "pass"
+            and hard_gate.get("passed") is True
+            and hard_gate.get("status") == "pass"
+        )
+        failed = (
+            quality.get("schema_version") == "harness_run_quality_v1"
+            and quality.get("run_dir") == str(run_dir)
+            and isinstance(hard_gate, dict)
+            and quality.get("hard_gate_passed") is False
+            and quality.get("status") == "fail"
+            and hard_gate.get("passed") is False
+            and hard_gate.get("status") == "fail"
+        )
+        if not case_id or not (passed or failed):
+            raise ValueError(f"verified run has inconsistent case or hard-gate evidence: {run_dir}")
+        if case_id in evidence:
+            raise ValueError(f"duplicate verified execution evidence for case: {case_id}")
+        evidence[case_id] = {
+            "schema_version": EXECUTION_EVIDENCE_SCHEMA_VERSION,
+            "case_id": case_id,
+            "status": "pass" if passed else "fail",
+            "run_dir": str(run_dir),
+            "case_spec_sha256": _file_sha256(case_path),
+            "quality_report_sha256": _file_sha256(quality_path),
+            "evaluator_schema": "harness_run_quality_v1",
+        }
+    return evidence
+
+
+def _validate_execution_evidence(evidence: Mapping[str, Mapping[str, Any]]) -> dict[str, str]:
+    if not isinstance(evidence, Mapping):
+        raise ValueError("verified_execution_evidence must be an object")
+    statuses: dict[str, str] = {}
+    for case_id, record in evidence.items():
+        run_dir = record.get("run_dir") if isinstance(record, Mapping) else None
+        if (
+            not isinstance(record, Mapping)
+            or record.get("schema_version") != EXECUTION_EVIDENCE_SCHEMA_VERSION
+            or record.get("case_id") != case_id
+            or record.get("status") not in {"pass", "fail"}
+            or not isinstance(run_dir, str)
+            or record.get("evaluator_schema") != "harness_run_quality_v1"
+            or any(not re.fullmatch(r"[0-9a-f]{64}", str(record.get(field) or "")) for field in ("case_spec_sha256", "quality_report_sha256"))
+        ):
+            raise ValueError(f"invalid verified execution evidence: {case_id}")
+        derived = verified_execution_evidence_from_run_dirs([run_dir]).get(str(case_id))
+        if derived != dict(record):
+            raise ValueError(f"verified execution evidence does not match local run artifacts: {case_id}")
+        statuses[str(case_id)] = str(record["status"])
+    return statuses
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def active_review_requirements(capability_id: str) -> dict[str, list[str]]:

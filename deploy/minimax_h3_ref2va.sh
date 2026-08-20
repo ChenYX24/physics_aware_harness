@@ -25,10 +25,19 @@ validate_paths() {
     echo "H3_ROOT must be a dedicated subdirectory" >&2
     exit 1
   }
-  case "$H3_VENV" in
-    "$H3_ROOT"/*) ;;
-    *) echo "H3_VENV must stay inside H3_ROOT" >&2; exit 1 ;;
+  case "$H3_ROOT/" in
+    *"/../"*|*"/./"*|*"//"*) echo "H3_ROOT must be a canonical absolute path" >&2; exit 1 ;;
   esac
+  [ "$H3_VENV" = "$H3_ROOT/venv" ] || { echo "H3_VENV must equal H3_ROOT/venv" >&2; exit 1; }
+  [ ! -L "$H3_VENV" ] || { echo "H3_VENV must not be a symlink" >&2; exit 1; }
+
+  local existing
+  existing="$H3_ROOT"
+  while [ ! -e "$existing" ]; do existing="${existing%/*}"; done
+  [ ! -L "$existing" ] && [ "$(cd "$existing" && pwd -P)" = "$existing" ] || {
+    echo "H3_ROOT must not traverse symlinks" >&2
+    exit 1
+  }
 }
 
 print_config() {
@@ -60,6 +69,10 @@ preflight() {
   command -v nvidia-smi >/dev/null
   command -v python3 >/dev/null
   mkdir -p "$H3_ROOT"
+  [ ! -L "$H3_ROOT" ] && [ "$(cd "$H3_ROOT" && pwd -P)" = "$H3_ROOT" ] || {
+    echo "H3_ROOT must resolve to itself" >&2
+    exit 1
+  }
 
   local available_kib required_kib
   available_kib="$(df -Pk "$H3_ROOT" | awk 'NR == 2 {print $4}')"
@@ -98,8 +111,7 @@ install_runtime() {
     "$H3_UV" pip install --python "$H3_VENV/bin/python" \
       "sglang[diffusion]==$H3_SGLANG_VERSION" \
       --extra-index-url https://sgl-project.github.io/whl/cu129/ \
-      --extra-index-url https://download.pytorch.org/whl/cu129 \
-      --index-strategy unsafe-best-match
+      --extra-index-url https://download.pytorch.org/whl/cu129
   elif python3 -c 'import ensurepip' >/dev/null 2>&1; then
     python3 -m venv "$H3_VENV"
     "$H3_VENV/bin/python" -m pip install --upgrade pip

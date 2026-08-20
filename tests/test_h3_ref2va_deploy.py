@@ -37,7 +37,8 @@ class H3Ref2VADeployTests(unittest.TestCase):
         self.assertIn("sgl-project.github.io/whl/cu129", source)
         self.assertIn("--ulysses-degree 4", source)
         self.assertNotIn("--tp-size 2", source)
-        self.assertIn("H3_VENV must stay inside H3_ROOT", source)
+        self.assertIn("H3_VENV must equal H3_ROOT/venv", source)
+        self.assertNotIn("unsafe-best-match", source)
         self.assertIn("refusing to stop unverified pid", source)
         self.assertNotIn("stop it before switching variants", source)
 
@@ -54,6 +55,24 @@ class H3Ref2VADeployTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("four unique GPUs", result.stderr)
+
+    def test_validate_config_rejects_venv_path_traversal(self) -> None:
+        script = Path(__file__).parents[1] / "deploy" / "minimax_h3_ref2va.sh"
+        environment = {
+            **os.environ,
+            "H3_ROOT": "/tmp/h3-safe-root",
+            "H3_VENV": "/tmp/h3-safe-root/../victim",
+        }
+
+        result = subprocess.run(
+            ["bash", str(script), "validate-config"],
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("H3_VENV must equal H3_ROOT/venv", result.stderr)
 
 
 if __name__ == "__main__":

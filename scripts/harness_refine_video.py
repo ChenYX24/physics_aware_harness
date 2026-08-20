@@ -11,12 +11,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from harness.core.artifact_schema import read_json
+from harness.core.workspace import workspace_root
 from harness.refinement.video_refiner import (
     ARK_MODEL_ENDPOINTS,
     RefinementJob,
     dry_run_plan,
     run_refinement,
     split_multiview_grid,
+    splice_from_repair_spec,
     splice_video,
     validate_comparison_jobs,
 )
@@ -50,6 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-frame", type=int)
     parser.add_argument("--end-frame", type=int)
     parser.add_argument("--mode", choices=("replace", "insert"))
+    parser.add_argument("--repair-spec", help="Derive a verified replace interval from a VideoRepairSpec.")
     parser.add_argument("--split-multiview", action="store_true", help="Split a row-major video grid into named views.")
     parser.add_argument("--input-grid")
     parser.add_argument("--output-dir")
@@ -69,6 +72,7 @@ def default_base_url(job: RefinementJob) -> str:
 
 def main() -> int:
     args = parse_args()
+    workspace = workspace_root()
     if args.split_multiview:
         if args.job or args.splice or args.validate_comparison:
             raise SystemExit("--split-multiview cannot be combined with a job, --splice, or --validate-comparison")
@@ -83,6 +87,7 @@ def main() -> int:
             columns=args.grid_columns,
             rows=args.grid_rows,
             manifest_path=manifest_path,
+            workspace=workspace,
         )
         print(json.dumps(result, indent=2, ensure_ascii=False, sort_keys=True))
         return 0
@@ -97,26 +102,38 @@ def main() -> int:
             "--source-video": args.source_video,
             "--replacement-video": args.replacement_video,
             "--output-video": args.output_video,
-            "--start-frame": args.start_frame,
-            "--end-frame": args.end_frame,
-            "--mode": args.mode,
         }
+        if not args.repair_spec:
+            required.update({"--start-frame": args.start_frame, "--end-frame": args.end_frame, "--mode": args.mode})
         missing = [name for name, value in required.items() if value is None]
         if missing:
             raise SystemExit(f"--splice requires {', '.join(missing)}")
+        if args.repair_spec and any(value is not None for value in (args.start_frame, args.end_frame, args.mode)):
+            raise SystemExit("--repair-spec derives the interval and cannot be combined with --start-frame, --end-frame, or --mode")
         output = Path(args.output_video)
         manifest_path = Path(args.manifest) if args.manifest else output.with_suffix(
             output.suffix + ".splice_manifest.json"
         )
-        result = splice_video(
-            args.source_video,
-            args.replacement_video,
-            output,
-            start_frame=args.start_frame,
-            end_frame=args.end_frame,
-            mode=args.mode,
-            manifest_path=manifest_path,
-        )
+        if args.repair_spec:
+            result = splice_from_repair_spec(
+                args.repair_spec,
+                args.source_video,
+                args.replacement_video,
+                output,
+                manifest_path=manifest_path,
+                workspace=workspace,
+            )
+        else:
+            result = splice_video(
+                args.source_video,
+                args.replacement_video,
+                output,
+                start_frame=args.start_frame,
+                end_frame=args.end_frame,
+                mode=args.mode,
+                manifest_path=manifest_path,
+                workspace=workspace,
+            )
         print(json.dumps(result, indent=2, ensure_ascii=False, sort_keys=True))
         return 0
     if not args.job:
@@ -148,6 +165,7 @@ def main() -> int:
             poll_interval=args.poll_interval,
             max_polls=args.max_polls,
             timeout=args.timeout,
+            workspace=workspace,
         )
     print(json.dumps(result, indent=2, ensure_ascii=False, sort_keys=True))
     return 0 if args.dry_run or result.get("status") == "succeeded" else 1

@@ -22,6 +22,7 @@ from harness.refinement.video_refiner import (
     dry_run_plan,
     run_refinement,
     split_multiview_grid,
+    splice_from_repair_spec,
     splice_video,
     validate_comparison_jobs,
 )
@@ -47,10 +48,26 @@ class FakeResponse:
 
 
 class VideoRefinerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.enterContext(patch.dict(os.environ, {"SIM_HARNESS_WORKSPACE": tempfile.gettempdir()}))
+
     def test_comparison_contract_enforces_shared_canonical_and_refiner_prompts(self) -> None:
         temporary = Path(self.enterContext(tempfile.TemporaryDirectory()))
         teacher_video = temporary / "ue.mp4"
         teacher_video.write_bytes(b"validated UE teacher")
+        quality_path = temporary / "quality_report.json"
+        quality_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "harness_run_quality_v1",
+                    "status": "pass",
+                    "hard_gate_passed": True,
+                    "hard_gate": {"passed": True},
+                    "run_dir": str(temporary),
+                }
+            ),
+            encoding="utf-8",
+        )
         teacher_receipt = temporary / "ue.teacher_validation.json"
         teacher_receipt.write_text(
             json.dumps(
@@ -59,6 +76,8 @@ class VideoRefinerTests(unittest.TestCase):
                     "status": "pass",
                     "input_sha256": hashlib.sha256(teacher_video.read_bytes()).hexdigest(),
                     "canonical_prompt_sha256": prompt_digest("One canonical billiards break prompt."),
+                    "quality_report_path": str(quality_path),
+                    "quality_report_sha256": hashlib.sha256(quality_path.read_bytes()).hexdigest(),
                     "checks": {
                         "canonical_prompt_match": "pass",
                         "event_contract": "pass",
@@ -106,6 +125,7 @@ class VideoRefinerTests(unittest.TestCase):
                 "model": "MiniMaxAI/MiniMax-H3",
                 "prompt": "One canonical billiards break prompt.",
                 "prompt_stage_id": "canonical_generation_prompt",
+                "job_role": "prompt_generation",
                 "use_reference_video": False,
             }
         )
@@ -127,6 +147,20 @@ class VideoRefinerTests(unittest.TestCase):
         report = validate_comparison_jobs([direct, refined])
 
         self.assertEqual(report["status"], "pass")
+        unclassified_reference = RefinementJob.from_dict(
+            {
+                **common,
+                "job_id": "unclassified-reference",
+                "provider": "ark_seedance",
+                "model": "ep-test",
+                "prompt": "One canonical billiards break prompt.",
+                "prompt_stage_id": "canonical_generation_prompt",
+                "reference_video_uri": "https://media.example/error.mp4",
+                "use_reference_video": True,
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "explicit direct_repair or ue_refiner"):
+            validate_comparison_jobs([unclassified_reference])
         with self.assertRaisesRegex(ValueError, "must equal its prompt lineage stage"):
             RefinementJob.from_dict(
                 {
@@ -221,6 +255,8 @@ class VideoRefinerTests(unittest.TestCase):
         job = RefinementJob.from_dict(data)
         payload = build_payload(job)
         self.assertEqual((payload["ratio"], payload["duration"]), ("adaptive", -1))
+        with self.assertRaisesRegex(ValueError, "cannot be converted to prompt-only"):
+            job.with_reference_video(False)
         with self.assertRaisesRegex(ValueError, "Seedance 2.5 adaptive"):
             RefinementJob.from_dict({**data, "model": ARK_DEFAULT_MODEL})
 
@@ -827,6 +863,52 @@ class VideoRefinerTests(unittest.TestCase):
                     manifest_path=root / "manifest.json",
                     opener=lambda *_args, **_kwargs: self.fail("network should not be called"),
                 )
+
+            with self.assertRaisesRegex(ValueError, "external Harness workspace"):
+                run_refinement(
+                    job,
+                    base_url="https://ark.cn-beijing.volces.com/api/v3",
+                    manifest_path=root / "manifest.json",
+                    opener=lambda *_args, **_kwargs: self.fail("network should not be called"),
+                    workspace=root / "workspace",
+                )
+
+    def test_repair_spec_binds_source_and_derives_splice_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            spec_path = root / "repair.json"
+            spec_path.write_text("{}", encoding="utf-8")
+            source = root / "source.mp4"
+            source.write_bytes(b"source")
+            expected_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+            spec = {
+                "repair_id": "repair-a",
+                "source": {"sha256": expected_hash, "fps": 24, "duration_s": 5.0},
+                "edit_plan": {"source_replacement_frame_range": [12, 36]},
+            }
+            manifest = {"schema_version": "harness_video_splice_manifest_v1", "status": "succeeded"}
+            with (
+                patch("harness.refinement.video_refiner.load_video_repair_spec", return_value=spec),
+                patch(
+                    "harness.refinement.video_refiner._probe_video",
+                    return_value={"sha256": expected_hash, "fps": "24/1", "duration_seconds": 5.0},
+                ),
+                patch("harness.refinement.video_refiner.splice_video", return_value=manifest) as splice,
+                patch("harness.refinement.video_refiner.write_json") as write,
+            ):
+                result = splice_from_repair_spec(
+                    spec_path,
+                    source,
+                    root / "replacement.mp4",
+                    root / "output.mp4",
+                    manifest_path=root / "manifest.json",
+                    workspace=root,
+                )
+
+            self.assertEqual(result["repair_spec"]["source_replacement_frame_range"], [12, 36])
+            self.assertEqual(splice.call_args.kwargs["start_frame"], 12)
+            self.assertEqual(splice.call_args.kwargs["end_frame"], 36)
+            write.assert_called_once()
 
     def test_cli_dry_run_compares_reference_payloads_without_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

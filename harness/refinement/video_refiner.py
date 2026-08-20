@@ -19,6 +19,8 @@ from urllib.request import Request, urlopen
 
 from harness.core.artifact_schema import read_json, write_json
 from harness.core.prompt_lineage import prompt_digest, prompt_stage_text, validate_prompt_lineage
+from harness.core.video_repair_spec import load_video_repair_spec
+from harness.core.workspace import workspace_root
 
 
 JOB_SCHEMA_VERSION = "harness_video_refinement_job_v1"
@@ -30,6 +32,7 @@ ARK_MODEL_ENDPOINTS = {
     "2.5": "ep-20260807200104-j8rs8",
 }
 ARK_DEFAULT_MODEL = ARK_MODEL_ENDPOINTS["2.0-fast"]
+JOB_ROLES = {"prompt_generation", "direct_repair", "ue_refiner"}
 
 
 @dataclass(frozen=True)
@@ -101,6 +104,8 @@ class RefinementJob:
         prompt_lineage = data.get("prompt_lineage")
         prompt_stage_id = data.get("prompt_stage_id")
         job_role = str(data["job_role"]) if data.get("job_role") else None
+        if job_role is not None and job_role not in JOB_ROLES:
+            raise ValueError(f"job_role must be one of {sorted(JOB_ROLES)}")
         teacher_validation_path = data.get("teacher_validation_path")
         if teacher_validation_path is not None and (
             not isinstance(teacher_validation_path, str) or not teacher_validation_path.strip()
@@ -149,6 +154,8 @@ class RefinementJob:
         )
 
     def with_reference_video(self, enabled: bool) -> RefinementJob:
+        if not enabled and (self.duration_seconds == -1 or self.aspect_ratio == "adaptive"):
+            raise ValueError("adaptive Seedance 2.5 reference edits cannot be converted to prompt-only jobs")
         return replace(self, use_reference_video=enabled)
 
     def with_model(self, model: str) -> RefinementJob:
@@ -263,6 +270,10 @@ def validate_comparison_jobs(jobs: list[RefinementJob]) -> dict[str, Any]:
     }
     if len(canonical_prompts) != 1:
         raise ValueError("comparison jobs must share one canonical generation prompt")
+    if any(job.use_reference_video and job.job_role not in {"direct_repair", "ue_refiner"} for job in jobs):
+        raise ValueError("reference-conditioned comparison jobs require an explicit direct_repair or ue_refiner role")
+    if any(not job.use_reference_video and job.job_role != "prompt_generation" for job in jobs):
+        raise ValueError("prompt-only comparison jobs require the prompt_generation role")
     prompt_only = [job for job in jobs if not job.use_reference_video]
     direct_repairs = [job for job in jobs if job.job_role == "direct_repair"]
     if prompt_only and direct_repairs:
@@ -298,6 +309,9 @@ def validate_ue_teacher(job: RefinementJob) -> dict[str, Any]:
     if not job.input_video.is_file():
         raise ValueError(f"UE teacher video does not exist: {job.input_video}")
     receipt = read_json(job.teacher_validation_path)
+    quality_path_value = receipt.get("quality_report_path")
+    quality_path = Path(quality_path_value) if isinstance(quality_path_value, str) else None
+    quality = read_json(quality_path) if quality_path and quality_path.is_file() else {}
     required_checks = {"canonical_prompt_match", "event_contract", "physics_hard_gate", "no_penetration"}
     checks = receipt.get("checks")
     canonical_prompt = prompt_stage_text(job.prompt_lineage or {}, str((job.prompt_lineage or {}).get("canonical_stage_id") or ""))
@@ -306,6 +320,14 @@ def validate_ue_teacher(job: RefinementJob) -> dict[str, Any]:
         or receipt.get("status") != "pass"
         or receipt.get("input_sha256") != _sha256(job.input_video)
         or receipt.get("canonical_prompt_sha256") != prompt_digest(canonical_prompt)
+        or quality_path is None
+        or receipt.get("quality_report_sha256") != _sha256(quality_path)
+        or quality.get("schema_version") != "harness_run_quality_v1"
+        or quality.get("status") != "pass"
+        or quality.get("hard_gate_passed") is not True
+        or not isinstance(quality.get("hard_gate"), dict)
+        or quality["hard_gate"].get("passed") is not True
+        or Path(str(quality.get("run_dir") or "")).resolve() != quality_path.parent.resolve()
         or not isinstance(checks, dict)
         or any(checks.get(name) != "pass" for name in required_checks)
     ):
@@ -371,6 +393,7 @@ def split_multiview_grid(
     manifest_path: str | Path | None = None,
     ffmpeg: str = "ffmpeg",
     ffprobe: str = "ffprobe",
+    workspace: str | Path | None = None,
 ) -> dict[str, Any]:
     source_path = Path(input_video)
     destination = Path(output_dir)
@@ -380,6 +403,8 @@ def split_multiview_grid(
         raise ValueError("view_ids must fit inside a positive rows-by-columns grid")
     if len(set(view_ids)) != len(view_ids) or any(not re.fullmatch(r"[A-Za-z0-9_-]+", view) for view in view_ids):
         raise ValueError("view_ids must be unique filesystem-safe names")
+    target_manifest = Path(manifest_path) if manifest_path else destination / "split_manifest.json"
+    _validate_workspace_outputs(workspace, target_manifest, *(destination / f"{view}.mp4" for view in view_ids))
     source = _probe_video(source_path, ffprobe)
     cell_width = source["width"] // columns // 2 * 2
     cell_height = source["height"] // rows // 2 * 2
@@ -410,7 +435,6 @@ def split_multiview_grid(
         "grid": {"columns": columns, "rows": rows, "cell_width": cell_width, "cell_height": cell_height},
         "outputs": outputs,
     }
-    target_manifest = Path(manifest_path) if manifest_path else destination / "split_manifest.json"
     if target_manifest.resolve() in {source_path.resolve(), *(Path(item["path"]).resolve() for item in outputs)}:
         raise ValueError("split manifest must not overwrite source or output videos")
     write_json(target_manifest, result)
@@ -466,11 +490,13 @@ def splice_video(
     manifest_path: str | Path,
     ffmpeg: str = "ffmpeg",
     ffprobe: str = "ffprobe",
+    workspace: str | Path | None = None,
 ) -> dict[str, Any]:
     source = Path(source)
     replacement = Path(replacement)
     output = Path(output)
     manifest_path = Path(manifest_path)
+    _validate_workspace_outputs(workspace, output, manifest_path)
     if not source.is_file() or not replacement.is_file():
         raise ValueError("source and replacement videos must exist")
     if output.resolve() in {source.resolve(), replacement.resolve()}:
@@ -621,6 +647,61 @@ def splice_video(
         temporary.unlink(missing_ok=True)
 
 
+def splice_from_repair_spec(
+    repair_spec_path: str | Path,
+    source: str | Path,
+    replacement: str | Path,
+    output: str | Path,
+    *,
+    manifest_path: str | Path,
+    ffmpeg: str = "ffmpeg",
+    ffprobe: str = "ffprobe",
+    workspace: str | Path | None = None,
+) -> dict[str, Any]:
+    spec_path = Path(repair_spec_path)
+    spec = load_video_repair_spec(spec_path)
+    source_path = Path(source)
+    source_info = _probe_video(source_path, ffprobe)
+    expected = spec["source"]
+    expected_fps = Fraction(str(expected["fps"]))
+    actual_fps = Fraction(source_info["fps"])
+    duration_tolerance = max(float(1 / expected_fps), 0.05)
+    if (
+        source_info["sha256"] != expected["sha256"]
+        or actual_fps != expected_fps
+        or abs(source_info["duration_seconds"] - float(expected["duration_s"])) > duration_tolerance
+    ):
+        raise ValueError("source video does not match repair-spec hash, FPS, and duration")
+    edit_plan = spec.get("edit_plan")
+    frame_range = edit_plan.get("source_replacement_frame_range") if isinstance(edit_plan, dict) else None
+    if (
+        not isinstance(frame_range, list)
+        or len(frame_range) != 2
+        or any(isinstance(value, bool) or not isinstance(value, int) for value in frame_range)
+    ):
+        raise ValueError("repair spec requires an integer source_replacement_frame_range")
+    manifest = splice_video(
+        source_path,
+        replacement,
+        output,
+        start_frame=frame_range[0],
+        end_frame=frame_range[1],
+        mode="replace",
+        manifest_path=manifest_path,
+        ffmpeg=ffmpeg,
+        ffprobe=ffprobe,
+        workspace=workspace,
+    )
+    manifest["repair_spec"] = {
+        "path": str(spec_path),
+        "sha256": _sha256(spec_path),
+        "repair_id": spec["repair_id"],
+        "source_replacement_frame_range": frame_range,
+    }
+    write_json(manifest_path, manifest)
+    return manifest
+
+
 def _redact(value: Any, *, key: str = "") -> Any:
     if key.lower() in {"api_key", "authorization", "token", "access_token"}:
         return "<redacted>"
@@ -706,7 +787,25 @@ def _validate_ark_base_url(base_url: str) -> None:
         raise ValueError("Ark base URL must use an approved HTTPS /api/v3 endpoint")
 
 
-def _validate_refinement_paths(job: RefinementJob, manifest_path: Path, prompt_lineage_path: Path | None = None) -> None:
+def _validate_workspace_outputs(workspace: str | Path | None, *paths: Path) -> None:
+    root = workspace_root(workspace)
+    for path in paths:
+        resolved = path.expanduser().resolve(strict=False)
+        if path.is_symlink():
+            raise ValueError(f"runtime output must not be a symlink: {path}")
+        try:
+            resolved.relative_to(root)
+        except ValueError as error:
+            raise ValueError(f"runtime output must stay inside the external Harness workspace: {path}") from error
+
+
+def _validate_refinement_paths(
+    job: RefinementJob,
+    manifest_path: Path,
+    prompt_lineage_path: Path | None = None,
+    *,
+    workspace: str | Path | None = None,
+) -> None:
     paths = [job.input_video.resolve(), job.output_video.resolve(), manifest_path.resolve()]
     if prompt_lineage_path is not None:
         paths.append(prompt_lineage_path.resolve())
@@ -714,6 +813,12 @@ def _validate_refinement_paths(job: RefinementJob, manifest_path: Path, prompt_l
         paths.append(job.teacher_validation_path.resolve())
     if len(set(paths)) != len(paths):
         raise ValueError("input, output, manifest, prompt lineage, and teacher validation paths must be distinct")
+    _validate_workspace_outputs(
+        workspace,
+        job.output_video,
+        manifest_path,
+        *((prompt_lineage_path,) if prompt_lineage_path is not None else ()),
+    )
 
 
 def _request_json(
@@ -785,6 +890,7 @@ def run_refinement(
     poll_interval: float = 1.0,
     max_polls: int = 720,
     timeout: float = 60.0,
+    workspace: str | Path | None = None,
 ) -> dict[str, Any]:
     if not job.input_video.is_file():
         raise ValueError(f"input video does not exist: {job.input_video}")
@@ -801,7 +907,7 @@ def run_refinement(
         if job.prompt_lineage is not None
         else None
     )
-    _validate_refinement_paths(job, manifest_path, prompt_lineage_path)
+    _validate_refinement_paths(job, manifest_path, prompt_lineage_path, workspace=workspace)
     root = base_url.rstrip("/")
     if job.provider == "h3_sglang":
         _validate_h3_base_url(job, root)

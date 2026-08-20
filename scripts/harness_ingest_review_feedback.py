@@ -11,7 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from harness.core.artifact_schema import read_json, write_json
-from harness.core.review_feedback import compile_review_feedback
+from harness.core.review_feedback import compile_review_feedback, verified_execution_evidence_from_run_dirs
 from harness.core.workspace import workspace_root
 
 
@@ -22,13 +22,15 @@ def main() -> int:
     parser.add_argument("--weekly-json", help="Defaults next to --output as weekly_candidates.json.")
     parser.add_argument("--weekly-markdown", help="Defaults next to --output as weekly_candidates.md.")
     parser.add_argument(
-        "--verified-execution-statuses",
-        help="Optional JSON object from a trusted manifest/gate verifier; browser-reported status is not regression evidence.",
+        "--verified-run-dir",
+        action="append",
+        default=[],
+        help="Repeat for local run directories containing case_spec.json and hard-gate quality_report.json evidence.",
     )
     args = parser.parse_args()
     output = Path(args.output) if args.output else workspace_root() / "review/learned_constraints/active_review_feedback.json"
-    verified = read_json(args.verified_execution_statuses) if args.verified_execution_statuses else None
-    compiled = compile_review_feedback(read_json(args.decisions), verified_execution_statuses=verified)
+    verified = verified_execution_evidence_from_run_dirs(args.verified_run_dir)
+    compiled = compile_review_feedback(read_json(args.decisions), verified_execution_evidence=verified)
     weekly_json = Path(args.weekly_json) if args.weekly_json else output.with_name("weekly_candidates.json")
     weekly_markdown = Path(args.weekly_markdown) if args.weekly_markdown else output.with_name("weekly_candidates.md")
     write_json(output, compiled)

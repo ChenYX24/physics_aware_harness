@@ -29,6 +29,13 @@ from harness.runtime.execution_profile import EXECUTION_PROFILES, execution_prof
 from harness.runtime.ue_backend import UEBackend, UEBackendUnavailable
 
 
+def reject_blocked_execution(case: CaseSpec | CaseSpecV2) -> None:
+    backend_options = case.data.get("backend_options")
+    if isinstance(backend_options, dict) and backend_options.get("execution_status") == "blocked":
+        reason = str(backend_options.get("blocked_reason") or "case execution is blocked by its contract")
+        raise RuntimeError(reason)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one harness case spec with a selected backend.")
     parser.add_argument("case_spec", nargs="?", help="Path to cases/.../*.json")
@@ -116,6 +123,7 @@ def main() -> int:
             source_case = generation.case_spec
     else:
         source_case = load_case_spec_document(case_path)
+    reject_blocked_execution(source_case)
     is_v2 = isinstance(source_case, CaseSpecV2)
     if profile:
         requested_views = list(profile.views)
