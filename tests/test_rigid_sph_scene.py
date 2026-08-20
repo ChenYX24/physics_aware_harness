@@ -193,11 +193,17 @@ class RigidSPHSceneTests(unittest.TestCase):
         self.assertNotIn("container_transfer", source)
         self.assertNotIn("container_surface_spill", source)
         self.assertNotIn("transfer_mode", source)
+        backend_source = paths[0].read_text(encoding="utf-8")
+        verifier_source = paths[1].read_text(encoding="utf-8")
+        self.assertNotIn("harness_genesis_fluid.py", backend_source)
+        self.assertNotIn("rigid_spheres", backend_source)
+        self.assertNotIn("minimum_float_sink_separation", verifier_source)
+        self.assertNotIn("verify_rigid_fluid_response", verifier_source)
 
     def test_backend_selects_contract_executor_without_large_cli_payload(self) -> None:
         case = load_case_spec(TRANSFER_CASE)
         parameters = genesis_parameters(case.data)
-        command = genesis_command(Path("/isolated/python"), Path("/runs/scene"), case.data["backend_options"], parameters)
+        command = genesis_command(Path("/isolated/python"), Path("/runs/scene"), parameters)
 
         self.assertIn("harness_genesis_rigid_sph.py", command[1])
         self.assertEqual(command[command.index("--case") + 1], "/runs/scene/case_spec.json")

@@ -352,14 +352,27 @@ class FluidBatchVerifierTests(unittest.TestCase):
 
 
 def particle_cache() -> dict:
-    surface = {"path": "surface.obj", "vertex_count": 3, "triangle_count": 1, "topology_consistent": True}
+    surface = {
+        "path": "surface.obj",
+        "vertex_count": 3,
+        "triangle_count": 1,
+        "topology_consistent": True,
+        "bounds_m": {"min_m": [0.0, 0.0, 0.9], "max_m": [0.1, 0.0, 1.0]},
+    }
     return {
         "schema_version": "harness_particle_cache_v1",
         "solver": {"gravity_m_s2": [0, 0, -9.81]},
         "particles": {"count": 2, "stable_ids": [0, 1]},
+        "environment": {
+            "type": "rigid_sph_scene",
+            "workspace_bounds_m": {"min_m": [-1.0, -1.0, -0.1], "max_m": [1.0, 1.0, 2.0]},
+            "penetration_tolerance_m": 0.01,
+            "measurements": [{"id": "level", "type": "axis_span", "axes": ["z"]}],
+            "assertions": [{"id": "bounded_level", "measurement_id": "level", "reduction": "final", "operator": "<=", "value": 1.0}],
+        },
         "frames": [
-            {"frame": 0, "time_s": 0.0, "positions_m": [[0, 0, 1], [0.1, 0, 1]], "velocities_m_s": [[0, 0, 0], [0, 0, 0]], "surface": surface},
-            {"frame": 1, "time_s": 0.1, "positions_m": [[0, 0, 0.9], [0.1, 0, 0.9]], "velocities_m_s": [[0, 0, -1], [0, 0, -1]], "surface": surface},
+            {"frame": 0, "time_s": 0.0, "positions_m": [[0, 0, 1], [0.1, 0, 1]], "velocities_m_s": [[0, 0, 0], [0, 0, 0]], "measurements": {"level": 0.0}, "surface": surface},
+            {"frame": 1, "time_s": 0.1, "positions_m": [[0, 0, 0.9], [0.1, 0, 0.9]], "velocities_m_s": [[0, 0, -1], [0, 0, -1]], "measurements": {"level": 0.0}, "surface": surface},
         ],
     }
 

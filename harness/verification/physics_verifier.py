@@ -8,6 +8,7 @@ from harness.core.artifact_schema import read_json, write_json
 from harness.core.physics_contract import execution_capability_id, infer_scene_domain
 from harness.core.stage_result import failure_stage_result, stage_result_from_verifier_report, write_stage_result
 from harness.core.verifier_schema import verifier_report
+from harness.runtime.rigid_sph_scene import compile_rigid_sph_scene
 from harness.verification.diagnosis import repair_suggestion
 from harness.verification.particle_cache_verifier import verify_particle_cache
 from harness.verification.trajectory_assertion_verifier import verify_trajectory_assertions
@@ -140,7 +141,11 @@ def verify_fluid_run(case_spec: dict[str, Any], run_dir: Path) -> dict[str, Any]
     candidates = (run_dir / "particle_cache.json", run_dir / "genesis_sph_output" / "particle_cache.json")
     cache_path = next((path for path in candidates if path.is_file()), None)
     cache = read_json(cache_path) if cache_path else {}
-    particle_report = verify_particle_cache(cache, root=cache_path.parent if cache_path else run_dir)
+    particle_report = verify_particle_cache(
+        cache,
+        root=cache_path.parent if cache_path else run_dir,
+        expected_contract=compile_rigid_sph_scene(case_spec),
+    )
     first = (particle_report.get("failures") or [None])[0]
     failure_type = str(first["code"]) if isinstance(first, dict) else None
     first_failure = None

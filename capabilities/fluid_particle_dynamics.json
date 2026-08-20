@@ -33,19 +33,15 @@
   ],
   "required_assets": [
     "fluid volume",
-    "rigid basin colliders"
+    "declared rigid colliders"
   ],
   "verifier_rules": [
     "Particle count and stable identities remain constant.",
     "Every output frame has a non-empty closed manifold surface mesh.",
-    "Particles remain inside the declared basin within tolerance.",
-    "Gravity produces a lower final center of mass than the initial state.",
-    "For prefilled-water buoyancy cases, low effective-density bodies remain above the basin floor, dense bodies reach it, and the declared float/sink separation is observed.",
-    "A declared splash must raise fluid particles above the initial liquid surface by the configured minimum.",
+    "Particles and reconstructed surfaces remain inside the declared workspace bounds within tolerance.",
     "A distinctive fluid material remains observable in RGB before a smoke run can promote to a complete candidate.",
     "Instance segmentation with an instance mapping declares and satisfies palette closure.",
     "Every camera declared dynamic has non-zero runtime motion.",
-    "A declared uniform or swirling initial velocity field must meet its speed, direction, displacement, or rise thresholds.",
     "Every rigid-SPH case declares measurements and assertions as data; the verifier applies only generic time-series reductions and comparisons.",
     "Visible rigid-body assets carry content hashes and declare asset_geometry_match=true for their solver collision primitives.",
     "Any non-uniform asset adaptation records scale_xyz in asset lineage and must preserve the declared solver geometry rather than only sharing a coarse shape label.",
@@ -56,24 +52,15 @@
   "failure_taxonomy": [
     "particle_count_changed",
     "non_finite_particle_state",
+    "particle_environment_contract",
+    "particle_contract_mismatch",
+    "declared_measurement_contract_missing",
     "surface_mesh_empty",
     "surface_topology_invalid",
     "container_penetration",
-    "gravity_direction_not_observed",
     "rgb_expected_subject_not_observable",
     "segmentation_palette_contract_missing",
     "dynamic_camera_static",
-    "initial_flow_speed_too_low",
-    "initial_flow_direction_mismatch",
-    "initial_swirl_direction_mismatch",
-    "horizontal_flow_displacement_too_low",
-    "jet_rise_too_low",
-    "surface_component_evidence_missing",
-    "final_surface_too_fragmented",
-    "surface_shape_evidence_missing",
-    "surface_volume_evidence_missing",
-    "final_surface_too_stringy",
-    "final_surface_volume_drift",
     "rigid_collision_invalid",
     "asset_geometry_mismatch",
     "declared_measurement_missing",
@@ -97,14 +84,10 @@
     "Invalidate and re-import the Unreal surface sequence whenever particle truth or any reconstructed mesh hash changes."
   ],
   "smoke_cases": [
-    "cases/fluid/drop_in_liquid/rubber_and_lead_balls.json",
-    "cases/fluid/fluid_drop_in_basin.json",
-    "cases/fluid/container_fill_stirring/v001_swirl_release.json",
-    "cases/fluid/container_to_container_transfer/v002_wine_glass_to_teacup.json"
+    "cases/fluid/container_to_container_transfer/v002_wine_glass_to_teacup.json",
+    "cases/fluid/container_to_surface_spill/v001_coffee_mug_table_spill.json"
   ],
-  "regression_cases": [
-    "cases/fluid/negative_no_gravity_response.json"
-  ],
+  "regression_cases": [],
   "capability_type": "physics_constraint",
   "stage_ids": [
     "runtime_backend_execution",
