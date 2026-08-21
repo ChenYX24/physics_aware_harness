@@ -569,7 +569,9 @@ class CodexAppServerReviewer:
             "use an array index, repeat a path, or suggest a broad parent object. suggested_adjustments evidence_refs contain artifact_id "
             "strings only. "
             "For trajectory evidence, inspect trajectory_summary.sampled_frames, readable_ranges, and state_transitions; "
-            "a trajectory_range citation must use the exact start_time_s and end_time_s of one declared readable range."
+            "for deforming surfaces, treat evidence_summary.json deformable_state_truth as authoritative over a fixed replay "
+            "Actor transform, and use explicit_asset_bindings for required user-explicit asset identity. "
+            "A trajectory_range citation must use the exact start_time_s and end_time_s of one declared readable range."
         )
         items: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
         allowed_kinds = {"keyframe", "multi_view_montage"}

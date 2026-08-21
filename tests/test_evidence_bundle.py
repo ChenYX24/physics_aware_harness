@@ -147,6 +147,144 @@ class EvidenceBundleTests(unittest.TestCase):
         self.assertEqual(len([row for row in artifacts if row["kind"] == "keyframe"]), 3)
         self.assertEqual([row for row in artifacts if row["kind"] == "multi_view_montage"], [])
 
+    def test_bundle_uses_particle_state_for_deforming_surface_evidence(self) -> None:
+        write_json(
+            self.run_dir / "trajectory.json",
+            [
+                {
+                    "frame": index,
+                    "time_s": index * 0.5,
+                    "objects": {
+                        "fluid_surface": {
+                            "position": [0.0, 0.0, -0.05],
+                            "velocity": [0.0, 0.0, 0.0],
+                        }
+                    },
+                }
+                for index in range(3)
+            ],
+        )
+        write_json(
+            self.run_dir / "particle_cache.json",
+            {
+                "schema_version": "harness_particle_cache_v1",
+                "frames": [
+                    {
+                        "frame": 0,
+                        "time_s": 0.0,
+                        "positions_m": [[0.0, 0.0, 0.2], [0.1, 0.0, 0.2]],
+                        "velocities_m_s": [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+                        "measurements": {"inside": 1.0},
+                    },
+                    {
+                        "frame": 1,
+                        "time_s": 0.5,
+                        "positions_m": [[0.2, 0.0, 0.1], [0.4, 0.0, 0.1]],
+                        "velocities_m_s": [[0.4, 0.0, -0.2], [0.6, 0.0, -0.2]],
+                        "measurements": {"inside": 0.5},
+                    },
+                    {
+                        "frame": 2,
+                        "time_s": 1.0,
+                        "positions_m": [[0.5, 0.0, 0.0], [0.8, 0.0, 0.0]],
+                        "velocities_m_s": [[0.6, 0.0, 0.0], [0.8, 0.0, 0.0]],
+                        "measurements": {"inside": 0.0},
+                    },
+                ],
+            },
+        )
+
+        build_evidence_bundle(
+            job_id="job_deformable_evidence",
+            attempt=self.attempt,
+            attempt_dir=self.attempt_dir,
+            candidate_run_dir=self.run_dir,
+            request=self.request,
+            intent_contract=self.intent,
+            result_provenance=self.result_provenance,
+            ffmpeg="/usr/bin/true",
+            command_runner=self.fake_ffmpeg,
+        )
+
+        summary = read_json(self.attempt_dir / "evidence_bundle" / "evidence_summary.json")
+        deformable = summary["deformable_state_truth"]
+        self.assertEqual(deformable["authority"], "particle_cache")
+        self.assertEqual(deformable["subject_id"], "fluid_surface")
+        self.assertEqual(deformable["sampled_frames"][0]["centroid_m"], [0.05, 0.0, 0.2])
+        self.assertEqual(deformable["sampled_frames"][-1]["centroid_m"], [0.65, 0.0, 0.0])
+        self.assertEqual(deformable["sampled_frames"][-1]["measurements"], {"inside": 0.0})
+        self.assertGreater(deformable["sampled_frames"][-1]["max_speed_m_s"], 0.0)
+
+    def test_bundle_exposes_required_user_asset_identity(self) -> None:
+        source_uri = "local-input://sha256/" + "a" * 64 + "/required.fbx"
+        self.case_spec["objects"] = [
+            {
+                "id": "required_asset",
+                "asset": {
+                    "acquisition": {
+                        "requirement": "required",
+                        "origin": "user_explicit",
+                        "source_uri_hint": source_uri,
+                    }
+                },
+            }
+        ]
+        write_json(self.attempt_dir / "case_spec.json", self.case_spec)
+        self.attempt["case_spec_digest"] = stable_digest(self.case_spec)
+        write_json(
+            self.run_dir / "asset_resolution.json",
+            {
+                "assets": [
+                    {
+                        "intent": {"object_id": "required_asset"},
+                        "selection_reason": "required_source_uri_exact_match",
+                        "selected_asset": {
+                            "asset_id": "local_input.required",
+                            "source_uri": source_uri,
+                            "sha256": "a" * 64,
+                            "ue_path": "/Game/Generated/Required.Required",
+                            "geometry_registration": {"status": "verified"},
+                        },
+                    }
+                ]
+            },
+        )
+        write_json(
+            self.run_dir / "provider_input_manifest.json",
+            {
+                "inputs": [
+                    {
+                        "input_id": "local_asset_required",
+                        "source_uri": source_uri,
+                        "sha256": "a" * 64,
+                        "local_path": "/fixtures/required.fbx",
+                    }
+                ]
+            },
+        )
+
+        build_evidence_bundle(
+            job_id="job_explicit_asset_evidence",
+            attempt=self.attempt,
+            attempt_dir=self.attempt_dir,
+            candidate_run_dir=self.run_dir,
+            request=self.request,
+            intent_contract=self.intent,
+            result_provenance=self.result_provenance,
+            ffmpeg="/usr/bin/true",
+            command_runner=self.fake_ffmpeg,
+        )
+
+        summary = read_json(self.attempt_dir / "evidence_bundle" / "evidence_summary.json")
+        binding = summary["explicit_asset_bindings"]["items"][0]
+        self.assertEqual(binding["object_id"], "required_asset")
+        self.assertEqual(binding["asset_id"], "local_input.required")
+        self.assertEqual(binding["source_uri"], source_uri)
+        self.assertEqual(binding["sha256"], "a" * 64)
+        self.assertEqual(binding["selection_reason"], "required_source_uri_exact_match")
+        self.assertEqual(binding["input_local_path"], "/fixtures/required.fbx")
+        self.assertEqual(binding["geometry_registration_status"], "verified")
+
     def test_declared_contact_ignores_earlier_contact_and_preserves_constraint_states(self) -> None:
         write_json(
             self.run_dir / "trajectory.json",

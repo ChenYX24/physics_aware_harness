@@ -128,6 +128,12 @@ def build_evidence_bundle(
         )
 
     trajectory_summary = _trajectory_summary(attempt_dir, trajectory_path, frames, timeline, selection)
+    deformable_state_truth = _deformable_state_truth(attempt_dir, run_dir, trajectory_summary)
+    explicit_asset_bindings = _explicit_asset_bindings(
+        attempt_dir,
+        run_dir,
+        snapshots["case_spec"],
+    )
     summary_path = bundle_dir / "evidence_summary.json"
     write_json(
         summary_path,
@@ -137,10 +143,12 @@ def build_evidence_bundle(
             "semantic_requirements": semantic_review_requirements(intent_contract, intent_amendments),
             "event_selection": selection,
             "trajectory": trajectory_summary,
+            "deformable_state_truth": deformable_state_truth,
             "constraint_states": _constraint_state_summary(frames, trajectory_summary),
             "contacts": timeline,
             "technical_gates": technical_gates,
             "result_provenance": dict(result_provenance),
+            "explicit_asset_bindings": explicit_asset_bindings,
         },
     )
     artifacts.append(_bundle_artifact(bundle_dir, "evidence_summary", "structured_summary", summary_path, source_ref=None))
@@ -800,6 +808,170 @@ def _trajectory_summary(
         "sampled_frames": samples,
         "readable_ranges": readable_ranges,
         "state_transitions": transitions[:_MAX_STATE_TRANSITIONS],
+    }
+
+
+def _deformable_state_truth(
+    attempt_dir: Path,
+    run_dir: Path,
+    trajectory_summary: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    path = run_dir / "particle_cache.json"
+    if not path.is_file():
+        return None
+    payload = read_json(path)
+    raw_frames = payload.get("frames") if isinstance(payload, Mapping) else None
+    frames = [row for row in raw_frames or [] if isinstance(row, Mapping)] if isinstance(raw_frames, list) else []
+    if not frames:
+        return None
+
+    sampled: list[dict[str, Any]] = []
+    for trajectory_sample in trajectory_summary.get("sampled_frames") or []:
+        if not isinstance(trajectory_sample, Mapping):
+            continue
+        trajectory_time = _number_or_none(trajectory_sample.get("time_s"))
+        if trajectory_time is None:
+            continue
+        frame = min(
+            frames,
+            key=lambda row: abs(float(_number_or_none(row.get("time_s")) or 0.0) - trajectory_time),
+        )
+        positions = _finite_vectors(frame.get("positions_m"), width=3)
+        if not positions:
+            continue
+        velocities = _finite_vectors(frame.get("velocities_m_s"), width=3)
+        speeds = [math.sqrt(sum(component * component for component in value)) for value in velocities]
+        sampled.append(
+            {
+                "trajectory_frame_index": int(trajectory_sample["frame_index"]),
+                "particle_frame_index": _integer(frame.get("frame"), default=len(sampled)),
+                "time_s": float(trajectory_time),
+                "particle_time_s": float(_number_or_none(frame.get("time_s")) or 0.0),
+                "particle_count": len(positions),
+                "centroid_m": [sum(value[axis] for value in positions) / len(positions) for axis in range(3)],
+                "bounds_m": {
+                    "min": [min(value[axis] for value in positions) for axis in range(3)],
+                    "max": [max(value[axis] for value in positions) for axis in range(3)],
+                },
+                "mean_speed_m_s": sum(speeds) / len(speeds) if speeds else 0.0,
+                "max_speed_m_s": max(speeds) if speeds else 0.0,
+                "measurements": dict(frame.get("measurements") or {})
+                if isinstance(frame.get("measurements"), Mapping)
+                else {},
+            }
+        )
+    if not sampled:
+        return None
+    object_ids = set(str(value) for value in trajectory_summary.get("objects") or [])
+    return {
+        "schema_version": "harness_deformable_state_summary_v1",
+        "authority": "particle_cache",
+        "subject_id": "fluid_surface" if "fluid_surface" in object_ids else "deformable_surface",
+        "source_path": path.resolve().relative_to(attempt_dir).as_posix(),
+        "source_sha256": _sha256_file(path),
+        "frame_count": len(frames),
+        "sampled_frames": sampled,
+    }
+
+
+def _finite_vectors(value: Any, *, width: int) -> list[list[float]]:
+    if not isinstance(value, list):
+        return []
+    result: list[list[float]] = []
+    for row in value:
+        if not isinstance(row, (list, tuple)) or len(row) != width:
+            continue
+        vector = [_number_or_none(component) for component in row]
+        if all(component is not None for component in vector):
+            result.append([float(component) for component in vector])
+    return result
+
+
+def _explicit_asset_bindings(
+    attempt_dir: Path,
+    run_dir: Path,
+    case_spec: Mapping[str, Any],
+) -> dict[str, Any]:
+    resolution_path = run_dir / "asset_resolution.json"
+    input_manifest_path = run_dir / "provider_input_manifest.json"
+    resolution = read_json(resolution_path) if resolution_path.is_file() else {}
+    input_manifest = read_json(input_manifest_path) if input_manifest_path.is_file() else {}
+    resolution_rows = resolution.get("assets") if isinstance(resolution, Mapping) else []
+    input_rows = input_manifest.get("inputs") if isinstance(input_manifest, Mapping) else []
+    resolution_rows = resolution_rows if isinstance(resolution_rows, list) else []
+    input_rows = input_rows if isinstance(input_rows, list) else []
+
+    bindings: list[dict[str, Any]] = []
+    for object_row in case_spec.get("objects") or []:
+        if not isinstance(object_row, Mapping):
+            continue
+        asset = object_row.get("asset")
+        acquisition = asset.get("acquisition") if isinstance(asset, Mapping) else None
+        if not isinstance(acquisition, Mapping) or acquisition.get("requirement") != "required" or acquisition.get("origin") != "user_explicit":
+            continue
+        object_id = str(object_row.get("id") or "")
+        resolution_row = next(
+            (
+                row
+                for row in resolution_rows
+                if isinstance(row, Mapping)
+                and str(
+                    row.get("object_id")
+                    or ((row.get("intent") or {}).get("object_id") if isinstance(row.get("intent"), Mapping) else "")
+                )
+                == object_id
+            ),
+            {},
+        )
+        selected = resolution_row.get("selected_asset") if isinstance(resolution_row, Mapping) else None
+        selected = selected if isinstance(selected, Mapping) else {}
+        source_uri = str(selected.get("source_uri") or acquisition.get("source_uri_hint") or "")
+        sha256 = str(selected.get("sha256") or "")
+        input_row = next(
+            (
+                row
+                for row in input_rows
+                if isinstance(row, Mapping)
+                and (
+                    (source_uri and str(row.get("source_uri") or "") == source_uri)
+                    or (sha256 and str(row.get("sha256") or "") == sha256)
+                )
+            ),
+            {},
+        )
+        geometry_registration = selected.get("geometry_registration")
+        geometry_registration = geometry_registration if isinstance(geometry_registration, Mapping) else {}
+        ue = selected.get("ue") if isinstance(selected.get("ue"), Mapping) else {}
+        bindings.append(
+            {
+                "object_id": object_id,
+                "requirement": "required",
+                "origin": "user_explicit",
+                "asset_id": selected.get("asset_id"),
+                "source_uri": source_uri or None,
+                "sha256": sha256 or input_row.get("sha256"),
+                "selection_reason": resolution_row.get("selection_reason")
+                if isinstance(resolution_row, Mapping)
+                else None,
+                "input_id": input_row.get("input_id") if isinstance(input_row, Mapping) else None,
+                "input_local_path": input_row.get("local_path") if isinstance(input_row, Mapping) else None,
+                "ue_path": selected.get("ue_path") or ue.get("object_path"),
+                "geometry_registration_status": geometry_registration.get("status"),
+            }
+        )
+    sources = []
+    for path in (resolution_path, input_manifest_path):
+        if path.is_file():
+            sources.append(
+                {
+                    "path": path.resolve().relative_to(attempt_dir).as_posix(),
+                    "sha256": _sha256_file(path),
+                }
+            )
+    return {
+        "schema_version": "harness_explicit_asset_bindings_v1",
+        "sources": sources,
+        "items": bindings,
     }
 
 
