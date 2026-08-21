@@ -234,6 +234,38 @@ class UEAssetImporterLauncherTests(unittest.TestCase):
                 str(root / "qualified_collision_mesh.obj"),
             )
 
+    def test_portable_collision_uses_asset_local_exported_geometry(self) -> None:
+        source = Path(__file__).resolve().parents[1] / "scripts" / "native_ue_asset_importer.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        functions = [
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in {"_format_float", "_portable_collision_obj"}
+        ]
+        namespace = {"math": math}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"), namespace)
+
+        lines, vertex_count, triangle_count = namespace["_portable_collision_obj"](
+            "\n".join(
+                (
+                    "v 100 300 200",
+                    "v 0 0 0",
+                    "v 100 0 0",
+                    "v 0 100 0",
+                    "f 1/1/1 2/2/2 3/3/3 4/4/4",
+                )
+            )
+        )
+
+        self.assertEqual(vertex_count, 4)
+        self.assertEqual(triangle_count, 2)
+        self.assertIn("v 1 2 3", lines)
+        self.assertEqual(lines[-2:], ["f 1 2 3", "f 1 3 4"])
+        native_source = source.read_text(encoding="utf-8")
+        self.assertNotIn('get_editor_property("vertex_data")', native_source)
+        self.assertIn('"unreal_static_mesh_lod0_convexification_v1"', native_source)
+
     def test_fbx_scale_is_uniformly_corrected_once_from_declared_dimensions(self) -> None:
         source = Path(__file__).resolve().parents[1] / "scripts" / "native_ue_asset_importer.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))

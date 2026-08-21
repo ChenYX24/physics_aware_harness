@@ -118,7 +118,7 @@ def _import_one(request: dict[str, Any]) -> dict[str, Any]:
         portable_collision_artifact = None
         portable_collision_error = None
         try:
-            portable_collision_artifact = _export_portable_collision_artifact(body_setup, request)
+            portable_collision_artifact = _export_portable_collision_artifact(asset, request)
         except Exception as exc:
             # UE runtime qualification remains useful to UE-only cases.  A
             # solver that requires the portable collision contract will reject
@@ -195,46 +195,17 @@ def _import_one(request: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _export_portable_collision_artifact(body_setup: Any, request: dict[str, Any]) -> dict[str, Any]:
+def _export_portable_collision_artifact(asset: Any, request: dict[str, Any]) -> dict[str, Any]:
     path_value = request.get("portable_collision_artifact_path")
     if not isinstance(path_value, str) or not path_value.strip():
         raise RuntimeError("portable collision artifact destination is not declared")
     destination = Path(path_value).expanduser().resolve()
-    aggregate = body_setup.get_editor_property("agg_geom")
-    convex_elements = aggregate.get_editor_property("convex_elems")
-    if not convex_elements:
-        raise RuntimeError("qualified BodySetup has no portable convex elements")
-
-    lines = [
-        "# harness_portable_collision_mesh_v1",
-        "# asset-local Z-up coordinates in meters; FKConvexElem transforms are baked",
-    ]
-    vertex_offset = 0
-    triangle_count = 0
-    for hull_index, element in enumerate(convex_elements):
-        vertices = list(element.get_editor_property("vertex_data") or [])
-        indices = [int(value) for value in (element.get_editor_property("index_data") or [])]
-        transform = element.get_editor_property("transform")
-        if len(vertices) < 4 or not indices or len(indices) % 3:
-            raise RuntimeError(f"BodySetup convex element {hull_index} has incomplete triangle data")
-        if any(index < 0 or index >= len(vertices) for index in indices):
-            raise RuntimeError(f"BodySetup convex element {hull_index} has an invalid triangle index")
-        lines.append(f"o collision_hull_{hull_index:04d}")
-        for vertex in vertices:
-            transformed = transform.transform_location(vertex)
-            coordinates_m = [
-                float(transformed.x) / 100.0,
-                float(transformed.y) / 100.0,
-                float(transformed.z) / 100.0,
-            ]
-            if any(not math.isfinite(value) for value in coordinates_m):
-                raise RuntimeError(f"BodySetup convex element {hull_index} contains non-finite vertices")
-            lines.append("v " + " ".join(_format_float(value) for value in coordinates_m))
-        for start in range(0, len(indices), 3):
-            face = [vertex_offset + indices[start + axis] + 1 for axis in range(3)]
-            lines.append("f " + " ".join(str(value) for value in face))
-            triangle_count += 1
-        vertex_offset += len(vertices)
+    with tempfile.TemporaryDirectory(prefix="harness_collision_mesh_") as temporary:
+        exported_obj = Path(temporary) / "lod0.obj"
+        _export_static_mesh_obj(asset, exported_obj)
+        lines, vertex_count, triangle_count = _portable_collision_obj(
+            exported_obj.read_text(encoding="utf-8", errors="strict")
+        )
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
@@ -256,11 +227,42 @@ def _export_portable_collision_artifact(body_setup: Any, request: dict[str, Any]
                 [0.0, 0.0, 0.0, 1.0],
             ]
         },
-        "qualification_source": "unreal_static_mesh_body_setup",
-        "convex_part_count": len(convex_elements),
-        "vertex_count": vertex_offset,
+        "qualification_source": "unreal_static_mesh_lod0_convexification_v1",
+        "convex_part_count": 1,
+        "vertex_count": vertex_count,
         "triangle_count": triangle_count,
     }
+
+
+def _portable_collision_obj(source: str) -> tuple[list[str], int, int]:
+    vertices: list[list[float]] = []
+    polygons: list[list[int]] = []
+    for line in source.splitlines():
+        fields = line.split()
+        if len(fields) >= 4 and fields[0] == "v":
+            # StaticMeshExporterOBJ writes UE asset-local X, Z, Y in centimeters.
+            vertex = [float(fields[1]) / 100.0, float(fields[3]) / 100.0, float(fields[2]) / 100.0]
+            if any(not math.isfinite(value) for value in vertex):
+                raise RuntimeError("exported StaticMesh contains non-finite vertices")
+            vertices.append(vertex)
+        elif len(fields) >= 4 and fields[0] == "f":
+            polygons.append([int(value.split("/", 1)[0]) for value in fields[1:]])
+    if len(vertices) < 4 or not polygons:
+        raise RuntimeError("exported StaticMesh LOD0 has incomplete collision geometry")
+    if any(index <= 0 or index > len(vertices) for polygon in polygons for index in polygon):
+        raise RuntimeError("exported StaticMesh LOD0 has invalid face indices")
+    lines = [
+        "# harness_portable_collision_mesh_v1",
+        "# UE asset-local Z-up coordinates in meters; Genesis convexifies this closed LOD0 surface",
+        "o collision_hull_0000",
+        *("v " + " ".join(_format_float(value) for value in vertex) for vertex in vertices),
+    ]
+    triangle_count = 0
+    for polygon in polygons:
+        for index in range(1, len(polygon) - 1):
+            lines.append(f"f {polygon[0]} {polygon[index]} {polygon[index + 1]}")
+            triangle_count += 1
+    return lines, len(vertices), triangle_count
 
 
 def _format_float(value: float) -> str:
@@ -368,16 +370,7 @@ def _analyze_asset_geometry(asset: Any) -> dict[str, Any]:
 def _exported_asset_vertices(asset: Any) -> list[list[float]]:
     with tempfile.TemporaryDirectory(prefix="harness_static_mesh_") as temporary:
         destination = Path(temporary) / "lod0.obj"
-        task = unreal.AssetExportTask()
-        task.object = asset
-        task.exporter = unreal.StaticMeshExporterOBJ()
-        task.filename = str(destination)
-        task.automated = True
-        task.prompt = False
-        task.replace_identical = True
-        if not unreal.Exporter.run_asset_export_task(task) or not destination.is_file():
-            errors = "; ".join(str(value) for value in (task.errors or []))
-            raise RuntimeError(f"could not export imported StaticMesh LOD0 as OBJ: {errors}")
+        _export_static_mesh_obj(asset, destination)
         points = []
         for line in destination.read_text(encoding="utf-8", errors="strict").splitlines():
             fields = line.split()
@@ -385,6 +378,19 @@ def _exported_asset_vertices(asset: Any) -> list[list[float]]:
                 # StaticMeshExporterOBJ writes UE asset-local X, Z, Y.
                 points.append([float(fields[1]), float(fields[3]), float(fields[2])])
         return points
+
+
+def _export_static_mesh_obj(asset: Any, destination: Path) -> None:
+    task = unreal.AssetExportTask()
+    task.object = asset
+    task.exporter = unreal.StaticMeshExporterOBJ()
+    task.filename = str(destination)
+    task.automated = True
+    task.prompt = False
+    task.replace_identical = True
+    if not unreal.Exporter.run_asset_export_task(task) or not destination.is_file():
+        errors = "; ".join(str(value) for value in (task.errors or []))
+        raise RuntimeError(f"could not export imported StaticMesh LOD0 as OBJ: {errors}")
 
 
 def _axisymmetric_z_frame(points: list[list[float]]) -> dict[str, Any]:
