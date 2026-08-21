@@ -232,6 +232,7 @@ def summarize_source_reports(
         ],
         "asset_resolution": [run_dir / "asset_resolution.json"],
         "sensor_state": [run_dir / "sensor_state.json"],
+        "rgb_observability": [run_dir / "rgb_observability_report.json"],
     }
     summaries: dict[str, Any] = {}
     raw: dict[str, Any] = {}
@@ -292,6 +293,14 @@ def summarize_report(name: str, value: Any, path: str) -> dict[str, Any]:
             "view_count": value.get("view_count") or len(value.get("views") or {}),
             "multi_view_sync_ok": value.get("multi_view_sync_ok"),
             "render_pass_valid": value.get("render_pass_valid"),
+            "failure_count": len(value.get("failures") or []),
+        }
+    if name == "rgb_observability":
+        return {
+            "present": True,
+            "path": path,
+            "status": value.get("status"),
+            "enforcement": value.get("enforcement"),
             "failure_count": len(value.get("failures") or []),
         }
     if name == "map_report":
@@ -416,6 +425,15 @@ def validate_source_gates(
         failures.append(issue("F_RENDER_SYNC_FAILED", "multi-view synchronization is false"))
     if render.get("present") and render.get("render_pass_valid") is False:
         failures.append(issue("F_RENDER_PASS_INVALID", "render pass contract is false"))
+    rgb_observability = summaries["rgb_observability"]
+    if rgb_observability.get("present") and rgb_observability.get("status") == "fail":
+        warnings.append(
+            issue(
+                "W_RGB_OBSERVABILITY_LOW",
+                "distinctive subject color was not observable in enough frames",
+                report_path=rgb_observability.get("path"),
+            )
+        )
     map_report = summaries["map_report"]
     if map_report.get("present") and (map_report.get("status") != "pass" or map_report.get("map_opened") is False or map_report.get("package_match") is False):
         failures.append(issue("F_MAP_GATE_FAILED", "map report did not prove the requested package was opened", selected_map=map_report.get("selected_map"), requested_map=map_report.get("requested_map")))

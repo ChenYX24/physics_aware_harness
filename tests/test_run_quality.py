@@ -66,6 +66,23 @@ class RunQualityTests(unittest.TestCase):
             self.assertTrue(readiness["physics_ready"])
             self.assertEqual(readiness["physics_provenance"]["status"], "pass")
 
+    def test_rgb_observability_failure_is_advisory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_run(Path(tmp))
+            self.write_json(
+                run_dir / "rgb_observability_report.json",
+                {
+                    "status": "fail",
+                    "enforcement": "advisory",
+                    "failures": [{"code": "F_RGB_EXPECTED_SUBJECT_NOT_OBSERVABLE"}],
+                },
+            )
+            with self.mock_ffprobe():
+                report = evaluate_run(run_dir, write=False)
+
+            self.assertTrue(report["hard_gate_passed"])
+            self.assertIn("W_RGB_OBSERVABILITY_LOW", {item["code"] for item in report["warnings"]})
+
     def test_runtime_binding_mismatch_is_a_direct_hard_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = self.make_run(Path(tmp))

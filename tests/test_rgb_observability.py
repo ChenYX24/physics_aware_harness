@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from harness.core.artifact_schema import read_json, write_json
 from harness.verification.rgb_observability import verify_expected_color_observability
 
 
@@ -47,7 +48,28 @@ class RGBObservabilityTests(unittest.TestCase):
                     write=False,
                 )
         self.assertEqual(report["status"], "fail")
+        self.assertEqual(report["enforcement"], "advisory")
         self.assertEqual(report["failure_codes"], ["F_RGB_EXPECTED_SUBJECT_NOT_OBSERVABLE"])
+
+    def test_failed_diagnostic_does_not_mutate_readiness(self) -> None:
+        gray_frames = bytes([80, 80, 80]) * (64 * 64 * 4)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "views" / "event_closeup" / "rgb.mp4"
+            video.parent.mkdir(parents=True)
+            video.write_bytes(b"mp4")
+            readiness = {"local_preview_ready": True, "visual_ready": True}
+            write_json(root / "run_readiness.json", readiness)
+            completed = subprocess.CompletedProcess([], 0, gray_frames, b"")
+            with patch("harness.verification.rgb_observability.subprocess.run", return_value=completed):
+                verify_expected_color_observability(
+                    root,
+                    expected_rgb=[0.03, 0.30, 0.78],
+                    view_ids=["event_closeup"],
+                    write=True,
+                )
+
+            self.assertEqual(read_json(root / "run_readiness.json"), readiness)
 
 
 if __name__ == "__main__":

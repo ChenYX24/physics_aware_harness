@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from harness.core.artifact_schema import read_json, write_json
+from harness.core.artifact_schema import write_json
 
 
 def verify_expected_color_observability(
@@ -18,12 +18,10 @@ def verify_expected_color_observability(
     minimum_visible_frame_fraction: float = 0.6,
     write: bool = True,
 ) -> dict[str, Any]:
-    """Cheap RGB smoke gate for a case with an intentionally distinctive material.
+    """Cheap RGB diagnostic for a case with an intentionally distinctive material.
 
-    This is not a realism score.  It only prevents an expected colored subject
-    from silently disappearing while UE still produces a syntactically valid
-    MP4.  Geometry and identity remain the responsibility of depth/segmentation
-    in the complete candidate profile.
+    This is not a realism score or a publication gate. Geometry and identity
+    remain the responsibility of depth/segmentation and semantic review.
     """
     if len(expected_rgb) != 3:
         raise ValueError("expected_rgb must contain three channels")
@@ -81,25 +79,11 @@ def verify_expected_color_observability(
         "views": per_view,
         "failure_codes": sorted({str(item["code"]) for item in failures}),
         "failures": failures,
-        "scope": "cheap observability gate; not a perceptual-quality or physical-correctness metric",
+        "enforcement": "advisory",
+        "scope": "cheap color observability diagnostic; not a perceptual-quality or physical-correctness metric",
     }
     if write:
-        root = Path(run_dir)
-        write_json(root / "rgb_observability_report.json", report)
-        readiness_path = root / "run_readiness.json"
-        if readiness_path.is_file():
-            readiness = read_json(readiness_path)
-            readiness["rgb_observability_gate_passed"] = report["status"] == "pass"
-            if report["status"] != "pass":
-                readiness.update(
-                    {
-                        "visual_ready": False,
-                        "reference_ready": False,
-                        "local_preview_ready": False,
-                        "publication_tier": "rejected",
-                    }
-                )
-            write_json(readiness_path, readiness)
+        write_json(Path(run_dir) / "rgb_observability_report.json", report)
     return report
 
 

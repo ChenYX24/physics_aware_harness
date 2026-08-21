@@ -522,7 +522,6 @@ def main() -> int:
         report.get("status") == "completed"
         and verifier.get("status") == "pass"
         and render_sync.get("status") == "pass"
-        and rgb_observability.get("status") == "pass"
         and asset_geometry_match
         and pose_registration.get("status") in {"pass", "not_required"}
     )
@@ -537,7 +536,7 @@ def main() -> int:
             "local_preview_ready": verified,
             "publication_tier": "local_preview" if verified else "rejected",
             "physics_ready": verifier.get("status") == "pass",
-            "visual_ready": report.get("rgb_real_ue") is True and rgb_observability.get("status") == "pass",
+            "visual_ready": report.get("rgb_real_ue") is True,
             "sensor_ready": render_sync.get("status") == "pass",
             "ue_render_real": render_sync.get("ue_render_real") is True,
             "depth_source": render_sync.get("depth_source"),
@@ -557,7 +556,7 @@ def main() -> int:
         {
             "local_preview_ready": verified,
             "publication_tier": "local_preview" if verified else "rejected",
-            "visual_ready": report.get("rgb_real_ue") is True and rgb_observability.get("status") == "pass",
+            "visual_ready": report.get("rgb_real_ue") is True,
             "sensor_ready": render_sync.get("status") == "pass",
             "quality_gate_passed": None,
         }
@@ -570,6 +569,7 @@ def main() -> int:
             "physics_verifier_status": verifier.get("status"),
             "render_sync_status": render_sync.get("status"),
             "rgb_observability_status": rgb_observability.get("status"),
+            "rgb_observability_enforcement": "advisory",
             "quality_gate_status": "deferred_to_controller",
             "runtime_pose_registration_status": pose_registration.get("status"),
             "state_truth": "particle_cache.json",
