@@ -630,6 +630,9 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
             water_binding["render_binding"]["cache_contract"]["contract_id"],
             "particle_surface_cache_v1",
         )
+        solve_stage = next(stage for stage in compilation.artifacts["runtime_plan"]["stages"] if stage["kind"] == "solve")
+        self.assertIn("declared_measurements", solve_stage["outputs"])
+        self.assertNotIn("contact_events", solve_stage["outputs"])
         solver_configuration = compilation.artifacts["solver_configuration"]
         self.assertEqual(solver_configuration["qualification_policy_id"], "genesis_wcsph_surface_v2")
         self.assertEqual(solver_configuration["parameters"]["steps_per_frame"], 100)
@@ -917,6 +920,9 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
         )
         self.assertEqual(compilation.artifacts["runtime_plan"]["backend_selection"]["selected_backend"], "fallback")
         self.assertNotIn("solver_configuration", compilation.artifacts)
+        rigid_stage = compilation.artifacts["runtime_plan"]["stages"][0]
+        self.assertIn("contact_events", rigid_stage["outputs"])
+        self.assertNotIn("declared_measurements", rigid_stage["outputs"])
         self.assertEqual(
             compilation.artifacts["runtime_plan"]["backend_selection"]["required_case_capabilities"],
             ["rigid_body_dynamics"],

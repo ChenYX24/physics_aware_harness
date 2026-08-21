@@ -10,10 +10,42 @@ from unittest.mock import patch
 
 from harness.core.timebase import build_timebase, sample_solver_trajectory
 from harness.verification.run_quality import EXR_MAGIC, evaluate_run
-from harness.verification.run_quality import validate_runtime_binding_snapshot
+from harness.verification.run_quality import validate_contacts, validate_runtime_binding_snapshot
 
 
 class RunQualityTests(unittest.TestCase):
+    def test_solver_declared_measurements_are_contact_evidence_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            self.write_json(
+                run_dir / "case_spec.json",
+                {
+                    "expected_physics": {
+                        "contact_required": True,
+                        "collision_graph": [["fluid", "support"]],
+                    },
+                    "objects": [],
+                },
+            )
+            self.write_json(
+                run_dir / "runtime_plan.json",
+                {
+                    "stages": [
+                        {"id": "solve", "kind": "solve", "outputs": ["trajectory", "declared_measurements"]},
+                        {"id": "render", "kind": "render", "outputs": ["render_artifacts"]},
+                    ]
+                },
+            )
+            self.write_json(run_dir / "contact_events.json", [])
+
+            failures: list[dict] = []
+            report = validate_contacts(run_dir, [], failures)
+
+            self.assertEqual(failures, [])
+            self.assertEqual(report["evidence_authority"], "declared_measurements")
+            self.assertEqual(report["initial_contact_scope"], "solver_declared_measurements")
+            self.assertIsNone(report["initial_expected_contact_free"])
+
     def test_runtime_constraint_binding_is_compared_as_executed_state(self) -> None:
         constraint = {
             "constraint_id": "joint",
@@ -698,6 +730,18 @@ class RunQualityTests(unittest.TestCase):
             },
         )
         self.write_json(run_dir / "harness_verifier.json", {"status": "pass", "failure_type": None})
+        self.write_json(
+            run_dir / "runtime_plan.json",
+            {
+                "stages": [
+                    {
+                        "id": "solve_render",
+                        "kind": "solve_render",
+                        "outputs": ["trajectory", "render_artifacts", "signals", "contact_events"],
+                    }
+                ]
+            },
+        )
         self.write_json(
             run_dir / "inputs" / "render_config.json",
             {"passes": ["rgb", "depth", "segmentation"]},

@@ -1622,6 +1622,7 @@ def validate_contacts(run_dir: Path, trajectory: list[dict[str, Any]], failures:
 
     graph = collision_graph(case)
     positive = positive_collision_case(case, graph)
+    evidence_authority = solve_stage_contact_evidence(run_dir)
     first_by_edge: dict[tuple[str, str], int] = {}
     for event in events:
         objects = event.get("objects")
@@ -1634,7 +1635,16 @@ def validate_contacts(run_dir: Path, trajectory: list[dict[str, Any]], failures:
 
     expected: list[dict[str, Any]] = []
     checked_frames: list[int] = []
-    if positive and graph:
+    if positive and evidence_authority == "declared_measurements":
+        expected = [{"objects": list(pair), "first_frame": None} for pair in graph]
+    elif positive and evidence_authority is None:
+        failures.append(
+            issue(
+                "F_CONTACT_EVIDENCE_CONTRACT_MISSING",
+                "solve stage declares no unique contact evidence output",
+            )
+        )
+    elif positive and graph:
         for pair in graph:
             frame = first_by_edge.get(pair)
             expected.append({"objects": list(pair), "first_frame": frame})
@@ -1652,15 +1662,42 @@ def validate_contacts(run_dir: Path, trajectory: list[dict[str, Any]], failures:
         elif min(checked_frames) == 0:
             failures.append(issue("F_CONTACT_AT_INITIAL_FRAME", "positive collision evidence starts at frame 0", frame=0))
 
-    initial_expected_contact_free = not positive or bool(checked_frames and min(checked_frames) > 0)
+    initial_expected_contact_free = (
+        None
+        if positive and evidence_authority == "declared_measurements"
+        else not positive or bool(checked_frames and min(checked_frames) > 0)
+    )
     return {
         "event_count": len(events),
+        "evidence_authority": evidence_authority,
         "positive_collision_case": positive,
         "expected_edges": expected,
         "first_positive_contact_frame": min(checked_frames) if checked_frames else None,
         "initial_expected_contact_free": initial_expected_contact_free,
-        "initial_contact_scope": "expected_collision_graph" if graph else "non_support_contacts",
+        "initial_contact_scope": (
+            "solver_declared_measurements"
+            if evidence_authority == "declared_measurements"
+            else "expected_collision_graph"
+            if graph
+            else "non_support_contacts"
+        ),
     }
+
+
+def solve_stage_contact_evidence(run_dir: Path) -> str | None:
+    runtime_plan = read_optional_json(run_dir / "runtime_plan.json")
+    stages = runtime_plan.get("stages") if isinstance(runtime_plan, dict) else None
+    solve_stage = next(
+        (
+            stage
+            for stage in stages or []
+            if isinstance(stage, dict) and stage.get("kind") in {"solve", "solve_render"}
+        ),
+        None,
+    )
+    outputs = set(solve_stage.get("outputs") or []) if isinstance(solve_stage, dict) else set()
+    declared = outputs.intersection({"contact_events", "declared_measurements"})
+    return next(iter(declared)) if len(declared) == 1 else None
 
 
 def state_position(state: dict[str, Any]) -> list[float]:

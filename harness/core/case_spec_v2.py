@@ -79,7 +79,14 @@ BACKEND_SOLVERS = {"fallback", "genesis_fem", "genesis_sph", "taichi_cloth", "ue
 BACKEND_SOLVER_CAPABILITIES = {
     "fallback": {"rigid_body", "contact_events", "trajectory"},
     "ue": {"rigid_body", "rigid_constraints", "contact_events", "trajectory", "fracture_events", "geometry_collection"},
-    "genesis_sph": {"particle_dynamics", "fluid_dynamics", "particle_cache", "surface_mesh_cache", "trajectory"},
+    "genesis_sph": {
+        "particle_dynamics",
+        "fluid_dynamics",
+        "particle_cache",
+        "surface_mesh_cache",
+        "trajectory",
+        "declared_measurements",
+    },
     "genesis_fem": {"soft_body", "finite_element", "mesh_cache", "deformable_mesh_cache", "trajectory"},
     "taichi_cloth": {"soft_body", "cloth", "mesh_cache", "trajectory"},
 }

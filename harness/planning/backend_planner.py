@@ -15,6 +15,7 @@ from harness.runtime.stage_contracts import stage_handoff_contract
 
 
 EXECUTION_BACKENDS = {"fallback", "genesis_fem", "genesis_sph", "taichi_cloth", "ue"}
+PHYSICS_EVIDENCE_OUTPUTS = {"contact_events", "declared_measurements"}
 
 
 @dataclass(frozen=True)
@@ -170,6 +171,9 @@ def _stages(
     *,
     handoff_contract: Mapping[str, Any] | None,
 ) -> list[dict[str, Any]]:
+    evidence_outputs = sorted(
+        PHYSICS_EVIDENCE_OUTPUTS.intersection(BACKEND_SOLVER_CAPABILITIES.get(solver_backend, set()))
+    )
     if solver_backend == render_backend:
         return [
             {
@@ -177,7 +181,7 @@ def _stages(
                 "kind": "solve_render",
                 "backend": solver_backend,
                 "inputs": ["asset_resolution", "scene_layout", "runtime_actor_placement"],
-                "outputs": ["trajectory", "render_artifacts", "signals"],
+                "outputs": ["trajectory", "render_artifacts", "signals", *evidence_outputs],
             }
         ]
     cache_kind = str((handoff_contract or {}).get("contract_id") or "unsupported_state_handoff")
@@ -187,7 +191,7 @@ def _stages(
             "kind": "solve",
             "backend": solver_backend,
             "inputs": ["asset_resolution", "scene_layout"],
-            "outputs": [cache_kind, "trajectory", "signals"],
+            "outputs": [cache_kind, "trajectory", "signals", *evidence_outputs],
             "handoff_contract": dict(handoff_contract) if handoff_contract is not None else None,
         },
         {
