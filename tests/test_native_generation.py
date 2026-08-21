@@ -54,14 +54,7 @@ class NativeGenerationTests(unittest.TestCase):
                 "soft_preferences": [],
                 "prohibitions": [],
                 "ambiguities": [],
-                "parameter_analysis": [
-                    {
-                        "path": "$.scene.duration_s",
-                        "requirement_level": "inferred",
-                        "reason": "The duration is an inferred capture window.",
-                        "constraint": {"kind": "numeric", "min": 1.0, "max": 3.0},
-                    }
-                ],
+                "parameter_analysis": [],
             },
             "case_spec": case_spec_v2_fixture(),
             "agent_reported": {
@@ -120,6 +113,10 @@ class NativeGenerationTests(unittest.TestCase):
         self.assertIn("$.objects.domino_10.initial_state.rotation_deg", path_contract)
         self.assertIn("exact id", path_contract)
         self.assertIn("numeric indices", path_contract)
+        minimality_rules = context["intent_draft_contract"]["minimality_rules"]
+        self.assertTrue(any("not the general revision allowlist" in rule for rule in minimality_rules))
+        self.assertTrue(any("freeze a user-explicit hard CaseSpec leaf" in rule for rule in minimality_rules))
+        self.assertTrue(any("Do not enumerate ordinary layout" in rule for rule in minimality_rules))
 
     def test_native_submission_rejects_prose_in_builtin_procedural_shape(self) -> None:
         blocked, context = self._create_context("job_native_procedural_shape")
@@ -261,8 +258,13 @@ class NativeGenerationTests(unittest.TestCase):
         cases = [
             (
                 "job_native_invalid_path_syntax",
-                lambda value: value["intent_draft"]["parameter_analysis"][0].__setitem__(
-                    "path", "$.objects[0].initial_state.position_m"
+                lambda value: value["intent_draft"]["parameter_analysis"].append(
+                    {
+                        "path": "$.objects[0].initial_state.position_m",
+                        "requirement_level": "hard",
+                        "reason": "the user fixed the exact position",
+                        "constraint": None,
+                    }
                 ),
                 [
                     "intent_draft.parameter_analysis[0].path",
@@ -272,8 +274,21 @@ class NativeGenerationTests(unittest.TestCase):
             ),
             (
                 "job_native_duplicate_path",
-                lambda value: value["intent_draft"]["parameter_analysis"].append(
-                    copy.deepcopy(value["intent_draft"]["parameter_analysis"][0])
+                lambda value: value["intent_draft"]["parameter_analysis"].extend(
+                    [
+                        {
+                            "path": "$.scene.duration_s",
+                            "requirement_level": "hard",
+                            "reason": "the user fixed the exact duration",
+                            "constraint": None,
+                        },
+                        {
+                            "path": "$.scene.duration_s",
+                            "requirement_level": "hard",
+                            "reason": "duplicate hard parameter",
+                            "constraint": None,
+                        },
+                    ]
                 ),
                 [
                     "intent_draft.parameter_analysis[1].path",
@@ -408,7 +423,14 @@ class NativeGenerationTests(unittest.TestCase):
             ),
             "native_generation_parameter_constraint_invalid": lambda value: value["intent_draft"][
                 "parameter_analysis"
-            ][0].__setitem__("path", "$.scene.missing_leaf"),
+            ].append(
+                {
+                    "path": "$.scene.missing_leaf",
+                    "requirement_level": "hard",
+                    "reason": "the user fixed a missing field",
+                    "constraint": None,
+                }
+            ),
         }
         for index, (expected_code, mutate) in enumerate(mutations.items(), start=1):
             with self.subTest(expected_code=expected_code):

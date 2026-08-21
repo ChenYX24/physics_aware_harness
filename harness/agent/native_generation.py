@@ -76,6 +76,14 @@ def build_native_generation_context(
                 "ambiguities",
                 "parameter_analysis",
             ],
+            "minimality_rules": [
+                "Keep every array empty unless the immutable user request requires an independent entry.",
+                "Do not restate the original request, CaseSpec object declarations, physics setup, expected behavior, or verification assertions as Intent prose.",
+                "hard_requirements contain only independently reviewable user-explicit semantics; prohibitions contain only user-explicit forbidden outcomes; ambiguities contain only unresolved choices that materially change the experiment.",
+                "parameter_analysis is not the general revision allowlist: the Controller independently opens generic bounded CaseSpec leaves.",
+                "Use parameter_analysis only to freeze a user-explicit hard CaseSpec leaf, or exceptionally to add one soft/inferred leaf that requires a narrower explicit bound than the generic revision policy.",
+                "Do not enumerate ordinary layout, dynamics, camera, motion, or constraint leaves merely to make them adjustable.",
+            ],
             "requirement_shape": {"id": "unique non-empty string", "text": "non-empty string"},
             "ambiguity_shape": {"question": "non-empty string"},
             "parameter_analysis_shape": {
@@ -84,9 +92,9 @@ def build_native_generation_context(
                     "$.objects.domino_10.initial_state.rotation_deg; list entries use their exact id "
                     "as a path segment; brackets, numeric indices, wildcards, selectors, and ranges are invalid"
                 ),
-                "requirement_level": "hard, soft, or inferred",
-                "reason": "non-empty string",
-                "constraint": "null for hard; bounded numeric, numeric_vector, list, or enum constraint otherwise",
+                "requirement_level": "hard only for a user-explicit leaf; soft or inferred only for an exceptional supplemental adjustment",
+                "reason": "concise provenance explaining why this exceptional entry is necessary",
+                "constraint": "null for hard; one valid bounded numeric, numeric_vector, list, or enum constraint for an exceptional soft/inferred entry",
             },
         },
         "submission_contract": {
