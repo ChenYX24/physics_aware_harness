@@ -5,7 +5,7 @@ import math
 from typing import Any, Mapping
 
 
-RIGID_SPH_QUALIFICATION_POLICY_ID = "genesis_wcsph_surface_v1"
+RIGID_SPH_QUALIFICATION_POLICY_ID = "genesis_wcsph_surface_v2"
 
 _CURRENT_POLICY = {
     "particle_size_m": 0.005,
@@ -21,9 +21,9 @@ _CURRENT_POLICY = {
         "surface_tension_n_m": 0.01,
     },
     "surface_reconstruction": {
-        "smoothing_length_in_particle_radii": 2.0,
-        "cube_size_in_particle_radii": 0.75,
-        "iso_surface_threshold": 0.65,
+        "smoothing_length_in_particle_radii": 2.5,
+        "cube_size_in_particle_radii": 1.0,
+        "iso_surface_threshold": 0.35,
     },
     "verification": {
         "particle_count_relative_tolerance": 0.0,

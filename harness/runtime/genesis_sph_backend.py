@@ -186,11 +186,18 @@ def run_ue_surface_replay(
     if width is not None and height is not None:
         command.extend(("--width", str(width), "--height", str(height)))
     result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
+    fluid_render_report_path = run_dir / "fluid_ue_render_report.json"
+    fluid_render_report = read_json(fluid_render_report_path) if fluid_render_report_path.is_file() else {}
+    verification_failed = result.returncode == 2 and fluid_render_report.get("status") == "failed_verification"
     report = {
         "schema_version": "harness_staged_render_report_v1",
         "solver_backend": "genesis_sph",
         "render_backend": "ue",
-        "status": "completed" if result.returncode == 0 else "failed",
+        "status": (
+            "failed_verification"
+            if verification_failed
+            else ("completed" if result.returncode == 0 else "failed")
+        ),
         "command": command,
         "returncode": result.returncode,
         "stdout": result.stdout,
@@ -199,7 +206,7 @@ def run_ue_surface_replay(
         "frame_count": int((replay.get("timebase") or {}).get("frame_count") or 0),
     }
     write_json(run_dir / "staged_render_report.json", report)
-    if result.returncode != 0:
+    if result.returncode != 0 and not verification_failed:
         raise RuntimeError(
             f"Genesis-to-UE replay failed with exit code {result.returncode}; see {run_dir / 'staged_render_report.json'}"
         )

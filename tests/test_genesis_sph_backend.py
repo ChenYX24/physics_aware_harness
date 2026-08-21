@@ -281,6 +281,46 @@ class GenesisSPHBackendTests(unittest.TestCase):
             )
             self.assertTrue((run_dir / "ue_replay_input" / "fluid_surface_replay.json").is_file())
 
+    def test_ue_replay_verification_failure_is_left_to_verifier_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            case = load_case_spec(TRANSFER_CASE)
+            write_valid_cache(run_dir, case.data)
+            cache = read_json(run_dir / "particle_cache.json")
+            cache["environment"]["measurements"] = []
+            cache["environment"]["assertions"] = []
+            for frame in cache["frames"]:
+                frame["measurements"] = {}
+            write_json(run_dir / "particle_cache.json", cache)
+            write_json(run_dir / "case_spec.json", case.data)
+            write_json(
+                run_dir / "fluid_ue_render_report.json",
+                {"status": "failed_verification", "physics_verifier_status": "fail"},
+            )
+            project = root / "SimulatorWorkspace.uproject"
+            executable = root / "UnrealEditor-Cmd"
+            project.write_text("{}", encoding="utf-8")
+            executable.touch()
+            completed = subprocess.CompletedProcess([], 2, '{"status":"failed_verification"}', "")
+
+            with patch.dict(
+                os.environ,
+                {
+                    "SIM_STUDIO_UE_PROJECT": str(project),
+                    "SIM_STUDIO_UE_EXECUTABLE": str(executable),
+                },
+                clear=False,
+            ), patch("harness.runtime.genesis_sph_backend.subprocess.run", return_value=completed):
+                report = run_ue_surface_replay(
+                    run_dir,
+                    handoff_contract={"numeric_tolerances": {"spatial_measurement_absolute": 1e-6}},
+                    profile="smoke",
+                )
+
+            self.assertEqual(report["status"], "failed_verification")
+            self.assertEqual(report["returncode"], 2)
+
     def test_missing_environment_still_leaves_unified_diagnostics(self) -> None:
         case = load_case_spec(TRANSFER_CASE)
         with tempfile.TemporaryDirectory() as tmp:

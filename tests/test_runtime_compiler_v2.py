@@ -587,8 +587,16 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
             "particle_surface_cache_v1",
         )
         solver_configuration = compilation.artifacts["solver_configuration"]
-        self.assertEqual(solver_configuration["qualification_policy_id"], "genesis_wcsph_surface_v1")
+        self.assertEqual(solver_configuration["qualification_policy_id"], "genesis_wcsph_surface_v2")
         self.assertEqual(solver_configuration["parameters"]["steps_per_frame"], 100)
+        self.assertEqual(
+            solver_configuration["parameters"]["surface_reconstruction"],
+            {
+                "smoothing_length_in_particle_radii": 2.5,
+                "cube_size_in_particle_radii": 1.0,
+                "iso_surface_threshold": 0.35,
+            },
+        )
         workspace = compilation.runtime_case.data["workspace_bounds_m"]
         expected_extent = [
             high - low
