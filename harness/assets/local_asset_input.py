@@ -236,6 +236,7 @@ def _existing_registration_ready(
         and provenance.get("source_input_sha256") == source_sha256
         and asset.get("lifecycle_status") == "runtime_bound"
         and str(qualification.get("status") or "").startswith("pass")
+        and isinstance(asset.get("geometry_analysis"), Mapping)
         and local_path.is_file()
         and sha256_file(local_path) == source_sha256
     )
@@ -388,6 +389,11 @@ def _catalog_asset(
     imported_files = [dict(row) for row in import_result.get("files") or []]
     dependencies = [dict(row) for row in import_result.get("dependencies") or []]
     import_validation = import_result.get("import_validation") if isinstance(import_result.get("import_validation"), Mapping) else {}
+    geometry_analysis = (
+        copy.deepcopy(dict(import_validation["geometry_analysis"]))
+        if isinstance(import_validation.get("geometry_analysis"), Mapping)
+        else None
+    )
     actual_size_cm = import_validation.get("actual_size_cm")
     size = (
         [float(value) / 100.0 for value in actual_size_cm]
@@ -449,6 +455,7 @@ def _catalog_asset(
         "byte_size": materialized_input.stat().st_size,
         "bbox_size_m": size,
         "authored_size_m": size,
+        "geometry_analysis": geometry_analysis,
         "preserve_authored_scale": True,
         "collider": "box",
         "collision_profile": "PhysicsActor",

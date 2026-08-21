@@ -763,6 +763,7 @@ def runtime_pose_registration_report(
     required_object_ids: list[str],
     *,
     tolerance_cm: float = 0.1,
+    rotation_tolerance_deg: float = 0.01,
 ) -> dict:
     registrations = (
         native_summary.get("runtime_pose_registrations")
@@ -777,8 +778,11 @@ def runtime_pose_registration_report(
             failures.append({"object_id": object_id, "code": "pose_registration_missing"})
             continue
         residual = float(registration.get("max_residual_cm", registration.get("residual_cm", float("inf"))))
+        rotation_residual = float(
+            registration.get("max_rotation_residual_deg", registration.get("rotation_residual_deg", float("inf")))
+        )
         objects[object_id] = registration
-        if registration.get("anchor") != "bounds_center":
+        if registration.get("anchor") != "solver_to_visual":
             failures.append({"object_id": object_id, "code": "pose_anchor_invalid"})
         if not math.isfinite(residual) or residual > tolerance_cm:
             failures.append(
@@ -788,11 +792,20 @@ def runtime_pose_registration_report(
                     "residual_cm": residual,
                 }
             )
+        if not math.isfinite(rotation_residual) or rotation_residual > rotation_tolerance_deg:
+            failures.append(
+                {
+                    "object_id": object_id,
+                    "code": "pose_registration_rotation_residual_exceeded",
+                    "residual_deg": rotation_residual,
+                }
+            )
     return {
         "schema_version": "harness_runtime_pose_registration_report_v1",
         "status": "fail" if failures else "pass",
-        "anchor": "bounds_center",
+        "anchor": "solver_to_visual",
         "tolerance_cm": tolerance_cm,
+        "rotation_tolerance_deg": rotation_tolerance_deg,
         "required_object_ids": required_object_ids,
         "objects": objects,
         "failures": failures,
@@ -864,6 +877,17 @@ def rigid_body_runtime_objects(
         if not isinstance(binding, dict):
             raise ValueError(f"declared rigid body has no runtime placement binding: {body_id}")
         asset = binding.get("asset") if isinstance(binding.get("asset"), dict) else {}
+        handoff_asset = body.get("asset") if isinstance(body.get("asset"), dict) else {}
+        registration = handoff_asset.get("geometry_registration")
+        placement_registration = asset.get("geometry_registration")
+        collision_registration = (body.get("collision") or {}).get("geometry_registration")
+        if not isinstance(registration, dict) or registration.get("status") != "verified":
+            raise ValueError(f"declared rigid body is missing verified solver-to-visual registration: {body_id}")
+        if registration != placement_registration or registration != collision_registration:
+            raise ValueError(f"solver-to-visual registration disagrees with runtime placement: {body_id}")
+        solver_to_visual = registration.get("solver_to_visual")
+        if not valid_solver_to_visual(solver_to_visual):
+            raise ValueError(f"declared rigid body has invalid solver-to-visual registration: {body_id}")
         transform = body.get("transform") if isinstance(body.get("transform"), dict) else {}
         if len(transform.get("position_m") or []) != 3 or len(transform.get("ue_rotation_pyr_deg") or []) != 3:
             raise ValueError(f"declared rigid body is missing an explicit UE transform: {body.get('id')}")
@@ -880,11 +904,8 @@ def rigid_body_runtime_objects(
                     else list(transform["ue_rotation_pyr_deg"])
                 ),
                 "preserve_authored_scale": True,
-                # Solver rigid-body poses are expressed at the collision/body
-                # center. Imported meshes may retain an arbitrary FBX authoring
-                # pivot, so the UE replay must register their visible bounds to
-                # that backend-neutral pose anchor.
-                "pose_anchor": "bounds_center",
+                "pose_anchor": "solver_to_visual",
+                "solver_to_visual": solver_to_visual,
                 "preserve_material": True,
                 "visual_material_path": str(asset.get("material_path") or ""),
                 "segmentation_identity": str(body.get("id") or "rigid_body"),
@@ -893,6 +914,22 @@ def rigid_body_runtime_objects(
         )
         (dynamic_objects if body.get("mobility") in {"kinematic", "dynamic"} else static_objects).append(runtime)
     return dynamic_objects, static_objects
+
+
+def valid_solver_to_visual(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    fields = ("translation_m", "solver_rotation_xyz_deg", "ue_rotation_pyr_deg")
+    if not all(
+        isinstance(value.get(field), list)
+        and len(value[field]) == 3
+        and all(isinstance(item, (int, float)) and not isinstance(item, bool) and math.isfinite(float(item)) for item in value[field])
+        for field in fields
+    ):
+        return False
+    solver = [float(item) for item in value["solver_rotation_xyz_deg"]]
+    expected_ue = [-solver[1], -solver[2], solver[0]]
+    return all(abs(float(value["ue_rotation_pyr_deg"][index]) - expected_ue[index]) <= 1e-6 for index in range(3))
 
 
 def rigid_body_trajectory_objects(

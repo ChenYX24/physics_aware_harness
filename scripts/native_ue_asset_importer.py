@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import tempfile
 import traceback
 from pathlib import Path
 from typing import Any
@@ -92,6 +93,12 @@ def _import_one(request: dict[str, Any]) -> dict[str, Any]:
             request.get("expected_size_m"),
             source_kind=str(request.get("source_kind") or ""),
         )
+        geometry_analysis = None
+        geometry_analysis_error = None
+        try:
+            geometry_analysis = _analyze_asset_geometry(asset)
+        except Exception as exc:
+            geometry_analysis_error = str(exc)
         mesh_editor = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
         if mesh_editor is None:
             raise RuntimeError("StaticMeshEditorSubsystem is unavailable for collision validation")
@@ -157,6 +164,8 @@ def _import_one(request: dict[str, Any]) -> dict[str, Any]:
                 ),
                 "portable_collision_artifact_error": portable_collision_error,
                 "actual_size_cm": actual_size_cm,
+                "geometry_analysis": geometry_analysis,
+                "geometry_analysis_error": geometry_analysis_error,
                 "expected_size_m": request.get("expected_size_m"),
                 "obj_meter_to_ue_centimeter_scale": 100.0,
                 "normalized_source_unit": "centimeter",
@@ -343,6 +352,112 @@ def _asset_size_cm(asset: Any) -> list[float]:
         float(bounds.max.y - bounds.min.y),
         float(bounds.max.z - bounds.min.z),
     ]
+
+
+def _analyze_asset_geometry(asset: Any) -> dict[str, Any]:
+    points = _exported_asset_vertices(asset)
+    if len(points) < 12 or any(not all(math.isfinite(value) for value in point) for point in points):
+        raise RuntimeError("imported StaticMesh has insufficient finite LOD0 vertices")
+    return {
+        "schema_version": "harness_asset_geometry_analysis_v1",
+        "vertex_count": len(points),
+        "axisymmetric_z_frame": _axisymmetric_z_frame(points),
+    }
+
+
+def _exported_asset_vertices(asset: Any) -> list[list[float]]:
+    with tempfile.TemporaryDirectory(prefix="harness_static_mesh_") as temporary:
+        destination = Path(temporary) / "lod0.obj"
+        task = unreal.AssetExportTask()
+        task.object = asset
+        task.exporter = unreal.StaticMeshExporterOBJ()
+        task.filename = str(destination)
+        task.automated = True
+        task.prompt = False
+        task.replace_identical = True
+        if not unreal.Exporter.run_asset_export_task(task) or not destination.is_file():
+            errors = "; ".join(str(value) for value in (task.errors or []))
+            raise RuntimeError(f"could not export imported StaticMesh LOD0 as OBJ: {errors}")
+        points = []
+        for line in destination.read_text(encoding="utf-8", errors="strict").splitlines():
+            fields = line.split()
+            if len(fields) >= 4 and fields[0] == "v":
+                # StaticMeshExporterOBJ writes UE asset-local X, Z, Y.
+                points.append([float(fields[1]), float(fields[3]), float(fields[2])])
+        return points
+
+
+def _axisymmetric_z_frame(points: list[list[float]]) -> dict[str, Any]:
+    z_values = [point[2] for point in points]
+    span_z = max(z_values) - min(z_values)
+    if span_z <= 1e-6:
+        return {"status": "unavailable", "method": "robust_horizontal_ring_fit_v1"}
+    bucket_width = max(span_z * 1e-4, 0.01)
+    buckets: dict[int, list[list[float]]] = {}
+    for point in points:
+        buckets.setdefault(round(point[2] / bucket_width), []).append(point)
+    rings = []
+    for ring_points in buckets.values():
+        if len(ring_points) < 12:
+            continue
+        xs = sorted(point[0] for point in ring_points)
+        ys = sorted(point[1] for point in ring_points)
+        center_x = (_quantile(xs, 0.10) + _quantile(xs, 0.90)) / 2.0
+        center_y = (_quantile(ys, 0.10) + _quantile(ys, 0.90)) / 2.0
+        span_x = _quantile(xs, 0.90) - _quantile(xs, 0.10)
+        span_y = _quantile(ys, 0.90) - _quantile(ys, 0.10)
+        if min(span_x, span_y) <= 1e-6 or max(span_x, span_y) / min(span_x, span_y) > 1.10:
+            continue
+        radii = sorted(math.hypot(point[0] - center_x, point[1] - center_y) for point in ring_points)
+        median_radius = _quantile(radii, 0.50)
+        radial_mad = _quantile(sorted(abs(radius - median_radius) for radius in radii), 0.50)
+        if median_radius <= 1e-6 or radial_mad / median_radius > 0.05:
+            continue
+        rings.append(
+            {
+                "center_x": center_x,
+                "center_y": center_y,
+                "z": sum(point[2] for point in ring_points) / len(ring_points),
+                "radius": median_radius,
+            }
+        )
+    if len(rings) < 3:
+        return {"status": "unavailable", "method": "robust_horizontal_ring_fit_v1", "ring_count": len(rings)}
+    center_x = _quantile(sorted(ring["center_x"] for ring in rings), 0.50)
+    center_y = _quantile(sorted(ring["center_y"] for ring in rings), 0.50)
+    residuals = sorted(math.hypot(ring["center_x"] - center_x, ring["center_y"] - center_y) for ring in rings)
+    radii = sorted(ring["radius"] for ring in rings)
+    center_residual = _quantile(residuals, 0.50)
+    median_radius = _quantile(radii, 0.50)
+    ring_z = [ring["z"] for ring in rings]
+    axial_coverage = (max(ring_z) - min(ring_z)) / span_z
+    if center_residual > max(0.05, median_radius * 0.02) or axial_coverage < 0.50:
+        return {
+            "status": "unavailable",
+            "method": "robust_horizontal_ring_fit_v1",
+            "ring_count": len(rings),
+            "center_residual_cm": center_residual,
+            "axial_coverage": axial_coverage,
+        }
+    return {
+        "status": "verified",
+        "method": "robust_horizontal_ring_fit_v1",
+        "frame_origin_cm": [center_x, center_y, (min(ring_z) + max(ring_z)) / 2.0],
+        "axis_direction": [0.0, 0.0, 1.0],
+        "ring_count": len(rings),
+        "center_residual_cm": center_residual,
+        "axial_coverage": axial_coverage,
+    }
+
+
+def _quantile(values: list[float], fraction: float) -> float:
+    position = max(0.0, min(1.0, float(fraction))) * (len(values) - 1)
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return float(values[lower])
+    weight = position - lower
+    return float(values[lower]) * (1.0 - weight) + float(values[upper]) * weight
 
 
 def _corrected_fbx_import_scale(

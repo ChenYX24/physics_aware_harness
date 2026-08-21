@@ -1374,6 +1374,7 @@ class AssetProviderOrchestrator:
             "byte_size": int(primary.get("byte_size") or Path(str(primary["local_path"])).stat().st_size),
             "bbox_size_m": size,
             "authored_size_m": size,
+            "geometry_analysis": copy.deepcopy((import_result.get("import_validation") or {}).get("geometry_analysis")),
             "provider_reported_size_m": (
                 list(acquisition.expected_size_m) if acquisition.expected_size_m is not None else None
             ),
@@ -1569,6 +1570,17 @@ class AssetProviderOrchestrator:
             "byte_size": int(primary.get("byte_size") or Path(str(primary["local_path"])).stat().st_size),
             "bbox_size_m": size,
             "authored_size_m": size,
+            "geometry_analysis": copy.deepcopy((import_result.get("import_validation") or {}).get("geometry_analysis")),
+            "geometry_registration": {
+                "status": "verified",
+                "method": "deterministic_centered_primitive_identity_v1",
+                "asset_sha256": str(primary["sha256"]),
+                "solver_to_visual": {
+                    "translation_m": [0.0, 0.0, 0.0],
+                    "solver_rotation_xyz_deg": [0.0, 0.0, 0.0],
+                    "ue_rotation_pyr_deg": [0.0, 0.0, 0.0],
+                },
+            },
             "preserve_authored_scale": True,
             "collider": shape,
             "collision_profile": "PhysicsActor",

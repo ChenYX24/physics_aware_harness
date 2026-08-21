@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
@@ -292,6 +293,20 @@ class FluidBatchVerifierTests(unittest.TestCase):
                 "collision": {"type": "asset", "asset_geometry_match": True},
             },
         ]
+        for body in bodies:
+            solver_registration_rotation = [10.0, 20.0, 30.0] if body["id"] == "moving_body" else [0.0, 0.0, 0.0]
+            ue_registration_rotation = [-20.0, -30.0, 10.0] if body["id"] == "moving_body" else [0.0, 0.0, 0.0]
+            body["asset"]["geometry_registration"] = {
+                "status": "verified",
+                "method": "test_registration_v1",
+                "asset_sha256": body["asset"]["sha256"],
+                "solver_to_visual": {
+                    "translation_m": [0.0, 0.0, 0.0],
+                    "solver_rotation_xyz_deg": solver_registration_rotation,
+                    "ue_rotation_pyr_deg": ue_registration_rotation,
+                },
+            }
+            body["collision"]["geometry_registration"] = body["asset"]["geometry_registration"]
         cache = {"environment": {"rigid_bodies": bodies}}
         placement = {
             "actor_bindings": [
@@ -300,6 +315,7 @@ class FluidBatchVerifierTests(unittest.TestCase):
                     "asset": {
                         "ue_path": body["asset"]["ue_path"],
                         "instance_scale": body["transform"]["scale"],
+                        "geometry_registration": body["asset"]["geometry_registration"],
                     },
                     "declared_object_transform": body["transform"],
                 }
@@ -314,13 +330,22 @@ class FluidBatchVerifierTests(unittest.TestCase):
         self.assertEqual(dynamic[1]["ue5_path"], bodies[2]["asset"]["ue_path"])
         self.assertEqual(static[0]["ue5_path"], bodies[1]["asset"]["ue_path"])
         self.assertEqual(dynamic[0]["params"]["base_rotation_degrees"], [0.0, 0.0, 0.0])
-        self.assertEqual(dynamic[0]["params"]["pose_anchor"], "bounds_center")
-        self.assertEqual(static[0]["params"]["pose_anchor"], "bounds_center")
+        self.assertEqual(dynamic[0]["params"]["pose_anchor"], "solver_to_visual")
+        self.assertEqual(dynamic[0]["params"]["solver_to_visual"]["ue_rotation_pyr_deg"], [-20.0, -30.0, 10.0])
+        self.assertEqual(static[0]["params"]["pose_anchor"], "solver_to_visual")
         self.assertEqual(static[0]["scale"], [2.0, 1.0, 0.5])
         self.assertEqual(static[0]["initial_position_m"], [0.02, 0.0, 0.0])
         self.assertTrue(dynamic[0]["params"]["asset_geometry_match"])
         self.assertEqual(resolution[0]["selected_asset"]["collision_representation"], "axisymmetric_profile")
         self.assertFalse(resolution[0]["selected_asset"]["proxy"])
+
+        mismatched = deepcopy(placement)
+        mismatched["actor_bindings"][0]["asset"]["geometry_registration"]["solver_to_visual"]["translation_m"] = [0.01, 0.0, 0.0]
+        with self.assertRaisesRegex(ValueError, "disagrees with runtime placement"):
+            rigid_body_runtime_objects(cache, mismatched, render_z_offset_m=0.025)
+        native_source = (ROOT / "scripts" / "native_ue_scene.py").read_text(encoding="utf-8")
+        self.assertIn("MathLibrary.compose_rotators", native_source)
+        self.assertIn("MathLibrary.transform_direction", native_source)
 
         trajectory = rigid_body_trajectory_objects(
             {
@@ -353,8 +378,16 @@ class FluidBatchVerifierTests(unittest.TestCase):
         registration = runtime_pose_registration_report(
             {
                 "runtime_pose_registrations": {
-                    "moving_body": {"anchor": "bounds_center", "max_residual_cm": 0.001},
-                    "static_body": {"anchor": "bounds_center", "max_residual_cm": 0.0},
+                    "moving_body": {
+                        "anchor": "solver_to_visual",
+                        "max_residual_cm": 0.001,
+                        "max_rotation_residual_deg": 0.0,
+                    },
+                    "static_body": {
+                        "anchor": "solver_to_visual",
+                        "max_residual_cm": 0.0,
+                        "max_rotation_residual_deg": 0.0,
+                    },
                 }
             },
             ["moving_body", "static_body"],

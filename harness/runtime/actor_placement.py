@@ -385,6 +385,7 @@ def actor_binding_from_node(
             "required_asset_unresolved": required_asset_unresolved,
             "collision": asset_binding.get("collision"),
             "collision_body_setup_verified": asset_body_setup_verified,
+            "geometry_registration": asset_binding.get("geometry_registration"),
         },
         "physics": {
             "state_kind": state_kind,

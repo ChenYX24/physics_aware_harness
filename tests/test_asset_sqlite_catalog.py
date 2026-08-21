@@ -119,6 +119,37 @@ class AssetSQLiteCatalogTests(unittest.TestCase):
             result = catalog.search(SearchIntent(raw_query="Renamed Office Chair"), top_k=1)
             self.assertEqual(result[0]["name"], "Renamed Office Chair")
 
+    def test_delete_asset_removes_only_the_exact_catalog_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            catalog_path = root / "catalog.sqlite"
+            catalog = initialize_catalog(catalog_path)
+            catalog.import_registry(self.registry_payload(root))
+
+            result = catalog.delete_asset("modern_wood_chair")
+
+            self.assertTrue(result["deleted"])
+            self.assertEqual(result["catalog_asset_count"], 2)
+            self.assertIsNone(catalog.get_asset("modern_wood_chair"))
+            self.assertIsNotNone(catalog.get_asset("chair_without_collision"))
+            with closing(sqlite3.connect(catalog_path)) as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT count(*) FROM asset_search_fts WHERE asset_id = ?",
+                        ("modern_wood_chair",),
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT count(*) FROM asset_aliases WHERE asset_id = ?",
+                        ("modern_wood_chair",),
+                    ).fetchone()[0],
+                    0,
+                )
+
+            self.assertFalse(catalog.delete_asset("modern_wood_chair")["deleted"])
+
     def test_v1_catalog_migrates_to_embedding_schema_without_sqlite_vec(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "catalog.sqlite"

@@ -132,6 +132,25 @@ class SQLiteCatalog:
             ).fetchone()
         return json.loads(str(row["row_json"])) if row else None
 
+    def delete_asset(self, asset_id: str) -> dict[str, Any]:
+        identity = str(asset_id).strip()
+        if not identity:
+            raise ValueError("Catalog deletion requires an exact asset_id")
+        with closing(self.connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DELETE FROM asset_search_fts WHERE asset_id = ?", (identity,))
+            deleted = connection.execute("DELETE FROM assets WHERE asset_id = ?", (identity,)).rowcount
+            if deleted:
+                connection.execute("UPDATE vector_index_state SET status = 'stale'")
+            connection.commit()
+            total = int(connection.execute("SELECT count(*) FROM assets").fetchone()[0])
+        return {
+            "asset_id": identity,
+            "deleted": deleted == 1,
+            "catalog_asset_count": total,
+            "schema_version": CATALOG_SCHEMA_VERSION,
+        }
+
     def get_assets_by_source_uri(self, source_uri: str) -> list[dict[str, Any]]:
         identity = str(source_uri).strip()
         if not identity:

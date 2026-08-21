@@ -253,6 +253,7 @@ def compile_collision(
             "artifact_to_asset_transform": {"matrix4x4": matrix},
             "backend_conversion": "catalog_portable_collision_mesh_v1_to_genesis_mesh",
             "convexify": True,
+            "geometry_registration": dict(collision.get("geometry_registration") or {}),
         }
     if collision_type == "plane":
         normal = vec3(collision.get("normal"), "plane normal")
@@ -265,6 +266,7 @@ def compile_collision(
             "position_m": vec3(collision.get("position_m"), "plane position_m"),
             "normal": normal,
             "asset_geometry_match": True,
+            "geometry_registration": dict(collision.get("geometry_registration") or {}),
         }
     if collision_type != "axisymmetric_profile":
         raise ValueError(f"unsupported rigid_sph collision type: {collision_type}")

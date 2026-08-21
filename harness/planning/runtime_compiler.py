@@ -25,6 +25,7 @@ from harness.core.stage_result import (
 )
 from harness.core.case_spec_v2 import CaseSpecV2, compile_case_spec_v2_runtime
 from harness.core.runtime_case import RuntimeCase
+from harness.core.scene_layout import resolve_instance_geometry
 from harness.planning.backend_planner import plan_backend
 from harness.planning.static_scene_builder import build_static_scene_layout
 from harness.planning.verification_compiler import compile_verification_plan
@@ -723,6 +724,8 @@ def bind_resolved_solver_assets(
     asset_resolution: Mapping[str, Any],
 ) -> dict[str, Any] | None:
     """Bind Catalog-selected assets before validating explicit solver geometry."""
+    from harness.runtime.rigid_sph_scene import RigidSphCapabilityMissing, compile_rigid_sph_scene
+
     solver_scene = case_spec.get("solver_scene") if isinstance(case_spec.get("solver_scene"), dict) else None
     if solver_scene is None:
         return None
@@ -757,11 +760,12 @@ def bind_resolved_solver_assets(
             "catalog_source": str(selected.get("source_kind") or selected.get("source_uri") or "catalog"),
             "bbox_m": copy.deepcopy(bbox_m),
             "collision": copy.deepcopy(selected.get("collision") or {}),
+            "geometry_analysis": copy.deepcopy(selected.get("geometry_analysis")),
+            "geometry_registration": copy.deepcopy(selected.get("geometry_registration")),
         }
-    register_model_generated_solver_frames(case_spec, selected_by_object)
     try:
-        from harness.runtime.rigid_sph_scene import RigidSphCapabilityMissing, compile_rigid_sph_scene
-
+        register_model_generated_solver_frames(case_spec, selected_by_object)
+        register_solver_to_visual_frames(case_spec, selected_by_object)
         compile_rigid_sph_scene(case_spec)
     except RigidSphCapabilityMissing as exc:
         return {
@@ -793,7 +797,7 @@ def register_model_generated_solver_frames(
             continue
         solver = obj.get("solver") if isinstance(obj.get("solver"), dict) else {}
         collision = solver.get("collision") if isinstance(solver.get("collision"), dict) else {}
-        if collision.get("type") != "axisymmetric_profile" or isinstance(collision.get("geometry_registration"), dict):
+        if collision.get("type") != "axisymmetric_profile":
             continue
         profile = collision.get("inner_profile")
         bbox_m = selected.get("bbox_size_m") or selected.get("effective_size_m") or selected.get("authored_size_m")
@@ -830,18 +834,152 @@ def register_model_generated_solver_frames(
                 initial["position_m"] = [position[0] * radial_scale, position[1] * radial_scale, position[2] - center_z]
             if isinstance(initial.get("radius_m"), (int, float)) and not isinstance(initial.get("radius_m"), bool):
                 initial["radius_m"] = float(initial["radius_m"]) * radial_scale
-        registration = {
-            "status": "verified",
-            "method": "resolved_visual_bounds_axisymmetric_registration_v1",
-            "asset_sha256": str(selected.get("sha256") or ""),
-            "visual_bounds_size_m": [float(value) for value in bbox_m],
-            "solver_local_translation_m": [0.0, 0.0, -center_z],
-            "solver_local_radial_scale": radial_scale,
-        }
-        collision["geometry_registration"] = registration
-        collision["fit_method"] = registration["method"]
+        collision["fit_method"] = "resolved_visual_bounds_axisymmetric_profile_fit_v1"
+
+
+def register_solver_to_visual_frames(
+    case_spec: dict[str, Any],
+    selected_by_object: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """Compile one explicit solver-frame to visual-frame registration per rigid body."""
+    for obj in case_spec.get("objects") or []:
+        if not isinstance(obj, dict) or obj.get("role") != "rigid_body":
+            continue
+        object_id = str(obj.get("id") or "")
+        solver = obj.get("solver") if isinstance(obj.get("solver"), dict) else {}
+        collision = solver.get("collision") if isinstance(solver.get("collision"), dict) else {}
         asset = obj.get("asset") if isinstance(obj.get("asset"), dict) else {}
+        selected = selected_by_object.get(object_id)
+        selected = selected if isinstance(selected, Mapping) else {}
+        instance_scale = resolve_instance_geometry(obj, dict(selected))["instance_scale"]
+        catalog_registration = selected.get("geometry_registration")
+        if (
+            isinstance(catalog_registration, Mapping)
+            and catalog_registration.get("status") == "verified"
+            and catalog_registration.get("asset_sha256") == str(selected.get("sha256") or "")
+            and _valid_solver_to_visual(catalog_registration.get("solver_to_visual"))
+        ):
+            registration = _scaled_catalog_registration(catalog_registration, instance_scale)
+        elif _centered_procedural_identity(selected):
+            registration = _identity_registration(
+                method="deterministic_centered_primitive_identity_v1",
+                evidence=str((selected.get("provenance") or {}).get("generator_source_version") or ""),
+                asset_sha256=str(selected.get("sha256") or ""),
+            )
+        elif str(collision.get("type") or "") == "asset":
+            portable = (asset.get("collision") or {}).get("portable_mesh") if isinstance(asset.get("collision"), dict) else None
+            matrix = (portable.get("artifact_to_asset_transform") or {}).get("matrix4x4") if isinstance(portable, Mapping) else None
+            if not isinstance(portable, Mapping) or portable.get("coordinate_system") != "asset_local_z_up_m" or not _identity_matrix4x4(matrix):
+                raise ValueError(f"rigid body {object_id} has no qualified asset-local registration")
+            registration = _identity_registration(
+                method="qualified_asset_local_registration_v1",
+                evidence=str(portable.get("sha256") or ""),
+                asset_sha256=str(asset.get("sha256") or selected.get("sha256") or ""),
+            )
+        elif str(collision.get("type") or "") == "axisymmetric_profile":
+            registration = _axisymmetric_geometry_registration(obj, selected, collision, instance_scale)
+        else:
+            raise ValueError(f"rigid body {object_id} has no explicit solver-to-visual registration")
+        collision["geometry_registration"] = copy.deepcopy(registration)
         asset["geometry_registration"] = copy.deepcopy(registration)
+
+
+def _axisymmetric_geometry_registration(
+    obj: Mapping[str, Any],
+    selected: Mapping[str, Any],
+    collision: Mapping[str, Any],
+    instance_scale: list[float],
+) -> dict[str, Any]:
+    analysis = selected.get("geometry_analysis") if isinstance(selected.get("geometry_analysis"), Mapping) else {}
+    axis_frame = analysis.get("axisymmetric_z_frame") if isinstance(analysis.get("axisymmetric_z_frame"), Mapping) else {}
+    origin_cm = axis_frame.get("frame_origin_cm")
+    profile = collision.get("inner_profile")
+    if (
+        analysis.get("schema_version") != "harness_asset_geometry_analysis_v1"
+        or axis_frame.get("status") != "verified"
+        or axis_frame.get("axis_direction") != [0.0, 0.0, 1.0]
+        or not _finite_vec3_values(origin_cm)
+        or not isinstance(profile, list)
+        or len(profile) < 2
+    ):
+        raise ValueError(f"rigid body {obj.get('id')} has no verified axisymmetric geometry registration")
+    profile_z = [float(point["z_m"]) for point in profile if isinstance(point, Mapping) and isinstance(point.get("z_m"), (int, float))]
+    if len(profile_z) != len(profile):
+        raise ValueError(f"rigid body {obj.get('id')} has invalid axisymmetric profile registration landmarks")
+    profile_center_z = (min(profile_z) + max(profile_z)) / 2.0
+    origin_m = [float(origin_cm[index]) / 100.0 * float(instance_scale[index]) for index in range(3)]
+    return {
+        "status": "verified",
+        "method": "asset_geometry_axisymmetric_z_registration_v1",
+        "asset_sha256": str(selected.get("sha256") or ""),
+        "geometry_analysis": {
+            "method": axis_frame.get("method"),
+            "ring_count": axis_frame.get("ring_count"),
+            "center_residual_cm": axis_frame.get("center_residual_cm"),
+            "axial_coverage": axis_frame.get("axial_coverage"),
+        },
+        "solver_to_visual": {
+            "translation_m": [-origin_m[0], -origin_m[1], profile_center_z - origin_m[2]],
+            "solver_rotation_xyz_deg": [0.0, 0.0, 0.0],
+            "ue_rotation_pyr_deg": [0.0, 0.0, 0.0],
+        },
+    }
+
+
+def _scaled_catalog_registration(registration: Mapping[str, Any], instance_scale: list[float]) -> dict[str, Any]:
+    result = copy.deepcopy(dict(registration))
+    transform = result["solver_to_visual"]
+    transform["translation_m"] = [
+        float(transform["translation_m"][index]) * float(instance_scale[index])
+        for index in range(3)
+    ]
+    return result
+
+
+def _identity_registration(*, method: str, evidence: str, asset_sha256: str) -> dict[str, Any]:
+    return {
+        "status": "verified",
+        "method": method,
+        "evidence": evidence,
+        "asset_sha256": asset_sha256,
+        "solver_to_visual": {
+            "translation_m": [0.0, 0.0, 0.0],
+            "solver_rotation_xyz_deg": [0.0, 0.0, 0.0],
+            "ue_rotation_pyr_deg": [0.0, 0.0, 0.0],
+        },
+    }
+
+
+def _centered_procedural_identity(selected: Mapping[str, Any]) -> bool:
+    provenance = selected.get("provenance") if isinstance(selected.get("provenance"), Mapping) else {}
+    return (
+        selected.get("source_kind") == "procedural_generation"
+        and provenance.get("provider_id") == "local_procedural_mesh_v1"
+        and provenance.get("generator_source_version") == "primitive_mesh_v1_obj_writer_v1"
+    )
+
+
+def _identity_matrix4x4(value: Any) -> bool:
+    return value == [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+
+
+def _valid_solver_to_visual(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    if not (
+        _finite_vec3_values(value.get("translation_m"))
+        and _finite_vec3_values(value.get("solver_rotation_xyz_deg"))
+        and _finite_vec3_values(value.get("ue_rotation_pyr_deg"))
+    ):
+        return False
+    solver = [float(item) for item in value["solver_rotation_xyz_deg"]]
+    expected_ue = [-solver[1], -solver[2], solver[0]]
+    return all(abs(float(value["ue_rotation_pyr_deg"][index]) - expected_ue[index]) <= 1e-6 for index in range(3))
 
 
 def _finite_vec3_values(value: Any) -> bool:

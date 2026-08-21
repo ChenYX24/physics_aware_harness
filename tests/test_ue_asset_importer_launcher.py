@@ -19,6 +19,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class UEAssetImporterLauncherTests(unittest.TestCase):
+    def test_native_geometry_analysis_uses_python_exposed_static_mesh_export(self) -> None:
+        source = Path(__file__).resolve().parents[1] / "scripts" / "native_ue_asset_importer.py"
+        text = source.read_text(encoding="utf-8")
+
+        self.assertNotIn("get_mesh_description", text)
+        self.assertIn("unreal.StaticMeshExporterOBJ()", text)
+        self.assertIn("unreal.Exporter.run_asset_export_task(task)", text)
+        self.assertIn(
+            "points.append([float(fields[1]), float(fields[3]), float(fields[2])])",
+            text,
+        )
+
     def test_batch_launcher_reports_configuration_failure_per_asset(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

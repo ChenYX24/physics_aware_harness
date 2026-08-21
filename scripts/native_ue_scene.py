@@ -5097,9 +5097,84 @@ def align_runtime_actor_to_pose_anchor(
     desired_position: unreal.Vector,
     registrations: dict | None = None,
 ) -> tuple[unreal.Vector, unreal.Vector]:
-    """Register an imported mesh's bounds center to the declared body pose."""
+    """Apply the compiled pose registration for a runtime actor."""
     params = obj.get("params") if isinstance(obj.get("params"), dict) else {}
-    if params.get("pose_anchor") != "bounds_center":
+    pose_anchor = params.get("pose_anchor")
+    if pose_anchor == "solver_to_visual":
+        registration = params.get("solver_to_visual")
+        if not isinstance(registration, dict):
+            raise RuntimeError(f"runtime solver-to-visual registration is missing for {obj.get('id')}")
+        translation_m = registration.get("translation_m")
+        solver_rotation = registration.get("solver_rotation_xyz_deg")
+        ue_rotation = registration.get("ue_rotation_pyr_deg")
+        if not all(isinstance(value, list) and len(value) == 3 for value in (translation_m, solver_rotation, ue_rotation)):
+            raise RuntimeError(f"runtime solver-to-visual registration is invalid for {obj.get('id')}")
+        numeric = [float(value) for values in (translation_m, solver_rotation, ue_rotation) for value in values]
+        if not all(math.isfinite(value) for value in numeric):
+            raise RuntimeError(f"runtime solver-to-visual registration is non-finite for {obj.get('id')}")
+        expected_ue_rotation = [-numeric[4], -numeric[5], numeric[3]]
+        if any(abs(float(ue_rotation[index]) - expected_ue_rotation[index]) > 1e-6 for index in range(3)):
+            raise RuntimeError(f"runtime solver-to-visual rotation conventions disagree for {obj.get('id')}")
+        before_location = actor.get_actor_location()
+        solver_world_rotation = actor.get_actor_rotation()
+        expected_rotation = unreal.MathLibrary.compose_rotators(
+            runtime_rotator(ue_rotation),
+            solver_world_rotation,
+        )
+        local_translation_cm = unreal.Vector(*[float(value) * 100.0 for value in translation_m])
+        world_translation_cm = unreal.MathLibrary.transform_direction(
+            actor.get_actor_transform(),
+            local_translation_cm,
+        )
+        expected_location = desired_position + world_translation_cm
+        actor.set_actor_location(expected_location, False, False)
+        actor.set_actor_rotation(expected_rotation, False)
+        actual_location = actor.get_actor_location()
+        actual_rotation = actor.get_actor_rotation()
+        residual = math.sqrt(
+            (actual_location.x - expected_location.x) ** 2
+            + (actual_location.y - expected_location.y) ** 2
+            + (actual_location.z - expected_location.z) ** 2
+        )
+        if residual > 0.1:
+            raise RuntimeError(
+                f"runtime pose registration failed for {obj.get('id')}: "
+                f"solver-to-visual residual {residual:.6f} cm"
+            )
+        rotation_residual = max(
+            abs((actual - expected + 180.0) % 360.0 - 180.0)
+            for actual, expected in (
+                (actual_rotation.pitch, expected_rotation.pitch),
+                (actual_rotation.yaw, expected_rotation.yaw),
+                (actual_rotation.roll, expected_rotation.roll),
+            )
+        )
+        if rotation_residual > 0.01:
+            raise RuntimeError(
+                f"runtime pose registration failed for {obj.get('id')}: "
+                f"solver-to-visual rotation residual {rotation_residual:.6f} degrees"
+            )
+        if registrations is not None:
+            object_id = str(obj.get("id") or "")
+            current = registrations.get(object_id) if isinstance(registrations.get(object_id), dict) else {}
+            registrations[object_id] = {
+                "anchor": "solver_to_visual",
+                "solver_position_cm": [desired_position.x, desired_position.y, desired_position.z],
+                "declared_solver_to_visual": registration,
+                "expected_visual_position_cm": [expected_location.x, expected_location.y, expected_location.z],
+                "actual_visual_position_cm": [actual_location.x, actual_location.y, actual_location.z],
+                "actor_location_before_cm": [before_location.x, before_location.y, before_location.z],
+                "residual_cm": residual,
+                "rotation_residual_deg": rotation_residual,
+                "application_count": int(current.get("application_count") or 0) + 1,
+                "max_residual_cm": max(float(current.get("max_residual_cm") or 0.0), residual),
+                "max_rotation_residual_deg": max(
+                    float(current.get("max_rotation_residual_deg") or 0.0),
+                    rotation_residual,
+                ),
+            }
+        return actor_bounds(actor)
+    if pose_anchor != "bounds_center":
         return actor_bounds(actor)
     before_origin, extent = actor_bounds(actor)
     before_location = actor.get_actor_location()

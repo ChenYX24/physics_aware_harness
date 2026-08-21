@@ -222,6 +222,7 @@ def build_object_node(
             "runtime_binding_requirements": asset_row.get("runtime_binding_requirements", []) if asset_row else [],
             "collision": selected_collision or None,
             "collision_body_setup_verified": asset_body_setup_verified,
+            "geometry_registration": declared_asset.get("geometry_registration"),
         },
     }
 

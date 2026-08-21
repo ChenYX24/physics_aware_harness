@@ -52,7 +52,13 @@ class StubImporter(BackendImporterAdapter):
                 "runtime_ready": True,
                 "files": [self._record(imported, role="primary", file_format="uasset")],
                 "dependencies": [],
-                "import_validation": {"actual_size_cm": [10.0, 8.0, 12.0]},
+                "import_validation": {
+                    "actual_size_cm": [10.0, 8.0, 12.0],
+                    "geometry_analysis": {
+                        "schema_version": "harness_asset_geometry_analysis_v1",
+                        "axisymmetric_z_frame": {"status": "unavailable"},
+                    },
+                },
                 "portable_collision_artifact": {
                     "schema_version": "harness_portable_collision_mesh_v1",
                     **self._record(collision, role="qualified_collision_mesh", file_format="obj"),
@@ -106,6 +112,10 @@ class LocalAssetInputTests(unittest.TestCase):
             self.assertEqual(registered["source_uri"], result["source_uri"])
             self.assertEqual(registered["lifecycle_status"], "runtime_bound")
             self.assertEqual(registered["qualification"]["status"], "pass_local_preview")
+            self.assertEqual(
+                registered["geometry_analysis"]["schema_version"],
+                "harness_asset_geometry_analysis_v1",
+            )
 
             manifest = with_registered_asset_input(
                 build_provider_input_manifest([], workspace=workspace),

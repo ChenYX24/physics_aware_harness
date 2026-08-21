@@ -377,6 +377,18 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
                         "sha256": "a" * 64,
                         "bbox_size_m": [0.13157, 0.098743, 0.106715],
                         "source_kind": "model_generation",
+                        "geometry_analysis": {
+                            "schema_version": "harness_asset_geometry_analysis_v1",
+                            "axisymmetric_z_frame": {
+                                "status": "verified",
+                                "method": "robust_horizontal_ring_fit_v1",
+                                "frame_origin_cm": [1.0, -2.0, 4.5],
+                                "axis_direction": [0.0, 0.0, 1.0],
+                                "ring_count": 24,
+                                "center_residual_cm": 0.01,
+                                "axial_coverage": 0.9,
+                            },
+                        },
                         "proxy": False,
                     },
                 },
@@ -387,11 +399,18 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
                         "sha256": "b" * 64,
                         "bbox_size_m": [0.8, 0.8, 0.05],
                         "source_kind": "procedural_generation",
+                        "provenance": {
+                            "provider_id": "local_procedural_mesh_v1",
+                            "generator_source_version": "primitive_mesh_v1_obj_writer_v1",
+                        },
                         "proxy": False,
                     },
                 },
             ]
         }
+        unregistered_case = deepcopy(case)
+        unregistered_resolution = deepcopy(resolution)
+        del unregistered_resolution["assets"][0]["selected_asset"]["geometry_analysis"]
 
         error = bind_resolved_solver_assets(case, resolution)
 
@@ -411,6 +430,21 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
         registration = mug["solver"]["collision"]["geometry_registration"]
         self.assertEqual(registration["status"], "verified")
         self.assertEqual(registration["asset_sha256"], "a" * 64)
+        self.assertEqual(
+            registration["solver_to_visual"],
+            {
+                "translation_m": [-0.01, 0.02, -0.045],
+                "solver_rotation_xyz_deg": [0.0, 0.0, 0.0],
+                "ue_rotation_pyr_deg": [0.0, 0.0, 0.0],
+            },
+        )
+        self.assertEqual(mug["asset"]["geometry_registration"], registration)
+        table_registration = case["objects"][1]["asset"]["geometry_registration"]
+        self.assertEqual(table_registration["solver_to_visual"]["translation_m"], [0.0, 0.0, 0.0])
+
+        missing_registration = bind_resolved_solver_assets(unregistered_case, unregistered_resolution)
+        self.assertEqual(missing_registration["code"], "F3_invalid_solver_contract")
+        self.assertIn("no verified axisymmetric geometry registration", missing_registration["message"])
 
     def test_asset_intents_only_include_asset_visual_representations(self) -> None:
         data = case_spec_v2_fixture()
@@ -560,6 +594,16 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
             "collider": "box",
             "collision_profile": "PhysicsActor",
             "collision": {"present": True, "kind": "simple_box"},
+            "geometry_registration": {
+                "status": "verified",
+                "method": "fixture_shared_frame_identity_v1",
+                "asset_sha256": "a" * 64,
+                "solver_to_visual": {
+                    "translation_m": [0.0, 0.0, 0.0],
+                    "solver_rotation_xyz_deg": [0.0, 0.0, 0.0],
+                    "ue_rotation_pyr_deg": [0.0, 0.0, 0.0],
+                },
+            },
             "mass_kg": 100.0,
             "material": {"dynamic_friction": 0.04, "restitution": 0.15},
             "proxy": False,
@@ -718,6 +762,10 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
                         "sha256": "a" * 64,
                         "bbox_size_m": [1.0, 1.0, 0.05],
                         "source_kind": "procedural_generation",
+                        "provenance": {
+                            "provider_id": "local_procedural_mesh_v1",
+                            "generator_source_version": "primitive_mesh_v1_obj_writer_v1",
+                        },
                         "proxy": False,
                     },
                 }
@@ -747,6 +795,10 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
                             "sha256": "a" * 64,
                             "bbox_size_m": [1.0, 1.0, 0.05],
                             "source_kind": "procedural_generation",
+                            "provenance": {
+                                "provider_id": "local_procedural_mesh_v1",
+                                "generator_source_version": "primitive_mesh_v1_obj_writer_v1",
+                            },
                             "proxy": False,
                         },
                     },
