@@ -1269,6 +1269,29 @@ def build_map_report(
     }
 
 
+def canonicalize_native_trajectory(trajectory: Any) -> list[dict[str, Any]]:
+    if not isinstance(trajectory, list):
+        raise ValueError("Native UE trajectory must be a list.")
+    canonical: list[dict[str, Any]] = []
+    for frame in trajectory:
+        if not isinstance(frame, dict) or not isinstance(frame.get("objects"), dict):
+            raise ValueError("Native UE trajectory frames must contain an objects mapping.")
+        canonical_frame = dict(frame)
+        canonical_objects: dict[str, dict[str, Any]] = {}
+        for object_id, state in frame["objects"].items():
+            if not isinstance(state, dict):
+                raise ValueError(f"Native UE trajectory state for {object_id} must be an object.")
+            canonical_state = dict(state)
+            if "position_m" not in canonical_state and isinstance(state.get("position"), list):
+                canonical_state["position_m"] = list(state["position"])
+            if "rotation_deg" not in canonical_state and isinstance(state.get("rotation_degrees"), list):
+                canonical_state["rotation_deg"] = list(state["rotation_degrees"])
+            canonical_objects[str(object_id)] = canonical_state
+        canonical_frame["objects"] = canonical_objects
+        canonical.append(canonical_frame)
+    return canonical
+
+
 def standardize_native_output(
     run_dir: Path,
     native_output: Path,
@@ -1301,14 +1324,14 @@ def standardize_native_output(
     missing = [str(path) for path in dict.fromkeys(required_paths) if not path.exists() or path.stat().st_size == 0]
     if missing:
         return fail_report("F6_RUNTIME_OR_RENDER_FAILURE", f"Native UE output missing: {missing}", native_ue_invoked=True)
-    shutil.copyfile(trajectory_path, run_dir / "trajectory.json")
+    trajectory = canonicalize_native_trajectory(read_json(trajectory_path))
+    write_json(run_dir / "trajectory.json", trajectory)
     fracture_events_path = rgb_source / "fracture_events.json"
     if fracture_events_path.is_file():
         shutil.copyfile(fracture_events_path, run_dir / "fracture_events.json")
     fragment_trajectory_path = rgb_source / "fragment_trajectory.json"
     if fragment_trajectory_path.is_file():
         shutil.copyfile(fragment_trajectory_path, run_dir / "fragment_trajectory.json")
-    trajectory = read_json(trajectory_path)
     contacts = extract_contacts(trajectory)
     write_json(run_dir / "contact_events.json", contacts)
     write_json(run_dir / "action_trace.json", extract_action_trace(trajectory))

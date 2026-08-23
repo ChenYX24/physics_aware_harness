@@ -35,6 +35,13 @@ def build_object_node(
     declared_asset = obj.get("asset") if isinstance(obj.get("asset"), dict) else {}
     declared_asset_size = first_positive_size(declared_asset.get("bbox_m"), declared_asset.get("bbox_size_m"))
     geometry_asset = selected_asset
+    articulated_size = solver.get("authored_size_m") if solver.get("type") == "articulated_body" else None
+    if isinstance(articulated_size, list) and len(articulated_size) == 3:
+        geometry_asset = {
+            **(selected_asset or {}),
+            "authored_size_m": [float(value) for value in articulated_size],
+            "preserve_authored_scale": True,
+        }
     if declared_asset_size is not None:
         world_size = [declared_asset_size[index] * declared_scale[index] for index in range(3)]
         geometry_asset = {**(selected_asset or {}), "authored_size_m": world_size, "bbox_size_m": world_size}

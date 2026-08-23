@@ -15,7 +15,12 @@ from harness.runtime.articulated_body import (
 )
 from harness.runtime.ue_backend import materialize_articulated_body_assets
 from harness.verification.runtime_actor_placement_verifier import verify_runtime_actor_placement
-from scripts.harness_local_ue_runner import default_physics_controls, runtime_objects_from_actor_placement
+from harness.verification.trajectory_assertion_verifier import evaluate_assertion
+from scripts.harness_local_ue_runner import (
+    canonicalize_native_trajectory,
+    default_physics_controls,
+    runtime_objects_from_actor_placement,
+)
 from tests.case_spec_v2_fixture import case_spec_v2_fixture
 
 
@@ -151,19 +156,66 @@ class ArticulatedBodyTests(unittest.TestCase):
         dynamic, static = runtime_objects_from_actor_placement(placement, runtime.data)
 
         human_binding = next(item for item in placement["actor_bindings"] if item["object_id"] == "cue_ball")
+        human_node = next(item for item in layout["object_nodes"] if item["object_id"] == "cue_ball")
         human_runtime = next(item for item in dynamic if item["id"] == "cue_ball")
         attached_runtime = next(item for item in dynamic if item["id"] == "target_ball")
         self.assertEqual(report["status"], "pass")
         self.assertEqual(human_binding["render_binding"]["kind"], "articulated_body")
+        self.assertEqual(human_binding["asset"]["authored_size_m"], [0.58, 0.36, 1.92])
+        self.assertTrue(human_binding["asset"]["preserve_authored_scale"])
+        self.assertEqual(human_node["bounds"]["extents_m"], [0.29, 0.18, 0.96])
+        self.assertEqual(human_node["bounds"]["top_z"], 1.92)
         self.assertEqual(human_binding["physics"]["simulate_physics"], False)
         self.assertEqual(human_runtime["behavior"], "articulated_kinematic")
         self.assertEqual(human_runtime["asset_kind"], "articulated_kinematic")
+        self.assertEqual(human_runtime["scale"], [1.0, 1.0, 1.0])
         self.assertEqual(human_runtime["params"]["pose_anchor"], "actor_origin")
         self.assertEqual(human_runtime["params"]["base_rotation_degrees"], [0.0, 15.0, 0.0])
         self.assertEqual(human_runtime["rotation_degrees"], [0.0, 0.0, 0.0])
         self.assertFalse(attached_runtime["physics_properties"]["simulate_physics"])
         self.assertFalse(any(item["id"] == "target_ball" for item in static))
         self.assertTrue(any(item["id"] == "floor" for item in static))
+
+    def test_native_ue_trajectory_is_canonicalized_before_verification(self) -> None:
+        native = [
+            {
+                "frame": 0,
+                "time": 0.0,
+                "objects": {
+                    "cup": {
+                        "position": [0.0, 0.0, 0.89],
+                        "rotation_degrees": [0.0, 0.0, 0.0],
+                    }
+                },
+            },
+            {
+                "frame": 1,
+                "time": 1.0,
+                "objects": {
+                    "cup": {
+                        "position": [0.0, 0.0, 1.19],
+                        "rotation_degrees": [0.0, 0.0, 0.0],
+                    }
+                },
+            },
+        ]
+
+        trajectory = canonicalize_native_trajectory(native)
+        result = evaluate_assertion(
+            {
+                "type": "state_delta",
+                "object_id": "cup",
+                "field": "position_m.z",
+                "operator": ">",
+                "value": 0.0,
+            },
+            trajectory,
+        )
+
+        self.assertEqual(trajectory[0]["objects"]["cup"]["position_m"], [0.0, 0.0, 0.89])
+        self.assertEqual(trajectory[0]["objects"]["cup"]["rotation_deg"], [0.0, 0.0, 0.0])
+        self.assertTrue(result["passed"])
+        self.assertAlmostEqual(result["measured"], 0.3)
 
     def test_unknown_bone_and_implicit_mode_transition_fail(self) -> None:
         bad_bone = articulated_case()

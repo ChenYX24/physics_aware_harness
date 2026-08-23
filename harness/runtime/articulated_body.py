@@ -7,6 +7,7 @@ from typing import Any, Mapping
 ARTICULATED_BODY_MODEL_ID = "harness_ue_mannequin_v1"
 ARTICULATED_BODY_ASSET_PATH = "/Game/Mannequin/Character/Mesh/SK_Mannequin.SK_Mannequin"
 ARTICULATED_BODY_PHYSICS_ASSET_PATH = "/Game/Mannequin/Character/Mesh/SK_Mannequin_PhysicsAsset.SK_Mannequin_PhysicsAsset"
+ARTICULATED_BODY_AUTHORED_SIZE_M = (0.58, 0.36, 1.92)
 ARTICULATED_BODY_MODES = frozenset({"kinematic", "ragdoll"})
 ARTICULATED_BODY_BONES = frozenset({
     "root",
@@ -99,6 +100,7 @@ def compile_articulated_body_contract(
         "model": ARTICULATED_BODY_MODEL_ID,
         "asset_path": ARTICULATED_BODY_ASSET_PATH,
         "physics_asset_path": ARTICULATED_BODY_PHYSICS_ASSET_PATH,
+        "authored_size_m": list(ARTICULATED_BODY_AUTHORED_SIZE_M),
         "mode": mode,
         "rotation_space": "component_offset",
         "root_keyframes": root_keyframes,
