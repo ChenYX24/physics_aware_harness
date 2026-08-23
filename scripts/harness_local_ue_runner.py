@@ -815,14 +815,14 @@ def duration_for_case(case_spec: dict[str, Any]) -> float:
 
 
 def post_event_tail_for_case(case_spec: dict[str, Any]) -> float:
-    """Time reserved for the autonomous simulation to settle after its event window."""
+    """Explicit time requested after the declared scene/event duration."""
     if os.environ.get("SIM_STUDIO_UE_DURATION"):
         return 0.0
     if os.environ.get("SIM_STUDIO_UE_POST_EVENT_TAIL_S") is not None:
         return max(0.0, min(3.0, float(os.environ["SIM_STUDIO_UE_POST_EVENT_TAIL_S"])))
     expected = case_spec.get("expected_physics") if isinstance(case_spec.get("expected_physics"), dict) else {}
     scene = case_spec.get("scene") if isinstance(case_spec.get("scene"), dict) else {}
-    value = expected.get("post_event_tail_s", scene.get("post_event_tail_s", 1.0))
+    value = expected.get("post_event_tail_s", scene.get("post_event_tail_s", 0.0))
     return max(0.0, min(3.0, float(value)))
 
 

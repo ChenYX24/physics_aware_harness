@@ -1084,6 +1084,17 @@ class CaseSpecV2Tests(unittest.TestCase):
             case_spec_v2_from_dict(data)
         self.assertIn("unknown_object_reference", {issue.code for issue in context.exception.issues})
 
+    def test_full_subject_camera_requires_a_declared_subject(self) -> None:
+        data = case_spec_v2_fixture()
+        camera = data["observation_requirements"]["cameras"][0]
+        camera["framing"] = "full_subject"
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("camera_subject_required", {issue.code for issue in context.exception.issues})
+
+        camera["subject"] = "cue_ball"
+        case_spec_v2_from_dict(data)
+
     def test_unsupported_capability_backend_combination_is_rejected_before_compilation(self) -> None:
         data = case_spec_v2_fixture()
         data["capabilities"] = {

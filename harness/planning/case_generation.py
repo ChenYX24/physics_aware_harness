@@ -24,6 +24,7 @@ from harness.core.case_spec_v2 import (
     ASSET_MUST_FIELDS,
     ASSET_MUST_NOT_FIELDS,
     BACKEND_SOLVER_CAPABILITIES,
+    CAMERA_FRAMINGS,
     CAMERA_ROLES,
     CASE_SPEC_V2_SCHEMA_VERSION,
     OBSERVATION_MODALITIES,
@@ -1713,9 +1714,10 @@ FIELD-BY-FIELD INSTRUCTIONS
     event's object is the source of one direct impacts relation, its linear velocity must point from the source's
     initial position toward that impacts target.
 13. expected_behavior: describe causal and observable outcomes without claiming success.
-14. observation_requirements: cameras use registered camera roles and exact target object IDs; modalities
-    use registered values; signals name evidence required by the capability and assertions. Do not emit
-    exact camera coordinates.
+14. observation_requirements: cameras use registered camera roles and exact target object IDs. A camera may
+    name one exact subject and framing=full_subject when that subject must determine a complete front/side
+    composition; use framing=scene otherwise. Modalities use registered values; signals name evidence required
+    by the capability and assertions. Do not emit exact camera coordinates.
 15. verification_requirements: each assertion is an object with a registered type and exact object IDs.
     event_sequence uses pairs=[[id_a,id_b],[id_b,id_c],...] with at least two explicit event pairs; a start/end
     objects list does not express a sequence.
@@ -2027,7 +2029,12 @@ def case_spec_generation_contract() -> dict[str, Any]:
                 "objects": "exact object IDs for a single-object or single-pair assertion",
                 "pairs": "event_sequence only: at least two ordered [exact object.id, exact object.id] pairs",
             },
-            "camera": {"role": "one camera_role enum", "target_objects": ["exact object.id"]},
+            "camera": {
+                "role": "one camera_role enum",
+                "target_objects": ["exact object.id"],
+                "subject": "optional exact object.id that defines the subject-local view frame",
+                "framing": "scene or full_subject; full_subject requires subject",
+            },
             "verification_requirements": {
                 "assertions": ["verification_assertion objects"],
                 "thresholds": "global capability/verifier-specific object; empty unless a known contract supplies names",
@@ -2064,6 +2071,7 @@ def case_spec_generation_contract() -> dict[str, Any]:
             "asset_must_field": sorted(ASSET_MUST_FIELDS),
             "asset_must_not_field": sorted(ASSET_MUST_NOT_FIELDS),
             "camera_role": sorted(CAMERA_ROLES),
+            "camera_framing": sorted(CAMERA_FRAMINGS),
             "observation_modality": sorted(OBSERVATION_MODALITIES),
             "verification_assertion": sorted(VERIFICATION_ASSERTION_TYPES),
             "relation_type": sorted(AGENT_RELATION_TYPES),
@@ -2208,7 +2216,7 @@ def _valid_case_spec_structure_example() -> dict[str, Any]:
         "events": [],
         "expected_behavior": {"contact_required": True},
         "observation_requirements": {
-            "cameras": [{"role": "front_static", "target_objects": ["generated_box", "floor"]}],
+            "cameras": [{"role": "front_static", "target_objects": ["generated_box", "floor"], "framing": "scene"}],
             "modalities": ["rgb"],
             "signals": ["trajectory", "contact_events"],
         },

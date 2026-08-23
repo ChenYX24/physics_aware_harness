@@ -55,6 +55,7 @@ CAMERA_ROLES = {
     "tracking_subject",
     "event_closeup",
 }
+CAMERA_FRAMINGS = {"scene", "full_subject"}
 OBSERVATION_MODALITIES = {"rgb", "depth", "segmentation", "instance_segmentation"}
 VERIFICATION_ASSERTION_TYPES = {
     "artifact_complete",
@@ -843,6 +844,28 @@ def collect_case_spec_v2_issues(
                     f"/observation_requirements/cameras/{index}/role",
                     "unsupported_camera_role",
                     f"unsupported camera role: {role}",
+                )
+            framing = camera.get("framing")
+            if framing is not None and framing not in CAMERA_FRAMINGS:
+                _issue(
+                    issues,
+                    f"/observation_requirements/cameras/{index}/framing",
+                    "unsupported_camera_framing",
+                    f"unsupported camera framing: {framing}",
+                )
+            if framing == "full_subject" and not camera.get("subject"):
+                _issue(
+                    issues,
+                    f"/observation_requirements/cameras/{index}/subject",
+                    "camera_subject_required",
+                    "full_subject framing requires one declared subject object",
+                )
+            if framing == "full_subject" and role not in {"front", "front_static", "side", "side_static"}:
+                _issue(
+                    issues,
+                    f"/observation_requirements/cameras/{index}/framing",
+                    "camera_framing_role_mismatch",
+                    "full_subject framing requires a front or side camera role",
                 )
     for key in ("modalities", "signals"):
         if observation.get(key) is not None:

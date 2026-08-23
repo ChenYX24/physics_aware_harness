@@ -3041,6 +3041,35 @@ class AgentJobControllerTests(unittest.TestCase):
 
         self.assertTrue(paths.isdisjoint(policy["paths"]))
 
+    def test_articulated_revision_policy_opens_motion_lists_without_opening_solver_identity(self) -> None:
+        case_spec = case_spec_v2_fixture()
+        case_spec["objects"][0]["solver"] = {
+            "type": "articulated_body",
+            "model": "harness_ue_mannequin_v1",
+            "mode": "kinematic",
+            "joint_keyframes": [
+                {"time_s": 0.0, "rotations_deg": {"upperarm_r": [0.0, 0.0, 0.0]}},
+                {"time_s": 2.0, "rotations_deg": {"upperarm_r": [0.0, 0.0, 60.0]}},
+            ],
+            "attachments": [
+                {
+                    "object_id": "target_ball",
+                    "bone": "hand_r",
+                    "start_time_s": 1.0,
+                    "end_time_s": 2.0,
+                    "local_position_m": [0.0, 0.0, 0.0],
+                    "local_rotation_deg": [0.0, 0.0, 0.0],
+                }
+            ],
+        }
+
+        policy = AgentJobController._case_spec_revision_policy(case_spec)
+
+        self.assertIn("$.objects.cue_ball.solver.joint_keyframes", policy["paths"])
+        self.assertIn("$.objects.cue_ball.solver.attachments", policy["paths"])
+        self.assertNotIn("$.objects.cue_ball.solver.model", policy["paths"])
+        self.assertNotIn("$.objects.cue_ball.solver.mode", policy["paths"])
+
     def test_soft_intent_explicitly_opens_one_physics_parameter(self) -> None:
         case_spec = case_spec_v2_fixture()
         path = "$.objects.cue_ball.physics.mass_kg"

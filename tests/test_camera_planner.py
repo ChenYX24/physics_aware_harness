@@ -10,9 +10,9 @@ class CameraPlannerTests(unittest.TestCase):
         plan = plan_cameras_for_scene(SceneBounds(center=(0.0, 0.0, 0.5), extent=(2.0, 2.0, 1.0)))
         self.assertEqual([view.camera_id for view in plan.views], ["front_static", "side_static", "top_down", "tracking_subject", "event_closeup"])
         self.assertEqual({view.role for view in plan.views}, {"front_static", "side_static", "top_down", "tracking_subject", "event_closeup"})
-        self.assertEqual(plan.views[0].location, (2.2, -2.2, 2.7))
         tracking = next(view for view in plan.views if view.role == "tracking_subject")
         event = next(view for view in plan.views if view.role == "event_closeup")
+        self.assertEqual(plan.views[0].location, (0.0, -1.9919, 0.5))
         self.assertEqual(tracking.dynamic_camera_profile, "damped_event_context_v1")
         self.assertEqual(tracking.camera_mode, "object_bound")
         self.assertEqual((tracking.subject_follow_location_gain, tracking.subject_follow_target_gain), (0.65, 0.65))
@@ -90,6 +90,34 @@ class CameraPlannerTests(unittest.TestCase):
         side = plan.views[0]
         self.assertEqual(side.location[0], 0.0)
         self.assertLess(side.location[1], 0.0)
+
+    def test_full_subject_front_uses_subject_orientation_and_authored_bounds(self) -> None:
+        case = {
+            "objects": [
+                {
+                    "id": "person",
+                    "initial_position_m": [1.0, 2.0, 0.0],
+                    "initial_rotation_deg": [0.0, 90.0, 0.0],
+                    "solver": {
+                        "type": "articulated_body",
+                        "authored_size_m": [0.58, 0.36, 1.92],
+                    },
+                }
+            ]
+        }
+
+        plan = camera_plan_from_case_spec(
+            case,
+            requested_views=["front_static"],
+            camera_intents=[{"role": "front_static", "subject": "person", "framing": "full_subject"}],
+        )
+
+        front = plan.views[0]
+        self.assertEqual(front.target, (1.0, 2.0, 0.96))
+        self.assertEqual(front.location[0], 1.0)
+        self.assertGreater(front.location[1], 5.0)
+        self.assertEqual(front.location[2], 0.96)
+        self.assertEqual(front.rotation[0], 0.0)
 
 
 if __name__ == "__main__":

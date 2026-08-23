@@ -52,6 +52,7 @@ def compile_observation_plan(
         dict(runtime_case_spec),
         requested_views=camera_roles or None,
         camera_strategy=camera_strategy,
+        camera_intents=camera_intents,
     )
     camera_plan_data = camera_plan_to_dict(camera_plan)
     requested_modalities = render_passes if render_passes is not None else requirements.get("modalities") or ["rgb"]

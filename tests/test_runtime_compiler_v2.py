@@ -895,7 +895,12 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
             self.assertTrue(registry.writable)
 
     def test_v2_compiles_all_runtime_artifacts_with_one_asset_resolve(self) -> None:
-        case = case_spec_v2_from_dict(case_spec_v2_fixture())
+        source = case_spec_v2_fixture()
+        source["observation_requirements"]["cameras"][0].update({
+            "subject": "cue_ball",
+            "framing": "full_subject",
+        })
+        case = case_spec_v2_from_dict(source)
         with patch(
             "harness.planning.runtime_compiler.resolve_asset_intents",
             wraps=resolve_asset_intents,
@@ -912,6 +917,9 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
 
         self.assertEqual(resolver.call_count, 1)
         self.assertEqual(compilation.status, "pass")
+        front = compilation.artifacts["observation_plan"]["cameras"][0]
+        self.assertEqual(front["target"], (-0.8, 0.0, 0.09))
+        self.assertGreater(front["location"][0], front["target"][0])
         self.assertEqual(compilation.report["asset_resolve_invocation_count"], 1)
         self.assertIn("event_closeup", compilation.artifacts["observation_plan"]["verifier_evidence_merged"]["camera_roles"])
         self.assertEqual(

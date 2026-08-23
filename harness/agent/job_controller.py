@@ -4935,6 +4935,16 @@ class AgentJobController:
                     ],
                 }
             solver = obj.get("solver") if isinstance(obj.get("solver"), Mapping) else {}
+            if solver.get("type") == "articulated_body":
+                for field in ("joint_keyframes", "attachments"):
+                    value = solver.get(field)
+                    path = f"$.objects.{object_id}.solver.{field}"
+                    if path not in excluded and isinstance(value, list):
+                        constraints[path] = {
+                            "kind": "list",
+                            "min_items": len(value),
+                            "max_items": len(value),
+                        }
             motion = solver.get("motion") if isinstance(solver.get("motion"), Mapping) else {}
             motion_path = f"$.objects.{object_id}.solver.motion"
             add_numeric_window(
