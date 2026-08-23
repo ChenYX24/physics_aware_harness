@@ -193,6 +193,7 @@ class AgentJobController:
         budget: Mapping[str, Any] | None = None,
         authorizations: Mapping[str, Any] | None = None,
         publication_tier: str = "reference",
+        ignore_provenance_and_release_gates: bool = False,
         seed_case_spec: Mapping[str, Any] | None = None,
         generation_mode: str = "native",
     ) -> dict[str, Any]:
@@ -221,6 +222,8 @@ class AgentJobController:
             raise ValueError("paid provider authorization requires max_paid_submissions > 0")
         if publication_tier not in {"diagnostic_only", "local_preview", "reference"}:
             raise ValueError("publication_tier is invalid")
+        if not isinstance(ignore_provenance_and_release_gates, bool):
+            raise ValueError("ignore_provenance_and_release_gates must be boolean")
         provider_manifest = (
             self._validate_provider_manifest(provider_input_manifest)
             if provider_input_manifest is not None
@@ -258,7 +261,11 @@ class AgentJobController:
                 "active_compilation_id": None,
                 "request_digest": stable_digest(request_data),
                 "intent_contract_digest": None,
-                "target": {"execution_profile": target_profile, "publication_tier": publication_tier},
+                "target": {
+                    "execution_profile": target_profile,
+                    "publication_tier": publication_tier,
+                    "ignore_provenance_and_release_gates": ignore_provenance_and_release_gates,
+                },
                 "authorizations": auth,
                 "budget": normalized,
                 "usage": empty_usage(),
@@ -2411,9 +2418,10 @@ class AgentJobController:
                 blocker = ("provider_input_missing", f"Provider input IDs are unresolved: {missing_ids}")
         target_tier = manifest["target"]["publication_tier"]
         case_tier = str((case_spec.data.get("asset_policy") or {}).get("required_license_tier") or "local_preview")
-        if blocker is None and target_tier == "reference" and case_tier != "reference":
+        ignore_release_gates = self._ignore_provenance_and_release_gates(manifest)
+        if blocker is None and not ignore_release_gates and target_tier == "reference" and case_tier != "reference":
             blocker = ("publication_tier_not_satisfied", "CaseSpec must require reference-tier assets")
-        if blocker is None and target_tier == "reference" and selection["selected_backend"] == "fallback":
+        if blocker is None and not ignore_release_gates and target_tier == "reference" and selection["selected_backend"] == "fallback":
             blocker = ("degraded_preview_only", "fallback cannot satisfy a reference-tier job")
         if blocker is None and shutil.disk_usage(self.store.workspace).free < manifest["budget"]["min_free_disk_bytes"]:
             blocker = ("disk_budget_insufficient", "free workspace storage is below the configured task minimum")
@@ -2556,6 +2564,13 @@ class AgentJobController:
             self._record_controller_ue_launch(manifest, kind="runtime", stage=stage_name)
             manifest = self._reconcile_ue_launch_usage(manifest)
         compilation.write(expected_run)
+        write_json(
+            expected_run / "quality_policy.json",
+            {
+                "schema_version": "harness_quality_policy_v1",
+                "ignore_provenance_and_release_gates": self._ignore_provenance_and_release_gates(manifest),
+            },
+        )
         handoff_contract = compilation.backend_selection.get("handoff_contract")
         particle_handoff_root = (
             attempt_dir / "physics_handoff"
@@ -2768,8 +2783,12 @@ class AgentJobController:
         quality = read_json(quality_path)
         readiness = ((quality.get("source_reports") or {}).get("run_readiness") or {})
         achieved_tier = readiness.get("publication_tier")
+        ignore_release_gates = self._ignore_provenance_and_release_gates(manifest)
         if achieved_tier not in {"diagnostic_only", "local_preview", "reference"}:
-            raise JobStoreError("Quality Report lacks a valid achieved publication tier")
+            if ignore_release_gates:
+                achieved_tier = "local_preview"
+            else:
+                raise JobStoreError("Quality Report lacks a valid achieved publication tier")
 
         assets = []
         for resolution in asset_resolution.get("assets") or []:
@@ -2777,7 +2796,11 @@ class AgentJobController:
             intent = resolution.get("intent") if isinstance(resolution, Mapping) else None
             provenance = selected.get("provenance") if isinstance(selected, Mapping) else None
             if not isinstance(selected, Mapping) or not isinstance(intent, Mapping) or not isinstance(provenance, Mapping):
-                raise JobStoreError("Asset Resolve lacks selected-asset provenance")
+                if not ignore_release_gates:
+                    raise JobStoreError("Asset Resolve lacks selected-asset provenance")
+                selected = selected if isinstance(selected, Mapping) else {}
+                intent = intent if isinstance(intent, Mapping) else {}
+                provenance = provenance if isinstance(provenance, Mapping) else {}
             assets.append(
                 {
                     "object_id": intent.get("object_id"),
@@ -2788,6 +2811,7 @@ class AgentJobController:
                     "provider_id": provenance.get("provider_id"),
                     "recipe_id": provenance.get("recipe_id"),
                     "receipt_id": provenance.get("receipt_id"),
+                    "complete": bool(selected and provenance),
                 }
             )
         routes = sorted(
@@ -2807,6 +2831,7 @@ class AgentJobController:
             "publication": {
                 "requested_tier": requested_tier,
                 "achieved_tier": achieved_tier,
+                "provenance_and_release_gate_override": ignore_release_gates,
                 "quality_report": {
                     "path": quality_path.relative_to(attempt_dir).as_posix(),
                     "sha256": self._sha256_file(quality_path),
@@ -4658,6 +4683,8 @@ class AgentJobController:
             "SIM_STUDIO_UE_ACTOR_CLASS": self.config.ue_actor_class,
             "SIM_STUDIO_UE_CONTACT_EXPORT": "1" if self.config.ue_contact_export else "0",
         }
+        if manifest is not None and self._ignore_provenance_and_release_gates(manifest):
+            values["SIM_HARNESS_IGNORE_PROVENANCE_AND_RELEASE_GATES"] = "1"
         if self.config.ue_asset_registry is not None:
             values["SIM_STUDIO_ASSET_REGISTRY"] = str(self.config.ue_asset_registry)
         if self.config.ue_runner_command:
@@ -5566,6 +5593,8 @@ class AgentJobController:
         return False
 
     def _publication_tier_satisfied(self, manifest: Mapping[str, Any]) -> bool:
+        if self._ignore_provenance_and_release_gates(manifest):
+            return True
         if manifest["target"]["publication_tier"] != "reference":
             return True
         attempt_dir = self.store.attempt_dir(manifest["job_id"], manifest["current_attempt_id"])
@@ -5573,6 +5602,11 @@ class AgentJobController:
         quality = read_json(Path(str(candidate["run_dir"])) / "quality_report.json")
         readiness = ((quality.get("source_reports") or {}).get("run_readiness") or {})
         return readiness.get("reference_ready") is True
+
+    @staticmethod
+    def _ignore_provenance_and_release_gates(manifest: Mapping[str, Any]) -> bool:
+        target = manifest.get("target") if isinstance(manifest.get("target"), Mapping) else {}
+        return target.get("ignore_provenance_and_release_gates") is True
 
     def _load_validated_semantic_review(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
         attempt_dir = self.store.attempt_dir(manifest["job_id"], manifest["current_attempt_id"])

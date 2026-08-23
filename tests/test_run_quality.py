@@ -651,6 +651,44 @@ class RunQualityTests(unittest.TestCase):
             self.assertFalse(readiness["local_preview_ready"])
             self.assertEqual(readiness["publication_tier"], "rejected")
 
+    def test_provenance_override_records_solver_failure_as_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_run(Path(tmp))
+            case = self.read_json(run_dir / "case_spec.json")
+            case["expected_physics"].pop("simulation_contract")
+            self.write_json(run_dir / "case_spec.json", case)
+            runtime_scene = self.read_json(run_dir / "studio_runtime_scene.json")
+            runtime_scene["precomputed_trajectory"] = self.read_json(run_dir / "trajectory.json")
+            runtime_scene["physics_controls"].update(
+                {
+                    "simulate_physics": False,
+                    "simulation_driver": "mujoco_rigid",
+                    "runtime_driver_backend": "precomputed_trajectory",
+                    "cpp_runtime_driver_enabled": False,
+                }
+            )
+            self.write_json(run_dir / "studio_runtime_scene.json", runtime_scene)
+            self.write_json(
+                run_dir / "quality_policy.json",
+                {
+                    "schema_version": "harness_quality_policy_v1",
+                    "ignore_provenance_and_release_gates": True,
+                },
+            )
+
+            with self.mock_ffprobe():
+                report = evaluate_run(run_dir, write=True)
+
+            self.assertTrue(report["hard_gate_passed"])
+            self.assertEqual(report["solver_execution"]["status"], "fail")
+            self.assertNotIn("F_RIGID_SOLVER_PROVENANCE", {item["code"] for item in report["hard_gate"]["failures"]})
+            warning = next(item for item in report["warnings"] if item.get("original_code") == "F_RIGID_SOLVER_PROVENANCE")
+            self.assertEqual(warning["code"], "W_PROVENANCE_AND_RELEASE_GATE_IGNORED")
+            readiness = self.read_json(run_dir / "run_readiness.json")
+            self.assertTrue(readiness["quality_gate_passed"])
+            self.assertTrue(readiness["local_preview_ready"])
+            self.assertTrue(readiness["provenance_and_release_gate_override"])
+
     def test_solver_provenance_uses_runtime_selected_by_native_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = self.make_run(Path(tmp))

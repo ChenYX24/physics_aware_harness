@@ -882,6 +882,27 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertEqual(semantic_events[-1]["result"]["failure_code"], "publication_tier_not_satisfied")
         self.assertNotIn("job_terminal", [row["event"] for row in events])
 
+    def test_provenance_release_override_does_not_block_publication_boundary(self) -> None:
+        controller, fake = self.controller()
+        controller.create(
+            self.request,
+            job_id="job_m4_publication_override",
+            publication_tier="reference",
+            ignore_provenance_and_release_gates=True,
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        boundary = controller.advance_until_blocked("job_m4_publication_override")
+        self.assertEqual(boundary["job"]["state"], "awaiting_semantic_review")
+        attempt_dir = Path(boundary["paths"]["job_root"]) / "attempts" / "attempt_001"
+        candidate = read_json(attempt_dir / "candidate_run.json")
+        policy = read_json(Path(candidate["run_dir"]) / "quality_policy.json")
+        self.assertTrue(policy["ignore_provenance_and_release_gates"])
+
+        completed = controller.run_semantic_review("job_m4_publication_override")
+
+        self.assertEqual(completed["job"]["state"], "completed")
+        self.assertEqual(fake.semantic_calls, 1)
+
     def test_semantic_fail_allows_intent_bounded_automatic_revision(self) -> None:
         fake = SuccessfulHarness(semantic_status="fail")
         controller, _ = self.controller(fake)

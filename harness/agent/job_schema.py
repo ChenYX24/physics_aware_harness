@@ -142,10 +142,14 @@ class JobManifest:
         if data["intent_contract_digest"] is not None:
             _sha256(data["intent_contract_digest"], "intent_contract_digest")
         target = _mapping(data["target"], "target")
+        target.setdefault("ignore_provenance_and_release_gates", False)
+        data["target"] = target
         if target.get("execution_profile") not in {"candidate", "local_preview"}:
             raise ValueError("target.execution_profile must be candidate or local_preview")
         if target.get("publication_tier") not in PUBLICATION_TIERS:
             raise ValueError("target.publication_tier is invalid")
+        if not isinstance(target.get("ignore_provenance_and_release_gates"), bool):
+            raise ValueError("target.ignore_provenance_and_release_gates must be boolean")
         authorizations = _mapping(data["authorizations"], "authorizations")
         # Deterministic in-memory migration for M2/M3 manifests. Semantic
         # Reviewer image upload is purpose-specific and therefore defaults to

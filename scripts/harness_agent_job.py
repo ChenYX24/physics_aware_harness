@@ -55,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     create.add_argument("--allow-paid-provider", action="store_true")
     create.add_argument("--allow-semantic-reviewer-image-upload", action="store_true")
     create.add_argument("--publication-tier", choices=["diagnostic_only", "local_preview", "reference"], default="reference")
+    create.add_argument("--ignore-provenance-and-release-gates", action="store_true")
     create.add_argument("--budget", help="JSON object overriding Controller budget defaults.")
     create.add_argument("--seed-case-spec", help="Validated CaseSpec V2 fixture; skips LLM generation but remains audited.")
     create.add_argument("--generation-mode", choices=["native", "legacy"], default="native")
@@ -188,6 +189,7 @@ def main() -> int:
                 "semantic_reviewer_image_upload": args.allow_semantic_reviewer_image_upload,
             },
             publication_tier=args.publication_tier,
+            ignore_provenance_and_release_gates=args.ignore_provenance_and_release_gates,
             seed_case_spec=read_json(args.seed_case_spec) if args.seed_case_spec else None,
             generation_mode=args.generation_mode,
         )

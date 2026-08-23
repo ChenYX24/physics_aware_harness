@@ -22,11 +22,16 @@ def resolve_asset_intents(
     provider_results: dict[tuple[str, str], dict[str, Any]] | None = None,
     target_backend: str = "unreal",
     allow_local_preview: bool | None = None,
+    ignore_provenance_and_release_gates: bool | None = None,
     requested_map_package: str | None = None,
 ) -> dict[str, Any]:
     registry = registry or AssetRegistry()
     if allow_local_preview is None:
         allow_local_preview = os.environ.get("SIM_HARNESS_ALLOW_LOCAL_PREVIEW_ASSETS", "").casefold() in {"1", "true", "yes"}
+    if ignore_provenance_and_release_gates is None:
+        ignore_provenance_and_release_gates = os.environ.get(
+            "SIM_HARNESS_IGNORE_PROVENANCE_AND_RELEASE_GATES", ""
+        ).casefold() in {"1", "true", "yes"}
     objects = [obj for obj in case_spec.get("objects", []) if isinstance(obj, dict)]
     objects_by_id = {str(obj.get("id") or ""): obj for obj in objects if obj.get("id")}
     missing_object_ids = [item.object_id for item in compiled_intents if item.object_id not in objects_by_id]
@@ -43,7 +48,7 @@ def resolve_asset_intents(
         provider_pending = bool(acquisition and provider_route_required(acquisition))
         provider_result = provider_results.get((compiled.object_id, compiled.slot)) if provider_results else None
         explicit_proxy = bool(obj.get("force_analytic_proxy") or obj.get("asset_policy") == "analytic_proxy")
-        search_intent = compiled.search_intent
+        search_intent = without_license_requirements(compiled.search_intent) if ignore_provenance_and_release_gates else compiled.search_intent
         required_source_uri = (
             str(acquisition.get("source_uri_hint") or "").strip()
             if acquisition and acquisition.get("requirement") == "required"
@@ -90,6 +95,7 @@ def resolve_asset_intents(
                     candidate,
                     physics_critical=intent.physics_critical,
                     allow_local_preview=allow_local_preview,
+                    ignore_provenance_and_release_gates=ignore_provenance_and_release_gates,
                 ),
             }
             for candidate in ranked
@@ -181,6 +187,7 @@ def resolve_asset_intents(
         registry=registry,
         top_k=top_k,
         allow_local_preview=allow_local_preview,
+        ignore_provenance_and_release_gates=ignore_provenance_and_release_gates,
         requested_reference=requested_map_package,
     )
     resolution_rows = [*rows, *([scene_map] if scene_map else [])]
@@ -259,6 +266,7 @@ def resolve_scene_map(
     registry: AssetRegistry,
     top_k: int,
     allow_local_preview: bool,
+    ignore_provenance_and_release_gates: bool = False,
     requested_reference: str | None = None,
 ) -> dict[str, Any] | None:
     requested = requested_map_reference(case_spec, explicit_override=requested_reference)
@@ -288,6 +296,7 @@ def resolve_scene_map(
                 candidate,
                 physics_critical=False,
                 allow_local_preview=allow_local_preview,
+                ignore_provenance_and_release_gates=ignore_provenance_and_release_gates,
             ),
         }
         for candidate in ranked
@@ -330,7 +339,12 @@ def asset_quality_gate(
     *,
     physics_critical: bool,
     allow_local_preview: bool = False,
+    ignore_provenance_and_release_gates: bool | None = None,
 ) -> dict[str, Any]:
+    if ignore_provenance_and_release_gates is None:
+        ignore_provenance_and_release_gates = os.environ.get(
+            "SIM_HARNESS_IGNORE_PROVENANCE_AND_RELEASE_GATES", ""
+        ).casefold() in {"1", "true", "yes"}
     execution_failures: list[str] = []
     reference_failures: list[str] = []
     source_kind = str(asset.get("source_kind") or "").strip()
@@ -403,18 +417,35 @@ def asset_quality_gate(
             execution_failures.append("collision_not_ready")
     execution_failures = dedupe(execution_failures)
     reference_failures = dedupe(reference_failures)
+    provenance_execution_codes = {"missing_source_kind", "missing_source_uri", "sha256_mismatch"}
+    ignored_findings = (
+        [code for code in execution_failures if code in provenance_execution_codes]
+        + reference_failures
+        if ignore_provenance_and_release_gates
+        else []
+    )
+    blocking_execution_failures = [code for code in execution_failures if code not in ignored_findings]
+    blocking_reference_failures = [] if ignore_provenance_and_release_gates else reference_failures
     local_preview = (
         allow_local_preview
         and license_tier == "local_preview"
         and quality_status in {"approved", "approved_proxy", "local_preview"}
-        and not execution_failures
+        and not blocking_execution_failures
     )
     failures = [*execution_failures, *reference_failures]
     return {
-        "status": "fail" if execution_failures or (reference_failures and not local_preview) else "pass_local_preview" if local_preview else "pass",
+        "status": (
+            "fail"
+            if blocking_execution_failures or (blocking_reference_failures and not local_preview)
+            else "pass_local_preview"
+            if local_preview or ignored_findings
+            else "pass"
+        ),
         "failure_codes": failures,
-        "execution_failure_codes": execution_failures,
+        "execution_failure_codes": blocking_execution_failures,
         "reference_blockers": reference_failures,
+        "ignored_provenance_and_release_codes": dedupe(ignored_findings),
+        "provenance_and_release_gate_override": ignore_provenance_and_release_gates,
         "reference_approved": not failures,
         "content_identity": sha256 or source_uri or None,
         "hash_required": source_requires_file,
@@ -424,6 +455,13 @@ def asset_quality_gate(
         "dependency_status": dependency_status,
         "ue_binding_ready": bool(asset.get("ue_path")) and (binding is None or binding.get("runtime_ready") is not False),
     }
+
+
+def without_license_requirements(intent: SearchIntent) -> SearchIntent:
+    value = intent.to_dict()
+    value["must"].pop("license_tier", None)
+    value["must_not"].pop("license_tier", None)
+    return SearchIntent.from_dict(value)
 
 
 def resolved_analytic_recipe(

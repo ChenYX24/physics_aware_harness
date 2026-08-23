@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import math
+import os
 import subprocess
 from collections import Counter
 from pathlib import Path
@@ -33,8 +34,11 @@ def evaluate_run(
     failures: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
     quality_contract = quality_contract_for_run(run_dir)
+    ignore_provenance_and_release_gates = quality_contract["ignore_provenance_and_release_gates"]
     required_modalities = set(quality_contract["required_modalities"])
     report_summaries, raw_reports = summarize_source_reports(run_dir, failures, warnings)
+    if ignore_provenance_and_release_gates:
+        warnings.extend(asset_provenance_warnings(raw_reports.get("asset_resolution")))
 
     view_ids = discover_view_ids(run_dir, raw_reports.get("render_sync"))
     media = validate_media(
@@ -53,18 +57,23 @@ def evaluate_run(
         required_modalities=required_modalities,
     )
     trajectory, trajectory_frames = validate_trajectory(run_dir, failures)
-    solver_execution = validate_solver_execution(run_dir, trajectory_frames, failures)
+    solver_findings = [] if ignore_provenance_and_release_gates else failures
+    solver_execution = validate_solver_execution(run_dir, trajectory_frames, solver_findings)
+    if ignore_provenance_and_release_gates:
+        warnings.extend(ignored_gate_warning(finding) for finding in solver_findings)
     refresh_ue_readiness_summary(
         report_summaries.get("run_readiness"),
         raw_reports.get("run_readiness"),
         solver_execution,
         required_modalities=required_modalities,
+        ignore_provenance_and_release_gates=ignore_provenance_and_release_gates,
     )
     validate_source_gates(
         report_summaries,
         failures,
         warnings,
         required_modalities=required_modalities,
+        ignore_provenance_and_release_gates=ignore_provenance_and_release_gates,
     )
     contacts = validate_contacts(run_dir, trajectory_frames, failures)
     camera_motion = validate_camera_motion(run_dir, failures)
@@ -134,11 +143,20 @@ def synchronize_run_readiness(run_dir: Path, quality_report: dict[str, Any]) -> 
         return
     provenance = quality_report.get("solver_execution") if isinstance(quality_report.get("solver_execution"), dict) else {}
     provenance_ready = provenance.get("status") in {"pass", "not_required"}
+    quality_contract = quality_report.get("quality_contract") if isinstance(quality_report.get("quality_contract"), dict) else {}
+    ignore_provenance_and_release_gates = quality_contract.get("ignore_provenance_and_release_gates") is True
+    provenance_gate_satisfied = provenance_ready or ignore_provenance_and_release_gates
     readiness["physics_provenance"] = provenance
-    readiness["physics_ready"] = provenance_ready
-    refresh_ue_readiness_summary(readiness, readiness, provenance)
+    readiness["physics_ready"] = provenance_gate_satisfied
+    readiness["provenance_and_release_gate_override"] = ignore_provenance_and_release_gates
+    refresh_ue_readiness_summary(
+        readiness,
+        readiness,
+        provenance,
+        ignore_provenance_and_release_gates=ignore_provenance_and_release_gates,
+    )
     quality_ready = bool(quality_report.get("hard_gate_passed"))
-    if not provenance_ready or not quality_ready:
+    if not provenance_gate_satisfied or not quality_ready:
         readiness.update(
             {
                 "execution_ready": False,
@@ -147,7 +165,16 @@ def synchronize_run_readiness(run_dir: Path, quality_report: dict[str, Any]) -> 
                 "publication_tier": "rejected",
             }
         )
-    if not provenance_ready:
+    elif ignore_provenance_and_release_gates:
+        readiness.update(
+            {
+                "execution_ready": True,
+                "reference_ready": False,
+                "local_preview_ready": True,
+                "publication_tier": "local_preview",
+            }
+        )
+    if not provenance_gate_satisfied:
         readiness["physics_ready"] = False
     render_sync = ((quality_report.get("source_reports") or {}).get("render_sync") or {})
     if render_sync.get("status") == "fail":
@@ -165,10 +192,12 @@ def refresh_ue_readiness_summary(
     provenance: Any,
     *,
     required_modalities: set[str] | None = None,
+    ignore_provenance_and_release_gates: bool = False,
 ) -> None:
     if not isinstance(summary, dict) or not isinstance(readiness, dict) or readiness.get("backend") != "ue":
         return
     provenance_ready = isinstance(provenance, dict) and provenance.get("status") in {"pass", "not_required"}
+    provenance_gate_satisfied = provenance_ready or ignore_provenance_and_release_gates
     detailed_execution_keys = (
         "map_ready",
         "camera_plan_ready",
@@ -187,19 +216,20 @@ def refresh_ue_readiness_summary(
         for key in detailed_execution_keys
         if key != "depth_ready" or "depth" in modalities
     ]
-    execution_ready = provenance_ready and readiness.get("verifier_status") == "pass" and all(
+    execution_ready = provenance_gate_satisfied and readiness.get("verifier_status") == "pass" and all(
         readiness.get(key) is True for key in required_execution_keys
     )
     assets_reference_ready = readiness.get("assets_reference_ready") is True
     local_asset_ready = int(readiness.get("local_preview_asset_count") or 0) > 0 or readiness.get("asset_catalog_reference_ready") is True
     complete_sensor_contract = {"rgb", "depth", "segmentation"}.issubset(modalities)
-    reference_ready = execution_ready and complete_sensor_contract and assets_reference_ready
-    local_preview_ready = execution_ready and local_asset_ready
+    reference_ready = execution_ready and complete_sensor_contract and assets_reference_ready and not ignore_provenance_and_release_gates
+    local_preview_ready = execution_ready and (local_asset_ready or ignore_provenance_and_release_gates)
     publication_tier = "reference" if reference_ready else "local_preview" if local_preview_ready else "rejected"
     readiness.update(
         {
             "execution_ready": execution_ready,
-            "physics_ready": provenance_ready,
+            "physics_ready": provenance_gate_satisfied,
+            "provenance_and_release_gate_override": ignore_provenance_and_release_gates,
             "reference_ready": reference_ready,
             "local_preview_ready": local_preview_ready,
             "publication_tier": publication_tier,
@@ -400,6 +430,7 @@ def validate_source_gates(
     warnings: list[dict[str, Any]],
     *,
     required_modalities: set[str] | None = None,
+    ignore_provenance_and_release_gates: bool = False,
 ) -> None:
     modalities = required_modalities if required_modalities is not None else {"rgb", "depth", "segmentation"}
     for name in ("run_readiness", "verifier", "render_sync", "map_report", "asset_resolution", "sensor_state"):
@@ -413,6 +444,13 @@ def validate_source_gates(
     if readiness.get("present") and readiness.get("reference_ready") is not True:
         if readiness.get("local_preview_ready") is True:
             warnings.append(issue("W_LOCAL_PREVIEW_ONLY", "run passed execution gates but asset provenance blocks reference publication"))
+        elif ignore_provenance_and_release_gates:
+            warnings.append(
+                issue(
+                    "W_PROVENANCE_AND_RELEASE_GATE_IGNORED",
+                    "run readiness was rejected only as a non-blocking provenance/release finding",
+                )
+            )
         else:
             failures.append(issue("F_RUN_NOT_READY", "run_readiness declares neither reference_ready nor local_preview_ready"))
     verifier = summaries["verifier"]
@@ -698,6 +736,12 @@ def quality_contract_for_run(run_dir: Path) -> dict[str, Any]:
     profile = read_optional_json(run_dir / "execution_profile.json")
     render_config = read_optional_json(run_dir / "inputs" / "render_config.json")
     profile_name = str(profile.get("name") or "")
+    quality_policy = read_optional_json(run_dir / "quality_policy.json")
+    ignore_provenance_and_release_gates = (
+        quality_policy.get("ignore_provenance_and_release_gates") is True
+        or os.environ.get("SIM_HARNESS_IGNORE_PROVENANCE_AND_RELEASE_GATES", "").casefold()
+        in {"1", "true", "yes"}
+    )
     actual_modalities = render_config.get("passes") if isinstance(render_config.get("passes"), list) else []
     raw_modalities = list(actual_modalities)
     source = "inputs/render_config.json"
@@ -710,8 +754,37 @@ def quality_contract_for_run(run_dir: Path) -> dict[str, Any]:
         "execution_profile": profile_name or "legacy",
         "required_modalities": modalities,
         "complete_sensor_contract": {"rgb", "depth", "segmentation"}.issubset(modalities),
+        "ignore_provenance_and_release_gates": ignore_provenance_and_release_gates,
         "source": source,
     }
+
+
+def ignored_gate_warning(finding: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "code": "W_PROVENANCE_AND_RELEASE_GATE_IGNORED",
+        "message": str(finding.get("message") or "provenance/release finding was ignored"),
+        "original_code": finding.get("code"),
+        "ignored_finding": dict(finding),
+    }
+
+
+def asset_provenance_warnings(asset_resolution: Any) -> list[dict[str, Any]]:
+    if not isinstance(asset_resolution, dict):
+        return []
+    warnings = []
+    for row in asset_resolution.get("assets") or []:
+        selected = row.get("selected_asset") if isinstance(row, dict) else None
+        gate = selected.get("quality_gate") if isinstance(selected, dict) else None
+        for code in (gate or {}).get("ignored_provenance_and_release_codes") or []:
+            warnings.append(
+                {
+                    "code": "W_PROVENANCE_AND_RELEASE_GATE_IGNORED",
+                    "message": "asset provenance/release finding was ignored",
+                    "original_code": str(code),
+                    "object_id": ((row.get("intent") or {}).get("object_id")) if isinstance(row, dict) else None,
+                }
+            )
+    return warnings
 
 
 def validate_exr(path: Path, run_dir: Path, modality: str, failures: list[dict[str, Any]]) -> dict[str, Any]:
