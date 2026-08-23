@@ -184,13 +184,9 @@ class JobManifest:
         if (
             isinstance(data.get("blocker"), Mapping)
             and data["blocker"].get("code") == "ue_launch_budget_exhausted"
-            and data["usage"]["ue_launches"] >= data["budget"]["max_ue_launches"]
+            and "resume" not in data["allowed_next_actions"]
         ):
-            data["allowed_next_actions"] = [
-                action
-                for action in data["allowed_next_actions"]
-                if action != "resume"
-            ]
+            data["allowed_next_actions"] = ["resume", *data["allowed_next_actions"]]
         _timestamp(data["created_at"], "created_at")
         _timestamp(data["updated_at"], "updated_at")
         return cls(data)

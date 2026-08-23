@@ -2568,8 +2568,21 @@ class AgentJobControllerTests(unittest.TestCase):
 
         self.assertEqual(inspection["job"]["state"], "needs_user_decision")
         self.assertEqual(inspection["job"]["blocker"]["code"], "ue_launch_budget_exhausted")
-        self.assertEqual(inspection["job"]["allowed_next_actions"], ["inspect_artifacts", "cancel"])
+        self.assertEqual(inspection["job"]["allowed_next_actions"], ["resume", "inspect_artifacts", "cancel"])
         self.assertEqual(fake.execute_calls, [])
+
+        with self.assertRaisesRegex(JobStoreError, "requires max_ue_launches"):
+            controller.resume("job_ue_budget")
+        with self.assertRaisesRegex(ValueError, "must exceed"):
+            controller.resume("job_ue_budget", max_ue_launches=0)
+
+        resumed = controller.resume("job_ue_budget", max_ue_launches=2)
+
+        amendment = read_json(Path(resumed["paths"]["job_root"]) / "request" / "authorization_amendment_001.json")
+        self.assertEqual(amendment["budget_changes"]["max_ue_launches"], {"before": 0, "after": 2})
+        self.assertEqual(resumed["job"]["budget"]["max_ue_launches"], 2)
+        self.assertEqual(resumed["job"]["usage"]["ue_launches"], 2)
+        self.assertEqual(fake.execute_calls, ["smoke", "local_preview"])
 
     def test_revision_budget_exhaustion_preserves_trigger_and_blocks_stale_revision(self) -> None:
         controller, _ = self.controller(SuccessfulHarness(fail_verifier=True))
@@ -3491,6 +3504,7 @@ class AgentJobCliTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("--max-paid-submissions", completed.stdout)
+        self.assertIn("--max-ue-launches", completed.stdout)
         self.assertIn("--allow-planning-image-upload", completed.stdout)
         self.assertIn("--allow-semantic-reviewer-image-upload", completed.stdout)
 

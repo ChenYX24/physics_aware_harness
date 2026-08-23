@@ -1129,6 +1129,7 @@ class AgentJobController:
         *,
         budget_extension_seconds: int = 0,
         max_paid_submissions: int | None = None,
+        max_ue_launches: int | None = None,
         authorizations: Mapping[str, Any] | None = None,
         intent_amendment: Mapping[str, Any] | None = None,
         revised_case_spec: Mapping[str, Any] | None = None,
@@ -1166,6 +1167,8 @@ class AgentJobController:
                 raise JobStoreError(f"current job state does not permit {requested_action}")
             prior_authorizations = copy.deepcopy(manifest["authorizations"])
             prior_budget = copy.deepcopy(manifest["budget"])
+            if (manifest.get("blocker") or {}).get("code") == "ue_launch_budget_exhausted" and max_ue_launches is None:
+                raise JobStoreError("resuming an exhausted UE launch budget requires max_ue_launches")
             if budget_extension_seconds:
                 if not isinstance(budget_extension_seconds, int) or budget_extension_seconds < 1:
                     raise ValueError("budget_extension_seconds must be a positive integer")
@@ -1183,6 +1186,19 @@ class AgentJobController:
                 budget = dict(manifest["budget"])
                 budget["max_paid_submissions"] = max_paid_submissions
                 manifest["budget"] = normalized_budget(budget)
+            if max_ue_launches is not None:
+                if (
+                    not isinstance(max_ue_launches, int)
+                    or isinstance(max_ue_launches, bool)
+                    or max_ue_launches <= max(
+                        manifest["budget"]["max_ue_launches"],
+                        int(manifest["usage"]["ue_launches"]),
+                    )
+                ):
+                    raise ValueError("max_ue_launches must exceed the current limit and used launch count")
+                budget = dict(manifest["budget"])
+                budget["max_ue_launches"] = max_ue_launches
+                manifest["budget"] = normalized_budget(budget)
             if authorizations:
                 current = dict(manifest["authorizations"])
                 for key, value in authorizations.items():
@@ -1195,6 +1211,7 @@ class AgentJobController:
             if (
                 manifest["authorizations"] != prior_authorizations
                 or manifest["budget"]["max_paid_submissions"] != prior_budget["max_paid_submissions"]
+                or manifest["budget"]["max_ue_launches"] != prior_budget["max_ue_launches"]
             ):
                 manifest = self._record_authorization_amendment(
                     manifest,
@@ -3273,6 +3290,11 @@ class AgentJobController:
                 "before": prior_budget["max_paid_submissions"],
                 "after": manifest["budget"]["max_paid_submissions"],
             }
+        if prior_budget["max_ue_launches"] != manifest["budget"]["max_ue_launches"]:
+            budget_changes["max_ue_launches"] = {
+                "before": prior_budget["max_ue_launches"],
+                "after": manifest["budget"]["max_ue_launches"],
+            }
         request = read_json(root / "user_request.json")
         effective_provider_manifest = build_provider_input_manifest(
             list(request.get("inputs") or []),
@@ -3494,9 +3516,10 @@ class AgentJobController:
             )
             if value["failure_code"] in {
                 "case_spec_revision_budget_exhausted",
-                "ue_launch_budget_exhausted",
             }:
                 actions = ["inspect_artifacts", "cancel"]
+            elif value["failure_code"] == "ue_launch_budget_exhausted":
+                actions = ["resume", "inspect_artifacts", "cancel"]
             return self._update_manifest(
                 manifest,
                 state=state,
