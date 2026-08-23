@@ -228,7 +228,7 @@ class CaseGenerationV2Tests(unittest.TestCase):
         )
         self.assertEqual(
             set(contract["enums"]["primary_capability"]),
-            {"rigid_body_dynamics", "fluid_particle_dynamics", "deformable_body_dynamics"},
+            {"articulated_body_motion", "rigid_body_dynamics", "fluid_particle_dynamics", "deformable_body_dynamics"},
         )
         self.assertEqual(
             set(contract["enums"]["resource_kind"]),

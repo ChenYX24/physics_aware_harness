@@ -41,6 +41,7 @@ from harness.core.case_spec_v2 import (
     stable_case_spec_digest,
 )
 from harness.runtime.stage_contracts import BACKEND_STAGE_IO, stage_handoff_contract
+from harness.runtime.articulated_body import ARTICULATED_BODY_BONES, ARTICULATED_BODY_MODEL_ID
 
 
 REQUEST_SCHEMA_VERSION = "harness_case_request_v1"
@@ -1515,7 +1516,7 @@ FIELD-BY-FIELD INSTRUCTIONS
 1. identity: set case_id, a concise title, and source_request. The caller will enforce the original
    case_id and source text.
 2. capabilities: this must be an object. Choose only the state/coupling domain:
-   rigid_body_dynamics, fluid_particle_dynamics, or deformable_body_dynamics. Never classify the
+   rigid_body_dynamics, fluid_particle_dynamics, deformable_body_dynamics, or articulated_body_motion. Never classify the
    request as a named physical process such as falling, bouncing, sequential collision, pouring,
    fracture, or pendulum motion. required contains that same primary and no unrelated capability.
 3. scene: describe environment_intent, z_up coordinates, positive duration_s, and optional positive
@@ -1611,6 +1612,17 @@ FIELD-BY-FIELD INSTRUCTIONS
    object.initial_state. Also provide workspace_bounds_m={"min_m":[x,y,z],"max_m":[x,y,z]} enclosing
    every declared body, initial volume, and expected motion. Do not name a physical phenomenon, select a prepared process, or put rendering
    behavior in these declarations. If the request does not require such coupling, omit both fields.
+   For the fixed white articulated body, use role="articulated_body",
+   visual_representation={"source":"solver_generated","visible":true}, omit object.asset, and declare
+   solver={"type":"articulated_body","model":"harness_ue_mannequin_v1","mode":"kinematic"|"ragdoll",
+   "root_keyframes":[...],"joint_keyframes":[...],"attachments":[...]}. Root keyframes contain time_s,
+   position_offset_m, and rotation_offset_deg and begin at time zero with zero offsets. Joint keyframes
+   contain time_s and rotations_deg keyed only by the fixed UE4 bones listed in the contract. Kinematic
+   mode requires physics.body_type="kinematic" and collision_required=false. Ragdoll mode requires
+   physics.body_type="dynamic", an explicit ragdoll_start_time_s, and the UE solver capability
+   articulated_body. Attachments reference another declared object plus a fixed bone and explicit time
+   interval; they must end by ragdoll start. Ragdoll uses the fixed reference pose, so its joint offsets
+   are zero; use kinematic mode when joint poses are required. Do not encode action names, infer poses, or switch modes.
    Dynamic rigid_sph mass comes from physics.mass_kg; optional density_kg_m3, dynamic_friction, and
    restitution come from physics.material. Initial linear and angular velocity come from initial_state.
    Every object also declares visual_representation.source as exactly asset, solver_generated, or none.
@@ -1769,7 +1781,7 @@ or prose outside JSON.
 
 
 def _executable_primary_capabilities() -> list[str]:
-    return ["deformable_body_dynamics", "fluid_particle_dynamics", "rigid_body_dynamics"]
+    return ["articulated_body_motion", "deformable_body_dynamics", "fluid_particle_dynamics", "rigid_body_dynamics"]
 
 
 def case_spec_generation_contract() -> dict[str, Any]:
@@ -1846,6 +1858,16 @@ def case_spec_generation_contract() -> dict[str, Any]:
                 },
                 "behavior": "object, never a string",
                 "solver": "optional object of generic backend solver primitives; never a named physical-process mode",
+                "articulated_body_solver": {
+                    "type": "articulated_body",
+                    "model": ARTICULATED_BODY_MODEL_ID,
+                    "mode": "kinematic or ragdoll",
+                    "ragdoll_start_time_s": "required only for ragdoll; within scene duration",
+                    "root_keyframes": "time-ordered position/rotation offsets beginning with zero offsets at time 0",
+                    "joint_keyframes": "time-ordered component-space rotation offsets beginning at time 0",
+                    "allowed_bones": sorted(ARTICULATED_BODY_BONES),
+                    "attachments": "optional object_id/bone/time interval/local transform entries ending before ragdoll",
+                },
             },
             "rigid_constraint": {
                 "id": "unique stable identifier",

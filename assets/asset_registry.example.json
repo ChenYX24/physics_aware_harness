@@ -7,6 +7,26 @@
   },
   "assets": [
     {
+      "asset_id": "harness_ue_mannequin_v1",
+      "name": "Harness UE Mannequin V1",
+      "category": "physics_critical",
+      "type": "skeletal_mesh",
+      "asset_kind": "skeletal_mesh",
+      "preserve_authored_scale": true,
+      "authored_size_m": [0.58, 0.36, 1.92],
+      "tags": ["articulated_body", "humanoid", "mannequin", "skeletal_mesh", "white_model", "ragdoll"],
+      "ue_path": "/Game/Mannequin/Character/Mesh/SK_Mannequin.SK_Mannequin",
+      "source_kind": "engine_builtin",
+      "source_uri": "ue-template://High/Mannequin/Content/Character/Mesh/SK_Mannequin",
+      "license": "Unreal Engine EULA",
+      "quality_status": "approved_proxy",
+      "collision_profile": "PhysicsActor",
+      "acquisition": {
+        "mode": "materialized_from_ue_template",
+        "physics_asset": "/Game/Mannequin/Character/Mesh/SK_Mannequin_PhysicsAsset.SK_Mannequin_PhysicsAsset"
+      }
+    },
+    {
       "asset_id": "GC_GlassPanelRadial",
       "name": "GC_GlassPanelRadial",
       "category": "physics_critical",

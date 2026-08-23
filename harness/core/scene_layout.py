@@ -81,16 +81,23 @@ def build_object_node(
         collider = collider if collider is not None else defaults["collider"]
         collision_profile = collision_profile if collision_profile is not None else defaults["collision_profile"]
         material = material if material is not None else defaults["material"]
-    bounds = bounds_for_position(
-        position,
-        extents,
-        intent.role,
-        centered=bool(
-            isinstance(selected_asset, dict)
-            and selected_asset.get("source_kind") == "procedural_generation"
-            and selected_asset.get("preserve_authored_scale") is True
-            and selected_asset.get("authored_size_m")
-        ),
+    bounds = (
+        {
+            "bottom_z": round(position[2], 6),
+            "top_z": round(position[2] + extents[2] * 2.0, 6),
+        }
+        if str(solver.get("type") or "") == "articulated_body"
+        else bounds_for_position(
+            position,
+            extents,
+            intent.role,
+            centered=bool(
+                isinstance(selected_asset, dict)
+                and selected_asset.get("source_kind") == "procedural_generation"
+                and selected_asset.get("preserve_authored_scale") is True
+                and selected_asset.get("authored_size_m")
+            ),
+        )
     )
     shape = obj.get("shape")
     if shape is None:
@@ -139,6 +146,7 @@ def build_object_node(
         0.0,
         (float(bounds["bottom_z"]) + float(bounds["top_z"])) / 2.0 - position[2],
     ]
+    solver_contract = obj.get("solver") if isinstance(obj.get("solver"), dict) else None
     return {
         "object_id": intent.object_id,
         "role": intent.role,
@@ -163,6 +171,11 @@ def build_object_node(
             "visible": visual_representation.get("visible") is not False,
         },
         "solver_declared": isinstance(obj.get("solver"), dict),
+        **(
+            {"articulated_body_contract": solver_contract}
+            if str((solver_contract or {}).get("type") or "") == "articulated_body"
+            else {}
+        ),
         "physics": {
             "state_kind": state_kind,
             "body_type": body_type,

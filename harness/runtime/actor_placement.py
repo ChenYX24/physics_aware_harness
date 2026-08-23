@@ -264,10 +264,20 @@ def actor_binding_from_node(
     is_field = str(node.get("shape") or "").casefold() in {"fixed_point", "constraint"}
     state_kind = str(physics.get("state_kind") or "rigid").casefold()
     body_type = str(physics.get("body_type") or "").casefold()
+    articulated_contract = (
+        node.get("articulated_body_contract")
+        if isinstance(node.get("articulated_body_contract"), dict)
+        else None
+    )
+    articulated_mode = str((articulated_contract or {}).get("mode") or "")
+    is_articulated = articulated_contract is not None
     kinematic = bool(body_type in {"static", "kinematic"} if body_type else physics.get("kinematic") or is_support or is_field)
-    simulate_physics = bool(physics_critical and state_kind == "rigid" and not kinematic and not is_field)
+    simulate_physics = bool(
+        articulated_mode == "ragdoll"
+        or (physics_critical and state_kind == "rigid" and not kinematic and not is_field)
+    )
     required_asset_unresolved = bool(asset_binding.get("required_asset_unresolved"))
-    ue_path = asset_binding.get("selected_asset_ue_path")
+    ue_path = articulated_contract.get("asset_path") if is_articulated else asset_binding.get("selected_asset_ue_path")
     collision_geometry = (
         physics.get("collision_geometry")
         if isinstance(physics.get("collision_geometry"), dict)
@@ -296,9 +306,12 @@ def actor_binding_from_node(
         and analytic_primitive is not None
     )
     asset_body_setup_verified = bool(
-        collision_enabled
-        and ue_path
-        and asset_binding.get("collision_body_setup_verified") is True
+        (is_articulated and articulated_mode == "ragdoll")
+        or (
+            collision_enabled
+            and ue_path
+            and asset_binding.get("collision_body_setup_verified") is True
+        )
     )
     proxy = bool(controlled_analytic_collision and not ue_path)
     collision_geometry_source = (
@@ -342,6 +355,7 @@ def actor_binding_from_node(
         visual_source,
         solver_declared=node.get("solver_declared") is True,
         handoff_contract=handoff_contract,
+        articulated_contract=articulated_contract,
     )
     return {
         "object_id": object_id,
@@ -363,7 +377,7 @@ def actor_binding_from_node(
         "asset": {
             "selected_asset_id": asset_binding.get("selected_asset_id"),
             "ue_path": ue_path,
-            "asset_kind": asset_binding.get("asset_kind"),
+            "asset_kind": "skeletal_mesh" if is_articulated else asset_binding.get("asset_kind"),
             "proxy": proxy,
             "binding_source": "analytic_proxy" if controlled_analytic_collision and not ue_path else "ue_asset" if ue_path else "unbound",
             "runtime_usage": runtime_usage,
@@ -415,6 +429,7 @@ def actor_binding_from_node(
             "use_ccd": physics.get("use_ccd"),
             "initial_angular_velocity_rad_s": physics.get("initial_angular_velocity_rad_s"),
         },
+        **({"articulated_body": articulated_contract} if is_articulated else {}),
         "runtime_binding_requirements": asset_binding.get("runtime_binding_requirements") or [],
         "target_backend": target_backend,
     }
@@ -425,7 +440,15 @@ def render_binding_for(
     *,
     solver_declared: bool,
     handoff_contract: dict[str, Any] | None,
+    articulated_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if isinstance(articulated_contract, dict):
+        return {
+            "kind": "articulated_body",
+            "model": articulated_contract.get("model"),
+            "mode": articulated_contract.get("mode"),
+            "asset_path": articulated_contract.get("asset_path"),
+        }
     if visual_source == "solver_generated":
         contract = handoff_contract if isinstance(handoff_contract, dict) else {}
         return {
@@ -480,6 +503,8 @@ def placement_warnings_for(actor_bindings: list[dict[str, Any]], scene_layout: d
 def ue_class_for(node: dict[str, Any], *, is_field: bool) -> str:
     if is_field:
         return "/Script/Engine.Actor"
+    if isinstance(node.get("articulated_body_contract"), dict):
+        return "/Script/Engine.SkeletalMeshActor"
     asset_binding = node.get("asset_binding") if isinstance(node.get("asset_binding"), dict) else {}
     asset_kind = str(asset_binding.get("asset_kind") or "").casefold()
     asset_path = str(asset_binding.get("selected_asset_ue_path") or "")

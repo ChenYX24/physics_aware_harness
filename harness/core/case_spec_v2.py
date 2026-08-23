@@ -13,6 +13,11 @@ from harness.core.capability import CapabilityStore, canonical_capability_id
 from harness.core.physics_contract import allowed_backends_for_scene
 from harness.core.runtime_case import RUNTIME_CASE_SCHEMA_VERSION, RuntimeCase
 from harness.core.scene_layout import rotate_local_vector_ue
+from harness.runtime.articulated_body import (
+    ArticulatedBodyContractError,
+    compile_articulated_body_contract,
+    is_articulated_body_solver,
+)
 
 
 CASE_SPEC_V2_SCHEMA_VERSION = "harness_case_spec_v2"
@@ -78,7 +83,7 @@ GEOMETRY_SCALE_POLICIES = {"preserve_authored", "fit_uniform_to_approx_size"}
 BACKEND_SOLVERS = {"fallback", "genesis_fem", "genesis_sph", "taichi_cloth", "ue"}
 BACKEND_SOLVER_CAPABILITIES = {
     "fallback": {"rigid_body", "contact_events", "trajectory"},
-    "ue": {"rigid_body", "rigid_constraints", "contact_events", "trajectory", "fracture_events", "geometry_collection"},
+    "ue": {"rigid_body", "rigid_constraints", "articulated_body", "contact_events", "trajectory", "fracture_events", "geometry_collection"},
     "genesis_sph": {
         "particle_dynamics",
         "fluid_dynamics",
@@ -750,6 +755,47 @@ def collect_case_spec_v2_issues(
     if duplicates:
         _issue(issues, "/objects", "duplicate_object_ids", f"duplicate ids: {', '.join(duplicates)}")
     known_objects = set(object_ids)
+    duration_s = float((data.get("scene") or {}).get("duration_s") or 0.0)
+    for index, obj in enumerate(objects):
+        if not isinstance(obj, Mapping) or not is_articulated_body_solver(obj.get("solver")):
+            continue
+        path = f"/objects/{index}"
+        physics = obj.get("physics") if isinstance(obj.get("physics"), Mapping) else {}
+        solver = obj.get("solver") if isinstance(obj.get("solver"), Mapping) else {}
+        mode = str(solver.get("mode") or "")
+        if obj.get("role") != "articulated_body":
+            _issue(issues, f"{path}/role", "invalid_articulated_body_role", "articulated_body solver requires role=articulated_body")
+        expected_body_type = "kinematic" if mode == "kinematic" else "dynamic" if mode == "ragdoll" else None
+        if expected_body_type and physics.get("body_type") != expected_body_type:
+            _issue(
+                issues,
+                f"{path}/physics/body_type",
+                "articulated_body_mode_mismatch",
+                f"{mode} mode requires body_type={expected_body_type}",
+            )
+        if mode == "kinematic" and physics.get("collision_required") is not False:
+            _issue(
+                issues,
+                f"{path}/physics/collision_required",
+                "kinematic_articulated_collision_mismatch",
+                "kinematic articulated bodies require collision_required=false",
+            )
+        if mode == "ragdoll" and physics.get("collision_required") is not True:
+            _issue(
+                issues,
+                f"{path}/physics/collision_required",
+                "ragdoll_articulated_collision_mismatch",
+                "ragdoll articulated bodies require collision_required=true",
+            )
+        try:
+            compile_articulated_body_contract(
+                solver,
+                duration_s=duration_s,
+                known_object_ids=known_objects,
+                object_id=str(obj.get("id") or ""),
+            )
+        except ArticulatedBodyContractError as exc:
+            _issue(issues, f"{path}/solver", "invalid_articulated_body_contract", str(exc))
     _validate_rigid_constraints(data.get("constraints"), objects, known_objects, backend, issues)
     _validate_references(data.get("relations"), "/relations", known_objects, issues)
     _validate_relation_surface_gaps(data.get("relations"), issues)
@@ -854,6 +900,17 @@ def compile_case_spec_v2_runtime(case_spec: CaseSpecV2) -> RuntimeCase:
         )
         for obj in case_spec.objects
     ]
+    known_object_ids = {str(obj.get("id") or "") for obj in case_spec.objects}
+    duration_s = float((data.get("scene") or {}).get("duration_s") or 3.0)
+    for source_object, projected_object in zip(case_spec.objects, projected_objects):
+        solver = source_object.get("solver")
+        if is_articulated_body_solver(solver):
+            projected_object["solver"] = compile_articulated_body_contract(
+                solver,
+                duration_s=duration_s,
+                known_object_ids=known_object_ids,
+                object_id=str(source_object.get("id") or ""),
+            )
     _project_release_events(data.get("events") or [], projected_objects)
     active, passive = _infer_active_passive(projected_objects)
     capability = CapabilityStore().get(capability_id)

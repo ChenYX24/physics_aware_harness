@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import signal
 import shlex
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -626,9 +627,11 @@ def invoke_real_ue_runner(
     render_passes: list[str],
 ) -> dict[str, Any]:
     run_id = run_dir.name
-    runner_command = build_runner_command(run_dir, preflight, requested_views=requested_views, render_passes=render_passes)
+    runner_command: list[str] = []
     timeout = int(os.environ.get("SIM_STUDIO_UE_TIMEOUT_SECONDS", "3600"))
     try:
+        materialize_articulated_body_assets(case, preflight)
+        runner_command = build_runner_command(run_dir, preflight, requested_views=requested_views, render_passes=render_passes)
         completed = run_runner_process_group(
             runner_command,
             cwd=Path(__file__).resolve().parents[2],
@@ -701,6 +704,40 @@ def invoke_real_ue_runner(
             failure_category="artifact_missing" if first_code in {"F_DEPTH_MISSING", "F_VIEW_MISMATCH"} else "render_sync_failure",
         )
     return build_backend_report(case, run_id, preflight, phase="runtime", real_ue_invoked=True, status="completed", runner_command=runner_command)
+
+
+def materialize_articulated_body_assets(case: RuntimeCase, preflight: dict[str, Any]) -> None:
+    articulated = [
+        obj
+        for obj in case.data.get("objects") or []
+        if isinstance(obj, dict)
+        and isinstance(obj.get("solver"), dict)
+        and obj["solver"].get("type") == "articulated_body"
+    ]
+    if not articulated:
+        return
+    executable = Path(str((preflight.get("resolved_paths") or {}).get("SIM_STUDIO_UE_EXECUTABLE") or ""))
+    project = Path(str((preflight.get("resolved_paths") or {}).get("SIM_STUDIO_UE_PROJECT") or ""))
+    engine_install_root = executable.resolve().parents[3]
+    source_root = engine_install_root / "Templates" / "TemplateResources" / "High" / "Mannequin" / "Content" / "Character"
+    destination_root = project.resolve().parent / "Content" / "Mannequin" / "Character"
+    required = (
+        Path("Mesh/SK_Mannequin.uasset"),
+        Path("Mesh/UE4_Mannequin_Skeleton.uasset"),
+        Path("Mesh/SK_Mannequin_PhysicsAsset.uasset"),
+    )
+    missing = [str(source_root / relative) for relative in required if not (source_root / relative).is_file()]
+    if missing:
+        raise RuntimeError(f"fixed articulated-body assets are unavailable in this UE installation: {missing}")
+    for source in sorted(path for path in source_root.rglob("*") if path.is_file()):
+        relative = source.relative_to(source_root)
+        destination = destination_root / relative
+        if destination.exists():
+            if not destination.is_file() or destination.read_bytes() != source.read_bytes():
+                raise RuntimeError(f"fixed articulated-body asset conflicts with project content: {destination}")
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
 
 
 def run_runner_process_group(

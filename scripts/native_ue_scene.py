@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from harness.core.case_spec import fracture_center_from_contact, fracture_response_for_energy
 from harness.core.timebase import build_timebase
+from harness.runtime.articulated_body import ARTICULATED_BODY_PHYSICS_ASSET_PATH, sample_articulated_body_contract
 from harness.verification.render_sync_checker import depth_pixel_statistics
 
 STUDIO_TOOLS = Path(__file__).resolve().parents[1] / "simulator_studio" / "tools"
@@ -541,7 +542,15 @@ def runtime_position(obj: dict, time_s: float, duration: float) -> tuple[list[fl
     yaw = 0.0
     pitch = 0.0
     roll = 0.0
-    if behavior == "wind_drift":
+    if behavior in {"articulated_kinematic", "articulated_ragdoll"}:
+        pose = sample_articulated_body_contract(params.get("articulated_body") or {}, time_s)
+        position_offset = pose["root_position_offset_m"]
+        rotation_offset = pose["root_rotation_offset_deg"]
+        x += float(position_offset[0])
+        y += float(position_offset[1])
+        z += float(position_offset[2])
+        pitch, yaw, roll = [float(value) for value in rotation_offset]
+    elif behavior == "wind_drift":
         phase = float(params.get("phase", 0.0))
         props = obj.get("physics_properties") or {}
         wind_speed = float(props.get("wind_speed_m_s") or params.get("wind_speed", 0.56))
@@ -916,12 +925,18 @@ def simulate_runtime_scene(runtime_scene: dict) -> list[dict]:
             ]
         for obj in runtime_scene.get("dynamic_objects") or []:
             position, rotation = runtime_position(obj, t, duration)
+            articulated_pose = (
+                sample_articulated_body_contract((obj.get("params") or {}).get("articulated_body") or {}, t)
+                if obj.get("behavior") in {"articulated_kinematic", "articulated_ragdoll"}
+                else None
+            )
             frame["objects"][obj["id"]] = {
                 "position": position,
                 "rotation_degrees": rotation,
                 "behavior": obj.get("behavior"),
                 "asset_key": obj.get("asset_key"),
                 "source": analytic_source if analytic_backend and obj.get("behavior") in {"falling_collision", "slope_roll", "rolling_friction", "projectile_arc", "thrown_box", "pendulum_swing", "constraint_joint_link", "stack_stability", "stack_push_impactor", "wind_drift", "plant_sway"} else "scripted_runtime_preview",
+                **({"joint_rotations_deg": articulated_pose["joint_rotations_deg"]} if articulated_pose else {}),
             }
             if obj.get("behavior") == "falling_collision":
                 params = obj.get("params") or {}
@@ -2914,7 +2929,7 @@ def actor_runtime_component(actor):
         component = getattr(actor, attr, None)
         if component:
             return component
-    for cls_name in ("GeometryCollectionComponent", "StaticMeshComponent", "SkeletalMeshComponent"):
+    for cls_name in ("PoseableMeshComponent", "GeometryCollectionComponent", "StaticMeshComponent", "SkeletalMeshComponent"):
         cls = getattr(unreal, cls_name, None)
         if not cls:
             continue
@@ -3651,6 +3666,76 @@ def attach_geometry_collection_fracture_events(trajectory: list[dict], physics_s
 def spawn_runtime_actor(label: str, asset_path: str, asset_kind: str, location: unreal.Vector, scale: unreal.Vector, material_path: str | None = None, rotation=None):
     subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     asset_kind = str(asset_kind or "").lower()
+    if asset_kind == "articulated_kinematic":
+        asset = load_asset(asset_path)
+        actor = subsystem.spawn_actor_from_class(unreal.Actor, location)
+        if not actor:
+            raise RuntimeError(f"failed to spawn articulated actor: {asset_path}")
+        actor.set_actor_label(label)
+        try:
+            subobjects = unreal.get_engine_subsystem(unreal.SubobjectDataSubsystem)
+            parent_handles = subobjects.k2_gather_subobject_data_for_instance(actor)
+            if not parent_handles:
+                raise RuntimeError("actor instance has no subobject root handle")
+            component_handle, fail_reason = subobjects.add_new_subobject(
+                unreal.AddNewSubobjectParams(
+                    parent_handle=parent_handles[0],
+                    new_class=unreal.PoseableMeshComponent,
+                    conform_transform_to_parent=True,
+                )
+            )
+            component_data = subobjects.k2_find_subobject_data_from_handle(component_handle)
+            component = (
+                unreal.SubobjectDataBlueprintFunctionLibrary.get_associated_object(component_data)
+                if component_data is not None
+                else None
+            )
+            if not component:
+                raise RuntimeError(f"failed to add PoseableMeshComponent: {fail_reason}")
+            component.set_skeletal_mesh(asset)
+            component.set_mobility(unreal.ComponentMobility.MOVABLE)
+            component.set_collision_enabled(unreal.CollisionEnabled.NO_COLLISION)
+            component.set_world_scale3d(scale)
+        except Exception as exc:
+            raise RuntimeError(f"failed to create PoseableMeshComponent for {label}: {exc}") from exc
+        white = create_generated_material(
+            "M_Harness_ArticulatedBodyWhite",
+            unreal.LinearColor(0.82, 0.82, 0.82, 1.0),
+            0.72,
+            0.0,
+            0.0,
+        )
+        for material_index in range(max(1, int(component.get_num_materials()))):
+            component.set_material(material_index, white)
+        if rotation:
+            actor.set_actor_rotation(rotation, False)
+        return actor
+    if asset_kind == "articulated_ragdoll":
+        asset = load_asset(asset_path)
+        actor = subsystem.spawn_actor_from_class(unreal.SkeletalMeshActor, location)
+        if not actor:
+            raise RuntimeError(f"failed to spawn articulated ragdoll: {asset_path}")
+        actor.set_actor_label(label)
+        component = actor_runtime_component(actor)
+        if not component:
+            raise RuntimeError(f"missing articulated ragdoll component: {asset_path}")
+        component.set_skeletal_mesh(asset)
+        physics_asset = load_asset(ARTICULATED_BODY_PHYSICS_ASSET_PATH)
+        component.set_physics_asset(physics_asset, False)
+        component.set_mobility(unreal.ComponentMobility.MOVABLE)
+        component.set_world_scale3d(scale)
+        white = create_generated_material(
+            "M_Harness_ArticulatedBodyWhite",
+            unreal.LinearColor(0.82, 0.82, 0.82, 1.0),
+            0.72,
+            0.0,
+            0.0,
+        )
+        for material_index in range(max(1, int(component.get_num_materials()))):
+            component.set_material(material_index, white)
+        if rotation:
+            actor.set_actor_rotation(rotation, False)
+        return actor
     if asset_kind in {"geometrycollection", "geometry_collection"}:
         asset = load_asset(asset_path)
         actor = subsystem.spawn_actor_from_class(unreal.GeometryCollectionActor, location)
@@ -8218,6 +8303,106 @@ def runtime_subject_delta_cm(runtime_scene: dict, frame_index: int, solver_traje
     return unreal.Vector(*[(current[index] - start[index]) * 100.0 for index in range(3)])
 
 
+def articulated_runtime_ids(runtime_scene: dict | None) -> list[str]:
+    return [
+        str(obj.get("id") or "")
+        for obj in (runtime_scene or {}).get("dynamic_objects") or []
+        if str(obj.get("behavior") or "") in {"articulated_kinematic", "articulated_ragdoll"}
+    ]
+
+
+def apply_articulated_pose(actors: dict, obj: dict, frame_obj: dict, time_s: float) -> bool:
+    object_id = str(obj.get("id") or "")
+    actor = actors.get(object_id)
+    if not actor:
+        raise RuntimeError(f"articulated actor is missing: {object_id}")
+    contract = (obj.get("params") or {}).get("articulated_body") or {}
+    component = actor_runtime_component(actor)
+    if not component:
+        raise RuntimeError(f"articulated mesh component is missing: {object_id}")
+    ragdoll_start = contract.get("ragdoll_start_time_s")
+    if contract.get("mode") == "ragdoll" and ragdoll_start is not None and time_s >= float(ragdoll_start):
+        state = actors.setdefault("articulated_ragdoll_state", {})
+        if not state.get(object_id):
+            component.set_collision_enabled(unreal.CollisionEnabled.QUERY_AND_PHYSICS)
+            component.set_collision_profile_name("PhysicsActor")
+            component.set_simulate_physics(True)
+            component.set_enable_gravity(True)
+            component.wake_all_rigid_bodies()
+            state[object_id] = True
+        return False
+    rotations = frame_obj.get("joint_rotations_deg") or {}
+    if not rotations:
+        return True
+    setter = getattr(component, "set_bone_rotation_by_name", None)
+    getter = getattr(component, "get_bone_rotation_by_name", None)
+    if not setter or not getter:
+        if any(any(abs(float(value)) > 1e-9 for value in rotation) for rotation in rotations.values()):
+            raise RuntimeError(f"articulated pose component cannot set declared bones: {object_id}")
+        return True
+    references = actors.setdefault("articulated_reference_rotations", {}).setdefault(object_id, {})
+    for bone, offset in rotations.items():
+        if bone not in references:
+            base = getter(unreal.Name(str(bone)), unreal.BoneSpaces.COMPONENT_SPACE)
+            references[bone] = [float(base.pitch), float(base.yaw), float(base.roll)]
+        base = references[bone]
+        setter(
+            unreal.Name(str(bone)),
+            runtime_rotator([base[index] + float(offset[index]) for index in range(3)]),
+            unreal.BoneSpaces.COMPONENT_SPACE,
+        )
+    return True
+
+
+def apply_articulated_attachments(actors: dict, runtime_scene: dict | None, time_s: float) -> None:
+    objects = [
+        obj
+        for obj in (runtime_scene or {}).get("dynamic_objects") or []
+        if str(obj.get("behavior") or "") in {"articulated_kinematic", "articulated_ragdoll"}
+    ]
+    by_id = {
+        str(obj.get("id") or ""): obj
+        for obj in ((runtime_scene or {}).get("dynamic_objects") or []) + ((runtime_scene or {}).get("static_objects") or [])
+    }
+    states = actors.setdefault("articulated_attachment_state", {})
+    for obj in objects:
+        body_actor = actors.get(str(obj.get("id") or ""))
+        body_component = actor_runtime_component(body_actor) if body_actor else None
+        if not body_component:
+            raise RuntimeError(f"articulated attachment source is missing: {obj.get('id')}")
+        contract = (obj.get("params") or {}).get("articulated_body") or {}
+        for attachment in contract.get("attachments") or []:
+            target_id = str(attachment.get("object_id") or "")
+            target = actors.get(target_id)
+            if not target:
+                raise RuntimeError(f"articulated attachment target is missing: {target_id}")
+            start = float(attachment.get("start_time_s") or 0.0)
+            end_value = attachment.get("end_time_s")
+            active = time_s >= start and (end_value is None or time_s < float(end_value))
+            target_component = actor_runtime_component(target)
+            if active:
+                if not states.get(target_id):
+                    if target_component:
+                        target_component.set_simulate_physics(False)
+                    states[target_id] = True
+                bone = unreal.Name(str(attachment.get("bone") or ""))
+                local_m = attachment.get("local_position_m") or [0.0, 0.0, 0.0]
+                local_rotation = attachment.get("local_rotation_deg") or [0.0, 0.0, 0.0]
+                world_position, world_rotation = body_component.transform_from_bone_space(
+                    bone,
+                    unreal.Vector(*[float(value) * 100.0 for value in local_m]),
+                    runtime_rotator(local_rotation),
+                )
+                target.set_actor_location(world_position, False, False)
+                target.set_actor_rotation(world_rotation, False)
+            elif states.pop(target_id, False):
+                properties = (by_id.get(target_id) or {}).get("physics_properties") or {}
+                if target_component and properties.get("simulate_physics") is True:
+                    target_component.set_simulate_physics(True)
+                    target_component.set_enable_gravity(bool_control(properties.get("enable_gravity"), True))
+                    target_component.wake_all_rigid_bodies()
+
+
 def apply_trajectory_frame(actors: dict, dynamic_ids: list[str], frame: dict, scene_origin: unreal.Vector, runtime_scene: dict | None) -> None:
     obj_by_id = {
         obj.get("id"): obj
@@ -8233,6 +8418,12 @@ def apply_trajectory_frame(actors: dict, dynamic_ids: list[str], frame: dict, sc
         params = (obj_by_id.get(oid) or {}).get("params") or {}
         if str(params.get("humanoid_adapter") or "").strip().lower() in {"gasp", "ddv"}:
             apply_gasp_locomotion_frame(actors, obj_by_id.get(oid) or {}, frame)
+            continue
+        articulated_obj = obj_by_id.get(oid) or {}
+        contract = params.get("articulated_body") if isinstance(params.get("articulated_body"), dict) else None
+        time_s = float(frame.get("time") or 0.0)
+        if contract and contract.get("mode") == "ragdoll" and time_s >= float(contract.get("ragdoll_start_time_s") or 0.0):
+            apply_articulated_pose(actors, articulated_obj, frame_obj, time_s)
             continue
         sweep_movement = params.get("sweep_movement") is True
         desired_position = ue_vec_from_meters(
@@ -8251,6 +8442,9 @@ def apply_trajectory_frame(actors: dict, dynamic_ids: list[str], frame: dict, sc
                 desired_position,
                 actors.get("runtime_pose_registrations"),
             )
+        if contract:
+            apply_articulated_pose(actors, articulated_obj, frame_obj, time_s)
+    apply_articulated_attachments(actors, runtime_scene, float(frame.get("time") or 0.0))
     update_elastic_tether_visual(actors, frame, scene_origin, runtime_scene)
 
 
@@ -10285,8 +10479,9 @@ def start_highres_viewport_capture(
                 raise RuntimeError("F_RUNTIME_CONSTRAINT_BINDING_FAILED: post-body-setup initialization failed")
         first_frame = trajectory[min(state["frame_index"], len(trajectory) - 1)] if trajectory else {"frame": 0, "time": 0.0, "objects": {}}
         runner_ids = [obj.get("id") for obj in (runtime_scene.get("dynamic_objects") or []) if obj.get("behavior") == "third_person_runner"] if runtime_scene else []
-        if runner_ids:
-            apply_trajectory_frame(actors, runner_ids, first_frame, scene_origin, runtime_scene)
+        scripted_ids = list(dict.fromkeys([*runner_ids, *articulated_runtime_ids(runtime_scene)]))
+        if scripted_ids:
+            apply_trajectory_frame(actors, scripted_ids, first_frame, scene_origin, runtime_scene)
         apply_runtime_animation_segments(actors, runtime_scene, first_frame, physics_status)
         apply_delayed_release_projectiles(actors, runtime_scene, first_frame, scene_origin, physics_status)
         state["physics_impulse_applied"] = True
@@ -10503,8 +10698,9 @@ def start_highres_viewport_capture(
             cpp_status = physics_status.get("cpp_runtime_driver") or {}
             cpp_driver = actors.get("adp_physics_runtime_driver")
             runner_ids = [obj.get("id") for obj in (runtime_scene.get("dynamic_objects") or []) if obj.get("behavior") == "third_person_runner"] if runtime_scene else []
-            if runner_ids:
-                apply_trajectory_frame(actors, runner_ids, frame, scene_origin, runtime_scene)
+            scripted_ids = list(dict.fromkeys([*runner_ids, *articulated_runtime_ids(runtime_scene)]))
+            if scripted_ids:
+                apply_trajectory_frame(actors, scripted_ids, frame, scene_origin, runtime_scene)
             apply_runtime_animation_segments(actors, runtime_scene, frame, physics_status)
             apply_delayed_release_projectiles(actors, runtime_scene, frame, scene_origin, physics_status)
             if cpp_status.get("started") and cpp_driver:
@@ -10515,8 +10711,8 @@ def start_highres_viewport_capture(
                     cpp_status.setdefault("errors", []).append(f"advance_capture:{exc}")
             elif physics_status.get("manual_world_tick_available"):
                 advance_physics_capture(actors, physics_status, fixed_physics_step_s(frame_index, FPS))
-            if runner_ids:
-                apply_trajectory_frame(actors, runner_ids, frame, scene_origin, runtime_scene)
+            if scripted_ids:
+                apply_trajectory_frame(actors, scripted_ids, frame, scene_origin, runtime_scene)
             apply_runtime_animation_segments(actors, runtime_scene, frame, physics_status)
             apply_delayed_release_projectiles(actors, runtime_scene, frame, scene_origin, physics_status)
             actual_frame, new_events = record_physics_transform_frame(
@@ -10529,17 +10725,20 @@ def start_highres_viewport_capture(
             )
             new_events = merge_live_native_contacts(actual_frame, new_events, cpp_driver)
             apply_geometry_collection_fracture_response(actors, runtime_scene, new_events, frame_index, physics_status)
-            if runner_ids and isinstance(actual_frame.get("objects"), dict):
-                for runner_id in runner_ids:
-                    runner_obj = next(
-                        (obj for obj in (runtime_scene.get("dynamic_objects") or []) if str(obj.get("id") or "") == str(runner_id)),
+            if scripted_ids and isinstance(actual_frame.get("objects"), dict):
+                for scripted_id in scripted_ids:
+                    scripted_obj = next(
+                        (obj for obj in (runtime_scene.get("dynamic_objects") or []) if str(obj.get("id") or "") == str(scripted_id)),
                         {},
                     )
-                    if str((runner_obj.get("params") or {}).get("humanoid_adapter") or "").strip().lower() in {"gasp", "ddv"}:
+                    if str((scripted_obj.get("params") or {}).get("humanoid_adapter") or "").strip().lower() in {"gasp", "ddv"}:
                         continue
-                    scripted = (frame.get("objects") or {}).get(runner_id)
+                    contract = (scripted_obj.get("params") or {}).get("articulated_body") or {}
+                    if contract.get("mode") == "ragdoll" and float(frame.get("time") or 0.0) >= float(contract.get("ragdoll_start_time_s") or 0.0):
+                        continue
+                    scripted = (frame.get("objects") or {}).get(scripted_id)
                     if isinstance(scripted, dict):
-                        actual_frame["objects"][runner_id] = {**scripted, "source": scripted.get("source") or "scripted_runtime_preview"}
+                        actual_frame["objects"][scripted_id] = {**scripted, "source": scripted.get("source") or "scripted_runtime_preview"}
             state["actual_trajectory"].append(actual_frame)
             state["contact_events"].extend(new_events)
         elif first_view_for_frame:
@@ -10785,13 +10984,14 @@ def main():
     write_progress_marker("warmup_complete")
     capture_started = time.perf_counter()
     runner_ids = [obj.get("id") for obj in (runtime_scene.get("dynamic_objects") or []) if obj.get("behavior") == "third_person_runner"] if runtime_scene else []
+    scripted_ids = list(dict.fromkeys([*runner_ids, *articulated_runtime_ids(runtime_scene)]))
     for frame in trajectory:
         frame_index = int(frame.get("frame", 0))
         if physics_enabled:
             cpp_status = physics_status.get("cpp_runtime_driver") or {}
             cpp_driver = actors.get("adp_physics_runtime_driver")
-            if runner_ids:
-                apply_trajectory_frame(actors, runner_ids, frame, scene_origin, runtime_scene)
+            if scripted_ids:
+                apply_trajectory_frame(actors, scripted_ids, frame, scene_origin, runtime_scene)
             apply_delayed_release_projectiles(actors, runtime_scene, frame, scene_origin, physics_status)
             if cpp_status.get("started") and cpp_driver:
                 try:
@@ -10801,8 +11001,8 @@ def main():
                     cpp_status.setdefault("errors", []).append(f"advance_capture:{exc}")
             else:
                 advance_physics_capture(actors, physics_status, fixed_physics_step_s(frame_index, FPS))
-            if runner_ids:
-                apply_trajectory_frame(actors, runner_ids, frame, scene_origin, runtime_scene)
+            if scripted_ids:
+                apply_trajectory_frame(actors, scripted_ids, frame, scene_origin, runtime_scene)
             apply_delayed_release_projectiles(actors, runtime_scene, frame, scene_origin, physics_status)
             actual_frame, new_events = record_physics_transform_frame(
                 actors,
@@ -10814,17 +11014,20 @@ def main():
             )
             new_events = merge_live_native_contacts(actual_frame, new_events, cpp_driver)
             apply_geometry_collection_fracture_response(actors, runtime_scene, new_events, frame_index, physics_status)
-            if runner_ids and isinstance(actual_frame.get("objects"), dict):
-                for runner_id in runner_ids:
-                    runner_obj = next(
-                        (obj for obj in (runtime_scene.get("dynamic_objects") or []) if str(obj.get("id") or "") == str(runner_id)),
+            if scripted_ids and isinstance(actual_frame.get("objects"), dict):
+                for scripted_id in scripted_ids:
+                    scripted_obj = next(
+                        (obj for obj in (runtime_scene.get("dynamic_objects") or []) if str(obj.get("id") or "") == str(scripted_id)),
                         {},
                     )
-                    if str((runner_obj.get("params") or {}).get("humanoid_adapter") or "").strip().lower() in {"gasp", "ddv"}:
+                    if str((scripted_obj.get("params") or {}).get("humanoid_adapter") or "").strip().lower() in {"gasp", "ddv"}:
                         continue
-                    scripted = (frame.get("objects") or {}).get(runner_id)
+                    contract = (scripted_obj.get("params") or {}).get("articulated_body") or {}
+                    if contract.get("mode") == "ragdoll" and float(frame.get("time") or 0.0) >= float(contract.get("ragdoll_start_time_s") or 0.0):
+                        continue
+                    scripted = (frame.get("objects") or {}).get(scripted_id)
                     if isinstance(scripted, dict):
-                        actual_frame["objects"][runner_id] = {**scripted, "source": scripted.get("source") or "scripted_runtime_preview"}
+                        actual_frame["objects"][scripted_id] = {**scripted, "source": scripted.get("source") or "scripted_runtime_preview"}
             actual_trajectory.append(actual_frame)
             contact_events.extend(new_events)
         else:

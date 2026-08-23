@@ -410,6 +410,13 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
         for obj in case_spec.get("objects", [])
         if isinstance(obj, dict) and (obj.get("id") or obj.get("object_id"))
     }
+    attachment_target_ids = {
+        str(attachment.get("object_id") or "")
+        for binding in actor_placement.get("actor_bindings") or []
+        if isinstance(binding, dict) and isinstance(binding.get("articulated_body"), dict)
+        for attachment in binding["articulated_body"].get("attachments") or []
+        if isinstance(attachment, dict) and attachment.get("object_id")
+    }
     dynamic: list[dict[str, Any]] = []
     static: list[dict[str, Any]] = []
     for index, binding in enumerate(actor_placement.get("actor_bindings") or []):
@@ -466,6 +473,11 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
             ),
             "compiled_collision_geometry": isinstance(physics.get("collision_geometry"), dict),
         }
+        articulated = binding.get("articulated_body") if isinstance(binding.get("articulated_body"), dict) else None
+        if articulated is not None:
+            params["articulated_body"] = articulated
+            params["preserve_authored_scale"] = True
+            params["pose_anchor"] = "actor_origin"
         preserve_authored_scale = asset.get("preserve_authored_scale") is True
         instance_scale = asset.get("instance_scale")
         has_instance_scale = bool(
@@ -474,7 +486,7 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
             and asset.get("scale_applied") is True
         )
         runtime_usage = str(asset.get("runtime_usage") or "")
-        if runtime_usage == "collision_and_visual" and is_runtime_mesh_path(str(asset.get("ue_path") or "")):
+        if articulated is None and runtime_usage == "collision_and_visual" and is_runtime_mesh_path(str(asset.get("ue_path") or "")):
             # Actor Placement positions are body/geometry-center poses. Preserve
             # that contract even when a selected FBX retains an arbitrary
             # modelling pivot.
@@ -538,7 +550,11 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
             "static_friction": material.get("static_friction"),
             "dynamic_friction": material.get("dynamic_friction"),
             "restitution": material.get("restitution"),
-            "simulate_physics": bool(physics.get("simulate_physics")),
+            "simulate_physics": (
+                "force_off_until_release"
+                if articulated is not None and articulated.get("mode") == "ragdoll"
+                else bool(physics.get("simulate_physics"))
+            ),
             "kinematic": bool(physics.get("kinematic")),
         }
         runtime_path = ue_path_for_binding(binding)
@@ -548,19 +564,33 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
             else None
         )
         params["expected_collision_mesh_path"] = runtime_path if physics.get("collision_enabled") else None
-        runtime_kind = "static_mesh" if runtime_path.startswith("/Engine/BasicShapes/") else runtime_asset_kind(asset.get("asset_kind"))
+        runtime_kind = (
+            f"articulated_{articulated['mode']}"
+            if articulated is not None
+            else "static_mesh" if runtime_path.startswith("/Engine/BasicShapes/") else runtime_asset_kind(asset.get("asset_kind"))
+        )
+        behavior = (
+            f"articulated_{articulated['mode']}"
+            if articulated is not None
+            else "llm_rigid_body" if physics.get("simulate_physics") else "llm_static_body"
+        )
         actor = runtime_object(
             object_id,
             runtime_path,
-            "llm_rigid_body" if physics.get("simulate_physics") else "llm_static_body",
+            behavior,
             list(transform.get("position_m") or case_object.get("initial_position_m") or case_object.get("position_m") or [0.0, 0.0, 0.0]),
             runtime_scale,
             runtime_physics,
             params,
             asset_kind=runtime_kind,
         )
-        actor["rotation_degrees"] = list(transform.get("rotation_deg") or [0.0, 0.0, 0.0])
-        if physics.get("simulate_physics"):
+        declared_rotation = list(transform.get("rotation_deg") or [0.0, 0.0, 0.0])
+        if articulated is not None:
+            actor["params"]["base_rotation_degrees"] = declared_rotation
+            actor["rotation_degrees"] = [0.0, 0.0, 0.0]
+        else:
+            actor["rotation_degrees"] = declared_rotation
+        if physics.get("simulate_physics") or articulated is not None or object_id in attachment_target_ids:
             dynamic.append(actor)
         else:
             static.append(actor)
@@ -735,6 +765,8 @@ def runtime_object(
             "blueprint": "Blueprint",
             "geometry_collection": "GeometryCollection",
             "skeletal_mesh": "SkeletalMesh",
+            "articulated_kinematic": "PoseableMesh",
+            "articulated_ragdoll": "SkeletalMesh",
         }.get(asset_kind, "StaticMesh"),
         "asset_kind": asset_kind,
         "render_usage": f"runtime_{asset_kind}",
@@ -798,7 +830,7 @@ def default_physics_controls(case_spec: dict[str, Any]) -> dict[str, Any]:
     parameters = case_spec.get("physical_parameters") if isinstance(case_spec.get("physical_parameters"), dict) else {}
     expected = case_spec.get("expected_physics") if isinstance(case_spec.get("expected_physics"), dict) else {}
     contract = expected.get("simulation_contract") if isinstance(expected.get("simulation_contract"), dict) else {}
-    return {
+    controls = {
         "schema_version": "physics_controls_v1",
         "gravity_enabled": parameters.get("gravity_enabled", True) is not False,
         "gravity_m_s2": parameters.get("gravity_m_s2") or [0.0, 0.0, -9.81],
@@ -823,6 +855,19 @@ def default_physics_controls(case_spec: dict[str, Any]) -> dict[str, Any]:
         "state_solver": contract.get("state_solver"),
         "trajectory_role": contract.get("trajectory_role"),
     }
+    if any(
+        isinstance(obj, dict)
+        and isinstance(obj.get("solver"), dict)
+        and obj["solver"].get("type") == "articulated_body"
+        and obj["solver"].get("mode") == "ragdoll"
+        for obj in case_spec.get("objects") or []
+    ):
+        controls.update({
+            "simulation_driver": "ue_chaos_articulated_body",
+            "runtime_driver_backend": "ue_world_simulation",
+            "cpp_runtime_driver_enabled": False,
+        })
+    return controls
 
 
 def default_lighting_controls(pass_mode: str = "data", case_spec: dict[str, Any] | None = None) -> dict[str, Any]:

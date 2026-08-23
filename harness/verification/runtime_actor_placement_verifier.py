@@ -253,6 +253,20 @@ def first_bad_physics_binding(bindings: list[dict[str, Any]]) -> dict[str, Any] 
         visual_source = str(visual.get("source") or "asset")
         render_binding = binding.get("render_binding") if isinstance(binding.get("render_binding"), dict) else {}
         if visual_source == "solver_generated":
+            if render_binding.get("kind") == "articulated_body":
+                articulated = binding.get("articulated_body") if isinstance(binding.get("articulated_body"), dict) else {}
+                if (
+                    render_binding.get("model") != articulated.get("model")
+                    or render_binding.get("mode") != articulated.get("mode")
+                    or render_binding.get("asset_path") != articulated.get("asset_path")
+                ):
+                    return {
+                        "failure_type": "F7_runtime_artifact_incomplete",
+                        "object_id": object_id,
+                        "metric": "articulated_body_render_binding",
+                        "value": render_binding,
+                    }
+                continue
             cache_contract = render_binding.get("cache_contract") if isinstance(render_binding.get("cache_contract"), dict) else {}
             if (
                 render_binding.get("kind") != "solver_generated"

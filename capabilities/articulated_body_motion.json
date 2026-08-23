@@ -1,0 +1,19 @@
+{
+  "schema_version": "harness_capability_v1",
+  "id": "articulated_body_motion",
+  "description": "Execute a declared fixed-skeleton body pose trajectory or an explicitly selected Chaos ragdoll without action-name routing.",
+  "physical_assumptions": [
+    "A single harness UE mannequin and fixed UE4 bone set define the articulated body.",
+    "Kinematic root and component-space joint offsets are declared as timed keyframes.",
+    "Chaos ragdoll starts only at the explicitly declared time and never as an automatic fallback."
+  ],
+  "required_signals": ["trajectory", "articulated_pose"],
+  "required_assets": ["harness_ue_mannequin_v1"],
+  "verifier_rules": ["Validate the declared root and joint trajectory through the existing trajectory artifact."],
+  "failure_taxonomy": ["invalid_articulated_body_contract", "articulated_body_asset_missing", "articulated_pose_application_failed"],
+  "repair_suggestions": ["Correct the fixed model ID, standard bone names, keyframe times, joint ranges or execution mode."],
+  "smoke_cases": ["cases_v2/representative/articulated_turn_and_hold.json"],
+  "regression_cases": [],
+  "capability_type": "physics_constraint",
+  "stage_ids": ["runtime_backend_execution", "physics_verifier_truth_gate"]
+}
