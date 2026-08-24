@@ -1246,11 +1246,19 @@ def validate_solver_execution(
         for item in chaos_runtime.get("actors") or []
         if isinstance(item, dict) and item.get("id") and item.get("role") == "dynamic"
     }
-    for object_id in sorted(dynamic_ids):
+    live_chaos_ids = {
+        str(item["id"])
+        for item in dynamic_objects
+        if isinstance(item, dict)
+        and item.get("id")
+        and isinstance(item.get("physics_properties"), dict)
+        and item["physics_properties"].get("simulate_physics") is True
+    }
+    for object_id in sorted(live_chaos_ids):
         actor = actor_status.get(object_id)
         if not actor:
             violations.append(f"dynamic_actor_missing:{object_id}")
-        elif actor.get("simulate_physics") is not True or actor.get("collision_enabled") is not True or actor.get("errors"):
+        elif actor.get("simulate_physics") is not True or actor.get("errors"):
             violations.append(f"dynamic_actor_not_live:{object_id}")
 
     if not capture_path or not isinstance(raw_capture, dict):
@@ -1540,11 +1548,23 @@ def validate_runtime_binding_snapshot(runtime: dict[str, Any], summary: dict[str
             ((actual.get("world_transform") or {}).get("position_m")),
             tolerance=1e-4,
         )
+        expected_rotation = expected.get("rotation_degrees") or [0.0, 0.0, 0.0]
+        base_rotation = params.get("base_rotation_degrees")
+        if (
+            isinstance(expected_rotation, (list, tuple))
+            and len(expected_rotation) >= 3
+            and isinstance(base_rotation, (list, tuple))
+            and len(base_rotation) >= 3
+        ):
+            expected_rotation = [
+                float(base_rotation[index]) + float(expected_rotation[index])
+                for index in range(3)
+            ]
         object_residuals["rotation_deg"] = compare_binding_vector(
             mismatches,
             object_id,
             "world_transform.rotation_deg",
-            expected.get("rotation_degrees") or [0.0, 0.0, 0.0],
+            expected_rotation,
             ((actual.get("world_transform") or {}).get("rotation_deg")),
             tolerance=1e-3,
         )

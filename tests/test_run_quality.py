@@ -77,6 +77,51 @@ class RunQualityTests(unittest.TestCase):
         )
         self.assertEqual(report["status"], "fail")
 
+    def test_articulated_binding_includes_declared_base_rotation(self) -> None:
+        report = validate_runtime_binding_snapshot(
+            {
+                "dynamic_objects": [{
+                    "id": "adult",
+                    "initial_position_m": [0.0, 0.0, 0.0],
+                    "rotation_degrees": [0.0, 0.0, 0.0],
+                    "params": {"base_rotation_degrees": [0.0, 180.0, 0.0], "visible": False},
+                    "physics_properties": {"collision_enabled": False, "simulate_physics": False},
+                }],
+            },
+            {
+                "runtime_binding_snapshot": {
+                    "capture_phase": "pre_simulation",
+                    "objects": [{
+                        "object_id": "adult",
+                        "world_transform": {
+                            "position_m": [0.0, 0.0, 0.0],
+                            "rotation_deg": [0.0, 180.0, 0.0],
+                        },
+                        "asset": {
+                            "render_mesh_path": None,
+                            "collision_mesh_path": None,
+                            "asset_id": None,
+                            "sha256": None,
+                            "binding_metadata_registered": True,
+                        },
+                        "mesh_component": {
+                            "registered": True,
+                            "visible": False,
+                            "participates_in_rendering": False,
+                        },
+                        "visible": False,
+                        "collision_enabled": False,
+                        "simulate_physics": False,
+                        "collision_geometry": None,
+                    }],
+                    "constraints": [],
+                },
+            },
+        )
+
+        self.assertEqual(report["status"], "pass")
+        self.assertEqual(report["residuals"]["adult"]["rotation_deg"], 0.0)
+
     def test_valid_run_passes_hard_gate_and_gets_technical_score(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = self.make_run(Path(tmp))
@@ -650,6 +695,47 @@ class RunQualityTests(unittest.TestCase):
             self.assertFalse(readiness["reference_ready"])
             self.assertFalse(readiness["local_preview_ready"])
             self.assertEqual(readiness["publication_tier"], "rejected")
+
+    def test_kinematic_driver_object_does_not_require_live_chaos_body(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_run(Path(tmp))
+            runtime_scene = self.read_json(run_dir / "studio_runtime_scene.json")
+            actor = runtime_scene["dynamic_objects"][0]
+            actor["behavior"] = "articulated_kinematic"
+            actor["physics_properties"].update(
+                {
+                    "kinematic": True,
+                    "simulate_physics": False,
+                    "collision_enabled": False,
+                    "collision_geometry": None,
+                }
+            )
+            actor["params"]["expected_collision_mesh_path"] = None
+            self.write_json(run_dir / "studio_runtime_scene.json", runtime_scene)
+            summary_path = run_dir / "logs" / "native_data" / "summary.json"
+            summary = self.read_json(summary_path)
+            snapshot = summary["runtime_binding_snapshot"]["objects"][0]
+            snapshot["asset"]["collision_mesh_path"] = None
+            snapshot.update(
+                {
+                    "simulate_physics": False,
+                    "collision_enabled": False,
+                    "collision_geometry": None,
+                }
+            )
+            summary["chaos_runtime"]["actors"][0].update(
+                {"simulate_physics": False, "collision_enabled": False}
+            )
+            self.write_json(summary_path, summary)
+
+            with self.mock_ffprobe():
+                report = evaluate_run(run_dir, write=False)
+
+            self.assertEqual(report["solver_execution"]["status"], "pass")
+            self.assertNotIn(
+                "F_RIGID_SOLVER_PROVENANCE",
+                {item["code"] for item in report["hard_gate"]["failures"]},
+            )
 
     def test_provenance_override_records_solver_failure_as_warning(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
