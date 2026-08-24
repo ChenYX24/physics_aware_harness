@@ -27,6 +27,58 @@
       }
     },
     {
+      "asset_id": "harness_ue4_mannequin_idle_v1",
+      "name": "Harness UE4 Mannequin Idle V1",
+      "category": "animation",
+      "type": "animation_sequence",
+      "asset_kind": "animation_sequence",
+      "tags": ["articulated_body", "humanoid", "idle", "in_place"],
+      "ue_path": "/Game/Mannequin/Animations/ThirdPersonIdle.ThirdPersonIdle",
+      "source_kind": "engine_builtin",
+      "source_uri": "ue-template://High/Mannequin/Content/Animations/ThirdPersonIdle",
+      "license": "Unreal Engine EULA",
+      "quality_status": "approved_proxy"
+    },
+    {
+      "asset_id": "harness_ue4_mannequin_walk_v1",
+      "name": "Harness UE4 Mannequin Walk V1",
+      "category": "animation",
+      "type": "animation_sequence",
+      "asset_kind": "animation_sequence",
+      "tags": ["articulated_body", "humanoid", "walk", "in_place"],
+      "ue_path": "/Game/Mannequin/Animations/ThirdPersonWalk.ThirdPersonWalk",
+      "source_kind": "engine_builtin",
+      "source_uri": "ue-template://High/Mannequin/Content/Animations/ThirdPersonWalk",
+      "license": "Unreal Engine EULA",
+      "quality_status": "approved_proxy"
+    },
+    {
+      "asset_id": "harness_ue4_mannequin_run_v1",
+      "name": "Harness UE4 Mannequin Run V1",
+      "category": "animation",
+      "type": "animation_sequence",
+      "asset_kind": "animation_sequence",
+      "tags": ["articulated_body", "humanoid", "run", "in_place"],
+      "ue_path": "/Game/Mannequin/Animations/ThirdPersonRun.ThirdPersonRun",
+      "source_kind": "engine_builtin",
+      "source_uri": "ue-template://High/Mannequin/Content/Animations/ThirdPersonRun",
+      "license": "Unreal Engine EULA",
+      "quality_status": "approved_proxy"
+    },
+    {
+      "asset_id": "harness_ue4_mannequin_jump_v1",
+      "name": "Harness UE4 Mannequin Jump Start V1",
+      "category": "animation",
+      "type": "animation_sequence",
+      "asset_kind": "animation_sequence",
+      "tags": ["articulated_body", "humanoid", "jump", "in_place"],
+      "ue_path": "/Game/Mannequin/Animations/ThirdPersonJump_Start.ThirdPersonJump_Start",
+      "source_kind": "engine_builtin",
+      "source_uri": "ue-template://High/Mannequin/Content/Animations/ThirdPersonJump_Start",
+      "license": "Unreal Engine EULA",
+      "quality_status": "approved_proxy"
+    },
+    {
       "asset_id": "GC_GlassPanelRadial",
       "name": "GC_GlassPanelRadial",
       "category": "physics_critical",

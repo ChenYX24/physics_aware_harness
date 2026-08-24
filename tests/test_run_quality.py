@@ -10,10 +10,81 @@ from unittest.mock import patch
 
 from harness.core.timebase import build_timebase, sample_solver_trajectory
 from harness.verification.run_quality import EXR_MAGIC, evaluate_run
-from harness.verification.run_quality import validate_contacts, validate_runtime_binding_snapshot
+from harness.verification.run_quality import (
+    validate_articulated_execution,
+    validate_contacts,
+    validate_runtime_binding_snapshot,
+)
 
 
 class RunQualityTests(unittest.TestCase):
+    def test_articulated_execution_requires_post_tick_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            self.write_json(run_dir / "case_spec.json", {
+                "objects": [{
+                    "id": "person",
+                    "solver": {
+                        "type": "articulated_body",
+                        "mode": "kinematic",
+                        "pose_source": {"type": "animation_sequence"},
+                        "root_transform_source": {"type": "character_movement"},
+                    },
+                }],
+            })
+            failures: list[dict] = []
+
+            report = validate_articulated_execution(
+                run_dir,
+                [{"frame": 0, "time": 0.0, "objects": {"person": {"position": [0.0, 0.0, 0.0]}}}],
+                failures,
+            )
+
+            self.assertEqual(report["status"], "fail")
+            self.assertEqual(failures[0]["code"], "F_ARTICULATED_EXECUTION_FAILED")
+
+    def test_articulated_execution_accepts_actual_character_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            self.write_json(run_dir / "case_spec.json", {
+                "objects": [{
+                    "id": "person",
+                    "solver": {
+                        "type": "articulated_body",
+                        "mode": "kinematic",
+                        "pose_source": {"type": "animation_sequence"},
+                        "root_transform_source": {"type": "character_movement"},
+                    },
+                }],
+            })
+            frames = []
+            for index, animation_time in enumerate((0.0, 0.04)):
+                frames.append({
+                    "frame": index,
+                    "time": animation_time,
+                    "objects": {"person": {"articulated_observed": {
+                        "sample_phase": "post_tick",
+                        "pose_source_type": "animation_sequence",
+                        "root_transform_source_type": "character_movement",
+                        "actor_transform": {"position_m": [animation_time, 0.0, 0.0]},
+                        "bones": {"root": {"position_m": [animation_time, 0.0, 0.0]}},
+                        "movement_mode": "Walking",
+                        "velocity_m_s": [1.0, 0.0, 0.0],
+                        "animation_asset_path": "/Game/Test.Walk",
+                        "animation_time_s": animation_time,
+                        "animation_playing": True,
+                        "root_motion_delta": {"translation_m": [animation_time, 0.0, 0.0], "rotation_deg": [0.0, 0.0, 0.0]},
+                        "ik": {},
+                        "errors": [],
+                    }}},
+                })
+            failures: list[dict] = []
+
+            report = validate_articulated_execution(run_dir, frames, failures)
+
+            self.assertEqual(report["status"], "pass")
+            self.assertEqual(failures, [])
+
     def test_solver_declared_measurements_are_contact_evidence_authority(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
@@ -121,6 +192,55 @@ class RunQualityTests(unittest.TestCase):
 
         self.assertEqual(report["status"], "pass")
         self.assertEqual(report["residuals"]["adult"]["rotation_deg"], 0.0)
+
+    def test_articulated_character_binding_requires_character_components(self) -> None:
+        expected = {
+            "id": "adult",
+            "behavior": "articulated_character",
+            "initial_position_m": [0.0, 0.0, 0.96],
+            "rotation_degrees": [0.0, 0.0, 0.0],
+            "params": {"base_rotation_degrees": [0.0, 0.0, 0.0], "visible": False},
+            "physics_properties": {"collision_enabled": False, "simulate_physics": False},
+        }
+        actual = {
+            "object_id": "adult",
+            "world_transform": {"position_m": [0.0, 0.0, 0.96], "rotation_deg": [0.0, 0.0, 0.0]},
+            "asset": {
+                "render_mesh_path": None,
+                "collision_mesh_path": None,
+                "asset_id": None,
+                "sha256": None,
+                "binding_metadata_registered": True,
+            },
+            "mesh_component": {
+                "actor_class": "Character",
+                "component_class": "SkeletalMeshComponent",
+                "registered": True,
+                "visible": False,
+                "participates_in_rendering": False,
+            },
+            "articulated_components": {
+                "capsule_registered": True,
+                "character_movement_registered": True,
+            },
+            "visible": False,
+            "collision_enabled": False,
+            "simulate_physics": False,
+            "collision_geometry": None,
+        }
+
+        report = validate_runtime_binding_snapshot(
+            {"dynamic_objects": [expected]},
+            {"runtime_binding_snapshot": {"capture_phase": "pre_simulation", "objects": [actual], "constraints": []}},
+        )
+
+        self.assertEqual(report["status"], "pass")
+        actual["articulated_components"]["character_movement_registered"] = False
+        report = validate_runtime_binding_snapshot(
+            {"dynamic_objects": [expected]},
+            {"runtime_binding_snapshot": {"capture_phase": "pre_simulation", "objects": [actual], "constraints": []}},
+        )
+        self.assertEqual(report["status"], "fail")
 
     def test_valid_run_passes_hard_gate_and_gets_technical_score(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

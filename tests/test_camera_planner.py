@@ -6,6 +6,16 @@ from harness.runtime.camera_planner import SceneBounds, camera_plan_from_case_sp
 
 
 class CameraPlannerTests(unittest.TestCase):
+    def test_camera_plan_preserves_declared_target_objects(self) -> None:
+        plan = camera_plan_from_case_spec(
+            {"objects": []},
+            requested_views=["front_static"],
+            camera_intents=[{"role": "front_static", "target_objects": ["person", "ball"]}],
+        )
+
+        self.assertEqual(plan.views[0].target_object_ids, ("person", "ball"))
+        self.assertEqual(plan.views[0].rotation, (0.0, 90.0, 0.0))
+
     def test_default_bounds_generate_canonical_five_views(self) -> None:
         plan = plan_cameras_for_scene(SceneBounds(center=(0.0, 0.0, 0.5), extent=(2.0, 2.0, 1.0)))
         self.assertEqual([view.camera_id for view in plan.views], ["front_static", "side_static", "top_down", "tracking_subject", "event_closeup"])

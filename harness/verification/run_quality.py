@@ -57,6 +57,7 @@ def evaluate_run(
         required_modalities=required_modalities,
     )
     trajectory, trajectory_frames = validate_trajectory(run_dir, failures)
+    articulated_execution = validate_articulated_execution(run_dir, trajectory_frames, failures)
     solver_findings = [] if ignore_provenance_and_release_gates else failures
     solver_execution = validate_solver_execution(run_dir, trajectory_frames, solver_findings)
     if ignore_provenance_and_release_gates:
@@ -123,6 +124,7 @@ def evaluate_run(
         "media": media,
         "sensor_sequences": sensor_sequences,
         "trajectory": trajectory,
+        "articulated_execution": articulated_execution,
         "solver_execution": solver_execution,
         "contacts": contacts,
         "camera_motion": camera_motion,
@@ -1078,6 +1080,119 @@ def validate_trajectory(run_dir: Path, failures: list[dict[str, Any]]) -> tuple[
     }, [item for item in frames if isinstance(item, dict)]
 
 
+def validate_articulated_execution(
+    run_dir: Path,
+    trajectory_frames: list[dict[str, Any]],
+    failures: list[dict[str, Any]],
+) -> dict[str, Any]:
+    case = read_case_spec(run_dir)
+    articulated = [
+        obj
+        for obj in case.get("objects") or []
+        if isinstance(obj, dict)
+        and isinstance(obj.get("solver"), dict)
+        and obj["solver"].get("type") == "articulated_body"
+    ]
+    if not articulated:
+        return {"status": "not_required", "applicable": False, "objects": {}}
+    results: dict[str, Any] = {}
+    failed = False
+    for obj in articulated:
+        object_id = str(obj.get("id") or "")
+        contract = obj["solver"]
+        pose_type = str((contract.get("pose_source") or {}).get("type") or "")
+        root_type = str((contract.get("root_transform_source") or {}).get("type") or "")
+        samples = []
+        for frame in trajectory_frames:
+            objects = frame.get("objects") if isinstance(frame.get("objects"), dict) else {}
+            state = objects.get(object_id) if isinstance(objects.get(object_id), dict) else {}
+            observed = state.get("articulated_observed") if isinstance(state.get("articulated_observed"), dict) else None
+            if observed is not None:
+                samples.append((frame, observed))
+        object_failures: list[dict[str, Any]] = []
+        if not samples:
+            object_failures.append({"metric": "post_tick_observation_missing"})
+        for frame, observed in samples:
+            frame_index = frame.get("frame")
+            if observed.get("sample_phase") != "post_tick":
+                object_failures.append({"metric": "invalid_observation_phase", "frame": frame_index})
+            if observed.get("pose_source_type") != pose_type or observed.get("root_transform_source_type") != root_type:
+                object_failures.append({"metric": "motion_source_mismatch", "frame": frame_index})
+            if observed.get("errors"):
+                object_failures.append({"metric": "observation_errors", "frame": frame_index, "value": observed.get("errors")})
+            if not isinstance(observed.get("actor_transform"), dict) or not isinstance(observed.get("bones"), dict):
+                object_failures.append({"metric": "articulated_transform_observation_missing", "frame": frame_index})
+            if root_type == "character_movement" and (
+                not observed.get("movement_mode") or not isinstance(observed.get("velocity_m_s"), list)
+            ):
+                object_failures.append({"metric": "character_movement_observation_missing", "frame": frame_index})
+            for goal, ik in (observed.get("ik") or {}).items():
+                weight = float(ik.get("weight") or 0.0)
+                error = ik.get("error_m")
+                tolerance = ik.get("tolerance_m")
+                if weight > 0.0 and (
+                    not isinstance(error, (int, float))
+                    or not isinstance(tolerance, (int, float))
+                    or float(error) > float(tolerance)
+                ):
+                    object_failures.append({
+                        "metric": "ik_effector_error_m",
+                        "frame": frame_index,
+                        "goal": goal,
+                        "value": error,
+                        "allowed": tolerance,
+                    })
+        if pose_type == "animation_sequence" and samples:
+            active = [
+                observed
+                for _, observed in samples
+                if observed.get("animation_asset_path")
+            ]
+            times = [
+                float(observed["animation_time_s"])
+                for observed in active
+                if isinstance(observed.get("animation_time_s"), (int, float))
+            ]
+            if not active or any(observed.get("animation_playing") is not True for observed in active):
+                object_failures.append({"metric": "animation_not_playing"})
+            if len(times) < 2 or max(times) - min(times) <= 1e-4:
+                object_failures.append({"metric": "animation_time_not_advancing", "value": times[:8]})
+        if root_type == "animation_root_motion" and samples:
+            translation = sum(
+                abs(float(value))
+                for _, observed in samples
+                for value in ((observed.get("root_motion_delta") or {}).get("translation_m") or [])
+            )
+            rotation = sum(
+                abs(float(value))
+                for _, observed in samples
+                for value in ((observed.get("root_motion_delta") or {}).get("rotation_deg") or [])
+            )
+            if translation <= 1e-5 and rotation <= 1e-4:
+                object_failures.append({"metric": "root_motion_delta_missing"})
+        if contract.get("mode") == "ragdoll" and samples:
+            start = float(contract.get("ragdoll_start_time_s") or 0.0)
+            post = [observed for frame, observed in samples if float(frame.get("time") or frame.get("time_s") or 0.0) >= start]
+            if not post or any(observed.get("ragdoll_active") is not True for observed in post):
+                object_failures.append({"metric": "ragdoll_observation_missing"})
+        if object_failures:
+            failed = True
+            failures.append(issue(
+                "F_ARTICULATED_EXECUTION_FAILED",
+                "UE post-tick articulated execution did not satisfy the declared contract",
+                object_id=object_id,
+                findings=object_failures[:20],
+            ))
+        results[object_id] = {
+            "status": "fail" if object_failures else "pass",
+            "sample_count": len(samples),
+            "pose_source_type": pose_type,
+            "root_transform_source_type": root_type,
+            "findings": object_failures,
+        }
+    return {"status": "fail" if failed else "pass", "applicable": True, "objects": results}
+
+
 def find_nonfinite(value: Any, path: str = "$", found: list[str] | None = None) -> list[str]:
     found = found if found is not None else []
     if isinstance(value, float) and not math.isfinite(value):
@@ -1103,6 +1218,50 @@ def validate_solver_execution(
     case = read_case_spec(run_dir)
     expected = case.get("expected_physics") if isinstance(case.get("expected_physics"), dict) else {}
     explicit_contract = expected.get("simulation_contract") if isinstance(expected.get("simulation_contract"), dict) else {}
+    articulated_objects = [
+        obj
+        for obj in case.get("objects") or []
+        if isinstance(obj, dict)
+        and isinstance(obj.get("solver"), dict)
+        and obj["solver"].get("type") == "articulated_body"
+    ]
+    simulated_rigid_objects = [
+        obj
+        for obj in case.get("objects") or []
+        if isinstance(obj, dict)
+        and str((obj.get("physics") or {}).get("body_type") or "").casefold() == "dynamic"
+        and not (isinstance(obj.get("solver"), dict) and obj["solver"].get("type") == "articulated_body")
+    ]
+    if articulated_objects and not simulated_rigid_objects and not explicit_contract:
+        runtime_path = next((path for path in (
+            run_dir / "studio_runtime_scene.json",
+            run_dir / "logs" / "studio_runtime_scene_combined.json",
+            run_dir / "logs" / "studio_runtime_scene_rgb.json",
+            run_dir / "logs" / "studio_runtime_scene_data.json",
+        ) if path.is_file()), None)
+        summary_path = next((path for path in (
+            run_dir / "logs" / "native_combined" / "summary.json",
+            run_dir / "logs" / "native_rgb" / "summary.json",
+            run_dir / "logs" / "native_data" / "summary.json",
+            run_dir / "ue_output" / "summary.json",
+        ) if path.is_file()), None)
+        binding = validate_runtime_binding_snapshot(
+            read_optional_json(runtime_path) if runtime_path else {},
+            read_optional_json(summary_path) if summary_path else {},
+        )
+        if binding["status"] != "pass":
+            failures.append(issue(
+                "F_RUNTIME_BINDING_MISMATCH",
+                "compiled articulated bindings do not match the pre-simulation UE component snapshot",
+                mismatches=binding["mismatches"],
+            ))
+        return {
+            "required": False,
+            "status": "not_required" if binding["status"] == "pass" else "fail",
+            "contract": {},
+            "contract_source": "articulated_post_tick_quality_gate",
+            "runtime_bindings": binding,
+        }
     readiness = read_optional_json(run_dir / "run_readiness.json")
     run_backend = backend or (readiness.get("backend") if isinstance(readiness, dict) else None)
     if run_backend is None and (run_dir / "ue_backend_report.json").is_file():
@@ -1213,7 +1372,9 @@ def validate_solver_execution(
     dynamic_ids = {
         str(item.get("id"))
         for item in dynamic_objects
-        if isinstance(item, dict) and item.get("id")
+        if isinstance(item, dict)
+        and item.get("id")
+        and str(item.get("behavior") or "") not in {"third_person_runner", "articulated_character"}
     }
     if not dynamic_ids:
         violations.append("dynamic_objects_missing")
@@ -1538,6 +1699,25 @@ def validate_runtime_binding_snapshot(runtime: dict[str, Any], summary: dict[str
         compare_binding_value(mismatches, object_id, "mesh_component.registered", True, ((actual.get("mesh_component") or {}).get("registered")))
         compare_binding_value(mismatches, object_id, "mesh_component.visible", expected_visible, ((actual.get("mesh_component") or {}).get("visible")))
         compare_binding_value(mismatches, object_id, "mesh_component.participates_in_rendering", expected_visible, ((actual.get("mesh_component") or {}).get("participates_in_rendering")))
+        if str(expected.get("behavior") or "") == "articulated_character":
+            mesh_component = actual.get("mesh_component") if isinstance(actual.get("mesh_component"), dict) else {}
+            articulated_components = actual.get("articulated_components") if isinstance(actual.get("articulated_components"), dict) else {}
+            compare_binding_value(mismatches, object_id, "mesh_component.actor_class", "Character", mesh_component.get("actor_class"))
+            compare_binding_value(
+                mismatches,
+                object_id,
+                "mesh_component.component_class",
+                "SkeletalMeshComponent",
+                mesh_component.get("component_class"),
+            )
+            compare_binding_value(mismatches, object_id, "articulated_components.capsule_registered", True, articulated_components.get("capsule_registered"))
+            compare_binding_value(
+                mismatches,
+                object_id,
+                "articulated_components.character_movement_registered",
+                True,
+                articulated_components.get("character_movement_registered"),
+            )
         compare_binding_value(mismatches, object_id, "collision_enabled", bool(physics.get("collision_enabled")), actual.get("collision_enabled"))
         compare_binding_value(mismatches, object_id, "simulate_physics", bool(physics.get("simulate_physics")), actual.get("simulate_physics"))
         object_residuals["position_m"] = compare_binding_vector(

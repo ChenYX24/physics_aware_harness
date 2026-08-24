@@ -170,13 +170,21 @@ def main() -> int:
                     if live_fracture_ids:
                         shutil.copyfile(sampling_source, run_dir / "rgb_sampling_map.json")
         if pass_mode in {"data", "combined"}:
+            required_visible_ids = {
+                str(view.get("camera_id")): {
+                    *(str(value) for value in view.get("target_object_ids") or []),
+                    *live_fracture_ids,
+                }
+                for view in camera_plan.get("views") or []
+                if isinstance(view, dict) and view.get("camera_id")
+            }
             quantization = quantize_native_instance_segmentation(
                 native_output,
                 width=int(render_config.get("width") or 0),
                 height=int(render_config.get("height") or 0),
                 fps=int(render_config.get("fps") or 0),
                 required="segmentation" in {item.strip() for item in args.passes.split(",")},
-                required_object_ids=live_fracture_ids,
+                required_object_ids_by_view=required_visible_ids,
             )
             proc_result["segmentation_quantization"] = quantization
             if quantization.get("status") == "fail":
@@ -320,6 +328,7 @@ def fracture_state_hashes(events: list[dict[str, Any]], fracture_ids: set[str]) 
 
 def build_studio_scene_spec(case_spec: dict[str, Any], args: argparse.Namespace, *, actor_placement: dict[str, Any] | None = None) -> dict[str, Any]:
     timebase = timebase_for_case(case_spec)
+    stage_map = runtime_stage_map(case_spec)
     return {
         "draft_id": str(case_spec.get("case_id") or "harness_case"),
         "prompt": case_spec.get("prompt", ""),
@@ -338,8 +347,13 @@ def build_studio_scene_spec(case_spec: dict[str, Any], args: argparse.Namespace,
         "camera_plan": {},
         "map_lighting_controls": default_lighting_controls("data", case_spec),
         "assets": [],
-        "background": {"ue5_path": args.map or "/Game/Maps/MarketEnvironment/Maps/Day.Day"},
+        "background": {"ue5_path": stage_map},
     }
+
+
+def runtime_stage_map(case_spec: dict[str, Any]) -> str:
+    scene = case_spec.get("scene") if isinstance(case_spec.get("scene"), dict) else {}
+    return str(scene.get("map_preference") or scene.get("map_package") or "studio_runtime")
 
 
 def build_runtime_scene(case_spec: dict[str, Any], camera_plan: dict[str, Any], args: argparse.Namespace, *, pass_mode: str, actor_placement: dict[str, Any] | None = None, simulation_trajectory: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -359,6 +373,16 @@ def build_runtime_scene(case_spec: dict[str, Any], camera_plan: dict[str, Any], 
             }
         )
     lighting_controls = default_lighting_controls("rgb" if pass_mode == "combined" else pass_mode, case_spec)
+    if runtime_stage_map(case_spec) == "studio_runtime":
+        lighting_controls.update(
+            {
+                "use_existing_map_lights": False,
+                "spawn_directional_sun": True,
+                "spawn_fill_light": True,
+                "spawn_sky_light": True,
+                "fixed_auto_exposure": True,
+            }
+        )
     live_geometry_collection_data = pass_mode in {"data", "combined"} and bool(fracture_object_ids(case_spec))
     if physics_controls.get("simulate_physics") and (pass_mode == "rgb" or live_geometry_collection_data):
         lighting_controls["capture_backend"] = "highres_viewport"
@@ -366,7 +390,7 @@ def build_runtime_scene(case_spec: dict[str, Any], camera_plan: dict[str, Any], 
         "schema_version": "studio_runtime_v1",
         "draft_id": str(case_spec.get("case_id") or "harness_case"),
         "case_type": native_case_type(case_spec),
-        "background_map": {"ue5_path": args.map or "/Game/Maps/MarketEnvironment/Maps/Day.Day"},
+        "background_map": {"ue5_path": runtime_stage_map(case_spec)},
         "prompt": case_spec.get("prompt", ""),
         "expanded_prompt": case_spec.get("prompt", ""),
         "simulation": {
@@ -564,21 +588,42 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
             else None
         )
         params["expected_collision_mesh_path"] = runtime_path if physics.get("collision_enabled") else None
+        uses_character = (
+            articulated is not None
+            and isinstance(articulated.get("pose_source"), dict)
+            and articulated["pose_source"].get("type") == "animation_sequence"
+        )
         runtime_kind = (
-            f"articulated_{articulated['mode']}"
+            "articulated_character"
+            if uses_character
+            else f"articulated_{articulated['mode']}"
             if articulated is not None
             else "static_mesh" if runtime_path.startswith("/Engine/BasicShapes/") else runtime_asset_kind(asset.get("asset_kind"))
         )
         behavior = (
-            f"articulated_{articulated['mode']}"
+            "articulated_character"
+            if uses_character
+            else f"articulated_{articulated['mode']}"
             if articulated is not None
             else "llm_rigid_body" if physics.get("simulate_physics") else "llm_static_body"
         )
+        initial_position_m = list(
+            transform.get("position_m")
+            or case_object.get("initial_position_m")
+            or case_object.get("position_m")
+            or [0.0, 0.0, 0.0]
+        )
+        if uses_character:
+            capsule_half_height_m = 0.96
+            initial_position_m[2] = float(initial_position_m[2]) + capsule_half_height_m
+            params["capsule_half_height_m"] = capsule_half_height_m
+            params["capsule_radius_m"] = 0.29
+            params["skeletal_root_offset_m"] = [0.0, 0.0, -capsule_half_height_m]
         actor = runtime_object(
             object_id,
             runtime_path,
             behavior,
-            list(transform.get("position_m") or case_object.get("initial_position_m") or case_object.get("position_m") or [0.0, 0.0, 0.0]),
+            initial_position_m,
             runtime_scale,
             runtime_physics,
             params,
@@ -767,6 +812,7 @@ def runtime_object(
             "skeletal_mesh": "SkeletalMesh",
             "articulated_kinematic": "PoseableMesh",
             "articulated_ragdoll": "SkeletalMesh",
+            "articulated_character": "Character",
         }.get(asset_kind, "StaticMesh"),
         "asset_kind": asset_kind,
         "render_usage": f"runtime_{asset_kind}",
@@ -1067,7 +1113,7 @@ def run_native_pass(
     environment = {
         "ASSET_DATABASE_ONLY_ASSETS": "0",
         "GITLAB_ONLY_ASSETS": "0",
-        "SCENE_MAP": args.map or "/Game/Maps/MarketEnvironment/Maps/Day",
+        "SCENE_MAP": runtime_stage_map(case_spec),
         "SCENE_DESCRIPTION": str(case_spec.get("prompt") or case_spec.get("case_id") or "Harness UE render"),
         "ASSET_ROOT": str((ROOT / "assets").resolve()),
         "WIDTH": os.environ.get("SIM_STUDIO_UE_WIDTH", "1920"),
@@ -1205,6 +1251,7 @@ def camera_runtime_from_plan(camera_plan: dict[str, Any]) -> dict[str, Any]:
                 "dynamic_camera_profile": view.get("dynamic_camera_profile"),
                 "subject_follow_location_gain": view.get("subject_follow_location_gain"),
                 "subject_follow_target_gain": view.get("subject_follow_target_gain"),
+                "target_object_ids": list(view.get("target_object_ids") or []),
             }
             for view in views
             if isinstance(view, dict) and view.get("camera_id")
@@ -1233,15 +1280,18 @@ def build_map_report(
     rgb_runtime_light_audit = rgb_lighting.get("runtime_light_audit") if isinstance(rgb_lighting.get("runtime_light_audit"), dict) else None
     rgb_existing_map_lights = rgb_lighting.get("existing_map_lights") if isinstance(rgb_lighting.get("existing_map_lights"), dict) else None
     requested_map_asset = (scene_spec.get("background") or {}).get("ue5_path")
-    requested_map = canonical_game_package(requested_map_asset)
+    controlled_stage = requested_map_asset == "studio_runtime"
+    requested_map = None if controlled_stage else canonical_game_package(requested_map_asset)
     opened_map = canonical_game_package(selected_map.get("opened_package") or selected_map.get("path"))
     actor_count = int(native_summary.get("loaded_map_actor_count") or 0)
     map_failures = []
-    if not selected_map.get("opened"):
+    if controlled_stage and selected_map.get("name") != "StudioRuntimeBlank":
+        map_failures.append("F_CONTROLLED_STAGE_NOT_SELECTED")
+    elif not controlled_stage and not selected_map.get("opened"):
         map_failures.append("F_MAP_NOT_OPENED")
     if requested_map and opened_map != requested_map:
         map_failures.append("F_MAP_PACKAGE_MISMATCH")
-    if actor_count < 1:
+    if not controlled_stage and actor_count < 1:
         map_failures.append("F_MAP_EMPTY")
     return {
         "schema_version": "harness_map_report_v1",
@@ -1250,7 +1300,8 @@ def build_map_report(
         "requested_package": requested_map,
         "requested_asset_path": requested_map_asset,
         "opened_package": opened_map,
-        "opened": bool(selected_map.get("opened")),
+        "opened": controlled_stage or bool(selected_map.get("opened")),
+        "stage_mode": "controlled_runtime" if controlled_stage else "catalog_map",
         "dependency_policy": "runtime_load_success",
         "loaded_actor_count": actor_count,
         "visible_actor_count": int((native_summary.get("visible_map_actors") or {}).get("actors") or 0),
@@ -1612,7 +1663,7 @@ def quantize_native_instance_segmentation(
     height: int,
     fps: int,
     required: bool,
-    required_object_ids: set[str] | None = None,
+    required_object_ids_by_view: dict[str, set[str]] | None = None,
 ) -> dict[str, Any]:
     manifest_path = native_output / "render_pass_manifest.json"
     manifest = read_optional_json(manifest_path)
@@ -1630,6 +1681,7 @@ def quantize_native_instance_segmentation(
     results = []
     for view in views:
         view_id = str(view.get("view_id") or "view")
+        required_object_ids = (required_object_ids_by_view or {}).get(view_id, set())
         frame_paths = [Path(str(path)) for path in view.get("frames") or [] if path]
         if len(set(frame_paths)) != len(frame_paths):
             return {
@@ -1639,7 +1691,7 @@ def quantize_native_instance_segmentation(
             }
         mapping = [item for item in view.get("instance_mapping") or [] if isinstance(item, dict)]
         mapped_object_ids = {str(item.get("object_id") or "") for item in mapping}
-        missing_mapping = sorted((required_object_ids or set()) - mapped_object_ids)
+        missing_mapping = sorted(required_object_ids - mapped_object_ids)
         if missing_mapping:
             return {
                 "status": "fail",
@@ -1654,7 +1706,7 @@ def quantize_native_instance_segmentation(
                 continue
             color = tuple(max(0, min(255, int(round(float(value) * 255.0)))) for value in rgb[:3])
             palette.append(color)
-            if str(item.get("object_id") or "") in (required_object_ids or set()):
+            if str(item.get("object_id") or "") in required_object_ids:
                 required_colors.add(color)
         palette = list(dict.fromkeys(palette))
         if not frame_paths or len(palette) <= 1 or any(not path.is_file() for path in frame_paths):

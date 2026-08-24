@@ -60,34 +60,41 @@
         "type": "articulated_body",
         "model": "harness_ue_mannequin_v1",
         "mode": "kinematic",
-        "root_keyframes": [
-          {
-            "time_s": 0.0,
-            "position_offset_m": [0.0, 0.0, 0.0],
-            "rotation_offset_deg": [0.0, 0.0, 0.0]
-          },
-          {
-            "time_s": 2.0,
-            "position_offset_m": [0.8, 0.0, 0.0],
-            "rotation_offset_deg": [0.0, 90.0, 0.0]
-          }
-        ],
-        "joint_keyframes": [
-          {
-            "time_s": 0.0,
-            "rotations_deg": {
-              "upperarm_r": [0.0, 0.0, 30.0],
-              "lowerarm_r": [0.0, 0.0, 45.0]
+        "pose_source": {
+          "type": "pose_keyframes",
+          "keyframes": [
+            {
+              "time_s": 0.0,
+              "rotations_deg": {
+                "upperarm_r": [0.0, 0.0, 30.0],
+                "lowerarm_r": [0.0, 0.0, 45.0]
+              }
+            },
+            {
+              "time_s": 2.0,
+              "rotations_deg": {
+                "upperarm_r": [0.0, 0.0, 60.0],
+                "lowerarm_r": [0.0, 0.0, 70.0]
+              }
             }
-          },
-          {
-            "time_s": 2.0,
-            "rotations_deg": {
-              "upperarm_r": [0.0, 0.0, 60.0],
-              "lowerarm_r": [0.0, 0.0, 70.0]
+          ]
+        },
+        "root_transform_source": {
+          "type": "root_keyframes",
+          "keyframes": [
+            {
+              "time_s": 0.0,
+              "position_offset_m": [0.0, 0.0, 0.0],
+              "rotation_offset_deg": [0.0, 0.0, 0.0]
+            },
+            {
+              "time_s": 2.0,
+              "position_offset_m": [0.8, 0.0, 0.0],
+              "rotation_offset_deg": [0.0, 90.0, 0.0]
             }
-          }
-        ],
+          ]
+        },
+        "ik_targets": [],
         "attachments": [
           {
             "object_id": "held_ball",

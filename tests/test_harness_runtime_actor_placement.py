@@ -1759,6 +1759,35 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual(report["rgb_capture"]["backend"], "highres_viewport")
         self.assertTrue(report["rgb_capture"]["preview_shadow_safe"])
 
+    def test_unspecified_case_map_uses_controlled_runtime_stage(self) -> None:
+        from scripts.harness_local_ue_runner import build_map_report, build_runtime_scene, runtime_stage_map
+
+        self.assertEqual(runtime_stage_map({"scene": {}}), "studio_runtime")
+        self.assertEqual(
+            runtime_stage_map({"scene": {"map_preference": "/Game/Test.Test"}}),
+            "/Game/Test.Test",
+        )
+        report = build_map_report(
+            {
+                "selected_map": {"name": "StudioRuntimeBlank", "opened": False},
+                "loaded_map_actor_count": 0,
+            },
+            {},
+            {"background": {"ue5_path": "studio_runtime"}},
+            {"views": []},
+        )
+        self.assertEqual(report["status"], "pass")
+        self.assertTrue(report["opened"])
+        self.assertEqual(report["stage_mode"], "controlled_runtime")
+        runtime_scene = build_runtime_scene(
+            {"case_id": "controlled", "scene": {}},
+            {"views": []},
+            Namespace(map="/Game/Boot.Boot"),
+            pass_mode="rgb",
+        )
+        self.assertTrue(runtime_scene["map_lighting_controls"]["spawn_directional_sun"])
+        self.assertFalse(runtime_scene["map_lighting_controls"]["use_existing_map_lights"])
+
     def test_chaos_output_replay_is_not_labeled_as_mujoco(self) -> None:
         from scripts.harness_local_ue_runner import build_runtime_scene
 

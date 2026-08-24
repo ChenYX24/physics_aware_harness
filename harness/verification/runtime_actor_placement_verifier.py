@@ -259,6 +259,13 @@ def first_bad_physics_binding(bindings: list[dict[str, Any]]) -> dict[str, Any] 
                     render_binding.get("model") != articulated.get("model")
                     or render_binding.get("mode") != articulated.get("mode")
                     or render_binding.get("asset_path") != articulated.get("asset_path")
+                    or render_binding.get("pose_source_type") != (articulated.get("pose_source") or {}).get("type")
+                    or render_binding.get("root_transform_source_type") != (articulated.get("root_transform_source") or {}).get("type")
+                    or render_binding.get("runtime_actor_class") != (
+                        "Character"
+                        if (articulated.get("pose_source") or {}).get("type") == "animation_sequence"
+                        else "Actor"
+                    )
                 ):
                     return {
                         "failure_type": "F7_runtime_artifact_incomplete",

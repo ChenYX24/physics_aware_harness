@@ -3162,10 +3162,21 @@ class AgentJobControllerTests(unittest.TestCase):
             "type": "articulated_body",
             "model": "harness_ue_mannequin_v1",
             "mode": "kinematic",
-            "joint_keyframes": [
-                {"time_s": 0.0, "rotations_deg": {"upperarm_r": [0.0, 0.0, 0.0]}},
-                {"time_s": 2.0, "rotations_deg": {"upperarm_r": [0.0, 0.0, 60.0]}},
-            ],
+            "pose_source": {
+                "type": "pose_keyframes",
+                "keyframes": [
+                    {"time_s": 0.0, "rotations_deg": {"upperarm_r": [0.0, 0.0, 0.0]}},
+                    {"time_s": 2.0, "rotations_deg": {"upperarm_r": [0.0, 0.0, 60.0]}},
+                ],
+            },
+            "root_transform_source": {
+                "type": "root_keyframes",
+                "keyframes": [
+                    {"time_s": 0.0, "position_offset_m": [0.0, 0.0, 0.0], "rotation_offset_deg": [0.0, 0.0, 0.0]},
+                    {"time_s": 2.0, "position_offset_m": [0.5, 0.0, 0.0], "rotation_offset_deg": [0.0, 0.0, 0.0]},
+                ],
+            },
+            "ik_targets": [],
             "attachments": [
                 {
                     "object_id": "target_ball",
@@ -3180,7 +3191,9 @@ class AgentJobControllerTests(unittest.TestCase):
 
         policy = AgentJobController._case_spec_revision_policy(case_spec)
 
-        self.assertIn("$.objects.cue_ball.solver.joint_keyframes", policy["paths"])
+        self.assertIn("$.objects.cue_ball.solver.pose_source.keyframes", policy["paths"])
+        self.assertIn("$.objects.cue_ball.solver.root_transform_source.keyframes", policy["paths"])
+        self.assertIn("$.objects.cue_ball.solver.ik_targets", policy["paths"])
         self.assertIn("$.objects.cue_ball.solver.attachments", policy["paths"])
         self.assertNotIn("$.objects.cue_ball.solver.model", policy["paths"])
         self.assertNotIn("$.objects.cue_ball.solver.mode", policy["paths"])

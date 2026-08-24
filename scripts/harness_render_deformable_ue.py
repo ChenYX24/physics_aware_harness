@@ -352,7 +352,7 @@ def main() -> int:
         write_json(run_dir / "deformable_ue_render_report.json", {"status": "failed", "process": process})
         return 2
     if "segmentation" in render_passes:
-        quantization = quantize_native_instance_segmentation(native_output, width=width, height=height, fps=fps, required=True, required_object_ids=set())
+        quantization = quantize_native_instance_segmentation(native_output, width=width, height=height, fps=fps, required=True)
         if quantization.get("status") != "pass":
             write_json(run_dir / "deformable_ue_render_report.json", {"status": "failed", "failure_code": "F_SEGMENTATION_QUANTIZATION_FAILED", "segmentation_quantization": quantization})
             return 2

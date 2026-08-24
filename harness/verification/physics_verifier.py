@@ -11,6 +11,7 @@ from harness.core.verifier_schema import verifier_report
 from harness.runtime.rigid_sph_scene import compile_rigid_sph_scene
 from harness.verification.diagnosis import repair_suggestion
 from harness.verification.particle_cache_verifier import verify_particle_cache
+from harness.verification.run_quality import validate_articulated_execution
 from harness.verification.trajectory_assertion_verifier import verify_trajectory_assertions
 
 
@@ -90,6 +91,28 @@ class PhysicsVerifier:
             trajectory_path = output_dir / "trajectory.json"
         trajectory = read_json(trajectory_path) if trajectory_path.exists() else []
         report = self.verify(case_spec, trajectory, output_dir=output_dir)
+        articulated_failures: list[dict[str, Any]] = []
+        articulated = validate_articulated_execution(run_dir, trajectory, articulated_failures)
+        if articulated.get("applicable") is True:
+            report.setdefault("evidence", []).append({"type": "articulated_execution", "results": articulated.get("objects") or {}})
+            if articulated.get("status") != "pass":
+                failure = articulated_failures[0] if articulated_failures else {}
+                findings = failure.get("findings") if isinstance(failure.get("findings"), list) else []
+                first = findings[0] if findings else {"metric": "articulated_execution"}
+                report.update({
+                    "status": "fail",
+                    "failure_type": "F_ARTICULATED_EXECUTION_FAILED",
+                    "first_failure": {
+                        "object_id": str(failure.get("object_id") or "articulated_body"),
+                        "frame": int(first.get("frame") or 0),
+                        "time": None,
+                        "metric": str(first.get("metric") or "articulated_execution"),
+                        "value": first.get("value"),
+                    },
+                    "repair_suggestions": [
+                        "检查 UE post-tick 的 Character、动画、根运动和骨骼回读；不要用 commanded 轨迹代替 observed 执行证据。"
+                    ],
+                })
         if write:
             write_json(run_dir / "harness_verifier.json", report)
             write_json(run_dir / "verifier_report.json", report)

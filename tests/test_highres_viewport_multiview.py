@@ -22,6 +22,28 @@ class Vector:
 
 
 class HighresViewportMultiviewTests(unittest.TestCase):
+    def test_matching_solver_and_visual_mesh_reuses_compiled_scale(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "runtime_visual_scale"
+        )
+        namespace = {}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+
+        obj = {
+            "ue5_path": "/Engine/BasicShapes/Cube.Cube",
+            "scale": [3.0, 2.0, 0.1],
+            "params": {},
+        }
+        self.assertEqual(
+            namespace["runtime_visual_scale"](obj, "/Engine/BasicShapes/Cube.Cube"),
+            [3.0, 2.0, 0.1],
+        )
+        self.assertIsNone(namespace["runtime_visual_scale"](obj, "/Game/Visuals/Table.Table"))
+
     def test_compiled_camera_plan_is_the_exact_view_set(self) -> None:
         source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
@@ -542,6 +564,7 @@ class HighresViewportMultiviewTests(unittest.TestCase):
             "runtime_combined_rotation": lambda _obj, values: list(values),
             "runtime_rotator": runtime_rotator,
             "align_runtime_actor_to_pose_anchor": lambda *_args, **_kwargs: None,
+            "apply_articulated_attachments": lambda *_args, **_kwargs: None,
         }
         exec(
             compile(ast.Module(body=[tether_helper, function], type_ignores=[]), str(source), "exec"),
@@ -1101,6 +1124,7 @@ class HighresViewportMultiviewTests(unittest.TestCase):
             "frame_time_s": lambda frame, *_: frame["frame"] / 24,
             "vector_payload": lambda value: [value.x, value.y, value.z],
             "look_at_rotation": lambda *_: None,
+            "capture_component_audit": lambda *_: {},
             "file_fingerprint": lambda *_: {},
             "print": lambda *_args, **_kwargs: None,
         }

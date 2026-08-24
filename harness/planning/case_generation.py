@@ -42,7 +42,14 @@ from harness.core.case_spec_v2 import (
     stable_case_spec_digest,
 )
 from harness.runtime.stage_contracts import BACKEND_STAGE_IO, stage_handoff_contract
-from harness.runtime.articulated_body import ARTICULATED_BODY_BONES, ARTICULATED_BODY_MODEL_ID
+from harness.runtime.articulated_body import (
+    ARTICULATED_ANIMATION_ASSETS,
+    ARTICULATED_BODY_BONES,
+    ARTICULATED_BODY_MODEL_ID,
+    ARTICULATED_IK_GOALS,
+    ARTICULATED_POSE_SOURCE_TYPES,
+    ARTICULATED_ROOT_TRANSFORM_SOURCE_TYPES,
+)
 
 
 REQUEST_SCHEMA_VERSION = "harness_case_request_v1"
@@ -1616,14 +1623,20 @@ FIELD-BY-FIELD INSTRUCTIONS
    For the fixed white articulated body, use role="articulated_body",
    visual_representation={"source":"solver_generated","visible":true}, omit object.asset, and declare
    solver={"type":"articulated_body","model":"harness_ue_mannequin_v1","mode":"kinematic"|"ragdoll",
-   "root_keyframes":[...],"joint_keyframes":[...],"attachments":[...]}. Root keyframes contain time_s,
-   position_offset_m, and rotation_offset_deg and begin at time zero with zero offsets. Joint keyframes
-   contain time_s and rotations_deg keyed only by the fixed UE4 bones listed in the contract. Kinematic
+   "pose_source":{...},"root_transform_source":{...},"ik_targets":[...],"attachments":[...]}.
+   pose_source is exactly pose_keyframes with keyframes, or animation_sequence with non-overlapping timed
+   segments referencing only registered animation_asset_id values. root_transform_source is exactly
+   root_keyframes, animation_root_motion, or character_movement. Root keyframes contain time_s,
+   position_offset_m, and rotation_offset_deg and begin at time zero with zero offsets. Pose keyframes
+   contain time_s and rotations_deg keyed only by the fixed UE4 bones listed in the contract. Character
+   Movement requires animation_sequence with in-place clips. Animation Root Motion requires qualified
+   root-motion clips. IK targets use only declared hand/foot goal IDs and explicit timed world transforms.
+   Kinematic
    mode requires physics.body_type="kinematic" and collision_required=false. Ragdoll mode requires
    physics.body_type="dynamic", an explicit ragdoll_start_time_s, and the UE solver capability
    articulated_body. Attachments reference another declared object plus a fixed bone and explicit time
-   interval; they must end by ragdoll start. Ragdoll uses the fixed reference pose, so its joint offsets
-   are zero; use kinematic mode when joint poses are required. Do not encode action names, infer poses, or switch modes.
+   interval; they must end by ragdoll start. Do not encode action names, infer a missing source, mix root
+   owners, or switch modes automatically.
    Dynamic rigid_sph mass comes from physics.mass_kg; optional density_kg_m3, dynamic_friction, and
    restitution come from physics.material. Initial linear and angular velocity come from initial_state.
    Every object also declares visual_representation.source as exactly asset, solver_generated, or none.
@@ -1865,9 +1878,14 @@ def case_spec_generation_contract() -> dict[str, Any]:
                     "model": ARTICULATED_BODY_MODEL_ID,
                     "mode": "kinematic or ragdoll",
                     "ragdoll_start_time_s": "required only for ragdoll; within scene duration",
+                    "pose_source_types": sorted(ARTICULATED_POSE_SOURCE_TYPES),
+                    "root_transform_source_types": sorted(ARTICULATED_ROOT_TRANSFORM_SOURCE_TYPES),
+                    "animation_asset_ids": sorted(ARTICULATED_ANIMATION_ASSETS),
+                    "pose_keyframes": "time-ordered component-space rotation offsets beginning at time 0",
                     "root_keyframes": "time-ordered position/rotation offsets beginning with zero offsets at time 0",
-                    "joint_keyframes": "time-ordered component-space rotation offsets beginning at time 0",
+                    "character_movement": "root keyframes plus positive max_speed_m_s and max_acceleration_m_s2",
                     "allowed_bones": sorted(ARTICULATED_BODY_BONES),
+                    "allowed_ik_goals": sorted(ARTICULATED_IK_GOALS),
                     "attachments": "optional object_id/bone/time interval/local transform entries ending before ragdoll",
                 },
             },

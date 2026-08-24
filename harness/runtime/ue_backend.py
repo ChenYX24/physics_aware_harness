@@ -716,6 +716,16 @@ def materialize_articulated_body_assets(case: RuntimeCase, preflight: dict[str, 
     ]
     if not articulated:
         return
+    ik_objects = [
+        str(obj.get("id") or "")
+        for obj in articulated
+        if ((obj.get("solver") or {}).get("ik_targets") or [])
+    ]
+    if ik_objects:
+        raise RuntimeError(
+            "fixed UE4 mannequin Control Rig has not been materialized for articulated IK: "
+            + ", ".join(ik_objects)
+        )
     executable = Path(str((preflight.get("resolved_paths") or {}).get("SIM_STUDIO_UE_EXECUTABLE") or ""))
     project = Path(str((preflight.get("resolved_paths") or {}).get("SIM_STUDIO_UE_PROJECT") or ""))
     engine_install_root = executable.resolve().parents[3]
@@ -735,6 +745,29 @@ def materialize_articulated_body_assets(case: RuntimeCase, preflight: dict[str, 
         if destination.exists():
             if not destination.is_file() or destination.read_bytes() != source.read_bytes():
                 raise RuntimeError(f"fixed articulated-body asset conflicts with project content: {destination}")
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+    animation_names = {
+        Path(str(segment.get("animation_asset_path") or "").split(".", 1)[0]).name
+        for obj in articulated
+        for segment in (
+            ((obj.get("solver") or {}).get("pose_source") or {}).get("segments") or []
+        )
+        if isinstance(segment, dict) and segment.get("animation_asset_path")
+    }
+    if not animation_names:
+        return
+    animation_source_root = engine_install_root / "Templates" / "TemplateResources" / "High" / "Mannequin" / "Content" / "Animations"
+    animation_destination_root = project.resolve().parent / "Content" / "Mannequin" / "Animations"
+    for animation_name in sorted(animation_names):
+        source = animation_source_root / f"{animation_name}.uasset"
+        destination = animation_destination_root / source.name
+        if not source.is_file():
+            raise RuntimeError(f"fixed articulated animation is unavailable in this UE installation: {source}")
+        if destination.exists():
+            if not destination.is_file() or destination.read_bytes() != source.read_bytes():
+                raise RuntimeError(f"fixed articulated animation conflicts with project content: {destination}")
             continue
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)

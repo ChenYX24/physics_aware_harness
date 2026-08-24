@@ -448,6 +448,13 @@ def render_binding_for(
             "model": articulated_contract.get("model"),
             "mode": articulated_contract.get("mode"),
             "asset_path": articulated_contract.get("asset_path"),
+            "pose_source_type": ((articulated_contract.get("pose_source") or {}).get("type")),
+            "root_transform_source_type": ((articulated_contract.get("root_transform_source") or {}).get("type")),
+            "runtime_actor_class": (
+                "Character"
+                if ((articulated_contract.get("pose_source") or {}).get("type")) == "animation_sequence"
+                else "Actor"
+            ),
         }
     if visual_source == "solver_generated":
         contract = handoff_contract if isinstance(handoff_contract, dict) else {}

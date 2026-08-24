@@ -448,7 +448,6 @@ def main() -> int:
             height=height,
             fps=fps,
             required=True,
-            required_object_ids=set(),
         )
         if quantization.get("status") != "pass":
             write_json(

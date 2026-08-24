@@ -40,6 +40,7 @@ class CameraViewSpec:
     subject_follow_location_gain: float | None = None
     subject_follow_target_gain: float | None = None
     camera_mode: str = "fixed"
+    target_object_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -143,9 +144,32 @@ def camera_plan_from_case_spec(
     )
     views = apply_camera_overrides(views, overrides, warnings)
     views = apply_explicit_camera_poses(views, camera_intents)
+    views = apply_camera_targets(views, camera_intents)
     if camera_strategy != "bounds_auto_v1":
         warnings.append(f"unsupported camera strategy requested, using bounds_auto_v1: {camera_strategy}")
     return CameraPlan(scene_bounds=plan.scene_bounds, views=views, strategy=plan.strategy, warnings=[*warnings, *plan.warnings])
+
+
+def apply_camera_targets(
+    views: list[CameraViewSpec],
+    camera_intents: list[dict[str, Any]] | None,
+) -> list[CameraViewSpec]:
+    intents = {
+        str(intent.get("role")): intent
+        for intent in camera_intents or []
+        if isinstance(intent, dict) and intent.get("role")
+    }
+    return [
+        replace(
+            view,
+            target_object_ids=tuple(
+                str(object_id)
+                for object_id in (intents.get(view.role) or {}).get("target_objects") or []
+                if object_id
+            ),
+        )
+        for view in views
+    ]
 
 
 def apply_subject_framing(
@@ -415,7 +439,7 @@ def look_at_rotation(location: tuple[float, float, float], target: tuple[float, 
     horizontal = math.sqrt(dx * dx + dy * dy) or 1e-6
     pitch = math.degrees(math.atan2(dz, horizontal))
     yaw = math.degrees(math.atan2(dy, dx))
-    return (pitch, 0.0, yaw)
+    return (pitch, yaw, 0.0)
 
 
 def vec3(value: Any) -> list[float] | None:
@@ -466,6 +490,7 @@ def camera_plan_from_dict(data: dict[str, Any]) -> CameraPlan:
                 subject_follow_location_gain=float(raw["subject_follow_location_gain"]) if raw.get("subject_follow_location_gain") is not None else None,
                 subject_follow_target_gain=float(raw["subject_follow_target_gain"]) if raw.get("subject_follow_target_gain") is not None else None,
                 camera_mode=str(raw.get("camera_mode") or "fixed"),
+                target_object_ids=tuple(str(value) for value in raw.get("target_object_ids") or []),
             )
         )
     return CameraPlan(
