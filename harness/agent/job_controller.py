@@ -1130,6 +1130,7 @@ class AgentJobController:
         budget_extension_seconds: int = 0,
         max_paid_submissions: int | None = None,
         max_ue_launches: int | None = None,
+        max_case_spec_revisions: int | None = None,
         authorizations: Mapping[str, Any] | None = None,
         intent_amendment: Mapping[str, Any] | None = None,
         revised_case_spec: Mapping[str, Any] | None = None,
@@ -1147,6 +1148,7 @@ class AgentJobController:
                 raise JobStoreError(f"job cannot be resumed from state {manifest['state']}")
             if (
                 revised_case_spec is not None
+                and max_case_spec_revisions is None
                 and manifest["usage"]["case_spec_revisions"] >= manifest["budget"]["max_case_spec_revisions"]
             ):
                 manifest, budget_result = self._block_case_spec_revision_budget(
@@ -1162,13 +1164,41 @@ class AgentJobController:
                 and not contract_revision
             ):
                 raise JobStoreError("only budget-exhausted failed jobs may be resumed")
+            revision_budget_blocked = (
+                (manifest.get("blocker") or {}).get("code") == "case_spec_revision_budget_exhausted"
+            )
+            revision_failure_class = str(
+                (((leaf or {}).get("result") or {}).get("failure_class") or "")
+            )
+            revision_budget_extension = (
+                max_case_spec_revisions is not None
+                and manifest["usage"]["case_spec_revisions"] >= manifest["budget"]["max_case_spec_revisions"]
+                and (
+                    revision_budget_blocked
+                    or (manifest.get("blocker") or {}).get("code")
+                    in {"semantic_intent_mismatch", "semantic_review_uncertain"}
+                    or revision_failure_class
+                    in {"case_spec_invalid", "verification_failed", "render_sync_failed", "quality_gate_failed"}
+                )
+            )
+            if max_case_spec_revisions is not None and revised_case_spec is None and not revision_budget_extension:
+                raise JobStoreError("max_case_spec_revisions requires revised_case_spec")
             requested_action = "resume_with_revision" if revised_case_spec is not None else "resume"
-            if requested_action not in manifest["allowed_next_actions"] and not contract_revision:
+            if (
+                requested_action not in manifest["allowed_next_actions"]
+                and not contract_revision
+                and not revision_budget_extension
+            ):
                 raise JobStoreError(f"current job state does not permit {requested_action}")
             prior_authorizations = copy.deepcopy(manifest["authorizations"])
             prior_budget = copy.deepcopy(manifest["budget"])
             if (manifest.get("blocker") or {}).get("code") == "ue_launch_budget_exhausted" and max_ue_launches is None:
                 raise JobStoreError("resuming an exhausted UE launch budget requires max_ue_launches")
+            if (manifest.get("blocker") or {}).get("code") == "case_spec_revision_budget_exhausted":
+                if max_case_spec_revisions is None:
+                    raise JobStoreError(
+                        "resuming an exhausted CaseSpec revision budget requires max_case_spec_revisions"
+                    )
             if budget_extension_seconds:
                 if not isinstance(budget_extension_seconds, int) or budget_extension_seconds < 1:
                     raise ValueError("budget_extension_seconds must be a positive integer")
@@ -1199,6 +1229,21 @@ class AgentJobController:
                 budget = dict(manifest["budget"])
                 budget["max_ue_launches"] = max_ue_launches
                 manifest["budget"] = normalized_budget(budget)
+            if max_case_spec_revisions is not None:
+                if (
+                    not isinstance(max_case_spec_revisions, int)
+                    or isinstance(max_case_spec_revisions, bool)
+                    or max_case_spec_revisions <= max(
+                        manifest["budget"]["max_case_spec_revisions"],
+                        int(manifest["usage"]["case_spec_revisions"]),
+                    )
+                ):
+                    raise ValueError(
+                        "max_case_spec_revisions must exceed the current limit and used revision count"
+                    )
+                budget = dict(manifest["budget"])
+                budget["max_case_spec_revisions"] = max_case_spec_revisions
+                manifest["budget"] = normalized_budget(budget)
             if authorizations:
                 current = dict(manifest["authorizations"])
                 for key, value in authorizations.items():
@@ -1212,12 +1257,40 @@ class AgentJobController:
                 manifest["authorizations"] != prior_authorizations
                 or manifest["budget"]["max_paid_submissions"] != prior_budget["max_paid_submissions"]
                 or manifest["budget"]["max_ue_launches"] != prior_budget["max_ue_launches"]
+                or manifest["budget"]["max_case_spec_revisions"] != prior_budget["max_case_spec_revisions"]
             ):
                 manifest = self._record_authorization_amendment(
                     manifest,
                     prior_authorizations=prior_authorizations,
                     prior_budget=prior_budget,
                 )
+            if revision_budget_extension and revised_case_spec is None:
+                self._update_manifest(
+                    manifest,
+                    state="needs_user_decision",
+                    current_stage=("budget" if revision_budget_blocked else manifest["current_stage"]),
+                    blocker=(
+                        {
+                            "code": "case_spec_revision_required",
+                            "message": "CaseSpec revision budget was extended; submit the revised CaseSpec",
+                            "stage": "budget",
+                        }
+                        if revision_budget_blocked
+                        else manifest["blocker"]
+                    ),
+                    allowed_next_actions=["resume_with_revision", "cancel"],
+                )
+                return self.inspect(job_id)
+            if (
+                revised_case_spec is not None
+                and manifest["usage"]["case_spec_revisions"] >= manifest["budget"]["max_case_spec_revisions"]
+            ):
+                manifest, budget_result = self._block_case_spec_revision_budget(
+                    manifest,
+                    trigger_result=(leaf or {}).get("result"),
+                )
+                self._stage_event(manifest, "stage_blocked", "budget", result=budget_result)
+                return self.inspect(job_id)
             if (manifest.get("blocker") or {}).get("code") == "intent_ambiguity_requires_decision" and intent_amendment is None:
                 raise JobStoreError("resolving an Intent Contract ambiguity requires an intent_amendment")
             if intent_amendment is not None:
@@ -3295,6 +3368,11 @@ class AgentJobController:
                 "before": prior_budget["max_ue_launches"],
                 "after": manifest["budget"]["max_ue_launches"],
             }
+        if prior_budget["max_case_spec_revisions"] != manifest["budget"]["max_case_spec_revisions"]:
+            budget_changes["max_case_spec_revisions"] = {
+                "before": prior_budget["max_case_spec_revisions"],
+                "after": manifest["budget"]["max_case_spec_revisions"],
+            }
         request = read_json(root / "user_request.json")
         effective_provider_manifest = build_provider_input_manifest(
             list(request.get("inputs") or []),
@@ -3439,15 +3517,15 @@ class AgentJobController:
             failure_class="blocked_user_action",
             failure_code="case_spec_revision_budget_exhausted",
             failure_codes=["case_spec_revision_budget_exhausted"],
-            message="CaseSpec revision budget is exhausted; the current Job cannot create another revision",
+            message="CaseSpec revision budget is exhausted; approve a higher limit before another revision",
             retryable=False,
             job_id=str(manifest["job_id"]),
             attempt_id=manifest.get("current_attempt_id"),
             artifact_refs=refs,
-            allowed_next_actions=["inspect_artifacts", "cancel"],
+            allowed_next_actions=["revise_case_spec", "inspect_artifacts", "cancel"],
             required_user_action={
                 "code": "case_spec_revision_budget_exhausted",
-                "message": "create a new Job if another CaseSpec revision is required",
+                "message": "approve a higher max_case_spec_revisions and submit the revised CaseSpec",
             },
         )
 
@@ -3464,7 +3542,7 @@ class AgentJobController:
             state="needs_user_decision",
             current_stage="budget",
             blocker={"code": result["failure_code"], "message": result["message"], "stage": "budget"},
-            allowed_next_actions=["inspect_artifacts", "cancel"],
+            allowed_next_actions=["resume", "resume_with_revision", "inspect_artifacts", "cancel"],
         )
         return updated, result
 
@@ -3517,7 +3595,7 @@ class AgentJobController:
             if value["failure_code"] in {
                 "case_spec_revision_budget_exhausted",
             }:
-                actions = ["inspect_artifacts", "cancel"]
+                actions = ["resume", "resume_with_revision", "inspect_artifacts", "cancel"]
             elif value["failure_code"] == "ue_launch_budget_exhausted":
                 actions = ["resume", "inspect_artifacts", "cancel"]
             return self._update_manifest(

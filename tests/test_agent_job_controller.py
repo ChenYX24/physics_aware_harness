@@ -1049,6 +1049,63 @@ class AgentJobControllerTests(unittest.TestCase):
             controller.run_semantic_review("job_m4_semantic_uncertain")
         self.assertEqual(fake.semantic_calls, 1)
 
+    def test_exhausted_semantic_revision_budget_can_be_extended_before_revision(self) -> None:
+        controller, _ = self.controller(SuccessfulHarness(semantic_status="uncertain"))
+        controller.create(
+            self.request,
+            job_id="job_m4_semantic_revision_budget",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+            budget={"max_case_spec_revisions": 1},
+        )
+        controller.advance_until_blocked("job_m4_semantic_revision_budget")
+        blocked = controller.run_semantic_review("job_m4_semantic_revision_budget")
+        self.assertEqual(blocked["job"]["allowed_next_actions"], ["cancel"])
+
+        extended = controller.resume(
+            "job_m4_semantic_revision_budget",
+            max_case_spec_revisions=2,
+        )
+
+        self.assertEqual(extended["job"]["blocker"]["code"], "semantic_review_uncertain")
+        self.assertEqual(extended["job"]["allowed_next_actions"], ["resume_with_revision", "cancel"])
+        revised = case_spec_v2_fixture()
+        revised["scene"]["duration_s"] += 0.25
+
+        resumed = controller.resume(
+            "job_m4_semantic_revision_budget",
+            revised_case_spec=revised,
+            revision_reason="user approved a second revision",
+        )
+
+        self.assertEqual(resumed["job"]["budget"]["max_case_spec_revisions"], 2)
+        self.assertEqual(resumed["job"]["usage"]["case_spec_revisions"], 2)
+
+    def test_exhausted_semantic_revision_budget_can_be_extended_with_revision(self) -> None:
+        controller, _ = self.controller(SuccessfulHarness(semantic_status="uncertain"))
+        controller.create(
+            self.request,
+            job_id="job_m4_combined_revision_budget",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+            budget={"max_case_spec_revisions": 1},
+        )
+        controller.advance_until_blocked("job_m4_combined_revision_budget")
+        blocked = controller.run_semantic_review("job_m4_combined_revision_budget")
+        self.assertEqual(blocked["job"]["allowed_next_actions"], ["cancel"])
+        revised = case_spec_v2_fixture()
+        revised["scene"]["duration_s"] += 0.25
+
+        resumed = controller.resume(
+            "job_m4_combined_revision_budget",
+            max_case_spec_revisions=2,
+            revised_case_spec=revised,
+            revision_reason="user approved a second revision",
+        )
+
+        self.assertEqual(resumed["job"]["budget"]["max_case_spec_revisions"], 2)
+        self.assertEqual(resumed["job"]["usage"]["case_spec_revisions"], 2)
+
     def test_evidence_provenance_rebuild_reuses_candidate_and_preserves_usage(self) -> None:
         controller, fake = self.controller(SuccessfulHarness(semantic_status="uncertain"))
         controller.create(
@@ -2599,7 +2656,10 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertEqual(inspection["job"]["state"], "needs_user_decision")
         self.assertEqual(inspection["job"]["current_stage"], "budget")
         self.assertEqual(inspection["job"]["blocker"]["code"], "case_spec_revision_budget_exhausted")
-        self.assertEqual(inspection["job"]["allowed_next_actions"], ["inspect_artifacts", "cancel"])
+        self.assertEqual(
+            inspection["job"]["allowed_next_actions"],
+            ["resume", "resume_with_revision", "inspect_artifacts", "cancel"],
+        )
         self.assertFalse(inspection["case_spec_revision_policy"]["available"])
         root = Path(inspection["paths"]["job_root"])
         budget_path = root / "attempts" / "attempt_001" / "stage_results" / "budget.json"
@@ -2631,7 +2691,10 @@ class AgentJobControllerTests(unittest.TestCase):
         )
 
         self.assertEqual(rejected["job"]["blocker"]["code"], "case_spec_revision_budget_exhausted")
-        self.assertEqual(rejected["job"]["allowed_next_actions"], ["inspect_artifacts", "cancel"])
+        self.assertEqual(
+            rejected["job"]["allowed_next_actions"],
+            ["resume", "resume_with_revision", "inspect_artifacts", "cancel"],
+        )
         self.assertFalse((root / "attempts" / "attempt_002").exists())
         rewritten_budget_result = read_json(budget_path)
         self.assertEqual(Path(rewritten_budget_result["artifact_refs"][0]["path"]).name, "verifier.json")
@@ -2699,8 +2762,47 @@ class AgentJobControllerTests(unittest.TestCase):
         )
 
         self.assertEqual(rejected["job"]["blocker"]["code"], "case_spec_revision_budget_exhausted")
-        self.assertEqual(rejected["job"]["allowed_next_actions"], ["inspect_artifacts", "cancel"])
+        self.assertEqual(
+            rejected["job"]["allowed_next_actions"],
+            ["resume", "resume_with_revision", "inspect_artifacts", "cancel"],
+        )
         self.assertEqual(len(rejected["attempts"]), 5)
+
+        with self.assertRaisesRegex(ValueError, "must exceed"):
+            controller.resume(
+                "job_revision_budget",
+                max_case_spec_revisions=5,
+                revised_case_spec=over_limit,
+                revision_reason="unchanged limit",
+            )
+
+        extended = controller.resume(
+            "job_revision_budget",
+            max_case_spec_revisions=6,
+        )
+
+        amendment = read_json(
+            Path(extended["paths"]["job_root"]) / "request" / "authorization_amendment_001.json"
+        )
+        self.assertEqual(
+            amendment["budget_changes"]["max_case_spec_revisions"],
+            {"before": 5, "after": 6},
+        )
+        self.assertEqual(extended["job"]["blocker"]["code"], "case_spec_revision_required")
+        self.assertEqual(extended["job"]["allowed_next_actions"], ["resume_with_revision", "cancel"])
+        self.assertEqual(extended["job"]["budget"]["max_case_spec_revisions"], 6)
+        self.assertEqual(extended["job"]["usage"]["case_spec_revisions"], 5)
+        self.assertEqual(len(extended["attempts"]), 5)
+
+        resumed = controller.resume(
+            "job_revision_budget",
+            revised_case_spec=over_limit,
+            revision_reason="user approved a sixth revision",
+        )
+
+        self.assertEqual(resumed["job"]["budget"]["max_case_spec_revisions"], 6)
+        self.assertEqual(resumed["job"]["usage"]["case_spec_revisions"], 6)
+        self.assertEqual(len(resumed["attempts"]), 6)
 
     def test_case_spec_revision_creates_new_immutable_attempt(self) -> None:
         controller, fake = self.controller(SuccessfulHarness(fail_verifier=True))
@@ -3505,6 +3607,7 @@ class AgentJobCliTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("--max-paid-submissions", completed.stdout)
         self.assertIn("--max-ue-launches", completed.stdout)
+        self.assertIn("--max-case-spec-revisions", completed.stdout)
         self.assertIn("--allow-planning-image-upload", completed.stdout)
         self.assertIn("--allow-semantic-reviewer-image-upload", completed.stdout)
 
