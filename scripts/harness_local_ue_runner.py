@@ -441,6 +441,15 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
         for attachment in binding["articulated_body"].get("attachments") or []
         if isinstance(attachment, dict) and attachment.get("object_id")
     }
+    support_candidates: dict[str, list[str]] = {}
+    for source, target in ((case_spec.get("expected_physics") or {}).get("support") or {}).items():
+        support_candidates.setdefault(str(source), []).append(str(target))
+    for relation in case_spec.get("relations") or []:
+        if not isinstance(relation, dict):
+            continue
+        relation_type = str(relation.get("type") or "").strip().casefold().replace("-", "_").replace(" ", "_")
+        if relation_type == "supported_by" and relation.get("source") and relation.get("target"):
+            support_candidates.setdefault(str(relation["source"]), []).append(str(relation["target"]))
     dynamic: list[dict[str, Any]] = []
     static: list[dict[str, Any]] = []
     for index, binding in enumerate(actor_placement.get("actor_bindings") or []):
@@ -502,6 +511,18 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
             params["articulated_body"] = articulated
             params["preserve_authored_scale"] = True
             params["pose_anchor"] = "actor_origin"
+            declared_support = articulated.get("support_object_id")
+            candidates = list(dict.fromkeys(support_candidates.get(object_id) or []))
+            if not declared_support and len(candidates) > 1:
+                raise RuntimeError(
+                    f"articulated object {object_id} has multiple supported_by targets; declare solver.support_object_id"
+                )
+            support_object_id = str(declared_support) if declared_support else candidates[0] if len(candidates) == 1 else None
+            if support_object_id:
+                params["support_object_id"] = support_object_id
+                params["support_binding_source"] = (
+                    "solver.support_object_id" if declared_support else "unique_supported_by_relation"
+                )
         preserve_authored_scale = asset.get("preserve_authored_scale") is True
         instance_scale = asset.get("instance_scale")
         has_instance_scale = bool(
@@ -615,7 +636,6 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
         )
         if uses_character:
             capsule_half_height_m = 0.96
-            initial_position_m[2] = float(initial_position_m[2]) + capsule_half_height_m
             params["capsule_half_height_m"] = capsule_half_height_m
             params["capsule_radius_m"] = 0.29
             params["skeletal_root_offset_m"] = [0.0, 0.0, -capsule_half_height_m]

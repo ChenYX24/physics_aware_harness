@@ -10,6 +10,7 @@ from harness.planning.static_scene_builder import build_static_scene_layout
 from harness.runtime.actor_placement import compile_runtime_actor_placement
 from harness.runtime.articulated_body import (
     ARTICULATED_BODY_ASSET_PATH,
+    ARTICULATED_BODY_CONTROL_RIG_PATH,
     ArticulatedBodyContractError,
     compile_articulated_body_contract,
     sample_articulated_body_contract,
@@ -156,11 +157,36 @@ class ArticulatedBodyTests(unittest.TestCase):
         dynamic, _ = runtime_objects_from_actor_placement(placement, runtime.data)
         human = next(item for item in dynamic if item["id"] == "cue_ball")
 
-        self.assertEqual(contract["schema_version"], "harness_articulated_body_contract_v2")
-        self.assertEqual(contract["pose_source"]["segments"][0]["animation_asset_path"], "/Game/Mannequin/Animations/ThirdPersonWalk.ThirdPersonWalk")
+        self.assertEqual(contract["schema_version"], "harness_articulated_body_contract_v3")
+        self.assertEqual(contract["pose_source"]["segments"][0]["animation_asset_path"], "/Game/Characters/Mannequins/Anims/Unarmed/Walk/MF_Unarmed_Walk_Fwd.MF_Unarmed_Walk_Fwd")
         self.assertEqual(contract["root_transform_source"]["type"], "character_movement")
         self.assertEqual(human["behavior"], "articulated_character")
         self.assertEqual(human["asset_kind"], "articulated_character")
+
+    def test_unique_support_is_compiled_without_guessing_between_multiple_targets(self) -> None:
+        data = animated_character_case()
+        data["relations"] = [{"type": "supported_by", "source": "cue_ball", "target": "floor"}]
+        runtime = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data))
+        layout = build_static_scene_layout(runtime.data)
+        placement = compile_runtime_actor_placement(runtime.data, layout, target_backend="ue")
+
+        dynamic, _ = runtime_objects_from_actor_placement(placement, runtime.data)
+        human = next(item for item in dynamic if item["id"] == "cue_ball")
+
+        self.assertEqual(human["params"]["support_object_id"], "floor")
+        self.assertEqual(human["params"]["support_binding_source"], "unique_supported_by_relation")
+
+        ambiguous = animated_character_case()
+        ambiguous["relations"] = [
+            {"type": "supported_by", "source": "cue_ball", "target": "floor"},
+            {"type": "supported_by", "source": "cue_ball", "target": "target_ball"},
+        ]
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(ambiguous)
+        self.assertIn("ambiguous_articulated_support", {issue.code for issue in context.exception.issues})
+
+        ambiguous["objects"][0]["solver"]["support_object_id"] = "floor"
+        case_spec_v2_from_dict(ambiguous)
 
     def test_in_place_animation_cannot_claim_root_motion(self) -> None:
         data = animated_character_case()
@@ -191,7 +217,64 @@ class ArticulatedBodyTests(unittest.TestCase):
         self.assertEqual(pose["ik_targets"]["hand_r"]["rotation_deg"], [0.0, 22.5, 0.0])
         self.assertEqual(pose["ik_targets"]["hand_r"]["weight"], 0.5)
 
-    def test_ik_fails_closed_until_the_fixed_control_rig_is_materialized(self) -> None:
+    def test_animation_pose_overlay_is_weighted_local_rotation_without_root_ownership(self) -> None:
+        data = animated_character_case()
+        data["objects"][0]["solver"]["pose_overlay"] = {
+            "type": "bone_local_rotation_offsets",
+            "keyframes": [
+                {"time_s": 0.0, "rotations_deg": {"head": [0.0, 0.0, 0.0]}, "weight": 0.0},
+                {"time_s": 2.0, "rotations_deg": {"head": [0.0, 60.0, 0.0]}, "weight": 1.0},
+            ],
+        }
+        contract = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data)).data["objects"][0]["solver"]
+
+        sampled = sample_articulated_body_contract(contract, 1.0)
+
+        self.assertEqual(sampled["pose_overlay"]["rotation_space"], "bone_local_offset")
+        self.assertEqual(sampled["pose_overlay"]["blend_mode"], "weighted_additive")
+        self.assertEqual(sampled["pose_overlay"]["rotations_deg"]["head"], [0.0, 30.0, 0.0])
+        self.assertEqual(sampled["pose_overlay"]["weight"], 0.5)
+        self.assertEqual(contract["root_transform_source"]["type"], "character_movement")
+
+    def test_pose_overlay_rejects_root(self) -> None:
+        data = animated_character_case()
+        data["objects"][0]["solver"]["pose_overlay"] = {
+            "type": "bone_local_rotation_offsets",
+            "keyframes": [{"time_s": 0.0, "rotations_deg": {"root": [0.0, 10.0, 0.0]}, "weight": 1.0}],
+        }
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        self.assertIn("invalid_articulated_body_contract", {issue.code for issue in context.exception.issues})
+
+    def test_ik_pole_and_head_look_are_sampled_as_chain_layers(self) -> None:
+        data = animated_character_case()
+        solver = data["objects"][0]["solver"]
+        solver["ik_targets"] = [{
+            "goal": "hand_l",
+            "tolerance_m": 0.03,
+            "keyframes": [
+                {"time_s": 0.0, "position_m": [0.0, 0.0, 1.0], "rotation_deg": [0.0, 0.0, 0.0], "pole_position_m": [0.0, -0.4, 1.2], "weight": 0.0},
+                {"time_s": 2.0, "position_m": [0.4, 0.0, 1.2], "rotation_deg": [0.0, 40.0, 0.0], "pole_position_m": [0.2, -0.4, 1.3], "weight": 1.0},
+            ],
+        }]
+        solver["head_look_target"] = {
+            "tolerance_deg": 4.0,
+            "keyframes": [
+                {"time_s": 0.0, "position_m": [1.0, 0.0, 1.7], "weight": 0.0},
+                {"time_s": 2.0, "position_m": [1.0, 1.0, 1.7], "weight": 1.0},
+            ],
+        }
+        contract = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data)).data["objects"][0]["solver"]
+
+        sampled = sample_articulated_body_contract(contract, 1.0)
+
+        self.assertEqual(sampled["ik_targets"]["hand_l"]["pole_position_m"], [0.1, -0.4, 1.25])
+        self.assertEqual(sampled["head_look_target"]["position_m"], [1.0, 0.5, 1.7])
+        self.assertEqual(sampled["head_look_target"]["weight"], 0.5)
+
+    def test_ik_compiles_to_the_fixed_control_rig(self) -> None:
         data = animated_character_case()
         data["objects"][0]["solver"]["ik_targets"] = [{
             "goal": "hand_r",
@@ -203,8 +286,7 @@ class ArticulatedBodyTests(unittest.TestCase):
         }]
         runtime = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data))
 
-        with self.assertRaisesRegex(RuntimeError, "Control Rig has not been materialized"):
-            materialize_articulated_body_assets(runtime, {"resolved_paths": {}})
+        self.assertEqual(runtime.data["objects"][0]["solver"]["control_rig_path"], ARTICULATED_BODY_CONTROL_RIG_PATH)
 
     def test_fixed_mannequin_materializes_at_its_authored_package_root(self) -> None:
         runtime = compile_case_spec_v2_runtime(case_spec_v2_from_dict(articulated_case()))
@@ -212,16 +294,16 @@ class ArticulatedBodyTests(unittest.TestCase):
             root = Path(raw_root)
             executable = root / "UE_5.7/Engine/Binaries/Mac/UnrealEditor-Cmd"
             project = root / "Project/SimulatorWorkspace.uproject"
-            source = root / "UE_5.7/Templates/TemplateResources/High/Mannequin/Content/Character"
+            source = root / "UE_5.7/Templates/TemplateResources/High/Characters/Content/Mannequins"
             executable.parent.mkdir(parents=True)
             executable.touch()
             project.parent.mkdir(parents=True)
             project.touch()
             for relative in (
-                "Mesh/SK_Mannequin.uasset",
-                "Mesh/UE4_Mannequin_Skeleton.uasset",
-                "Mesh/SK_Mannequin_PhysicsAsset.uasset",
-                "Materials/M_Male_Body.uasset",
+                "Meshes/SKM_Manny_Simple.uasset",
+                "Meshes/SK_Mannequin.uasset",
+                "Rigs/PA_Mannequin.uasset",
+                "Rigs/CR_Mannequin_Body.uasset",
             ):
                 path = source / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -239,10 +321,10 @@ class ArticulatedBodyTests(unittest.TestCase):
 
             self.assertEqual(
                 ARTICULATED_BODY_ASSET_PATH,
-                "/Game/Mannequin/Character/Mesh/SK_Mannequin.SK_Mannequin",
+                "/Game/Characters/Mannequins/Meshes/SKM_Manny_Simple.SKM_Manny_Simple",
             )
-            self.assertTrue((project.parent / "Content/Mannequin/Character/Materials/M_Male_Body.uasset").is_file())
-            self.assertFalse((project.parent / "Content/Character/Mesh/SK_Mannequin.uasset").exists())
+            self.assertTrue((project.parent / "Content/Characters/Mannequins/Rigs/CR_Mannequin_Body.uasset").is_file())
+            self.assertFalse((project.parent / "Content/Mannequin/Character/Mesh/SK_Mannequin.uasset").exists())
 
     def test_declared_animation_is_materialized_from_fixed_bundle(self) -> None:
         runtime = compile_case_spec_v2_runtime(case_spec_v2_from_dict(animated_character_case()))
@@ -250,22 +332,23 @@ class ArticulatedBodyTests(unittest.TestCase):
             root = Path(raw_root)
             executable = root / "UE_5.7/Engine/Binaries/Mac/UnrealEditor-Cmd"
             project = root / "Project/SimulatorWorkspace.uproject"
-            character_source = root / "UE_5.7/Templates/TemplateResources/High/Mannequin/Content/Character"
-            animation_source = root / "UE_5.7/Templates/TemplateResources/High/Mannequin/Content/Animations"
+            character_source = root / "UE_5.7/Templates/TemplateResources/High/Characters/Content/Mannequins"
+            animation_source = root / "UE_5.7/Templates/TemplateResources/High/Characters/Content/Mannequins/Anims/Unarmed/Walk"
             executable.parent.mkdir(parents=True)
             executable.touch()
             project.parent.mkdir(parents=True)
             project.touch()
             for relative in (
-                "Mesh/SK_Mannequin.uasset",
-                "Mesh/UE4_Mannequin_Skeleton.uasset",
-                "Mesh/SK_Mannequin_PhysicsAsset.uasset",
+                "Meshes/SKM_Manny_Simple.uasset",
+                "Meshes/SK_Mannequin.uasset",
+                "Rigs/PA_Mannequin.uasset",
+                "Rigs/CR_Mannequin_Body.uasset",
             ):
                 path = character_source / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(relative.encode("utf-8"))
             animation_source.mkdir(parents=True)
-            (animation_source / "ThirdPersonWalk.uasset").write_bytes(b"walk")
+            (animation_source / "MF_Unarmed_Walk_Fwd.uasset").write_bytes(b"walk")
 
             materialize_articulated_body_assets(
                 runtime,
@@ -273,7 +356,7 @@ class ArticulatedBodyTests(unittest.TestCase):
             )
 
             self.assertEqual(
-                (project.parent / "Content/Mannequin/Animations/ThirdPersonWalk.uasset").read_bytes(),
+                (project.parent / "Content/Characters/Mannequins/Anims/Unarmed/Walk/MF_Unarmed_Walk_Fwd.uasset").read_bytes(),
                 b"walk",
             )
 

@@ -47,6 +47,8 @@ from harness.runtime.articulated_body import (
     ARTICULATED_BODY_BONES,
     ARTICULATED_BODY_MODEL_ID,
     ARTICULATED_IK_GOALS,
+    ARTICULATED_POSE_OVERLAY_BONES,
+    ARTICULATED_POSE_OVERLAY_TYPE,
     ARTICULATED_POSE_SOURCE_TYPES,
     ARTICULATED_ROOT_TRANSFORM_SOURCE_TYPES,
 )
@@ -1623,14 +1625,20 @@ FIELD-BY-FIELD INSTRUCTIONS
    For the fixed white articulated body, use role="articulated_body",
    visual_representation={"source":"solver_generated","visible":true}, omit object.asset, and declare
    solver={"type":"articulated_body","model":"harness_ue_mannequin_v1","mode":"kinematic"|"ragdoll",
-   "pose_source":{...},"root_transform_source":{...},"ik_targets":[...],"attachments":[...]}.
+   "pose_source":{...},"pose_overlay":{...},"root_transform_source":{...},"ik_targets":[...],
+   "head_look_target":{...},"support_object_id":"optional explicit support id","attachments":[...]}.
    pose_source is exactly pose_keyframes with keyframes, or animation_sequence with non-overlapping timed
    segments referencing only registered animation_asset_id values. root_transform_source is exactly
    root_keyframes, animation_root_motion, or character_movement. Root keyframes contain time_s,
    position_offset_m, and rotation_offset_deg and begin at time zero with zero offsets. Pose keyframes
-   contain time_s and rotations_deg keyed only by the fixed UE4 bones listed in the contract. Character
+   contain time_s and rotations_deg keyed only by the fixed mannequin bones listed in the contract. Optional
+   pose_overlay is exactly type=bone_local_rotation_offsets plus time-ordered rotations_deg and weight keyframes;
+   it excludes root and never owns root translation or rotation. Character
    Movement requires animation_sequence with in-place clips. Animation Root Motion requires qualified
-   root-motion clips. IK targets use only declared hand/foot goal IDs and explicit timed world transforms.
+   root-motion clips. IK targets use only declared hand/foot goal IDs and explicit timed world transforms;
+   pole_position_m is optional inside every keyframe of that same chain. head_look_target is one explicit timed
+   world-space target with weight and angular tolerance. Ground calibration occurs only for one explicit
+   supported_by relation or support_object_id and changes only initial Z.
    Kinematic
    mode requires physics.body_type="kinematic" and collision_required=false. Ragdoll mode requires
    physics.body_type="dynamic", an explicit ragdoll_start_time_s, and the UE solver capability
@@ -1886,6 +1894,16 @@ def case_spec_generation_contract() -> dict[str, Any]:
                     "character_movement": "root keyframes plus positive max_speed_m_s and max_acceleration_m_s2",
                     "allowed_bones": sorted(ARTICULATED_BODY_BONES),
                     "allowed_ik_goals": sorted(ARTICULATED_IK_GOALS),
+                    "pose_overlay": {
+                        "type": ARTICULATED_POSE_OVERLAY_TYPE,
+                        "rotation_space": "bone_local_offset",
+                        "blend_mode": "weighted_additive",
+                        "allowed_bones": sorted(ARTICULATED_POSE_OVERLAY_BONES),
+                        "root_allowed": False,
+                    },
+                    "ik_pole": "optional pole_position_m in every keyframe of the corresponding hand/foot chain",
+                    "head_look_target": "optional world position keyframes, weight and tolerance_deg",
+                    "support_object_id": "optional explicit support object for one-time vertical foot/bounds alignment",
                     "attachments": "optional object_id/bone/time interval/local transform entries ending before ragdoll",
                 },
             },

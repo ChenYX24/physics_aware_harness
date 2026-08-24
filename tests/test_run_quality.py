@@ -64,6 +64,8 @@ class RunQualityTests(unittest.TestCase):
                     "time": animation_time,
                     "objects": {"person": {"articulated_observed": {
                         "sample_phase": "post_tick",
+                        "sample_time_s": animation_time,
+                        "frame_zero_evaluated": True,
                         "pose_source_type": "animation_sequence",
                         "root_transform_source_type": "character_movement",
                         "actor_transform": {"position_m": [animation_time, 0.0, 0.0]},
@@ -74,6 +76,10 @@ class RunQualityTests(unittest.TestCase):
                         "animation_time_s": animation_time,
                         "animation_playing": True,
                         "root_motion_delta": {"translation_m": [animation_time, 0.0, 0.0], "rotation_deg": [0.0, 0.0, 0.0]},
+                        "grounding": {
+                            "status": "applied",
+                            "support_gap_m": 0.0 if index == 0 else 0.25,
+                        },
                         "ik": {},
                         "errors": [],
                     }}},
@@ -84,6 +90,79 @@ class RunQualityTests(unittest.TestCase):
 
             self.assertEqual(report["status"], "pass")
             self.assertEqual(failures, [])
+
+            frames[0]["objects"]["person"]["articulated_observed"]["grounding"]["support_gap_m"] = 0.03
+            self.assertEqual(validate_articulated_execution(run_dir, frames, [])["status"], "fail")
+
+    def test_articulated_control_layers_require_same_post_tick_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            self.write_json(run_dir / "case_spec.json", {
+                "objects": [{
+                    "id": "person",
+                    "solver": {
+                        "type": "articulated_body",
+                        "mode": "kinematic",
+                        "pose_source": {"type": "animation_sequence"},
+                        "pose_overlay": {"keyframes": [{}]},
+                        "ik_targets": [{"goal": "hand_r", "keyframes": [{}]}],
+                        "root_transform_source": {"type": "character_movement", "max_speed_m_s": 1.0},
+                    },
+                }],
+            })
+            frames = []
+            for index, sample_time in enumerate((0.0, 0.04)):
+                frames.append({
+                    "frame": index,
+                    "time": sample_time,
+                    "objects": {"person": {"articulated_observed": {
+                        "sample_phase": "post_tick",
+                        "sample_time_s": sample_time,
+                        "frame_zero_evaluated": True,
+                        "pose_source_type": "animation_sequence",
+                        "root_transform_source_type": "character_movement",
+                        "actor_transform": {"position_m": [sample_time, 0.0, 0.0]},
+                        "bones": {"root": {"position_m": [sample_time, 0.0, 0.0]}},
+                        "movement_mode": "Walking",
+                        "velocity_m_s": [1.0, 0.0, 0.0],
+                        "animation_asset_path": "/Game/Test.Walk",
+                        "animation_time_s": sample_time,
+                        "animation_playing": True,
+                        "root_motion_delta": {"translation_m": [sample_time, 0.0, 0.0], "rotation_deg": [0.0, 0.0, 0.0]},
+                        "control_rig": {
+                            "registered": True,
+                            "evaluation_time_s": sample_time,
+                            "evaluation_phase": "post_animation_pre_observation",
+                            "backwards_solve_executed": True,
+                            "forwards_solve_executed": True,
+                        },
+                        "pose_overlay": {"results": [{
+                            "bone": "head",
+                            "commanded_rotation_deg": [0.0, 10.0, 0.0],
+                            "output_rotation_delta_deg": [0.0, 9.8, 0.0],
+                        }]},
+                        "ik": {
+                            "hand_r": {
+                                "weight": 0.5,
+                                "switch_value": 0.5,
+                                "commanded_target_transform": {"position_m": [0.4, 0.0, 1.2]},
+                                "target_control": {"observed_position_m": [0.4, 0.0, 1.2]},
+                                "effector_transform": {"position_m": [0.0, 0.0, 1.0]},
+                                "error_m": 0.45,
+                                "tolerance_m": 0.1,
+                            }
+                        },
+                        "errors": [],
+                    }}},
+                })
+
+            failures: list[dict] = []
+            report = validate_articulated_execution(run_dir, frames, failures)
+            self.assertEqual(report["status"], "pass")
+
+            frames[0]["objects"]["person"]["articulated_observed"]["control_rig"]["evaluation_time_s"] = 0.1
+            report = validate_articulated_execution(run_dir, frames, [])
+            self.assertEqual(report["status"], "fail")
 
     def test_solver_declared_measurements_are_contact_evidence_authority(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -222,6 +301,8 @@ class RunQualityTests(unittest.TestCase):
             "articulated_components": {
                 "capsule_registered": True,
                 "character_movement_registered": True,
+                "control_rig_registered": False,
+                "control_rig_path": None,
             },
             "visible": False,
             "collision_enabled": False,
@@ -241,6 +322,24 @@ class RunQualityTests(unittest.TestCase):
             {"runtime_binding_snapshot": {"capture_phase": "pre_simulation", "objects": [actual], "constraints": []}},
         )
         self.assertEqual(report["status"], "fail")
+
+        actual["articulated_components"]["character_movement_registered"] = True
+        expected["params"]["articulated_body"] = {
+            "pose_overlay": {"keyframes": [{}]},
+            "control_rig_path": "/Game/Characters/Mannequins/Rigs/CR_Mannequin_Body.CR_Mannequin_Body",
+        }
+        report = validate_runtime_binding_snapshot(
+            {"dynamic_objects": [expected]},
+            {"runtime_binding_snapshot": {"capture_phase": "pre_simulation", "objects": [actual], "constraints": []}},
+        )
+        self.assertEqual(report["status"], "fail")
+        actual["articulated_components"]["control_rig_registered"] = True
+        actual["articulated_components"]["control_rig_path"] = expected["params"]["articulated_body"]["control_rig_path"]
+        report = validate_runtime_binding_snapshot(
+            {"dynamic_objects": [expected]},
+            {"runtime_binding_snapshot": {"capture_phase": "pre_simulation", "objects": [actual], "constraints": []}},
+        )
+        self.assertEqual(report["status"], "pass")
 
     def test_valid_run_passes_hard_gate_and_gets_technical_score(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

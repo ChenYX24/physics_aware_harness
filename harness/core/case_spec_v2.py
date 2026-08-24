@@ -803,6 +803,7 @@ def collect_case_spec_v2_issues(
     _validate_references(data.get("events"), "/events", known_objects, issues)
     _validate_event_payloads(data.get("events"), issues)
     _validate_release_impact_directions(objects, data.get("relations"), data.get("events"), issues)
+    _validate_articulated_support_selection(objects, data.get("relations"), issues)
     _validate_support_footprints(objects, data.get("relations"), issues)
     verification = _mapping(data.get("verification_requirements"), "/verification_requirements", issues)
     assertions = verification.get("assertions")
@@ -1625,6 +1626,55 @@ def _validate_support_footprints(
                 f"/objects/{support_index}/geometry/approx_size_m",
                 "support_footprint_too_small",
                 f"support {support_id} does not contain the full horizontal bounds of {subject_id}; enlarge or reposition it",
+            )
+
+
+def _validate_articulated_support_selection(
+    objects: Iterable[Any],
+    relations: Any,
+    issues: list[ValidationIssue],
+) -> None:
+    if not isinstance(relations, list):
+        return
+    targets: dict[str, list[str]] = {}
+    for relation in relations:
+        if not isinstance(relation, Mapping) or _canonical_relation_type(relation.get("type")) != "supported_by":
+            continue
+        if relation.get("source") and relation.get("target"):
+            targets.setdefault(str(relation["source"]), []).append(str(relation["target"]))
+    by_id = {
+        str(obj.get("id") or ""): obj
+        for obj in objects
+        if isinstance(obj, Mapping) and obj.get("id")
+    }
+    for index, obj in enumerate(objects):
+        if not isinstance(obj, Mapping) or not is_articulated_body_solver(obj.get("solver")):
+            continue
+        candidates = list(dict.fromkeys(targets.get(str(obj.get("id") or "")) or []))
+        declared = str((obj.get("solver") or {}).get("support_object_id") or "")
+        if len(candidates) > 1 and not declared:
+            _issue(
+                issues,
+                f"/objects/{index}/solver/support_object_id",
+                "ambiguous_articulated_support",
+                "multiple supported_by targets require an explicit support_object_id",
+            )
+        elif len(candidates) == 1 and not declared:
+            support = by_id.get(candidates[0]) or {}
+            rotation = ((support.get("initial_state") or {}).get("rotation_deg") or [0.0, 0.0, 0.0])
+            if len(rotation) == 3 and (abs(float(rotation[0])) > 1e-4 or abs(float(rotation[2])) > 1e-4):
+                _issue(
+                    issues,
+                    f"/objects/{index}/solver/support_object_id",
+                    "inclined_articulated_support_requires_explicit_id",
+                    "an inclined supported_by target requires an explicit support_object_id",
+                )
+        elif declared and candidates and declared not in candidates:
+            _issue(
+                issues,
+                f"/objects/{index}/solver/support_object_id",
+                "articulated_support_mismatch",
+                "support_object_id must match one of the declared supported_by targets",
             )
 
 

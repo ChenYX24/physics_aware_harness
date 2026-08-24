@@ -257,7 +257,13 @@
       "behavior": {}
     }
   ],
-  "relations": [],
+  "relations": [
+    {
+      "type": "supported_by",
+      "source": "cue_ball",
+      "target": "floor"
+    }
+  ],
   "events": [],
   "expected_behavior": {},
   "observation_requirements": {

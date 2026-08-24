@@ -22,7 +22,11 @@ from harness.core.case_spec import fracture_center_from_contact, fracture_respon
 from harness.core.timebase import build_timebase
 from harness.runtime.articulated_body import (
     ARTICULATED_BODY_BONES,
+    ARTICULATED_BODY_CONTROL_RIG_PATH,
     ARTICULATED_BODY_PHYSICS_ASSET_PATH,
+    ARTICULATED_HEAD_LOOK_CONTROLS,
+    ARTICULATED_IK_CONTROLS,
+    ARTICULATED_POSE_OVERLAY_CONTROLS,
     sample_articulated_body_contract,
 )
 from harness.verification.render_sync_checker import depth_pixel_statistics
@@ -130,7 +134,6 @@ GENERATED_MATERIAL_VERSION = os.environ.get("GENERATED_MATERIAL_VERSION", "V24_F
 CHAOS_RIGID_BODY_SETUP = os.environ.get("CHAOS_RIGID_BODY_SETUP", "1") != "0"
 CHAOS_SIMULATION_ENABLED = os.environ.get("CHAOS_SIMULATION_ENABLED", "0") == "1"
 CONTROLLED_BOTTLE_STAGE = os.environ.get("CONTROLLED_BOTTLE_STAGE", "0") != "0"
-
 MAP_CANDIDATES = [
     {
         "name": "TropicalIsland_Level_Scene_01",
@@ -3667,7 +3670,50 @@ def attach_geometry_collection_fracture_events(trajectory: list[dict], physics_s
     return events
 
 
-def spawn_runtime_actor(label: str, asset_path: str, asset_kind: str, location: unreal.Vector, scale: unreal.Vector, material_path: str | None = None, rotation=None):
+def add_articulated_control_rig(actor, skeletal_component, skeletal_mesh):
+    subobjects = unreal.get_engine_subsystem(unreal.SubobjectDataSubsystem)
+    parent_handles = subobjects.k2_gather_subobject_data_for_instance(actor)
+    if not parent_handles:
+        raise RuntimeError("articulated Character has no subobject root handle")
+    component_handle, fail_reason = subobjects.add_new_subobject(
+        unreal.AddNewSubobjectParams(
+            parent_handle=parent_handles[0],
+            new_class=unreal.ControlRigComponent,
+            conform_transform_to_parent=True,
+        )
+    )
+    component_data = subobjects.k2_find_subobject_data_from_handle(component_handle)
+    rig_component = (
+        unreal.SubobjectDataBlueprintFunctionLibrary.get_associated_object(component_data)
+        if component_data is not None
+        else None
+    )
+    if not rig_component:
+        raise RuntimeError(f"failed to add fixed ControlRigComponent: {fail_reason}")
+    rig_asset = load_asset(ARTICULATED_BODY_CONTROL_RIG_PATH)
+    rig_component.set_control_rig_class(rig_asset.generated_class())
+    rig_component.set_editor_property("update_rig_on_tick", False)
+    rig_component.set_editor_property("update_in_editor", False)
+    rig_component.set_editor_property("reset_transform_before_tick", False)
+    rig_component.set_bone_initial_transforms_from_skeletal_mesh(skeletal_mesh)
+    rig_component.initialize()
+    rig_component.add_mapped_complete_skeletal_mesh(
+        skeletal_component,
+        unreal.ControlRigComponentMapDirection.OUTPUT,
+    )
+    return rig_component
+
+
+def spawn_runtime_actor(
+    label: str,
+    asset_path: str,
+    asset_kind: str,
+    location: unreal.Vector,
+    scale: unreal.Vector,
+    material_path: str | None = None,
+    rotation=None,
+    enable_control_rig: bool = False,
+):
     subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     asset_kind = str(asset_kind or "").lower()
     if asset_kind == "articulated_character":
@@ -3700,6 +3746,8 @@ def spawn_runtime_actor(label: str, asset_path: str, asset_kind: str, location: 
         )
         for material_index in range(max(1, int(component.get_num_materials()))):
             component.set_material(material_index, white)
+        if enable_control_rig:
+            add_articulated_control_rig(actor, component, asset)
         if rotation:
             actor.set_actor_rotation(rotation, False)
         return actor
@@ -4346,7 +4394,7 @@ def play_runtime_animation(
         "root_transform_source_type": root_transform_source_type,
         "errors": [],
     }
-    component = actor_skeletal_component_with_socket(actor, "hand_r")
+    component = actor_skeletal_component_with_socket(actor, "root")
     if not is_skeletal_component(component):
         detail["errors"].append("missing_skeletal_mesh_component")
         events = status.setdefault("animation_events", [])
@@ -4413,12 +4461,18 @@ def play_runtime_animation(
                 detail["errors"].append(f"root_motion_mode:{exc}")
     if not detail["played"]:
         detail["errors"].extend(play_errors[-3:])
+    clip_duration_s = float(anim.get_editor_property("sequence_length"))
+    detail["clip_duration_s"] = round(clip_duration_s, 6)
+    sample_time_s = max(0.0, float(local_time_s))
+    if loop and clip_duration_s > 0.0:
+        sample_time_s %= clip_duration_s
     position_method = getattr(component, "set_position", None)
     if position_method:
-        for args in ((max(0.0, float(local_time_s)), False), (max(0.0, float(local_time_s)),)):
+        for args in ((sample_time_s, False), (sample_time_s,)):
             try:
                 position_method(*args)
                 detail["position_set"] = True
+                detail["sample_time_s"] = round(sample_time_s, 6)
                 break
             except Exception as exc:
                 detail["errors"].append(f"set_position:{exc}")
@@ -6428,6 +6482,12 @@ def setup_scene(runtime_scene: dict | None = None):
         mesh_path = resolve_runtime_asset_path(obj)
         combined_rotation = runtime_combined_rotation(obj, list(rotation_degrees))
         spawn_rotation = runtime_rotator(combined_rotation)
+        articulated_contract = ((obj.get("params") or {}).get("articulated_body") or {})
+        enable_control_rig = bool(
+            articulated_contract.get("pose_overlay")
+            or articulated_contract.get("ik_targets")
+            or articulated_contract.get("head_look_target")
+        )
         write_progress_marker("place_runtime_spawn_start", obj.get("id"))
         actor = spawn_runtime_actor(
             "native_phenomena_demo_" + obj["id"],
@@ -6437,6 +6497,7 @@ def setup_scene(runtime_scene: dict | None = None):
             unreal.Vector(*[float(v) for v in obj.get("scale", [0.65, 0.65, 0.65])]),
             None,
             spawn_rotation,
+            enable_control_rig,
         )
         try:
             actor.set_actor_rotation(spawn_rotation, False)
@@ -7143,6 +7204,16 @@ def setup_scene(runtime_scene: dict | None = None):
                         ),
                         "character_movement_registered": runtime_component_registered(
                             physics_actor.get_component_by_class(unreal.CharacterMovementComponent)
+                        ),
+                        "control_rig_registered": runtime_component_registered(
+                            physics_actor.get_component_by_class(unreal.ControlRigComponent)
+                        ),
+                        "control_rig_path": (
+                            ((obj.get("params") or {}).get("articulated_body") or {}).get("control_rig_path")
+                            if runtime_component_registered(
+                                physics_actor.get_component_by_class(unreal.ControlRigComponent)
+                            )
+                            else None
                         ),
                     }
                     if str(obj.get("behavior") or "") == "articulated_character"
@@ -8449,14 +8520,26 @@ def apply_articulated_character_command(actors: dict, actor, obj: dict, frame_ob
     if not movement:
         raise RuntimeError(f"articulated character movement component is missing: {obj.get('id')}")
     if source_type == "character_movement":
-        movement.set_editor_property("max_walk_speed", float(root_source.get("max_speed_m_s") or 1.0) * 100.0)
-        movement.set_editor_property("max_acceleration", float(root_source.get("max_acceleration_m_s2") or 2.0) * 100.0)
+        max_speed_cm_s = float(root_source.get("max_speed_m_s") or 1.0) * 100.0
+        max_acceleration_cm_s2 = float(root_source.get("max_acceleration_m_s2") or 2.0) * 100.0
+        movement.set_editor_property("max_walk_speed", max_speed_cm_s)
+        movement.set_editor_property("max_acceleration", max_acceleration_cm_s2)
         desired = frame_obj.get("position") or obj.get("initial_position_m") or [0.0, 0.0, 0.0]
         scene_origin = unreal.Vector(*actors.get("scene_origin", [0.0, 0.0, 0.0]))
         desired_world = ue_vec_from_meters(desired, origin=scene_origin)
         current = actor.get_actor_location()
         delta = unreal.Vector(desired_world.x - current.x, desired_world.y - current.y, 0.0)
         length = math.hypot(delta.x, delta.y)
+        command_state = actors.setdefault("articulated_character_movement_state", {}).setdefault(
+            str(obj.get("id") or ""),
+            {"velocity_cm_s": [0.0, 0.0, 0.0]},
+        )
+        commanded_velocity = command_state.get("velocity_cm_s") or [0.0, 0.0, 0.0]
+        movement.velocity = unreal.Vector(
+            float(commanded_velocity[0]),
+            float(commanded_velocity[1]),
+            float(commanded_velocity[2]),
+        )
         if length > 0.01:
             actor.add_movement_input(unreal.Vector(delta.x / length, delta.y / length, 0.0), 1.0, True)
         rotation = frame_obj.get("rotation_degrees") or [0.0, 0.0, 0.0]
@@ -8508,6 +8591,233 @@ def apply_articulated_pose(actors: dict, obj: dict, frame_obj: dict, time_s: flo
     return True
 
 
+def seed_control_rig_from_animation(rig, skeletal) -> None:
+    world_space = unreal.ControlRigComponentSpace.WORLD_SPACE
+    for bone_index in range(int(skeletal.get_num_bones())):
+        bone_name = skeletal.get_bone_name(bone_index)
+        rig.set_bone_transform(
+            bone_name,
+            skeletal.get_bone_transform(
+                bone_name,
+                unreal.RelativeTransformSpace.RTS_WORLD,
+            ),
+            world_space,
+            1.0,
+            False,
+        )
+    control_rig = rig.get_control_rig()
+    if not control_rig or not control_rig.execute(unreal.Name("Backwards Solve")):
+        raise RuntimeError("fixed articulated Control Rig cannot execute Backwards Solve")
+
+
+def apply_articulated_control_layers(actors: dict, obj: dict, time_s: float) -> None:
+    object_id = str(obj.get("id") or "")
+    actor = actors.get(object_id)
+    if not actor:
+        raise RuntimeError(f"articulated Control Rig actor is missing: {object_id}")
+    contract = (obj.get("params") or {}).get("articulated_body") or {}
+    sampled = sample_articulated_body_contract(contract, time_s)
+    overlay = sampled.get("pose_overlay")
+    ik_targets = sampled.get("ik_targets") or {}
+    head_look = sampled.get("head_look_target")
+    if not overlay and not ik_targets and not head_look:
+        return
+    rig = actor.get_component_by_class(unreal.ControlRigComponent)
+    skeletal = actor_skeletal_component_with_socket(actor, "head")
+    if not rig or not skeletal:
+        raise RuntimeError(f"fixed articulated Control Rig binding is missing: {object_id}")
+    local_space = unreal.ControlRigComponentSpace.LOCAL_SPACE
+    world_space = unreal.ControlRigComponentSpace.WORLD_SPACE
+    seed_control_rig_from_animation(rig, skeletal)
+    applied = {
+        "sample_time_s": round(float(time_s), 6),
+        "sample_phase": "post_animation_pre_observation",
+        "backwards_solve_executed": True,
+        "forwards_solve_executed": False,
+        "pose_overlay": [],
+        "ik": {},
+        "head_look": None,
+    }
+    overlay_before = {}
+    if overlay:
+        weight = float(overlay.get("weight") or 0.0)
+        for bone, rotation in (overlay.get("rotations_deg") or {}).items():
+            before = skeletal.get_socket_rotation(unreal.Name(str(bone)))
+            overlay_before[str(bone)] = [float(before.pitch), float(before.yaw), float(before.roll)]
+            control = ARTICULATED_POSE_OVERLAY_CONTROLS[str(bone)]
+            base = rig.get_control_rotator(unreal.Name(control), local_space)
+            offset = [float(value) * weight for value in rotation]
+            rig.set_control_rotator(
+                unreal.Name(control),
+                runtime_rotator([
+                    float(base.pitch) + offset[0],
+                    float(base.yaw) + offset[1],
+                    float(base.roll) + offset[2],
+                ]),
+                local_space,
+            )
+            applied["pose_overlay"].append({
+                "bone": bone,
+                "control": control,
+                "weight": weight,
+                "commanded_rotation_offset_deg": offset,
+                "base_control_rotation_deg": [float(base.pitch), float(base.yaw), float(base.roll)],
+                "target_control_rotation_deg": [
+                    float(base.pitch) + offset[0],
+                    float(base.yaw) + offset[1],
+                    float(base.roll) + offset[2],
+                ],
+            })
+    for goal, target in ik_targets.items():
+        controls = ARTICULATED_IK_CONTROLS[str(goal)]
+        weight = float(target.get("weight") or 0.0)
+        rig.set_control_float(unreal.Name(controls["switch"]), weight)
+        target_transform = unreal.Transform(
+            location=ue_vec_from_meters(target.get("position_m") or [0.0, 0.0, 0.0], origin=unreal.Vector(*actors.get("scene_origin", [0.0, 0.0, 0.0]))),
+            rotation=runtime_rotator(target.get("rotation_deg") or [0.0, 0.0, 0.0]),
+            scale=unreal.Vector(1.0, 1.0, 1.0),
+        )
+        rig.set_control_transform(unreal.Name(controls["target"]), target_transform, world_space)
+        pole_position = target.get("pole_position_m")
+        if pole_position is not None:
+            rig.set_control_position(
+                unreal.Name(controls["pole"]),
+                ue_vec_from_meters(pole_position, origin=unreal.Vector(*actors.get("scene_origin", [0.0, 0.0, 0.0]))),
+                world_space,
+            )
+        applied["ik"][goal] = {
+            "target_control": controls["target"],
+            "pole_control": controls["pole"] if pole_position is not None else None,
+            "weight": weight,
+        }
+    if head_look:
+        weight = float(head_look.get("weight") or 0.0)
+        target = ue_vec_from_meters(
+            head_look.get("position_m") or [0.0, 0.0, 0.0],
+            origin=unreal.Vector(*actors.get("scene_origin", [0.0, 0.0, 0.0])),
+        )
+        head_position = skeletal.get_socket_location(unreal.Name("head"))
+        desired_rotation = unreal.MathLibrary.find_look_at_rotation(head_position, target)
+        current_rotation = skeletal.get_socket_rotation(unreal.Name("head"))
+        blended_rotation = runtime_rotator([
+            current_rotation.pitch + (((desired_rotation.pitch - current_rotation.pitch + 180.0) % 360.0) - 180.0) * weight,
+            current_rotation.yaw + (((desired_rotation.yaw - current_rotation.yaw + 180.0) % 360.0) - 180.0) * weight,
+            current_rotation.roll + (((desired_rotation.roll - current_rotation.roll + 180.0) % 360.0) - 180.0) * weight,
+        ])
+        control = ARTICULATED_HEAD_LOOK_CONTROLS["target"]
+        rig.set_control_transform(
+            unreal.Name(control),
+            unreal.Transform(
+                location=head_position,
+                rotation=blended_rotation,
+                scale=unreal.Vector(1.0, 1.0, 1.0),
+            ),
+            world_space,
+        )
+        applied["head_look"] = {"control": control, "weight": weight}
+    control_rig = rig.get_control_rig()
+    if not control_rig or not control_rig.execute(unreal.Name("Forwards Solve")):
+        raise RuntimeError("fixed articulated Control Rig cannot execute Forwards Solve")
+    applied["forwards_solve_executed"] = True
+    for result in applied["pose_overlay"]:
+        after = skeletal.get_socket_rotation(unreal.Name(str(result["bone"])))
+        before = overlay_before[str(result["bone"])]
+        result["output_rotation_delta_deg"] = [
+            round(((float(value) - before[index] + 180.0) % 360.0) - 180.0, 6)
+            for index, value in enumerate((after.pitch, after.yaw, after.roll))
+        ]
+    actors.setdefault("articulated_control_state", {})[object_id] = applied
+
+
+def support_surface_height_cm(
+    support_actor,
+    support_obj: dict,
+    x_cm: float,
+    y_cm: float,
+    support_binding_source: str,
+) -> tuple[float, str]:
+    rotation = support_actor.get_actor_rotation()
+    origin, extent = actor_bounds(support_actor)
+    if abs(float(rotation.pitch)) <= 1e-4 and abs(float(rotation.roll)) <= 1e-4:
+        return float(origin.z + extent.z), "horizontal_actor_bounds"
+    if str(support_binding_source or "") != "solver.support_object_id":
+        raise RuntimeError("inclined articulated support requires explicit solver.support_object_id")
+    geometry = (support_obj.get("physics_properties") or {}).get("collision_geometry") or {}
+    if str(geometry.get("shape") or "") != "box":
+        raise RuntimeError("inclined articulated support requires explicit box collision geometry")
+    size_m = geometry.get("size_m") or []
+    if not isinstance(size_m, list) or len(size_m) != 3:
+        raise RuntimeError("inclined articulated support box size is unavailable")
+    pitch, yaw, roll = [math.radians(value) for value in (rotation.pitch, rotation.yaw, rotation.roll)]
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    cr, sr = math.cos(roll), math.sin(roll)
+    normal = unreal.Vector(cy * sp * cr + sy * sr, sy * sp * cr - cy * sr, cp * cr)
+    if abs(float(normal.z)) <= 1e-4:
+        raise RuntimeError("articulated support surface is vertical")
+    actor_location = support_actor.get_actor_location()
+    top = unreal.Vector(
+        actor_location.x + normal.x * float(size_m[2]) * 50.0,
+        actor_location.y + normal.y * float(size_m[2]) * 50.0,
+        actor_location.z + normal.z * float(size_m[2]) * 50.0,
+    )
+    height = top.z - (normal.x * (float(x_cm) - top.x) + normal.y * (float(y_cm) - top.y)) / normal.z
+    return float(height), "explicit_inclined_box_plane"
+
+
+def calibrate_articulated_grounding(actors: dict, runtime_scene: dict | None) -> None:
+    objects = {
+        str(obj.get("id") or ""): obj
+        for obj in ((runtime_scene or {}).get("dynamic_objects") or []) + ((runtime_scene or {}).get("static_objects") or [])
+    }
+    records = actors.setdefault("articulated_grounding", {})
+    for object_id, obj in objects.items():
+        if str(obj.get("behavior") or "") != "articulated_character":
+            continue
+        support_id = str((obj.get("params") or {}).get("support_object_id") or "")
+        if not support_id:
+            records[object_id] = {"status": "not_requested"}
+            continue
+        actor = actors.get(object_id)
+        support_actor = actors.get(support_id)
+        support_obj = objects.get(support_id)
+        if not actor or not support_actor or not support_obj:
+            raise RuntimeError(f"articulated support binding is unavailable: {object_id}->{support_id}")
+        location = actor.get_actor_location()
+        binding_source = str((obj.get("params") or {}).get("support_binding_source") or "")
+        support_height, surface_source = support_surface_height_cm(
+            support_actor,
+            support_obj,
+            location.x,
+            location.y,
+            binding_source,
+        )
+        bounds_origin, bounds_extent = actor_bounds(actor)
+        foot_height = float(bounds_origin.z - bounds_extent.z)
+        offset_cm = support_height - foot_height
+        actor.set_actor_location(
+            unreal.Vector(location.x, location.y, location.z + offset_cm),
+            False,
+            False,
+        )
+        actors.setdefault("runtime_ground_offsets", {})[object_id] = offset_cm
+        calibrated_location = actor.get_actor_location()
+        calibrated_rotation = actor.get_actor_rotation()
+        actors.setdefault("runtime_initial_transforms", {})[object_id] = {
+            "position_cm": [calibrated_location.x, calibrated_location.y, calibrated_location.z],
+            "rotation_degrees": [calibrated_rotation.pitch, calibrated_rotation.yaw, calibrated_rotation.roll],
+        }
+        records[object_id] = {
+            "status": "applied",
+            "support_object_id": support_id,
+            "support_binding_source": (obj.get("params") or {}).get("support_binding_source"),
+            "measurement_source": "evaluated_character_bounds",
+            "surface_source": surface_source,
+            "vertical_offset_m": round(offset_cm / 100.0, 6),
+            "support_height_m": round((support_height - unreal.Vector(*actors.get("scene_origin", [0.0, 0.0, 0.0])).z) / 100.0, 6),
+        }
+
+
 def apply_articulated_attachments(actors: dict, runtime_scene: dict | None, time_s: float) -> None:
     objects = [
         obj
@@ -8521,7 +8831,7 @@ def apply_articulated_attachments(actors: dict, runtime_scene: dict | None, time
     states = actors.setdefault("articulated_attachment_state", {})
     for obj in objects:
         body_actor = actors.get(str(obj.get("id") or ""))
-        body_component = actor_runtime_component(body_actor) if body_actor else None
+        body_component = actor_skeletal_component_with_socket(body_actor, "root") if body_actor else None
         if not body_component:
             raise RuntimeError(f"articulated attachment source is missing: {obj.get('id')}")
         contract = (obj.get("params") or {}).get("articulated_body") or {}
@@ -8536,9 +8846,14 @@ def apply_articulated_attachments(actors: dict, runtime_scene: dict | None, time
             target_component = actor_runtime_component(target)
             if active:
                 if not states.get(target_id):
+                    properties = (by_id.get(target_id) or {}).get("physics_properties") or {}
                     if target_component:
                         target_component.set_simulate_physics(False)
-                    states[target_id] = True
+                        target_component.set_collision_enabled(unreal.CollisionEnabled.NO_COLLISION)
+                    states[target_id] = {
+                        "collision_enabled": bool_control(properties.get("collision_enabled"), True),
+                        "simulate_physics": properties.get("simulate_physics") is True,
+                    }
                 bone = unreal.Name(str(attachment.get("bone") or ""))
                 local_m = attachment.get("local_position_m") or [0.0, 0.0, 0.0]
                 local_rotation = attachment.get("local_rotation_deg") or [0.0, 0.0, 0.0]
@@ -8549,12 +8864,18 @@ def apply_articulated_attachments(actors: dict, runtime_scene: dict | None, time
                 )
                 target.set_actor_location(world_position, False, False)
                 target.set_actor_rotation(world_rotation, False)
-            elif states.pop(target_id, False):
+            elif attachment_state := states.pop(target_id, None):
                 properties = (by_id.get(target_id) or {}).get("physics_properties") or {}
-                if target_component and properties.get("simulate_physics") is True:
-                    target_component.set_simulate_physics(True)
-                    target_component.set_enable_gravity(bool_control(properties.get("enable_gravity"), True))
-                    target_component.wake_all_rigid_bodies()
+                if target_component:
+                    target_component.set_collision_enabled(
+                        unreal.CollisionEnabled.QUERY_AND_PHYSICS
+                        if attachment_state.get("collision_enabled")
+                        else unreal.CollisionEnabled.NO_COLLISION
+                    )
+                    if attachment_state.get("simulate_physics"):
+                        target_component.set_simulate_physics(True)
+                        target_component.set_enable_gravity(bool_control(properties.get("enable_gravity"), True))
+                        target_component.wake_all_rigid_bodies()
 
 
 def apply_trajectory_frame(actors: dict, dynamic_ids: list[str], frame: dict, scene_origin: unreal.Vector, runtime_scene: dict | None) -> None:
@@ -9076,6 +9397,7 @@ def observed_articulated_state(
     actor_id: str,
     actor,
     obj: dict,
+    runtime_scene: dict | None,
     elapsed_s: float,
     scene_origin: unreal.Vector,
 ) -> dict:
@@ -9084,6 +9406,8 @@ def observed_articulated_state(
     actor_transform = world_transform_payload(actor.get_actor_location(), actor.get_actor_rotation(), scene_origin)
     observed = {
         "sample_phase": "post_tick",
+        "sample_time_s": round(float(elapsed_s), 6),
+        "frame_zero_evaluated": (actors.get("articulated_frame_zero_evaluation") or {}).get("status") == "ready",
         "actor_class": actor.get_class().get_name(),
         "actor_transform": actor_transform,
         "pose_source_type": str((contract.get("pose_source") or {}).get("type") or ""),
@@ -9147,9 +9471,62 @@ def observed_articulated_state(
         observed["root_motion_delta"] = {"translation_m": [0.0, 0.0, 0.0], "rotation_deg": [0.0, 0.0, 0.0]}
     actors["articulated_observed_previous"][actor_id] = actor_transform
     sampled = sample_articulated_body_contract(contract, elapsed_s)
+    rig = actor.get_component_by_class(unreal.ControlRigComponent)
+    control_state = (actors.get("articulated_control_state") or {}).get(actor_id) or {}
+    observed["control_rig"] = {
+        "registered": runtime_component_registered(rig),
+        "asset_path": contract.get("control_rig_path"),
+        "evaluation_time_s": control_state.get("sample_time_s"),
+        "evaluation_phase": control_state.get("sample_phase"),
+        "backwards_solve_executed": control_state.get("backwards_solve_executed") is True,
+        "forwards_solve_executed": control_state.get("forwards_solve_executed") is True,
+    }
+    overlay = sampled.get("pose_overlay")
+    observed["pose_overlay"] = {"results": [], "weight": float((overlay or {}).get("weight") or 0.0)}
+    if overlay and rig:
+        overlay_weight = float(overlay.get("weight") or 0.0)
+        for bone, rotation in (overlay.get("rotations_deg") or {}).items():
+            control = ARTICULATED_POSE_OVERLAY_CONTROLS[str(bone)]
+            value = rig.get_control_rotator(unreal.Name(control), unreal.ControlRigComponentSpace.LOCAL_SPACE)
+            actual = [float(value.pitch), float(value.yaw), float(value.roll)]
+            applied_result = next(
+                (item for item in control_state.get("pose_overlay") or [] if str(item.get("bone") or "") == str(bone)),
+                {},
+            )
+            expected = applied_result.get("commanded_rotation_offset_deg") or [
+                float(component) * overlay_weight for component in rotation
+            ]
+            target_control = applied_result.get("target_control_rotation_deg") or actual
+            error = max(
+                abs(((actual[index] - float(target_control[index]) + 180.0) % 360.0) - 180.0)
+                for index in range(3)
+            )
+            observed["pose_overlay"]["results"].append({
+                "bone": bone,
+                "control": control,
+                "commanded_rotation_deg": expected,
+                "observed_rotation_deg": [round(component, 5) for component in actual],
+                "error_deg": round(error, 6),
+                "output_rotation_delta_deg": applied_result.get("output_rotation_delta_deg"),
+            })
     for goal, target in (sampled.get("ik_targets") or {}).items():
         effector = observed["bones"].get(goal)
         target_position = target.get("position_m") or [0.0, 0.0, 0.0]
+        controls = ARTICULATED_IK_CONTROLS[str(goal)]
+        target_control_position = None
+        switch_value = None
+        if rig:
+            target_control_transform = rig.get_control_transform(
+                unreal.Name(controls["target"]),
+                unreal.ControlRigComponentSpace.WORLD_SPACE,
+            )
+            location = target_control_transform.translation
+            target_control_position = [
+                round((float(location.x) - scene_origin.x) / 100.0, 6),
+                round((float(location.y) - scene_origin.y) / 100.0, 6),
+                round((float(location.z) - scene_origin.z) / 100.0, 6),
+            ]
+            switch_value = round(float(rig.get_control_float(unreal.Name(controls["switch"]))), 6)
         error_m = None
         if effector:
             error_m = round(math.sqrt(sum(
@@ -9157,15 +9534,74 @@ def observed_articulated_state(
                 for index in range(3)
             )), 6)
         observed["ik"][goal] = {
-            "target_transform": {
+            "commanded_target_transform": {
                 "position_m": target_position,
                 "rotation_deg": target.get("rotation_deg") or [0.0, 0.0, 0.0],
             },
+            "target_control": {
+                "control": controls["target"],
+                "observed_position_m": target_control_position,
+            },
+            "switch_control": controls["switch"],
+            "switch_value": switch_value,
             "effector_transform": effector,
             "weight": target.get("weight"),
             "tolerance_m": target.get("tolerance_m"),
             "error_m": error_m,
         }
+        pole_target = target.get("pole_position_m")
+        if pole_target is not None and rig:
+            pole_control = ARTICULATED_IK_CONTROLS[str(goal)]["pole"]
+            pole = rig.get_control_position(unreal.Name(pole_control), unreal.ControlRigComponentSpace.WORLD_SPACE)
+            observed["ik"][goal]["pole"] = {
+                "control": pole_control,
+                "target_position_m": pole_target,
+                "observed_position_m": [
+                    round((float(pole.x) - scene_origin.x) / 100.0, 6),
+                    round((float(pole.y) - scene_origin.y) / 100.0, 6),
+                    round((float(pole.z) - scene_origin.z) / 100.0, 6),
+                ],
+            }
+    head_look = sampled.get("head_look_target")
+    observed["head_look"] = None
+    if head_look and component:
+        target = head_look.get("position_m") or [0.0, 0.0, 0.0]
+        head = component.get_socket_location(unreal.Name("head"))
+        rotation = component.get_socket_rotation(unreal.Name("head"))
+        forward = unreal.MathLibrary.get_forward_vector(rotation)
+        target_world = ue_vec_from_meters(target, origin=scene_origin)
+        delta = unreal.Vector(target_world.x - head.x, target_world.y - head.y, target_world.z - head.z)
+        length = max(1e-9, math.sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z))
+        dot = max(-1.0, min(1.0, (forward.x * delta.x + forward.y * delta.y + forward.z * delta.z) / length))
+        observed["head_look"] = {
+            "target_position_m": target,
+            "weight": head_look.get("weight"),
+            "tolerance_deg": head_look.get("tolerance_deg"),
+            "angular_error_deg": round(math.degrees(math.acos(dot)), 6),
+        }
+    grounding = (actors.get("articulated_grounding") or {}).get(actor_id)
+    observed["grounding"] = dict(grounding) if isinstance(grounding, dict) else None
+    if isinstance(grounding, dict) and grounding.get("status") == "applied":
+        support_id = str(grounding.get("support_object_id") or "")
+        support_actor = actors.get(support_id)
+        all_objects = {
+            str(item.get("id") or ""): item
+            for item in ((runtime_scene or {}).get("dynamic_objects") or []) + ((runtime_scene or {}).get("static_objects") or [])
+        }
+        if support_actor and support_id in all_objects:
+            location = actor.get_actor_location()
+            support_height, _ = support_surface_height_cm(
+                support_actor,
+                all_objects[support_id],
+                location.x,
+                location.y,
+                str(grounding.get("support_binding_source") or ""),
+            )
+            bounds_origin, bounds_extent = actor_bounds(actor)
+            observed["grounding"]["support_gap_m"] = round(
+                ((bounds_origin.z - bounds_extent.z) - support_height) / 100.0,
+                6,
+            )
     observed["ragdoll_active"] = bool((actors.get("articulated_ragdoll_state") or {}).get(actor_id))
     return observed
 
@@ -9213,6 +9649,7 @@ def record_physics_transform_frame(
                     actor_id,
                     actors[actor_id],
                     obj,
+                    runtime_scene,
                     elapsed_s,
                     scene_origin,
                 )
@@ -10572,6 +11009,48 @@ def configure_clean_highres_viewport() -> dict:
     }
 
 
+def evaluate_articulated_frame_zero(
+    actors: dict,
+    runtime_scene: dict | None,
+    trajectory: list[dict],
+    status: dict,
+) -> None:
+    if not trajectory:
+        return
+    frame = trajectory[0]
+    if int(frame.get("frame") or 0) != 0 or abs(float(frame.get("time") or 0.0)) > 1e-9:
+        raise RuntimeError("articulated frame-zero initialization requires a t=0 trajectory sample")
+    object_ids = articulated_runtime_ids(runtime_scene)
+    if not object_ids:
+        return
+    scene_origin = unreal.Vector(*actors.get("scene_origin", [0.0, 0.0, 0.0]))
+    apply_trajectory_frame(actors, object_ids, frame, scene_origin, runtime_scene)
+    apply_runtime_animation_segments(actors, runtime_scene, frame, status)
+    objects = {
+        str(obj.get("id") or ""): obj
+        for obj in (runtime_scene or {}).get("dynamic_objects") or []
+    }
+    for object_id in object_ids:
+        obj = objects.get(object_id) or {}
+        if str(obj.get("behavior") or "") != "articulated_character":
+            continue
+        actor = actors.get(object_id)
+        component = actor_skeletal_component_with_socket(actor, "root") if actor else None
+        if not component:
+            raise RuntimeError(f"articulated frame-zero skeletal component is missing: {object_id}")
+        apply_articulated_control_layers(actors, obj, 0.0)
+    calibrate_articulated_grounding(actors, runtime_scene)
+    apply_articulated_attachments(actors, runtime_scene, 0.0)
+    sync_runtime_visuals(actors)
+    actors["articulated_frame_zero_evaluation"] = {
+        "status": "ready",
+        "sample_phase": "post_tick",
+        "time_s": 0.0,
+        "logical_time_advanced": False,
+        "object_ids": object_ids,
+    }
+
+
 def start_highres_viewport_capture(
     actors: dict,
     runtime_scene: dict | None,
@@ -10638,6 +11117,7 @@ def start_highres_viewport_capture(
         "character_tick_pending": None,
         "character_tick_target_time": None,
         "character_advanced_frame": None,
+        "articulated_frame_zero_ready": not bool(articulated_runtime_ids(runtime_scene)),
         "camera_tracks": {
             str(output.get("view_id") or output.get("id")): []
             for output in view_outputs
@@ -11022,6 +11502,13 @@ def start_highres_viewport_capture(
             cpp_driver = actors.get("adp_physics_runtime_driver")
             runner_ids = [obj.get("id") for obj in (runtime_scene.get("dynamic_objects") or []) if obj.get("behavior") == "third_person_runner"] if runtime_scene else []
             scripted_ids = list(dict.fromkeys([*runner_ids, *articulated_runtime_ids(runtime_scene)]))
+            if state.get("character_advanced_frame") == frame_index:
+                generic_character_ids = {
+                    str(obj.get("id") or "")
+                    for obj in (runtime_scene.get("dynamic_objects") or [])
+                    if obj.get("behavior") == "articulated_character"
+                }
+                scripted_ids = [object_id for object_id in scripted_ids if object_id not in generic_character_ids]
             if scripted_ids:
                 apply_trajectory_frame(actors, scripted_ids, frame, scene_origin, runtime_scene)
             apply_runtime_animation_segments(actors, runtime_scene, frame, physics_status)
@@ -11037,12 +11524,20 @@ def start_highres_viewport_capture(
             if scripted_ids:
                 apply_trajectory_frame(actors, scripted_ids, frame, scene_origin, runtime_scene)
             apply_runtime_animation_segments(actors, runtime_scene, frame, physics_status)
+            if state.get("character_advanced_frame") == frame_index:
+                for articulated_obj in (runtime_scene.get("dynamic_objects") or []):
+                    if str(articulated_obj.get("behavior") or "") == "articulated_character":
+                        apply_articulated_control_layers(
+                            actors,
+                            articulated_obj,
+                            float(frame.get("time") or 0.0),
+                        )
             apply_delayed_release_projectiles(actors, runtime_scene, frame, scene_origin, physics_status)
             actual_frame, new_events = record_physics_transform_frame(
                 actors,
                 runtime_scene,
                 frame_index,
-                frame_index / max(FPS, 1),
+                frame_time_s(frame, frame_index),
                 scene_origin,
                 state["seen_contact_pairs"],
             )
@@ -11192,6 +11687,16 @@ def start_highres_viewport_capture(
                     write_summary(summary)
                     finish()
                 return
+            if not state["articulated_frame_zero_ready"]:
+                evaluate_articulated_frame_zero(actors, runtime_scene, trajectory, physics_status)
+                state["articulated_frame_zero_ready"] = True
+                state["character_advanced_frame"] = 0
+                summary["articulated_frame_zero_evaluation"] = actors.get("articulated_frame_zero_evaluation")
+                summary["articulated_grounding"] = actors.get("articulated_grounding")
+                state["runtime_binding_snapshot_ready"] = update_runtime_binding_snapshot()
+                state["runtime_binding_wait_started"] = time.perf_counter()
+                write_summary(summary)
+                return
             if not state["runtime_binding_snapshot_ready"]:
                 if update_runtime_binding_snapshot():
                     write_summary(summary)
@@ -11213,6 +11718,17 @@ def start_highres_viewport_capture(
                 current_time = float(unreal.GameplayStatics.get_time_seconds(world)) if world else target_time
                 if current_time + 1e-4 < target_time:
                     return
+                for articulated_obj in (runtime_scene or {}).get("dynamic_objects") or []:
+                    if str(articulated_obj.get("behavior") or "") != "articulated_character":
+                        continue
+                    object_id = str(articulated_obj.get("id") or "")
+                    actor = actors.get(object_id)
+                    movement = actor.get_component_by_class(unreal.CharacterMovementComponent) if actor else None
+                    if movement:
+                        velocity = movement.velocity
+                        actors.setdefault("articulated_character_movement_state", {}).setdefault(
+                            object_id, {}
+                        )["velocity_cm_s"] = [float(velocity.x), float(velocity.y), float(velocity.z)]
                 set_simulation_world_paused(actors, physics_status, True)
                 state["character_tick_pending"] = None
                 state["character_tick_target_time"] = None
@@ -11220,6 +11736,12 @@ def start_highres_viewport_capture(
                 gasp_obj = next(iter(runtime_gasp_objects(runtime_scene)), None)
                 if gasp_obj:
                     bound_gasp_post_tick_displacement(actors, gasp_obj, pending_frame)
+                pending_sample = trajectory[pending_frame]
+                pending_time = float(pending_sample.get("time") or 0.0)
+                for articulated_obj in (runtime_scene or {}).get("dynamic_objects") or []:
+                    if str(articulated_obj.get("behavior") or "") == "articulated_character":
+                        apply_articulated_control_layers(actors, articulated_obj, pending_time)
+                apply_articulated_attachments(actors, runtime_scene, pending_time)
                 physics_status["character_world_tick_count"] = int(physics_status.get("character_world_tick_count") or 0) + 1
                 return
             min_probe_count = min(2, RENDER_FIRST_FRAME_STABILITY_SAMPLES)
@@ -11302,6 +11824,7 @@ def main():
     }
     first_frame_views: dict[str, dict] = {}
 
+    evaluate_articulated_frame_zero(actors, runtime_scene, trajectory, physics_status)
     material_warmup = warm_up_surface_replay_materials(runtime_scene)
     actors.setdefault("lighting", {})["surface_replay_material_warmup"] = material_warmup
     write_progress_marker("surface_replay_material_warmup", json.dumps(material_warmup, sort_keys=True))
@@ -11333,7 +11856,7 @@ def main():
                 actors,
                 runtime_scene,
                 int(frame["frame"]),
-                frame_index / max(FPS, 1),
+                frame_time_s(frame, frame_index),
                 scene_origin,
                 seen_contact_pairs,
             )
@@ -11494,6 +12017,8 @@ def main():
         "runtime_pose_registrations": actors.get("runtime_pose_registrations", {}),
         "runtime_ground_offsets": actors.get("runtime_ground_offsets", {}),
         "runtime_initial_transforms": actors.get("runtime_initial_transforms", {}),
+        "articulated_frame_zero_evaluation": actors.get("articulated_frame_zero_evaluation"),
+        "articulated_grounding": actors.get("articulated_grounding"),
         "runtime_binding_snapshot": actors.get("runtime_binding_snapshot", {}),
         "chaos_runtime": actors.get("chaos_runtime", {}),
         "removed_map_actors": actors.get("removed_map_actors", []),

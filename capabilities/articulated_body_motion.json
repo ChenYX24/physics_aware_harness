@@ -1,12 +1,13 @@
 {
   "schema_version": "harness_capability_v1",
   "id": "articulated_body_motion",
-  "description": "Execute declared fixed-skeleton pose keyframes or fixed animation assets with one explicit root-transform owner, optional IK goals, and an explicit Chaos ragdoll transition.",
+  "description": "Execute declared fixed-skeleton pose keyframes or fixed animation assets with one explicit root-transform owner, optional local pose overlay, hand/foot IK and head look, plus an explicit Chaos ragdoll transition.",
   "physical_assumptions": [
-    "A single harness UE mannequin and fixed UE4 bone set define the articulated body.",
+    "A single harness UE mannequin, fixed bone/control set and versioned Control Rig define the articulated body.",
     "Pose and root-transform sources are orthogonal, explicit declarations; no action-name routing or runtime fallback is allowed.",
     "Animation clips come from the fixed mannequin bundle; Character Movement consumes an explicit root path.",
-    "Execution evidence is sampled from UE post-tick capsule, root, bones, animation state, movement state and IK error.",
+    "Execution evidence is sampled at one UE post-tick time from capsule, root, bones, animation, Control Rig, movement, overlay, IK and head-look state.",
+    "Initial ground alignment changes only Z and only when a unique explicit support is available.",
     "Chaos ragdoll starts only at the explicitly declared time and never as an automatic fallback."
   ],
   "required_signals": ["trajectory", "articulated_pose", "articulated_observed"],

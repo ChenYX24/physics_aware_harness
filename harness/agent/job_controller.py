@@ -5038,12 +5038,16 @@ class AgentJobController:
             solver = obj.get("solver") if isinstance(obj.get("solver"), Mapping) else {}
             if solver.get("type") == "articulated_body":
                 pose_source = solver.get("pose_source") if isinstance(solver.get("pose_source"), Mapping) else {}
+                pose_overlay = solver.get("pose_overlay") if isinstance(solver.get("pose_overlay"), Mapping) else {}
                 root_source = solver.get("root_transform_source") if isinstance(solver.get("root_transform_source"), Mapping) else {}
+                head_look = solver.get("head_look_target") if isinstance(solver.get("head_look_target"), Mapping) else {}
                 articulated_lists = (
                     ("pose_source.keyframes", pose_source.get("keyframes")),
                     ("pose_source.segments", pose_source.get("segments")),
+                    ("pose_overlay.keyframes", pose_overlay.get("keyframes")),
                     ("root_transform_source.keyframes", root_source.get("keyframes")),
                     ("ik_targets", solver.get("ik_targets")),
+                    ("head_look_target.keyframes", head_look.get("keyframes")),
                     ("attachments", solver.get("attachments")),
                 )
                 for field, value in articulated_lists:

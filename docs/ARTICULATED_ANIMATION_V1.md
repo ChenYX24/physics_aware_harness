@@ -28,6 +28,7 @@ Add the minimum generic human-animation path needed for declared animation clips
 - `animation_root_motion` gives the selected animation exclusive ownership of root translation and rotation.
 - `character_movement` contains explicit timed path keyframes and movement limits. It drives one `ACharacter`; an in-place animation sequence still provides the skeletal pose.
 - Optional `ik_targets` are a post-animation pose layer. Each target names one fixed hand or foot goal and supplies timed world-space transforms plus weight.
+- Optional `pose_overlay` is a weighted additive local-rotation layer on registered non-root bones. Optional pole positions remain fields of their corresponding hand/foot IK chain; one optional head-look target is evaluated in the same Control Rig layer.
 - Existing attachment declarations remain explicit object/bone/time/local-frame constraints.
 - Ragdoll remains an explicit mode/time transition and is never an automatic fallback.
 
@@ -58,7 +59,7 @@ CaseSpec references stable asset IDs. UE package paths are compiled metadata, no
 - Preserve the current `PoseableMeshComponent` path for declared pose keyframes.
 - Add one generic `ACharacter` path with capsule, skeletal mesh and `CharacterMovementComponent` for animation playback, root motion and Character Movement.
 - Animation playback, root-motion mode and Character Movement are configured explicitly from the compiled contract.
-- Control Rig evaluates after the base animation and before observation.
+- For control layers, the single visible skeletal mesh supplies the evaluated animation pose to Control Rig, `Backwards Solve` derives its controls, then overlay/IK/head commands run through `Forwards Solve`. No second animation skeleton is created.
 - Ragdoll changes the same skeletal body to Chaos only at the declared time.
 
 ## Commanded and observed evidence
@@ -102,5 +103,7 @@ Compiled and UE camera rotations use the shared `(pitch, yaw, roll)` convention.
 ## Current implementation checkpoint
 
 - Implemented: versioned orthogonal contract, fixed idle/walk/run/jump assets, generic `ACharacter`, Character Movement path command, post-tick observed evidence, binding checks and articulated Quality Gate.
-- Pending asset work: one qualified UE4-skeleton root-motion sequence and one compatible minimal Control Rig. Root-motion declarations are rejected by contract validation and non-empty IK declarations fail asset materialization until those fixed assets exist.
-- Validated execution evidence: the isolated Character Movement walk smoke passed in real UE with synchronized RGB/depth/instance-segmentation output and 49 post-tick articulated samples.
+- Implemented asset work: the fixed UE 5.7 mannequin bundle now materializes its matching mesh, skeleton, PhysicsAsset, animations and `CR_Mannequin_Body`; no second mannequin or runtime fallback is retained.
+- Pending asset work: one qualified root-motion sequence. Root-motion declarations remain rejected until that fixed asset exists.
+- Pending execution evidence: a real UE smoke for pose overlay, hand/foot IK with optional pole, head look, one-time support alignment and zero-time frame-0 evaluation.
+- Current execution evidence: the isolated Character Movement walk smoke passes with the fixed UE 5.7 Manny bundle.

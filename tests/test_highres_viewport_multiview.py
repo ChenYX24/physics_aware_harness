@@ -22,6 +22,103 @@ class Vector:
 
 
 class HighresViewportMultiviewTests(unittest.TestCase):
+    def test_direct_articulated_attachment_suspends_declared_collision(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "apply_articulated_attachments"
+        )
+
+        class Component:
+            def __init__(self, body: bool = False) -> None:
+                self.body = body
+                self.simulation = []
+                self.collision = []
+
+            def set_simulate_physics(self, enabled):
+                self.simulation.append(enabled)
+
+            def set_collision_enabled(self, enabled):
+                self.collision.append(enabled)
+
+            def transform_from_bone_space(self, *_args):
+                return Vector(1.0, 2.0, 3.0), "rotation"
+
+        class Actor:
+            def __init__(self, component) -> None:
+                self.component = component
+
+            def set_actor_location(self, *_args):
+                pass
+
+            def set_actor_rotation(self, *_args):
+                pass
+
+        collision = types.SimpleNamespace(NO_COLLISION="none", QUERY_AND_PHYSICS="query_and_physics")
+        namespace = {
+            "unreal": types.SimpleNamespace(CollisionEnabled=collision, Name=str, Vector=Vector),
+            "actor_runtime_component": lambda actor: actor.component,
+            "actor_skeletal_component_with_socket": lambda actor, _socket: actor.component,
+            "runtime_rotator": lambda value: value,
+            "bool_control": lambda value, default: default if value is None else bool(value),
+        }
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+        body_component = Component(body=True)
+        target_component = Component()
+        actors = {"person": Actor(body_component), "prop": Actor(target_component)}
+        runtime_scene = {
+            "dynamic_objects": [
+                {
+                    "id": "person",
+                    "behavior": "articulated_character",
+                    "params": {"articulated_body": {"attachments": [{
+                        "object_id": "prop",
+                        "bone": "hand_r",
+                        "start_time_s": 0.0,
+                        "end_time_s": 1.0,
+                    }] }},
+                },
+                {
+                    "id": "prop",
+                    "physics_properties": {"collision_enabled": True, "simulate_physics": False},
+                },
+            ],
+            "static_objects": [],
+        }
+
+        namespace["apply_articulated_attachments"](actors, runtime_scene, 0.0)
+        namespace["apply_articulated_attachments"](actors, runtime_scene, 1.0)
+
+        self.assertEqual(target_component.simulation, [False])
+        self.assertEqual(target_component.collision, ["none", "query_and_physics"])
+
+    def test_articulated_observation_uses_canonical_frame_time(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        source_text = source.read_text(encoding="utf-8")
+        tree = ast.parse(source_text, filename=str(source))
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "record_physics_transform_frame"
+        ]
+
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(
+            isinstance(call.args[3], ast.Call)
+            and isinstance(call.args[3].func, ast.Name)
+            and call.args[3].func.id == "frame_time_s"
+            for call in calls
+        ))
+        self.assertIn('anim.get_editor_property("sequence_length")', source_text)
+        self.assertNotIn("anim.get_play_length()", source_text)
+        self.assertNotIn("MathLibrary.make_transform", source_text)
+        self.assertIn("target_transform = unreal.Transform(", source_text)
+        self.assertIn("location=head_position", source_text)
+
     def test_matching_solver_and_visual_mesh_reuses_compiled_scale(self) -> None:
         source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
@@ -1079,6 +1176,7 @@ class HighresViewportMultiviewTests(unittest.TestCase):
             "camera_view_specs": lambda *_: views,
             "initialize_data_pass_dirs": lambda *_: {},
             "runtime_timebase": lambda *_: {"fps": 24, "frame_count": 2},
+            "articulated_runtime_ids": lambda *_: [],
             "physics_capture_enabled": lambda *_: True,
             "start_editor_physics_capture": lambda *_: {"enabled": True},
             "refresh_runtime_binding_snapshot": refresh_binding_snapshot,

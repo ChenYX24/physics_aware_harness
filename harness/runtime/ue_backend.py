@@ -716,38 +716,11 @@ def materialize_articulated_body_assets(case: RuntimeCase, preflight: dict[str, 
     ]
     if not articulated:
         return
-    ik_objects = [
-        str(obj.get("id") or "")
-        for obj in articulated
-        if ((obj.get("solver") or {}).get("ik_targets") or [])
-    ]
-    if ik_objects:
-        raise RuntimeError(
-            "fixed UE4 mannequin Control Rig has not been materialized for articulated IK: "
-            + ", ".join(ik_objects)
-        )
     executable = Path(str((preflight.get("resolved_paths") or {}).get("SIM_STUDIO_UE_EXECUTABLE") or ""))
     project = Path(str((preflight.get("resolved_paths") or {}).get("SIM_STUDIO_UE_PROJECT") or ""))
     engine_install_root = executable.resolve().parents[3]
-    source_root = engine_install_root / "Templates" / "TemplateResources" / "High" / "Mannequin" / "Content" / "Character"
-    destination_root = project.resolve().parent / "Content" / "Mannequin" / "Character"
-    required = (
-        Path("Mesh/SK_Mannequin.uasset"),
-        Path("Mesh/UE4_Mannequin_Skeleton.uasset"),
-        Path("Mesh/SK_Mannequin_PhysicsAsset.uasset"),
-    )
-    missing = [str(source_root / relative) for relative in required if not (source_root / relative).is_file()]
-    if missing:
-        raise RuntimeError(f"fixed articulated-body assets are unavailable in this UE installation: {missing}")
-    for source in sorted(path for path in source_root.rglob("*") if path.is_file()):
-        relative = source.relative_to(source_root)
-        destination = destination_root / relative
-        if destination.exists():
-            if not destination.is_file() or destination.read_bytes() != source.read_bytes():
-                raise RuntimeError(f"fixed articulated-body asset conflicts with project content: {destination}")
-            continue
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
+    source_root = engine_install_root / "Templates" / "TemplateResources" / "High" / "Characters" / "Content"
+    destination_root = project.resolve().parent / "Content" / "Characters"
     animation_names = {
         Path(str(segment.get("animation_asset_path") or "").split(".", 1)[0]).name
         for obj in articulated
@@ -756,18 +729,32 @@ def materialize_articulated_body_assets(case: RuntimeCase, preflight: dict[str, 
         )
         if isinstance(segment, dict) and segment.get("animation_asset_path")
     }
-    if not animation_names:
-        return
-    animation_source_root = engine_install_root / "Templates" / "TemplateResources" / "High" / "Mannequin" / "Content" / "Animations"
-    animation_destination_root = project.resolve().parent / "Content" / "Mannequin" / "Animations"
-    for animation_name in sorted(animation_names):
-        source = animation_source_root / f"{animation_name}.uasset"
-        destination = animation_destination_root / source.name
+    fixed_assets = {
+        "SKM_Manny_Simple": Path("Mannequins/Meshes/SKM_Manny_Simple.uasset"),
+        "SK_Mannequin": Path("Mannequins/Meshes/SK_Mannequin.uasset"),
+        "PA_Mannequin": Path("Mannequins/Rigs/PA_Mannequin.uasset"),
+        "CR_Mannequin_Body": Path("Mannequins/Rigs/CR_Mannequin_Body.uasset"),
+        "MM_Idle": Path("Mannequins/Anims/Unarmed/MM_Idle.uasset"),
+        "MF_Unarmed_Walk_Fwd": Path("Mannequins/Anims/Unarmed/Walk/MF_Unarmed_Walk_Fwd.uasset"),
+        "MF_Unarmed_Jog_Fwd": Path("Mannequins/Anims/Unarmed/Jog/MF_Unarmed_Jog_Fwd.uasset"),
+        "MM_Jump": Path("Mannequins/Anims/Unarmed/Jump/MM_Jump.uasset"),
+    }
+    selected = [
+        fixed_assets[name]
+        for name in ("SKM_Manny_Simple", "SK_Mannequin", "PA_Mannequin", "CR_Mannequin_Body", *sorted(animation_names))
+        if name in fixed_assets
+    ]
+    unknown = sorted(animation_names - fixed_assets.keys())
+    if unknown:
+        raise RuntimeError(f"unknown fixed articulated animation assets: {unknown}")
+    for relative in selected:
+        source = source_root / relative
+        destination = destination_root / relative
         if not source.is_file():
-            raise RuntimeError(f"fixed articulated animation is unavailable in this UE installation: {source}")
+            raise RuntimeError(f"fixed articulated-body asset is unavailable in this UE installation: {source}")
         if destination.exists():
             if not destination.is_file() or destination.read_bytes() != source.read_bytes():
-                raise RuntimeError(f"fixed articulated animation conflicts with project content: {destination}")
+                raise RuntimeError(f"fixed articulated-body asset conflicts with project content: {destination}")
             continue
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)

@@ -1102,6 +1102,9 @@ def validate_articulated_execution(
         contract = obj["solver"]
         pose_type = str((contract.get("pose_source") or {}).get("type") or "")
         root_type = str((contract.get("root_transform_source") or {}).get("type") or "")
+        control_layers_required = bool(
+            contract.get("pose_overlay") or contract.get("ik_targets") or contract.get("head_look_target")
+        )
         samples = []
         for frame in trajectory_frames:
             objects = frame.get("objects") if isinstance(frame.get("objects"), dict) else {}
@@ -1116,6 +1119,11 @@ def validate_articulated_execution(
             frame_index = frame.get("frame")
             if observed.get("sample_phase") != "post_tick":
                 object_failures.append({"metric": "invalid_observation_phase", "frame": frame_index})
+            frame_time = float(frame.get("time") or frame.get("time_s") or 0.0)
+            if not isinstance(observed.get("sample_time_s"), (int, float)) or abs(float(observed["sample_time_s"]) - frame_time) > 1e-6:
+                object_failures.append({"metric": "articulated_sample_time_mismatch", "frame": frame_index})
+            if frame_index == 0 and observed.get("frame_zero_evaluated") is not True:
+                object_failures.append({"metric": "frame_zero_not_evaluated", "frame": frame_index})
             if observed.get("pose_source_type") != pose_type or observed.get("root_transform_source_type") != root_type:
                 object_failures.append({"metric": "motion_source_mismatch", "frame": frame_index})
             if observed.get("errors"):
@@ -1126,11 +1134,61 @@ def validate_articulated_execution(
                 not observed.get("movement_mode") or not isinstance(observed.get("velocity_m_s"), list)
             ):
                 object_failures.append({"metric": "character_movement_observation_missing", "frame": frame_index})
+            if control_layers_required:
+                rig = observed.get("control_rig") if isinstance(observed.get("control_rig"), dict) else {}
+                if (
+                    rig.get("registered") is not True
+                    or rig.get("evaluation_phase") != "post_animation_pre_observation"
+                    or not isinstance(rig.get("evaluation_time_s"), (int, float))
+                    or abs(float(rig["evaluation_time_s"]) - frame_time) > 1e-6
+                    or rig.get("backwards_solve_executed") is not True
+                    or rig.get("forwards_solve_executed") is not True
+                ):
+                    object_failures.append({"metric": "control_rig_post_tick_evidence_missing", "frame": frame_index})
+            overlay = observed.get("pose_overlay") if isinstance(observed.get("pose_overlay"), dict) else {}
+            for result in overlay.get("results") or []:
+                expected = result.get("commanded_rotation_deg") or []
+                output_delta = result.get("output_rotation_delta_deg") or []
+                if any(abs(float(value)) > 1e-4 for value in expected) and (
+                    len(output_delta) != 3 or max(abs(float(value)) for value in output_delta) <= 1e-4
+                ):
+                    object_failures.append({
+                        "metric": "pose_overlay_not_applied",
+                        "frame": frame_index,
+                        "bone": result.get("bone"),
+                        "value": output_delta,
+                    })
             for goal, ik in (observed.get("ik") or {}).items():
                 weight = float(ik.get("weight") or 0.0)
+                switch_value = ik.get("switch_value")
+                if not isinstance(switch_value, (int, float)) or abs(float(switch_value) - weight) > 1e-4:
+                    object_failures.append({
+                        "metric": "ik_switch_weight_mismatch",
+                        "frame": frame_index,
+                        "goal": goal,
+                        "value": switch_value,
+                        "expected": weight,
+                    })
+                commanded_target = ((ik.get("commanded_target_transform") or {}).get("position_m") or [])
+                observed_target = ((ik.get("target_control") or {}).get("observed_position_m") or [])
+                if (
+                    len(commanded_target) != 3
+                    or len(observed_target) != 3
+                    or math.sqrt(sum(
+                        (float(observed_target[index]) - float(commanded_target[index])) ** 2
+                        for index in range(3)
+                    )) > 1e-4
+                ):
+                    object_failures.append({
+                        "metric": "ik_target_control_mismatch",
+                        "frame": frame_index,
+                        "goal": goal,
+                        "value": observed_target,
+                        "expected": commanded_target,
+                    })
                 error = ik.get("error_m")
                 tolerance = ik.get("tolerance_m")
-                if weight > 0.0 and (
+                if weight >= 1.0 - 1e-4 and (
                     not isinstance(error, (int, float))
                     or not isinstance(tolerance, (int, float))
                     or float(error) > float(tolerance)
@@ -1141,6 +1199,29 @@ def validate_articulated_execution(
                         "goal": goal,
                         "value": error,
                         "allowed": tolerance,
+                    })
+                if isinstance(ik.get("pole"), dict) and not isinstance(ik["pole"].get("observed_position_m"), list):
+                    object_failures.append({"metric": "ik_pole_observation_missing", "frame": frame_index, "goal": goal})
+            head_look = observed.get("head_look") if isinstance(observed.get("head_look"), dict) else None
+            if head_look and float(head_look.get("weight") or 0.0) >= 1.0 - 1e-4:
+                error = head_look.get("angular_error_deg")
+                tolerance = head_look.get("tolerance_deg")
+                if not isinstance(error, (int, float)) or not isinstance(tolerance, (int, float)) or float(error) > float(tolerance):
+                    object_failures.append({
+                        "metric": "head_look_angular_error_deg",
+                        "frame": frame_index,
+                        "value": error,
+                        "allowed": tolerance,
+                    })
+            grounding = observed.get("grounding") if isinstance(observed.get("grounding"), dict) else None
+            if frame_index == 0 and grounding and grounding.get("status") == "applied":
+                gap = grounding.get("support_gap_m")
+                if not isinstance(gap, (int, float)) or abs(float(gap)) > 0.02:
+                    object_failures.append({
+                        "metric": "articulated_support_gap_m",
+                        "frame": frame_index,
+                        "value": gap,
+                        "allowed_abs": 0.02,
                     })
         if pose_type == "animation_sequence" and samples:
             active = [
@@ -1157,6 +1238,22 @@ def validate_articulated_execution(
                 object_failures.append({"metric": "animation_not_playing"})
             if len(times) < 2 or max(times) - min(times) <= 1e-4:
                 object_failures.append({"metric": "animation_time_not_advancing", "value": times[:8]})
+        if control_layers_required and len(samples) >= 2:
+            first_frame, first = samples[0]
+            second_frame, second = samples[1]
+            first_position = ((first.get("capsule_transform") or first.get("actor_transform") or {}).get("position_m") or [])
+            second_position = ((second.get("capsule_transform") or second.get("actor_transform") or {}).get("position_m") or [])
+            if len(first_position) == 3 and len(second_position) == 3:
+                dt = max(0.0, float(second_frame.get("time") or 0.0) - float(first_frame.get("time") or 0.0))
+                max_speed = float(((contract.get("root_transform_source") or {}).get("max_speed_m_s") or 0.0))
+                jump = math.sqrt(sum((float(second_position[index]) - float(first_position[index])) ** 2 for index in range(3)))
+                allowed = max_speed * dt + 0.05
+                if jump > allowed:
+                    object_failures.append({
+                        "metric": "frame_zero_initialization_jump_m",
+                        "value": round(jump, 6),
+                        "allowed": round(allowed, 6),
+                    })
         if root_type == "animation_root_motion" and samples:
             translation = sum(
                 abs(float(value))
@@ -1718,13 +1815,37 @@ def validate_runtime_binding_snapshot(runtime: dict[str, Any], summary: dict[str
                 True,
                 articulated_components.get("character_movement_registered"),
             )
+            articulated_contract = params.get("articulated_body") or {}
+            control_rig_required = bool(
+                articulated_contract.get("pose_overlay")
+                or articulated_contract.get("ik_targets")
+                or articulated_contract.get("head_look_target")
+            )
+            compare_binding_value(
+                mismatches,
+                object_id,
+                "articulated_components.control_rig_registered",
+                control_rig_required,
+                articulated_components.get("control_rig_registered"),
+            )
+            compare_binding_value(
+                mismatches,
+                object_id,
+                "articulated_components.control_rig_path",
+                articulated_contract.get("control_rig_path") if control_rig_required else None,
+                articulated_components.get("control_rig_path") if articulated_components.get("control_rig_registered") else None,
+            )
         compare_binding_value(mismatches, object_id, "collision_enabled", bool(physics.get("collision_enabled")), actual.get("collision_enabled"))
         compare_binding_value(mismatches, object_id, "simulate_physics", bool(physics.get("simulate_physics")), actual.get("simulate_physics"))
+        expected_position = list(expected.get("initial_position_m") or [0.0, 0.0, 0.0])
+        grounding = ((summary.get("articulated_grounding") or {}).get(object_id) or {})
+        if grounding.get("status") == "applied" and isinstance(grounding.get("vertical_offset_m"), (int, float)):
+            expected_position[2] = float(expected_position[2]) + float(grounding["vertical_offset_m"])
         object_residuals["position_m"] = compare_binding_vector(
             mismatches,
             object_id,
             "world_transform.position_m",
-            expected.get("initial_position_m"),
+            expected_position,
             ((actual.get("world_transform") or {}).get("position_m")),
             tolerance=1e-4,
         )
