@@ -1095,6 +1095,22 @@ class CaseSpecV2Tests(unittest.TestCase):
         camera["subject"] = "cue_ball"
         case_spec_v2_from_dict(data)
 
+    def test_explicit_camera_pose_is_complete_world_static_truth(self) -> None:
+        data = case_spec_v2_fixture()
+        camera = data["observation_requirements"]["cameras"][0]
+        camera.update({
+            "coordinate_frame": "world",
+            "position_m": [4.0, -4.0, 1.4],
+            "look_at_m": [0.0, 0.0, 0.9],
+            "fov_deg": 50.0,
+        })
+        case_spec_v2_from_dict(data)
+
+        del camera["look_at_m"]
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("invalid_vector", {issue.code for issue in context.exception.issues})
+
     def test_unsupported_capability_backend_combination_is_rejected_before_compilation(self) -> None:
         data = case_spec_v2_fixture()
         data["capabilities"] = {

@@ -867,6 +867,47 @@ def collect_case_spec_v2_issues(
                     "camera_framing_role_mismatch",
                     "full_subject framing requires a front or side camera role",
                 )
+            explicit_pose = any(
+                camera.get(field) is not None
+                for field in ("coordinate_frame", "position_m", "look_at_m", "fov_deg")
+            )
+            if explicit_pose:
+                if camera.get("coordinate_frame") != "world":
+                    _issue(
+                        issues,
+                        f"/observation_requirements/cameras/{index}/coordinate_frame",
+                        "unsupported_camera_coordinate_frame",
+                        "explicit camera pose requires coordinate_frame=world",
+                    )
+                position = _finite_vec3(
+                    camera.get("position_m"),
+                    f"/observation_requirements/cameras/{index}/position_m",
+                    issues,
+                )
+                target = _finite_vec3(
+                    camera.get("look_at_m"),
+                    f"/observation_requirements/cameras/{index}/look_at_m",
+                    issues,
+                )
+                fov = _finite_number(
+                    camera.get("fov_deg"),
+                    f"/observation_requirements/cameras/{index}/fov_deg",
+                    issues,
+                )
+                if position and target and math.dist(position, target) <= 1e-6:
+                    _issue(
+                        issues,
+                        f"/observation_requirements/cameras/{index}/look_at_m",
+                        "degenerate_camera_pose",
+                        "camera position and look-at point must differ",
+                    )
+                if fov is not None and not 10.0 <= fov <= 120.0:
+                    _issue(
+                        issues,
+                        f"/observation_requirements/cameras/{index}/fov_deg",
+                        "invalid_camera_fov",
+                        "camera FOV must be between 10 and 120 degrees",
+                    )
     for key in ("modalities", "signals"):
         if observation.get(key) is not None:
             values = _string_list(observation.get(key), f"/observation_requirements/{key}", issues)

@@ -4,7 +4,11 @@ import copy
 from typing import Any, Mapping
 
 from harness.core.case_spec_v2 import CaseSpecV2
-from harness.runtime.camera_planner import camera_plan_from_case_spec, camera_plan_to_dict
+from harness.runtime.camera_planner import (
+    camera_plan_from_case_spec,
+    camera_plan_to_dict,
+    subject_frames_from_scene_layout,
+)
 
 
 MODALITY_ALIASES = {
@@ -53,6 +57,7 @@ def compile_observation_plan(
         requested_views=camera_roles or None,
         camera_strategy=camera_strategy,
         camera_intents=camera_intents,
+        subject_frames=subject_frames_from_scene_layout(scene_layout),
     )
     camera_plan_data = camera_plan_to_dict(camera_plan)
     requested_modalities = render_passes if render_passes is not None else requirements.get("modalities") or ["rgb"]

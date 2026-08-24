@@ -119,6 +119,61 @@ class CameraPlannerTests(unittest.TestCase):
         self.assertEqual(front.location[2], 0.96)
         self.assertEqual(front.rotation[0], 0.0)
 
+    def test_full_subject_prefers_registered_scene_bounds(self) -> None:
+        plan = camera_plan_from_case_spec(
+            {
+                "objects": [{
+                    "id": "subject",
+                    "initial_position_m": [0.0, 0.0, 0.0],
+                    "size_m": [0.1, 0.1, 0.1],
+                }],
+            },
+            requested_views=["front_static"],
+            camera_intents=[{
+                "role": "front_static",
+                "subject": "subject",
+                "framing": "full_subject",
+            }],
+            subject_frames={
+                "subject": {
+                    "center_m": [1.0, 2.0, 1.0],
+                    "size_m": [0.6, 0.4, 2.0],
+                    "yaw_deg": 90.0,
+                },
+            },
+        )
+
+        self.assertEqual(plan.views[0].target, (1.0, 2.0, 1.0))
+        self.assertEqual(plan.views[0].location[0], 1.0)
+        self.assertGreater(plan.views[0].location[1], 5.0)
+
+    def test_explicit_world_pose_overrides_automatic_framing(self) -> None:
+        plan = camera_plan_from_case_spec(
+            {
+                "objects": [{
+                    "id": "subject",
+                    "initial_position_m": [0.0, 0.0, 0.0],
+                    "size_m": [0.6, 0.4, 2.0],
+                }],
+            },
+            requested_views=["front_static"],
+            camera_intents=[{
+                "role": "front_static",
+                "subject": "subject",
+                "framing": "full_subject",
+                "coordinate_frame": "world",
+                "position_m": [4.0, -4.0, 1.4],
+                "look_at_m": [0.0, 0.0, 0.9],
+                "fov_deg": 50.0,
+            }],
+        )
+
+        view = plan.views[0]
+        self.assertEqual(view.location, (4.0, -4.0, 1.4))
+        self.assertEqual(view.target, (0.0, 0.0, 0.9))
+        self.assertEqual(view.fov, 50.0)
+        self.assertEqual(view.camera_mode, "fixed")
+
 
 if __name__ == "__main__":
     unittest.main()

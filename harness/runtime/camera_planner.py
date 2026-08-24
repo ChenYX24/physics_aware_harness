@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass, replace
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
+
+from harness.core.scene_layout import rotate_local_vector_ue
 
 
 DEFAULT_VIEWS = ["front_static", "side_static", "top_down", "tracking_subject", "event_closeup"]
@@ -121,6 +123,7 @@ def camera_plan_from_case_spec(
     requested_views: list[str] | None = None,
     camera_strategy: str = "bounds_auto_v1",
     camera_intents: list[dict[str, Any]] | None = None,
+    subject_frames: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> CameraPlan:
     bounds, warnings = bounds_from_case_spec(case_spec)
     plan = plan_cameras_for_scene(
@@ -131,8 +134,15 @@ def camera_plan_from_case_spec(
     )
     scene = case_spec.get("scene") if isinstance(case_spec.get("scene"), dict) else {}
     overrides = case_spec.get("camera_overrides") or scene.get("camera_overrides")
-    views = apply_subject_framing(plan.views, case_spec, camera_intents, warnings)
+    views = apply_subject_framing(
+        plan.views,
+        case_spec,
+        camera_intents,
+        warnings,
+        subject_frames=subject_frames,
+    )
     views = apply_camera_overrides(views, overrides, warnings)
+    views = apply_explicit_camera_poses(views, camera_intents)
     if camera_strategy != "bounds_auto_v1":
         warnings.append(f"unsupported camera strategy requested, using bounds_auto_v1: {camera_strategy}")
     return CameraPlan(scene_bounds=plan.scene_bounds, views=views, strategy=plan.strategy, warnings=[*warnings, *plan.warnings])
@@ -143,6 +153,8 @@ def apply_subject_framing(
     case_spec: dict[str, Any],
     camera_intents: list[dict[str, Any]] | None,
     warnings: list[str],
+    *,
+    subject_frames: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[CameraViewSpec]:
     intents = {
         str(intent.get("role")): intent
@@ -161,7 +173,7 @@ def apply_subject_framing(
             result.append(view)
             continue
         subject_id = str(intent.get("subject") or "")
-        frame = subject_frame(objects.get(subject_id))
+        frame = subject_frame(objects.get(subject_id), (subject_frames or {}).get(subject_id))
         if frame is None:
             raise ValueError(f"full_subject framing requires registered bounds for subject: {subject_id}")
         center, size, yaw_deg = frame
@@ -191,7 +203,16 @@ def apply_subject_framing(
     return result
 
 
-def subject_frame(subject: dict[str, Any] | None) -> tuple[tuple[float, float, float], tuple[float, float, float], float] | None:
+def subject_frame(
+    subject: dict[str, Any] | None,
+    registered_frame: Mapping[str, Any] | None = None,
+) -> tuple[tuple[float, float, float], tuple[float, float, float], float] | None:
+    if isinstance(registered_frame, Mapping):
+        center = vec3(registered_frame.get("center_m"))
+        size = vec3(registered_frame.get("size_m"))
+        yaw = registered_frame.get("yaw_deg")
+        if center is not None and size is not None and all(component > 0.0 for component in size):
+            return tuple(center), tuple(size), float(yaw or 0.0)
     if not isinstance(subject, dict):
         return None
     position = point_from_dict(subject)
@@ -213,6 +234,66 @@ def subject_frame(subject: dict[str, Any] | None) -> tuple[tuple[float, float, f
     if solver.get("type") == "articulated_body":
         center = (position[0], position[1], position[2] + size[2] * 0.5)
     return tuple(center), tuple(size), float(rotation[1])
+
+
+def apply_explicit_camera_poses(
+    views: list[CameraViewSpec],
+    camera_intents: list[dict[str, Any]] | None,
+) -> list[CameraViewSpec]:
+    intents = {
+        str(intent.get("role")): intent
+        for intent in camera_intents or []
+        if isinstance(intent, dict) and intent.get("role")
+    }
+    result: list[CameraViewSpec] = []
+    for view in views:
+        intent = intents.get(view.role)
+        if not isinstance(intent, dict) or intent.get("position_m") is None:
+            result.append(view)
+            continue
+        location = vec3(intent.get("position_m"))
+        target = vec3(intent.get("look_at_m"))
+        if location is None or target is None or intent.get("coordinate_frame") != "world":
+            raise ValueError(f"invalid explicit world camera pose: {view.role}")
+        fov = float(intent.get("fov_deg"))
+        distance = math.dist(location, target)
+        result.append(
+            replace(
+                view,
+                location=round_vec(location),
+                target=round_vec(target),
+                rotation=round_vec(look_at_rotation(tuple(location), tuple(target))),
+                fov=fov,
+                far_clip=round(max(distance * 6.0, 10.0), 4),
+                dynamic_camera_profile=None,
+                subject_follow_location_gain=None,
+                subject_follow_target_gain=None,
+                camera_mode="fixed",
+            )
+        )
+    return result
+
+
+def subject_frames_from_scene_layout(scene_layout: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    frames: dict[str, dict[str, Any]] = {}
+    for node in scene_layout.get("object_nodes") or []:
+        if not isinstance(node, Mapping) or not node.get("object_id"):
+            continue
+        transform = node.get("transform") if isinstance(node.get("transform"), Mapping) else {}
+        bounds = node.get("bounds") if isinstance(node.get("bounds"), Mapping) else {}
+        position = vec3(transform.get("position_m"))
+        rotation = vec3(transform.get("rotation_deg"))
+        half_extent = vec3(bounds.get("extents_m"))
+        local_center = vec3(bounds.get("local_center_offset_m"))
+        if None in (position, rotation, half_extent, local_center):
+            continue
+        world_offset = rotate_local_vector_ue(local_center, rotation)
+        frames[str(node["object_id"])] = {
+            "center_m": [position[index] + world_offset[index] for index in range(3)],
+            "size_m": [component * 2.0 for component in half_extent],
+            "yaw_deg": rotation[1],
+        }
+    return frames
 
 
 def framing_distance(width: float, height: float, horizontal_fov_deg: float) -> float:
