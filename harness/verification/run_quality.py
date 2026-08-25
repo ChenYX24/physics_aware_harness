@@ -1138,13 +1138,21 @@ def validate_articulated_execution(
                 rig = observed.get("control_rig") if isinstance(observed.get("control_rig"), dict) else {}
                 if (
                     rig.get("registered") is not True
-                    or rig.get("evaluation_phase") != "post_animation_pre_observation"
+                    or rig.get("evaluation_phase") != "post_forwards_solve"
                     or not isinstance(rig.get("evaluation_time_s"), (int, float))
                     or abs(float(rig["evaluation_time_s"]) - frame_time) > 1e-6
+                    or rig.get("pre_initialize_executed") is not True
                     or rig.get("backwards_solve_executed") is not True
+                    or rig.get("pre_forwards_solve_executed") is not True
                     or rig.get("forwards_solve_executed") is not True
+                    or rig.get("post_forwards_solve_executed") is not True
+                    or rig.get("coordinate_space") != "control_rig_component_lifecycle"
                 ):
-                    object_failures.append({"metric": "control_rig_post_tick_evidence_missing", "frame": frame_index})
+                    object_failures.append({"metric": "control_rig_lifecycle_evidence_missing", "frame": frame_index})
+                if rig.get("control_write_verified") is not True:
+                    object_failures.append({"metric": "control_rig_command_write_failed", "frame": frame_index})
+                if rig.get("mesh_output_sampled") is not True:
+                    object_failures.append({"metric": "control_rig_mesh_output_missing", "frame": frame_index})
             overlay = observed.get("pose_overlay") if isinstance(observed.get("pose_overlay"), dict) else {}
             for result in overlay.get("results") or []:
                 expected = result.get("commanded_rotation_deg") or []
@@ -1161,13 +1169,14 @@ def validate_articulated_execution(
             for goal, ik in (observed.get("ik") or {}).items():
                 weight = float(ik.get("weight") or 0.0)
                 switch_value = ik.get("switch_value")
-                if not isinstance(switch_value, (int, float)) or abs(float(switch_value) - weight) > 1e-4:
+                expected_switch = 1.0 if weight > 0.0 else 0.0
+                if not isinstance(switch_value, (int, float)) or abs(float(switch_value) - expected_switch) > 1e-4:
                     object_failures.append({
                         "metric": "ik_switch_weight_mismatch",
                         "frame": frame_index,
                         "goal": goal,
                         "value": switch_value,
-                        "expected": weight,
+                        "expected": expected_switch,
                     })
                 commanded_target = ((ik.get("commanded_target_transform") or {}).get("position_m") or [])
                 observed_target = ((ik.get("target_control") or {}).get("observed_position_m") or [])
@@ -1186,7 +1195,11 @@ def validate_articulated_execution(
                         "value": observed_target,
                         "expected": commanded_target,
                     })
-                error = ik.get("error_m")
+                effector_position = ((ik.get("effector_transform") or {}).get("position_m") or [])
+                error = math.sqrt(sum(
+                    (float(effector_position[index]) - float(commanded_target[index])) ** 2
+                    for index in range(3)
+                )) if len(effector_position) == 3 and len(commanded_target) == 3 else None
                 tolerance = ik.get("tolerance_m")
                 if weight >= 1.0 - 1e-4 and (
                     not isinstance(error, (int, float))
@@ -1200,11 +1213,39 @@ def validate_articulated_execution(
                         "value": error,
                         "allowed": tolerance,
                     })
-                if isinstance(ik.get("pole"), dict) and not isinstance(ik["pole"].get("observed_position_m"), list):
-                    object_failures.append({"metric": "ik_pole_observation_missing", "frame": frame_index, "goal": goal})
+                pole = ik.get("pole") if isinstance(ik.get("pole"), dict) else None
+                if pole:
+                    pole_target = pole.get("target_position_m") or []
+                    observed_pole = pole.get("observed_position_m") or []
+                    if len(observed_pole) != 3:
+                        object_failures.append({"metric": "ik_pole_observation_missing", "frame": frame_index, "goal": goal})
+                    elif len(pole_target) != 3 or math.sqrt(sum(
+                        (float(observed_pole[index]) - float(pole_target[index])) ** 2
+                        for index in range(3)
+                    )) > 1e-4:
+                        object_failures.append({
+                            "metric": "ik_pole_control_mismatch",
+                            "frame": frame_index,
+                            "goal": goal,
+                            "value": observed_pole,
+                            "expected": pole_target,
+                        })
             head_look = observed.get("head_look") if isinstance(observed.get("head_look"), dict) else None
             if head_look and float(head_look.get("weight") or 0.0) >= 1.0 - 1e-4:
-                error = head_look.get("angular_error_deg")
+                target = head_look.get("target_position_m") or []
+                head = (observed.get("bones") or {}).get("head") or {}
+                head_position = head.get("position_m") or []
+                head_rotation = head.get("rotation_deg") or []
+                error = None
+                if len(target) == 3 and len(head_position) == 3 and len(head_rotation) == 3:
+                    pitch = math.radians(float(head_rotation[0]))
+                    yaw = math.radians(float(head_rotation[1]))
+                    forward = (math.cos(pitch) * math.cos(yaw), math.cos(pitch) * math.sin(yaw), math.sin(pitch))
+                    delta = tuple(float(target[index]) - float(head_position[index]) for index in range(3))
+                    length = math.sqrt(sum(value * value for value in delta))
+                    if length > 1e-9:
+                        dot = max(-1.0, min(1.0, sum(forward[index] * delta[index] for index in range(3)) / length))
+                        error = math.degrees(math.acos(dot))
                 tolerance = head_look.get("tolerance_deg")
                 if not isinstance(error, (int, float)) or not isinstance(tolerance, (int, float)) or float(error) > float(tolerance):
                     object_failures.append({
@@ -1241,18 +1282,32 @@ def validate_articulated_execution(
         if control_layers_required and len(samples) >= 2:
             first_frame, first = samples[0]
             second_frame, second = samples[1]
-            first_position = ((first.get("capsule_transform") or first.get("actor_transform") or {}).get("position_m") or [])
-            second_position = ((second.get("capsule_transform") or second.get("actor_transform") or {}).get("position_m") or [])
-            if len(first_position) == 3 and len(second_position) == 3:
-                dt = max(0.0, float(second_frame.get("time") or 0.0) - float(first_frame.get("time") or 0.0))
-                max_speed = float(((contract.get("root_transform_source") or {}).get("max_speed_m_s") or 0.0))
-                jump = math.sqrt(sum((float(second_position[index]) - float(first_position[index])) ** 2 for index in range(3)))
-                allowed = max_speed * dt + 0.05
+            dt = max(0.0, float(second_frame.get("time") or 0.0) - float(first_frame.get("time") or 0.0))
+            max_speed = float(((contract.get("root_transform_source") or {}).get("max_speed_m_s") or 0.0))
+            allowed = max_speed * dt + 0.05
+            initialization_transforms = {
+                "capsule": (
+                    (first.get("capsule_transform") or first.get("actor_transform") or {}).get("position_m") or [],
+                    (second.get("capsule_transform") or second.get("actor_transform") or {}).get("position_m") or [],
+                ),
+                "mesh_root": (
+                    (((first.get("bones") or {}).get("root") or {}).get("position_m") or []),
+                    (((second.get("bones") or {}).get("root") or {}).get("position_m") or []),
+                ),
+            }
+            for source, (first_position, second_position) in initialization_transforms.items():
+                if len(first_position) != 3 or len(second_position) != 3:
+                    continue
+                jump = math.sqrt(sum(
+                    (float(second_position[index]) - float(first_position[index])) ** 2
+                    for index in range(3)
+                ))
                 if jump > allowed:
                     object_failures.append({
                         "metric": "frame_zero_initialization_jump_m",
                         "value": round(jump, 6),
                         "allowed": round(allowed, 6),
+                        "source": source,
                     })
         if root_type == "animation_root_motion" and samples:
             translation = sum(

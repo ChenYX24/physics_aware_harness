@@ -88,7 +88,10 @@ ARTICULATED_IK_CONTROLS = {
     "foot_l": {"target": "foot_l_ik_ctrl", "pole": "leg_l_pv_ik_ctrl", "switch": "leg_l_fk_ik_switch"},
     "foot_r": {"target": "foot_r_ik_ctrl", "pole": "leg_r_pv_ik_ctrl", "switch": "leg_r_fk_ik_switch"},
 }
-ARTICULATED_HEAD_LOOK_CONTROLS = {"target": "head_ctrl"}
+ARTICULATED_HEAD_LOOK_CONTROLS = {
+    "target": "head_ik_ctrl",
+    "switch": "neck_fk_ik_switch",
+}
 
 
 class ArticulatedBodyContractError(ValueError):

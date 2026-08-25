@@ -1209,7 +1209,11 @@ def classify_native_pass_failure(native_output: Path, pass_mode: str) -> dict[st
             "failure_code": "F_RUNTIME_BINDING_MISMATCH",
             "failure_message": "UE PIE runtime components did not match the compiled binding declaration.",
         }
-    if "LogPython: Error: Traceback" in process_text or "Python script executed with errors" in process_text:
+    if (
+        "LogPython: Error: Traceback" in process_text
+        or "Python script executed with errors" in process_text
+        or "Traceback (most recent call last)" in error_text
+    ):
         return {
             "failure_code": "F_UE_NATIVE_SCRIPT_EXCEPTION",
             "failure_message": "UE native Python scene execution raised an exception.",

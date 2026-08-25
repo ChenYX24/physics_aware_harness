@@ -59,7 +59,9 @@ CaseSpec references stable asset IDs. UE package paths are compiled metadata, no
 - Preserve the current `PoseableMeshComponent` path for declared pose keyframes.
 - Add one generic `ACharacter` path with capsule, skeletal mesh and `CharacterMovementComponent` for animation playback, root motion and Character Movement.
 - Animation playback, root-motion mode and Character Movement are configured explicitly from the compiled contract.
-- For control layers, the single visible skeletal mesh supplies the evaluated animation pose to Control Rig, `Backwards Solve` derives its controls, then overlay/IK/head commands run through `Forwards Solve`. No second animation skeleton is created.
+- For control layers, a hidden non-rendering skeletal component evaluates the animation sequence while the single visible mesh remains owned by Control Rig output. `Backwards Solve` derives controls from the hidden pose; `Pre Forwards Solve` converts declared world targets once into rig space, writes IK/head commands and local overlay controls, and immediately reads the controls back. Visible bones are sampled after `Post Forwards Solve`.
+- Runtime changes to the `ACharacter` mesh offset are committed through `CacheInitialMeshOffset`; the first Walking tick must preserve the grounded mesh root instead of restoring the constructor-time offset.
+- Readability-stage helpers are render-only and remain non-colliding in both editor and PIE worlds, so grounding is determined only by the declared support body.
 - Ragdoll changes the same skeletal body to Chaos only at the declared time.
 
 ## Commanded and observed evidence
@@ -74,6 +76,7 @@ Each observed articulated sample records:
 - `movement_mode` and observed velocity;
 - actual per-frame `root_motion_delta` translation and rotation;
 - IK target transform, observed effector transform and error;
+- Control Rig lifecycle events, immediate command readback and separate post-solve bone output;
 - ragdoll state and attachment state where applicable.
 
 Verifier and Quality Gate use only observed data to prove execution. Commanded values may define expected tolerances but may not be copied into observed fields.
@@ -86,6 +89,7 @@ Verifier and Quality Gate use only observed data to prove execution. Commanded v
 - Character Movement path and velocity remain within declared tolerances.
 - Root-motion clips produce observed deltas and the capsule/root follows them.
 - IK effector error remains within the declared tolerance when target weight is nonzero.
+- Frame 0 and the first Walking tick preserve the initialized capsule and visible mesh root within the declared movement bound.
 - Post-ragdoll samples come from Chaos, not scripted pose data.
 
 ## Non-goals

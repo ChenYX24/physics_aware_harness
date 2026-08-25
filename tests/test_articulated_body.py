@@ -11,6 +11,8 @@ from harness.runtime.actor_placement import compile_runtime_actor_placement
 from harness.runtime.articulated_body import (
     ARTICULATED_BODY_ASSET_PATH,
     ARTICULATED_BODY_CONTROL_RIG_PATH,
+    ARTICULATED_HEAD_LOOK_CONTROLS,
+    ARTICULATED_IK_CONTROLS,
     ArticulatedBodyContractError,
     compile_articulated_body_contract,
     sample_articulated_body_contract,
@@ -131,6 +133,12 @@ def animated_character_case() -> dict:
 
 
 class ArticulatedBodyTests(unittest.TestCase):
+    def test_fixed_mannequin_uses_boolean_ik_switch_controls(self) -> None:
+        self.assertEqual(ARTICULATED_IK_CONTROLS["hand_l"]["switch"], "arm_l_fk_ik_switch")
+        self.assertEqual(ARTICULATED_IK_CONTROLS["hand_r"]["switch"], "arm_r_fk_ik_switch")
+        self.assertEqual(ARTICULATED_HEAD_LOOK_CONTROLS["target"], "head_ik_ctrl")
+        self.assertEqual(ARTICULATED_HEAD_LOOK_CONTROLS["switch"], "neck_fk_ik_switch")
+
     def test_standard_verifier_rejects_commanded_articulated_trajectory_without_observation(self) -> None:
         runtime = compile_case_spec_v2_runtime(case_spec_v2_from_dict(animated_character_case()))
         with tempfile.TemporaryDirectory() as raw_root:

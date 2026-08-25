@@ -116,8 +116,73 @@ class HighresViewportMultiviewTests(unittest.TestCase):
         self.assertIn('anim.get_editor_property("sequence_length")', source_text)
         self.assertNotIn("anim.get_play_length()", source_text)
         self.assertNotIn("MathLibrary.make_transform", source_text)
-        self.assertIn("target_transform = unreal.Transform(", source_text)
+        self.assertIn("on_pre_initialize_delegate.add_callable_unique", source_text)
+        self.assertIn("on_pre_forwards_solve_delegate.add_callable_unique", source_text)
+        self.assertIn("on_post_forwards_solve_delegate.add_callable_unique", source_text)
+        self.assertIn("component.clear_mapped_elements()", source_text)
+        self.assertIn("pre_initialize_count < 1 or not rig_component.can_execute()", source_text)
+        self.assertNotIn("PreInitialize mapping did not execute exactly once", source_text)
+        self.assertIn('ARTICULATED_ANIMATION_SOURCE_TAG = "HarnessArticulatedAnimationSource"', source_text)
+        self.assertIn("animation_source = add_articulated_animation_source(actor, component, asset)", source_text)
+        self.assertIn("articulated_animation_source_component(actor)", source_text)
+        self.assertIn("seed_control_rig_from_animation(rig, animation_source)", source_text)
+        self.assertLess(
+            source_text.index("on_pre_initialize_delegate.add_callable_unique"),
+            source_text.index("rig_component.set_control_rig_class(rig_class)"),
+        )
+        self.assertIn("rig.update(0.0)", source_text)
+        self.assertIn("rig_component.update(0.0)", source_text)
+        self.assertEqual(source_text.count("actor.cache_initial_mesh_offset("), 2)
+        self.assertIn("RigHierarchy.make_control_value_from_bool(weight > 0.0)", source_text)
+        self.assertIn("component.set_control_transform(", source_text)
+        self.assertIn("component.set_control_position(", source_text)
+        self.assertIn("component.get_control_bool(", source_text)
+        self.assertIn('ARTICULATED_HEAD_LOOK_CONTROLS["switch"]', source_text)
+        self.assertNotIn("component.set_control_float(unreal.Name(controls[\"switch\"]), weight)", source_text)
+        self.assertNotIn("animation_source.get_component_transform()", source_text)
+        self.assertNotIn("hierarchy.set_global_transform(", source_text)
+        self.assertNotIn('control_rig.execute(unreal.Name("Forwards Solve"))', source_text)
+        self.assertNotIn("world.tick(tick_enum, 0.001)", source_text)
+        self.assertIn("disable_runtime_stage_helper_collision(actor)", source_text)
+        self.assertIn("actor.set_actor_enable_collision(False)", source_text)
+        self.assertIn('component.set_collision_profile_name("NoCollision")', source_text)
         self.assertIn("location=head_position", source_text)
+        self.assertIn("articulated_rig_position_from_world(component, pole_world)", source_text)
+        self.assertIn("articulated_world_position_from_rig(component, pole_rig)", source_text)
+        self.assertIn("align_articulated_control_rig_component(rig_component, skeletal_component)", source_text)
+        self.assertIn("align_articulated_control_rig_component(rig, skeletal)", source_text)
+        self.assertEqual(source_text.count("component.get_world_transform()"), 2)
+        self.assertNotIn('state["character_advanced_frame"] = 0', source_text)
+        self.assertIn("if pending_frame == 0:", source_text)
+        self.assertIn("restore_articulated_frame_zero_roots(actors, runtime_scene)", source_text)
+        self.assertIn('"status": "pending_post_tick"', source_text)
+        self.assertIn('"sample_phase": "pre_tick"', source_text)
+        self.assertIn('result["post_solve_control_position_delta_cm"]', source_text)
+        self.assertNotIn('result["control_write_position_error_cm"] = round(position_error, 6)', source_text)
+        self.assertIn("target_world = ue_vec_from_meters(target, z_offset_cm=0.0, origin=scene_origin)", source_text)
+        pre_solve = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "articulated_control_rig_pre_forwards_solve"
+        )
+        world_target_conversions = [
+            node
+            for node in ast.walk(pre_solve)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "ue_vec_from_meters"
+        ]
+        self.assertEqual(len(world_target_conversions), 3)
+        self.assertTrue(all(
+            any(
+                keyword.arg == "z_offset_cm"
+                and isinstance(keyword.value, ast.Constant)
+                and keyword.value.value == 0.0
+                for keyword in call.keywords
+            )
+            for call in world_target_conversions
+        ))
 
     def test_matching_solver_and_visual_mesh_reuses_compiled_scale(self) -> None:
         source = ROOT / "scripts" / "native_ue_scene.py"

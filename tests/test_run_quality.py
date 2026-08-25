@@ -132,9 +132,15 @@ class RunQualityTests(unittest.TestCase):
                         "control_rig": {
                             "registered": True,
                             "evaluation_time_s": sample_time,
-                            "evaluation_phase": "post_animation_pre_observation",
+                            "evaluation_phase": "post_forwards_solve",
+                            "pre_initialize_executed": True,
                             "backwards_solve_executed": True,
+                            "pre_forwards_solve_executed": True,
                             "forwards_solve_executed": True,
+                            "post_forwards_solve_executed": True,
+                            "control_write_verified": True,
+                            "mesh_output_sampled": True,
+                            "coordinate_space": "control_rig_component_lifecycle",
                         },
                         "pose_overlay": {"results": [{
                             "bone": "head",
@@ -144,9 +150,13 @@ class RunQualityTests(unittest.TestCase):
                         "ik": {
                             "hand_r": {
                                 "weight": 0.5,
-                                "switch_value": 0.5,
+                                "switch_value": 1.0,
                                 "commanded_target_transform": {"position_m": [0.4, 0.0, 1.2]},
                                 "target_control": {"observed_position_m": [0.4, 0.0, 1.2]},
+                                "pole": {
+                                    "target_position_m": [0.2, 0.0, 1.4],
+                                    "observed_position_m": [0.2, 0.0, 1.4],
+                                },
                                 "effector_transform": {"position_m": [0.0, 0.0, 1.0]},
                                 "error_m": 0.45,
                                 "tolerance_m": 0.1,
@@ -160,7 +170,41 @@ class RunQualityTests(unittest.TestCase):
             report = validate_articulated_execution(run_dir, frames, failures)
             self.assertEqual(report["status"], "pass")
 
+            frames[0]["objects"]["person"]["articulated_observed"]["ik"]["hand_r"]["pole"]["observed_position_m"][2] = 0.4
+            report = validate_articulated_execution(run_dir, frames, [])
+            self.assertEqual(report["status"], "fail")
+            self.assertIn(
+                "ik_pole_control_mismatch",
+                {finding["metric"] for finding in report["objects"]["person"]["findings"]},
+            )
+            frames[0]["objects"]["person"]["articulated_observed"]["ik"]["hand_r"]["pole"]["observed_position_m"][2] = 1.4
+
+            frames[1]["objects"]["person"]["articulated_observed"]["bones"]["root"]["position_m"][2] = 0.5
+            report = validate_articulated_execution(run_dir, frames, [])
+            self.assertEqual(report["status"], "fail")
+            self.assertIn(
+                {"metric": "frame_zero_initialization_jump_m", "value": 0.501597, "allowed": 0.09, "source": "mesh_root"},
+                report["objects"]["person"]["findings"],
+            )
+            frames[1]["objects"]["person"]["articulated_observed"]["bones"]["root"]["position_m"][2] = 0.0
+
             frames[0]["objects"]["person"]["articulated_observed"]["control_rig"]["evaluation_time_s"] = 0.1
+            report = validate_articulated_execution(run_dir, frames, [])
+            self.assertEqual(report["status"], "fail")
+
+            frames[0]["objects"]["person"]["articulated_observed"]["control_rig"]["evaluation_time_s"] = 0.0
+            frames[0]["objects"]["person"]["articulated_observed"]["control_rig"]["control_write_verified"] = False
+            report = validate_articulated_execution(run_dir, frames, [])
+            self.assertEqual(report["status"], "fail")
+            self.assertIn(
+                "control_rig_command_write_failed",
+                {finding["metric"] for finding in report["objects"]["person"]["findings"]},
+            )
+
+            frames[0]["objects"]["person"]["articulated_observed"]["control_rig"]["control_write_verified"] = True
+            frames[0]["objects"]["person"]["articulated_observed"]["ik"]["hand_r"]["weight"] = 1.0
+            frames[0]["objects"]["person"]["articulated_observed"]["ik"]["hand_r"]["switch_value"] = 1.0
+            frames[0]["objects"]["person"]["articulated_observed"]["ik"]["hand_r"]["error_m"] = 0.0
             report = validate_articulated_execution(run_dir, frames, [])
             self.assertEqual(report["status"], "fail")
 

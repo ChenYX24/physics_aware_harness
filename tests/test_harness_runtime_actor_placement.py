@@ -351,6 +351,19 @@ class RuntimeActorPlacementTests(unittest.TestCase):
 
         self.assertEqual(result["failure_code"], "F_UE_NATIVE_SCRIPT_EXCEPTION")
 
+    def test_native_callback_traceback_in_summary_precedes_missing_rgb_classification(self) -> None:
+        from scripts.harness_local_ue_runner import classify_native_pass_failure
+
+        with tempfile.TemporaryDirectory() as temporary:
+            native_output = Path(temporary)
+            (native_output / "summary.json").write_text(
+                json.dumps({"errors": [{"error": "Traceback (most recent call last):\nAttributeError: bad UE API"}]}),
+                encoding="utf-8",
+            )
+            result = classify_native_pass_failure(native_output, "rgb")
+
+        self.assertEqual(result["failure_code"], "F_UE_NATIVE_SCRIPT_EXCEPTION")
+
     def test_constraint_binding_failure_precedes_missing_rgb_classification(self) -> None:
         from scripts.harness_local_ue_runner import classify_native_pass_failure
 
