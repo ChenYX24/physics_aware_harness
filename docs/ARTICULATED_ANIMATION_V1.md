@@ -59,7 +59,7 @@ CaseSpec references stable asset IDs. UE package paths are compiled metadata, no
 - Preserve the current `PoseableMeshComponent` path for declared pose keyframes.
 - Add one generic `ACharacter` path with capsule, skeletal mesh and `CharacterMovementComponent` for animation playback, root motion and Character Movement.
 - Animation playback, root-motion mode and Character Movement are configured explicitly from the compiled contract.
-- For control layers, a hidden non-rendering skeletal component evaluates the animation sequence while the single visible mesh remains owned by Control Rig output. `Backwards Solve` derives controls from the hidden pose; `Pre Forwards Solve` converts declared world targets once into rig space, writes IK/head commands and local overlay controls, and immediately reads the controls back. Visible bones are sampled after `Post Forwards Solve`.
+- For control layers, a hidden non-rendering skeletal component evaluates the animation sequence while the single visible mesh remains owned by Control Rig output. Bone-local overlay rotations are composed onto that pose before `Backwards Solve` derives coupled controls; `Pre Forwards Solve` then writes IK/head commands. Visible bones are sampled after `Post Forwards Solve`.
 - Runtime changes to the `ACharacter` mesh offset are committed through `CacheInitialMeshOffset`; the first Walking tick must preserve the grounded mesh root instead of restoring the constructor-time offset.
 - Readability-stage helpers are render-only and remain non-colliding in both editor and PIE worlds, so grounding is determined only by the declared support body.
 - Ragdoll changes the same skeletal body to Chaos only at the declared time.

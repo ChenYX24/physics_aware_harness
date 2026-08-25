@@ -22,6 +22,25 @@ class Vector:
 
 
 class HighresViewportMultiviewTests(unittest.TestCase):
+    def test_control_rig_rotation_readback_uses_quaternion_equivalence(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "articulated_quaternion_angular_error_deg"
+        )
+        namespace = {"math": __import__("math")}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+        angular_error = namespace["articulated_quaternion_angular_error_deg"]
+        quat = types.SimpleNamespace(x=0.0, y=0.0, z=0.70710678, w=0.70710678)
+        equivalent = types.SimpleNamespace(x=0.0, y=0.0, z=-0.70710674, w=-0.70710674)
+        identity = types.SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0)
+
+        self.assertAlmostEqual(angular_error(quat, equivalent), 0.0, places=6)
+        self.assertAlmostEqual(angular_error(identity, quat), 90.0, places=5)
+
     def test_direct_articulated_attachment_suspends_declared_collision(self) -> None:
         source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
@@ -125,7 +144,16 @@ class HighresViewportMultiviewTests(unittest.TestCase):
         self.assertIn('ARTICULATED_ANIMATION_SOURCE_TAG = "HarnessArticulatedAnimationSource"', source_text)
         self.assertIn("animation_source = add_articulated_animation_source(actor, component, asset)", source_text)
         self.assertIn("articulated_animation_source_component(actor)", source_text)
-        self.assertIn("seed_control_rig_from_animation(rig, animation_source)", source_text)
+        self.assertIn("seed_control_rig_from_animation(rig, animation_source, overlay)", source_text)
+        self.assertIn("compose_transforms(offset_transform, base_local)", source_text)
+        self.assertIn("RTS_PARENT_BONE_SPACE", source_text)
+        self.assertNotIn("ARTICULATED_POSE_OVERLAY_CONTROLS", source_text)
+        self.assertIn('head_world = component.get_bone_transform(', source_text)
+        self.assertIn("articulated_quaternion_angular_error_deg(", source_text)
+        self.assertLess(
+            source_text.index("rig.set_bone_transform(bone_name, target_local"),
+            source_text.index('control_rig.execute(unreal.Name("Backwards Solve"))'),
+        )
         self.assertLess(
             source_text.index("on_pre_initialize_delegate.add_callable_unique"),
             source_text.index("rig_component.set_control_rig_class(rig_class)"),

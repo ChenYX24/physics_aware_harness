@@ -26,7 +26,6 @@ from harness.runtime.articulated_body import (
     ARTICULATED_BODY_PHYSICS_ASSET_PATH,
     ARTICULATED_HEAD_LOOK_CONTROLS,
     ARTICULATED_IK_CONTROLS,
-    ARTICULATED_POSE_OVERLAY_CONTROLS,
     sample_articulated_body_contract,
 )
 from harness.verification.render_sync_checker import depth_pixel_statistics
@@ -3726,6 +3725,18 @@ def articulated_control_rotation(transform) -> list[float]:
     return [float(rotation.pitch), float(rotation.yaw), float(rotation.roll)]
 
 
+def articulated_quaternion_angular_error_deg(left, right) -> float:
+    left_values = [float(left.x), float(left.y), float(left.z), float(left.w)]
+    right_values = [float(right.x), float(right.y), float(right.z), float(right.w)]
+    dot = abs(sum(left_values[index] * right_values[index] for index in range(4)))
+    norm = math.sqrt(
+        sum(value * value for value in left_values)
+        * sum(value * value for value in right_values)
+    )
+    cosine = max(-1.0, min(1.0, dot / norm))
+    return math.degrees(2.0 * math.acos(cosine))
+
+
 def articulated_control_key(name: str):
     return unreal.RigElementKey(
         type=unreal.RigElementType.CONTROL,
@@ -3778,12 +3789,10 @@ def articulated_control_rig_pre_forwards_solve(component) -> None:
     command = context.get("pending_command")
     if not isinstance(command, dict):
         return
-    animation_source = context["animation_source"]
     control_rig = component.get_control_rig()
     hierarchy = control_rig.get_hierarchy() if control_rig else None
     if not hierarchy:
         raise RuntimeError("fixed articulated Control Rig hierarchy is unavailable")
-    local_space = unreal.ControlRigComponentSpace.LOCAL_SPACE
     rig_space = unreal.ControlRigComponentSpace.RIG_SPACE
     world_space = unreal.ControlRigComponentSpace.WORLD_SPACE
     state = {
@@ -3798,47 +3807,14 @@ def articulated_control_rig_pre_forwards_solve(component) -> None:
         "control_write_verified": True,
         "mesh_output_sampled": False,
         "coordinate_space": "control_rig_component_lifecycle",
-        "pose_overlay": [],
+        "pose_overlay": [dict(result) for result in command.get("pose_overlay_inputs") or []],
         "ik": {},
         "head_look": None,
     }
-    overlay = command.get("pose_overlay")
-    if overlay:
-        weight = float(overlay.get("weight") or 0.0)
-        for bone, rotation in (overlay.get("rotations_deg") or {}).items():
-            control = ARTICULATED_POSE_OVERLAY_CONTROLS[str(bone)]
-            base = component.get_control_transform(unreal.Name(control), local_space)
-            base_rotation = articulated_control_rotation(base)
-            offset = [float(value) * weight for value in rotation]
-            target_rotation = [base_rotation[index] + offset[index] for index in range(3)]
-            component.set_control_transform(
-                unreal.Name(control),
-                unreal.Transform(
-                    location=base.translation,
-                    rotation=runtime_rotator(target_rotation),
-                    scale=base.scale3d,
-                ),
-                local_space,
-            )
-            observed_control = articulated_control_rotation(
-                component.get_control_transform(unreal.Name(control), local_space)
-            )
-            control_error = max(
-                abs(((observed_control[index] - target_rotation[index] + 180.0) % 360.0) - 180.0)
-                for index in range(3)
-            )
-            state["control_write_verified"] = state["control_write_verified"] and control_error <= 1e-3
-            state["pose_overlay"].append({
-                "bone": str(bone),
-                "control": control,
-                "weight": weight,
-                "commanded_rotation_offset_deg": offset,
-                "base_control_rotation_deg": base_rotation,
-                "target_control_rotation_deg": target_rotation,
-                "observed_control_rotation_deg": observed_control,
-                "control_write_error_deg": round(control_error, 6),
-                "output_rotation_before_deg": command["overlay_before"][str(bone)],
-            })
+    state["control_write_verified"] = all(
+        float(result.get("bone_input_error_deg") or 0.0) <= 1e-3
+        for result in state["pose_overlay"]
+    )
     for goal, target in (command.get("ik_targets") or {}).items():
         controls = ARTICULATED_IK_CONTROLS[str(goal)]
         weight = float(target.get("weight") or 0.0)
@@ -3918,9 +3894,9 @@ def articulated_control_rig_pre_forwards_solve(component) -> None:
             z_offset_cm=0.0,
             origin=command["scene_origin"],
         )
-        head_world = animation_source.get_socket_transform(
+        head_world = component.get_bone_transform(
             unreal.Name("head"),
-            unreal.RelativeTransformSpace.RTS_WORLD,
+            unreal.ControlRigComponentSpace.WORLD_SPACE,
         )
         head_position = head_world.translation
         desired_rotation = unreal.MathLibrary.find_look_at_rotation(head_position, target)
@@ -3966,9 +3942,9 @@ def articulated_control_rig_pre_forwards_solve(component) -> None:
         ))
         observed_rotation = articulated_control_rotation(observed_control)
         target_rotation = articulated_control_rotation(target_control_world)
-        rotation_error = max(
-            abs(((observed_rotation[index] - target_rotation[index] + 180.0) % 360.0) - 180.0)
-            for index in range(3)
+        rotation_error = articulated_quaternion_angular_error_deg(
+            observed_control.rotation,
+            target_control_world.rotation,
         )
         state["control_write_verified"] = state["control_write_verified"] and (
             observed_switch == switch_enabled
@@ -4002,22 +3978,18 @@ def articulated_control_rig_post_forwards_solve(component) -> None:
         return
     if state.get("serial") != command.get("serial"):
         return
-    local_space = unreal.ControlRigComponentSpace.LOCAL_SPACE
     rig_space = unreal.ControlRigComponentSpace.RIG_SPACE
     world_space = unreal.ControlRigComponentSpace.WORLD_SPACE
     state["forwards_solve_executed"] = True
     state["post_forwards_solve_executed"] = True
     for result in state["pose_overlay"]:
-        actual_control = articulated_control_rotation(
-            component.get_control_transform(unreal.Name(result["control"]), local_space)
+        actual_bone = articulated_control_rotation(
+            component.get_bone_transform(
+                unreal.Name(result["bone"]),
+                unreal.ControlRigComponentSpace.LOCAL_SPACE,
+            )
         )
-        target_control = result["target_control_rotation_deg"]
-        control_error = max(
-            abs(((actual_control[index] - target_control[index] + 180.0) % 360.0) - 180.0)
-            for index in range(3)
-        )
-        result["post_solve_control_rotation_deg"] = actual_control
-        result["post_solve_control_delta_deg"] = round(control_error, 6)
+        result["post_solve_bone_local_rotation_deg"] = actual_bone
     for goal, result in state["ik"].items():
         controls = ARTICULATED_IK_CONTROLS[goal]
         switch_enabled = bool(component.get_control_bool(unreal.Name(controls["switch"])))
@@ -9082,8 +9054,9 @@ def apply_articulated_pose(actors: dict, obj: dict, frame_obj: dict, time_s: flo
     return True
 
 
-def seed_control_rig_from_animation(rig, animation_source) -> None:
+def seed_control_rig_from_animation(rig, animation_source, overlay: dict | None) -> list[dict]:
     rig_space = unreal.ControlRigComponentSpace.RIG_SPACE
+    local_space = unreal.ControlRigComponentSpace.LOCAL_SPACE
     for bone_index in range(int(animation_source.get_num_bones())):
         bone_name = animation_source.get_bone_name(bone_index)
         rig.set_bone_transform(
@@ -9096,14 +9069,44 @@ def seed_control_rig_from_animation(rig, animation_source) -> None:
             1.0,
             False,
         )
+    overlay_inputs = []
+    if overlay:
+        weight = float(overlay.get("weight") or 0.0)
+        for bone, rotation in (overlay.get("rotations_deg") or {}).items():
+            bone_name = unreal.Name(str(bone))
+            base_local = rig.get_bone_transform(bone_name, local_space)
+            offset = [float(value) * weight for value in rotation]
+            offset_transform = unreal.Transform(
+                location=unreal.Vector(0.0, 0.0, 0.0),
+                rotation=runtime_rotator(offset),
+                scale=unreal.Vector(1.0, 1.0, 1.0),
+            )
+            target_local = unreal.MathLibrary.compose_transforms(offset_transform, base_local)
+            rig.set_bone_transform(bone_name, target_local, local_space, 1.0, True)
+            observed_local = rig.get_bone_transform(bone_name, local_space)
+            observed_offset = unreal.MathLibrary.make_relative_transform(observed_local, base_local)
+            observed_offset_rotation = articulated_control_rotation(observed_offset)
+            input_error = max(
+                abs(((observed_offset_rotation[index] - offset[index] + 180.0) % 360.0) - 180.0)
+                for index in range(3)
+            )
+            overlay_inputs.append({
+                "bone": str(bone),
+                "weight": weight,
+                "commanded_rotation_offset_deg": offset,
+                "observed_bone_local_offset_deg": observed_offset_rotation,
+                "bone_input_error_deg": round(input_error, 6),
+            })
     control_rig = rig.get_control_rig()
     if not control_rig or not control_rig.execute(unreal.Name("Backwards Solve")):
         raise RuntimeError("fixed articulated Control Rig cannot execute Backwards Solve")
+    return overlay_inputs
 
 
 def finalize_articulated_control_output(rig, state: dict) -> None:
     context = articulated_control_rig_context(rig)
     skeletal = context["skeletal"]
+    animation_source = context["animation_source"]
     output_bones = {result["bone"] for result in state["pose_overlay"]} | set(state["ik"])
     if state.get("head_look"):
         output_bones.add("head")
@@ -9122,11 +9125,19 @@ def finalize_articulated_control_output(rig, state: dict) -> None:
             "rotation_deg": articulated_control_rotation(transform),
         }
     for result in state["pose_overlay"]:
-        after = skeletal.get_socket_rotation(unreal.Name(result["bone"]))
-        before = result.pop("output_rotation_before_deg")
+        bone_name = unreal.Name(result["bone"])
+        before_local = animation_source.get_bone_transform(
+            bone_name,
+            unreal.RelativeTransformSpace.RTS_PARENT_BONE_SPACE,
+        )
+        after_local = skeletal.get_bone_transform(
+            bone_name,
+            unreal.RelativeTransformSpace.RTS_PARENT_BONE_SPACE,
+        )
+        output_offset = unreal.MathLibrary.make_relative_transform(after_local, before_local)
         result["output_rotation_delta_deg"] = [
-            round(((float(value) - before[index] + 180.0) % 360.0) - 180.0, 6)
-            for index, value in enumerate((after.pitch, after.yaw, after.roll))
+            round(float(value), 6)
+            for value in articulated_control_rotation(output_offset)
         ]
     state["mesh_output_sampled"] = bool(output_bones)
 
@@ -9151,20 +9162,14 @@ def apply_articulated_control_layers(actors: dict, obj: dict, time_s: float) -> 
     animation_source = context.get("animation_source")
     if not animation_source:
         raise RuntimeError(f"articulated animation source is missing: {object_id}")
-    seed_control_rig_from_animation(rig, animation_source)
+    overlay_inputs = seed_control_rig_from_animation(rig, animation_source, overlay)
     serial = int(context.get("command_serial") or 0) + 1
     context["command_serial"] = serial
-    overlay_before = {}
-    if overlay:
-        for bone in (overlay.get("rotations_deg") or {}):
-            before = animation_source.get_socket_rotation(unreal.Name(str(bone)))
-            overlay_before[str(bone)] = [float(before.pitch), float(before.yaw), float(before.roll)]
     context["pending_command"] = {
         "serial": serial,
         "sample_time_s": round(float(time_s), 6),
         "scene_origin": unreal.Vector(*actors.get("scene_origin", [0.0, 0.0, 0.0])),
-        "pose_overlay": overlay,
-        "overlay_before": overlay_before,
+        "pose_overlay_inputs": overlay_inputs,
         "ik_targets": ik_targets,
         "head_look": head_look,
     }
@@ -9980,23 +9985,17 @@ def observed_articulated_state(
     if overlay and rig:
         overlay_weight = float(overlay.get("weight") or 0.0)
         for bone, rotation in (overlay.get("rotations_deg") or {}).items():
-            control = ARTICULATED_POSE_OVERLAY_CONTROLS[str(bone)]
             applied_result = next(
                 (item for item in control_state.get("pose_overlay") or [] if str(item.get("bone") or "") == str(bone)),
                 {},
             )
-            actual = applied_result.get("observed_control_rotation_deg") or []
+            actual = applied_result.get("observed_bone_local_offset_deg") or []
             expected = applied_result.get("commanded_rotation_offset_deg") or [
                 float(component) * overlay_weight for component in rotation
             ]
-            target_control = applied_result.get("target_control_rotation_deg") or []
-            error = max(
-                abs(((actual[index] - float(target_control[index]) + 180.0) % 360.0) - 180.0)
-                for index in range(3)
-            ) if len(actual) == 3 and len(target_control) == 3 else None
+            error = applied_result.get("bone_input_error_deg")
             observed["pose_overlay"]["results"].append({
                 "bone": bone,
-                "control": control,
                 "commanded_rotation_deg": expected,
                 "observed_rotation_deg": [round(value, 5) for value in actual],
                 "error_deg": round(error, 6) if isinstance(error, (int, float)) else None,
