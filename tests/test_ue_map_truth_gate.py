@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def load_native_map_functions():
-    source = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+    source = ROOT / "scripts" / "native_ue_scene.py"
     tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
     names = {"canonical_map_package", "current_world_package", "try_open_map"}
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]

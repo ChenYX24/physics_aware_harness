@@ -19,8 +19,12 @@ if str(ROOT) not in sys.path:
 from harness.core.artifact_manager import ArtifactManager
 from harness.core.artifact_schema import read_json, write_json
 from harness.core.case_spec import load_case_spec
-from harness.runtime.camera_planner import camera_plan_from_case_spec, camera_plan_to_dict
-from harness.runtime.execution_profile import COMPLETE_CASE_VIEWS, execution_profile, write_execution_reports
+from harness.runtime.observation_planner import camera_ids_from_observation_plan, render_mode_for_passes, render_passes_from_observation_plan
+from harness.runtime.execution_profile import (
+    execution_profile,
+    execution_profile_names,
+    write_execution_reports,
+)
 from harness.runtime.render_pass_contract import write_render_contract_artifacts
 from harness.verification.render_sync_checker import check_render_sync
 from harness.verification.rgb_observability import verify_expected_color_observability
@@ -29,7 +33,7 @@ from scripts.harness_local_ue_runner import (
     DEFAULT_UE_EXECUTABLE,
     camera_runtime_from_plan,
     quantize_native_instance_segmentation,
-    run_ue_until_artifacts,
+    run_precompiled_ue_scene,
     standardize_native_output,
 )
 from scripts.harness_render_fluid_ue import ensure_ue_surface_assets
@@ -48,23 +52,25 @@ def main() -> int:
     parser.add_argument("--ue-project", required=True)
     parser.add_argument("--ue-executable", default=str(DEFAULT_UE_EXECUTABLE))
     parser.add_argument("--map", default="/Game/Maps/MarketEnvironment/Maps/Day.Day")
-    parser.add_argument("--profile", choices=("smoke", "candidate", "publish"), default="smoke")
-    parser.add_argument("--views")
+    parser.add_argument("--profile", choices=execution_profile_names(), default="smoke")
     parser.add_argument("--width", type=int)
     parser.add_argument("--height", type=int)
     args = parser.parse_args()
 
     started = time.perf_counter()
-    requested_profile = execution_profile(args.profile)
-    requested_views = [item.strip() for item in args.views.split(",") if item.strip()] if args.views else list(requested_profile.views)
-    complete_views = set(COMPLETE_CASE_VIEWS).issubset(requested_views)
-    profile = requested_profile if requested_profile.name == "smoke" or complete_views else execution_profile("smoke")
+    profile = execution_profile(args.profile)
     width = int(args.width or profile.width)
     height = int(args.height or profile.height)
-    render_passes = list(profile.render_passes)
-    render_mode = profile.render_mode
     run_dir = Path(args.run_dir).expanduser().resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
+    observation_plan = read_json(run_dir / "observation_plan.json")
+    camera_payload = read_json(run_dir / "camera_plan.json")
+    requested_views = camera_ids_from_observation_plan(observation_plan)
+    render_passes = render_passes_from_observation_plan(observation_plan)
+    render_mode = render_mode_for_passes(render_passes)
+    complete_sensor_contract = {"rgb", "depth", "segmentation"}.issubset(render_passes)
+    if not requested_views:
+        raise SystemExit("compiled Observation Plan contains no cameras")
     logs = run_dir / "logs"
     logs.mkdir(exist_ok=True)
     native_output = logs / "native_combined"
@@ -76,8 +82,10 @@ def main() -> int:
     replay = read_json(replay_path)
     cache_manifest = read_json(cache_manifest_path)
     case_spec = dict(load_case_spec(case_path).data)
-    if case_spec.get("capability_id") != "soft_body_deformation":
-        raise SystemExit("deformable UE replay requires soft_body_deformation")
+    from harness.core.physics_contract import infer_scene_domain
+
+    if infer_scene_domain(case_spec) != "deformable":
+        raise SystemExit("deformable UE replay requires a deformable-domain scene contract")
     fps = int((replay.get("timebase") or {}).get("fps") or 0)
     frame_count = int((replay.get("timebase") or {}).get("frame_count") or 0)
     if fps <= 0 or frame_count <= 1 or len(replay.get("frames") or []) != frame_count:
@@ -120,12 +128,6 @@ def main() -> int:
         "sample_phase": "external_solver_fixed_topology_frame_boundary",
         "endpoint_policy": "inclusive",
     }
-    camera_plan = camera_plan_from_case_spec(case_spec, requested_views=requested_views, camera_strategy="bounds_auto_v1")
-    camera_payload = camera_plan_to_dict(camera_plan)
-    planned_views = [str(item.get("camera_id")) for item in camera_payload.get("views") or []]
-    if planned_views != requested_views:
-        raise SystemExit(f"requested deformable views did not compile exactly: requested={requested_views}, planned={planned_views}")
-
     asset_paths = [
         f"{frame['ue_asset_path']}.{str(frame['ue_asset_path']).rsplit('/', 1)[-1]}"
         for frame in replay["frames"]
@@ -286,7 +288,6 @@ def main() -> int:
     write_json(runtime_path, runtime_scene)
     write_json(studio_path, studio_scene)
     write_json(run_dir / "case_spec.json", case_spec)
-    write_json(run_dir / "camera_plan.json", camera_payload)
     shutil.copyfile(cache_path, run_dir / "deformable_cache.npz")
     shutil.copyfile(cache_manifest_path, run_dir / "deformable_cache.json")
     shutil.copyfile(replay_path, run_dir / "deformable_surface_replay.json")
@@ -320,13 +321,9 @@ def main() -> int:
         "-NoScreenMessages",
         "-stdout",
         "-FullStdOutLogOutput",
-        f"-ExecutePythonScript={ROOT / 'scripts' / 'native_ue_physics_phenomena_scene.py'}",
+        f"-ExecutePythonScript={ROOT / 'scripts' / 'native_ue_scene.py'}",
     ]
-    env = os.environ.copy()
-    env.update({
-        "OUTPUT_DIR": str(native_output),
-        "SCENE_SPEC": str(studio_path),
-        "SCENE_RUNTIME_JSON": str(runtime_path),
+    environment = {
         "SCENE_MAP": args.map.split(".", 1)[0],
         "WIDTH": str(width),
         "HEIGHT": str(height),
@@ -338,17 +335,24 @@ def main() -> int:
         "CHAOS_SIMULATION_ENABLED": "0",
         "SIM_STUDIO_UE_CAPTURE_BACKEND": "highres_viewport",
         "WORLD_MODEL_RENDER_PASS_MODE": render_mode,
-        "KEEP_RENDER_FRAMES": "0",
+        "KEEP_RENDER_FRAMES": os.environ.get("SIM_STUDIO_KEEP_RENDER_FRAMES", "0"),
         "VIDEO_CRF": "18",
         "VIDEO_PRESET": "fast",
         "RENDER_SURFACE_REPLAY_MATERIAL_WARMUP_SECONDS": "4.0" if profile.name == "smoke" else "0.5",
-    })
-    process = run_ue_until_artifacts(command, env=env, native_output=native_output, timeout=1200)
+    }
+    process = run_precompiled_ue_scene(
+        command,
+        studio_scene_path=studio_path,
+        runtime_scene_path=runtime_path,
+        native_output=native_output,
+        environment=environment,
+        timeout=1200,
+    )
     if process.get("status") != "completed":
         write_json(run_dir / "deformable_ue_render_report.json", {"status": "failed", "process": process})
         return 2
     if "segmentation" in render_passes:
-        quantization = quantize_native_instance_segmentation(native_output, width=width, height=height, fps=fps, required=True, required_object_ids=set())
+        quantization = quantize_native_instance_segmentation(native_output, width=width, height=height, fps=fps, required=True)
         if quantization.get("status") != "pass":
             write_json(run_dir / "deformable_ue_render_report.json", {"status": "failed", "failure_code": "F_SEGMENTATION_QUANTIZATION_FAILED", "segmentation_quantization": quantization})
             return 2
@@ -365,12 +369,12 @@ def main() -> int:
         "execution_strategy": "external_solver_once_fixed_topology_cache_then_ue_mesh_replay",
     }
     report = standardize_native_output(run_dir, native_output, camera_payload, started, render_mode=render_mode, rgb_native_output=native_output, render_config=render_config, case_spec=case_spec, scene_spec=studio_scene)
-    write_render_contract_artifacts(run_dir, backend="ue", case_id=case_spec["case_id"], camera_plan=camera_plan, render_passes=render_passes, allow_placeholders=False, source="external_deformable_ue_replay")
+    write_render_contract_artifacts(run_dir, backend="ue", case_id=case_spec["case_id"], camera_plan=camera_payload, render_passes=render_passes, allow_placeholders=False, source="external_deformable_ue_replay")
     sync = check_render_sync(run_dir, require_depth="depth" in render_passes, require_segmentation="segmentation" in render_passes, write=True)
     observability = verify_expected_color_observability(run_dir, expected_rgb=surface_color, view_ids=requested_views, write=True)
     solver_verifier = read_json(run_dir / "harness_verifier.json")
     ue_render_real = report.get("rgb_real_ue") is True and (
-        sync.get("ue_render_real") is True or not profile.complete_sensor_contract
+        sync.get("ue_render_real") is True or not complete_sensor_contract
     )
     verified = report.get("status") == "completed" and report.get("rgb_real_ue") is True and sync.get("status") == "pass" and observability.get("status") == "pass" and solver_verifier.get("status") == "pass"
     inputs = run_dir / "inputs"
@@ -393,9 +397,9 @@ def main() -> int:
         "render_representation": "deformable_surface_replay.json",
     }
     write_json(run_dir / "run_readiness.json", readiness)
-    quality = evaluate_run(run_dir, write=True) if profile.complete_sensor_contract else {"status": "not_required"}
-    overall = ArtifactManager(run_dir).publish_run_overall() if profile.complete_sensor_contract else {}
-    if profile.complete_sensor_contract and quality.get("status") != "pass":
+    quality = evaluate_run(run_dir, write=True) if complete_sensor_contract else {"status": "not_required"}
+    overall = ArtifactManager(run_dir).publish_run_overall() if complete_sensor_contract else {}
+    if complete_sensor_contract and quality.get("status") != "pass":
         verified = False
     readiness.update({
         "local_preview_ready": verified,

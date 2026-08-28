@@ -4,8 +4,9 @@ import subprocess
 from pathlib import Path
 
 from harness.core.artifact_schema import read_json, write_json
-from harness.core.case_spec import CaseSpec
-from harness.runtime.genesis_sph_backend import genesis_python
+from harness.core.runtime_case import RuntimeCase
+from harness.core.physics_contract import infer_scene_domain
+from harness.runtime.genesis_sph_backend import genesis_child_environment, genesis_python
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -14,9 +15,9 @@ ROOT = Path(__file__).resolve().parents[2]
 class GenesisFEMBackend:
     name = "genesis_fem"
 
-    def run_case(self, case: CaseSpec, output_root: str | Path, **_: object) -> Path:
-        if case.capability_id != "soft_body_deformation":
-            raise ValueError(f"genesis_fem only supports soft_body_deformation, got {case.capability_id}")
+    def run_case(self, case: RuntimeCase, output_root: str | Path, **_: object) -> Path:
+        if infer_scene_domain(case.data) != "deformable":
+            raise ValueError("genesis_fem requires a deformable-domain scene contract")
         run_dir = Path(output_root) / f"{case.case_id}_{self.name}"
         run_dir.mkdir(parents=True, exist_ok=True)
         write_json(run_dir / "case_spec.json", case.data)
@@ -29,7 +30,14 @@ class GenesisFEMBackend:
         ]
         if not executable.is_file():
             raise RuntimeError(f"Genesis environment missing: {executable}")
-        result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            env=genesis_child_environment(run_dir),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
         verifier = read_json(run_dir / "harness_verifier.json") if (run_dir / "harness_verifier.json").is_file() else {}
         status = "completed" if result.returncode == 0 and verifier.get("status") == "pass" else "failed"
         write_json(run_dir / "genesis_fem_backend_report.json", {

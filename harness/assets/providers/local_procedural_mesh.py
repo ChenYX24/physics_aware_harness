@@ -36,6 +36,16 @@ RECIPE_BY_SHAPE = {
     "sphere": "sphere_mesh_v1",
     "cylinder": "cylinder_mesh_v1",
 }
+GENERIC_PROVIDER_ALIASES = frozenset(
+    {
+        "deterministic_local",
+        "local",
+        "local_procedural",
+        "local_procedural_mesh",
+        PROVIDER_ID,
+        "procedural_generation",
+    }
+)
 
 
 class ProceduralGenerationError(ValueError):
@@ -48,6 +58,14 @@ class ProceduralGenerationError(ValueError):
 def recipe_for_shape(shape: Any) -> str | None:
     canonical = SHAPE_ALIASES.get(str(shape or "").strip().casefold())
     return RECIPE_BY_SHAPE.get(canonical or "")
+
+
+def recipe_for_provider_hint(shape: Any, provider_hint: Any) -> str | None:
+    """Resolve a generic local-provider name to the registered recipe for its shape."""
+    hint = str(provider_hint or "").strip().casefold()
+    if not hint or hint in GENERIC_PROVIDER_ALIASES:
+        return recipe_for_shape(shape)
+    return hint
 
 
 def normalize_generation_spec(value: Mapping[str, Any]) -> dict[str, Any]:

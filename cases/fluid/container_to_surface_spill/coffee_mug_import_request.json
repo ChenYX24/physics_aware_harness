@@ -1,0 +1,26 @@
+{
+  "schema_version": "harness_backend_asset_import_request_v1",
+  "request_id": "backend-import.user-coffee-mug-99de80f66495",
+  "request_digest": "0c5b12b605e3abb4af44c4e75d9e158d136147c40a2e2f1b3ebc8027cc5cea16",
+  "asset_id": "user.fab.coffee_mug.99de80f66495",
+  "target_backend": "unreal",
+  "class_name": "StaticMesh",
+  "desired_name": "user_fab_coffee_mug_99de80f66495",
+  "source_kind": "user_file",
+  "import_uniform_scale": 37.5,
+  "expected_size_m": [
+    0.131555,
+    0.105135,
+    0.099992
+  ],
+  "source_files": [
+    {
+      "role": "user_import_source",
+      "local_path": "/Volumes/TiPlus7100s/PhysicsAssetSource/fab/coffee_cup/mug.fbx",
+      "format": "fbx",
+      "sha256": "99de80f664958a875ea60b6244a60c969ef956942b632f3c25e6dd3de1cb6f11",
+      "byte_size": 237132,
+      "materialized": true
+    }
+  ]
+}

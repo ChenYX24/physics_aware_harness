@@ -8,7 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from harness.assets.embedding_index import EmbeddingProvider
-from harness.assets.search_intent import SearchIntent, asset_matches_approx_size, taxonomy_relaxation_values
+from harness.assets.search_intent import (
+    SearchIntent,
+    asset_matches_approx_size,
+    license_tier_satisfies,
+    taxonomy_relaxation_values,
+)
 from harness.assets.sqlite_catalog import SQLiteCatalog, default_catalog_path, effective_license_tier
 
 
@@ -23,13 +28,14 @@ class AssetRegistry:
         embedding_provider: EmbeddingProvider | None = None,
         retrieval_config_path: str | Path | None = None,
     ) -> None:
-        explicit = (
-            path
-            or os.environ.get("SIM_HARNESS_ASSET_CATALOG")
-            or os.environ.get("SIM_STUDIO_ASSET_REGISTRY")
-        )
+        explicit = path or os.environ.get("SIM_HARNESS_ASSET_CATALOG")
         workspace_catalog = default_catalog_path()
-        configured = explicit or (workspace_catalog if workspace_catalog.is_file() else ROOT / "assets" / "asset_physics_index.json")
+        legacy_registry = os.environ.get("SIM_STUDIO_ASSET_REGISTRY")
+        configured = explicit or (
+            workspace_catalog
+            if workspace_catalog.is_file()
+            else legacy_registry or ROOT / "assets" / "asset_physics_index.json"
+        )
         self.path = Path(configured)
         self._sqlite = (
             SQLiteCatalog(
@@ -108,6 +114,14 @@ class AssetRegistry:
 
     def get_assets_by_ids(self, asset_ids: list[str]) -> list[dict[str, Any]]:
         return [asset for asset_id in asset_ids if (asset := self.get_asset_by_id(asset_id)) is not None]
+
+    def get_assets_by_source_uri(self, source_uri: str) -> list[dict[str, Any]]:
+        identity = str(source_uri).strip()
+        if not identity:
+            return []
+        if self._sqlite is not None:
+            return self._sqlite.get_assets_by_source_uri(identity)
+        return [item for item in self.assets if str(item.get("source_uri") or "") == identity]
 
     def search_intent(self, intent: SearchIntent, *, top_k: int = 5) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
@@ -299,7 +313,7 @@ def candidate_matches_search_intent(
         source_kind=item.get("source_kind"),
         redistribution=item.get("redistribution") or (item.get("release_audit") or {}).get("redistribution"),
     )
-    if not _matches_value(inferred_license_tier, must.get("license_tier")):
+    if not license_tier_satisfies(inferred_license_tier, must.get("license_tier")):
         return False
     if requested_category and str(requested_category).casefold() not in {"physics_critical", "visual_only"}:
         if str(requested_category).casefold() not in category_values:

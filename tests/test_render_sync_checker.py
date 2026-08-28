@@ -19,6 +19,8 @@ class RenderSyncCheckerTests(unittest.TestCase):
             write_valid_views(run_dir)
             report = check_render_sync(run_dir)
             self.assertEqual(report["status"], "pass")
+            stage_result = read_json(run_dir / "stage_results" / "render_sync.json")
+            self.assertEqual(stage_result["status"], "completed")
             self.assertTrue(report["ue_render_real"])
             self.assertEqual(report["depth_source"], "ue")
             self.assertTrue(report["multi_view_sync_ok"])
@@ -33,6 +35,25 @@ class RenderSyncCheckerTests(unittest.TestCase):
             self.assertEqual(report["status"], "fail")
             self.assertIn("F_DEPTH_MISSING", report["failure_codes"])
             self.assertEqual(report["render_observability_fail"], 1)
+
+    def test_rgb_only_native_ue_capture_is_real_without_depth(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            write_valid_views(run_dir)
+            for camera_id in ("overview", "side"):
+                view_dir = run_dir / "views" / camera_id
+                (view_dir / "depth.exr").unlink()
+                (view_dir / "segmentation.exr").unlink()
+                meta_path = view_dir / "meta.json"
+                meta = read_json(meta_path)
+                meta.update({"native_ue_rgb": True, "frame_count_depth": 0, "frame_count_segmentation": 0, "depth_source": "missing"})
+                write_json(meta_path, meta)
+
+            report = check_render_sync(run_dir, require_depth=False, require_segmentation=False)
+
+            self.assertEqual(report["status"], "pass")
+            self.assertTrue(report["ue_render_real"])
+            self.assertEqual(report["depth_source"], "missing")
 
     def test_timestamp_mismatch_is_sync_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

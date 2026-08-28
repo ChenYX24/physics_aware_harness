@@ -1,0 +1,41 @@
+{
+  "schema_version": "harness_config_v1",
+  "planning_llm": {
+    "base_url": "https://api.openai.com/v1",
+    "model": "",
+    "image_capability": "unknown",
+    "api_key_env": "SIM_HARNESS_LLM_API_KEY"
+  },
+  "meshy": {
+    "api_key_env": "SIM_HARNESS_MESHY_API_KEY"
+  },
+  "codex_reviewer": {
+    "executable": null
+  },
+  "ue_asset_importer": {
+    "command": [
+      "/Users/laplace/miniforge3/bin/python",
+      "/Users/laplace/phyawareharness/physics_aware_harness/scripts/harness_ue_asset_importer.py"
+    ]
+  },
+  "ue_runtime": {
+    "map_package": "/Game/HarnessGenerated/Maps/BallBoardSmoke.BallBoardSmoke",
+    "actor_class": "/Script/Engine.StaticMeshActor",
+    "asset_registry": "/Volumes/TiPlus7100s/SimulatorWorkspace/physics_aware_harness/catalog/local_generated/asset_registry.local.json",
+    "contact_export": true,
+    "runner_command": [
+      "/Users/laplace/miniforge3/bin/python",
+      "/Users/laplace/phyawareharness/physics_aware_harness/scripts/harness_local_ue_runner.py"
+    ]
+  },
+  "paths": {
+    "workspace": "/Volumes/TiPlus7100s/SimulatorWorkspace/physics_aware_harness",
+    "catalog": null,
+    "ue_project": null,
+    "ue_executable": "/Volumes/TiPlus7100s/UnrealEngine/UE_5.7/Engine/Binaries/Mac/UnrealEditor-Cmd"
+  },
+  "safety": {
+    "default_publication_tier": "reference",
+    "external_calls_default_allow": false
+  }
+}

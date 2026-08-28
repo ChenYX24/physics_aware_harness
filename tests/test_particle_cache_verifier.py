@@ -32,6 +32,28 @@ class ParticleCacheVerifierTests(unittest.TestCase):
         self.assertIn("particle_count_changed", report["failure_codes"])
         self.assertIn("surface_mesh_missing", report["failure_codes"])
 
+    def test_legacy_environment_contract_is_rejected(self) -> None:
+        cache = particle_cache()
+        cache["environment"] = {"type": "five_plane_basin"}
+
+        report = verify_particle_cache(cache)
+
+        self.assertIn("particle_environment_contract", report["failure_codes"])
+
+    def test_cache_assertions_must_match_compiled_contract(self) -> None:
+        cache = particle_cache()
+        expected = {
+            field: cache["environment"][field]
+            for field in ("workspace_bounds_m", "measurements", "assertions")
+        }
+        cache["environment"]["assertions"] = [
+            assertion("weakened", "level", "final", "<=", 100.0),
+        ]
+
+        report = verify_particle_cache(cache, expected_contract=expected)
+
+        self.assertIn("particle_contract_mismatch", report["failure_codes"])
+
     def test_container_penetration_fails(self) -> None:
         cache = particle_cache()
         cache["frames"][1]["positions_m"][0] = [0.0, 0.0, -0.2]
@@ -53,7 +75,7 @@ class ParticleCacheVerifierTests(unittest.TestCase):
         cache = particle_cache()
         cache["frames"][1]["surface"] = {
             **cache["frames"][1]["surface"],
-            "bounds_m": {"min_m": [-0.31, -0.2, 0.0], "max_m": [0.2, 0.2, 1.0]},
+            "bounds_m": {"min_m": [-1.01, -0.2, 0.0], "max_m": [0.2, 0.2, 1.0]},
         }
 
         report = verify_particle_cache(cache)
@@ -73,9 +95,12 @@ class ParticleCacheVerifierTests(unittest.TestCase):
         self.assertEqual(report["status"], "fail")
         self.assertIn("surface_rigid_intersection", report["failure_codes"])
 
-    def test_container_bounds_follow_declared_basin_center(self) -> None:
+    def test_container_bounds_follow_declared_workspace(self) -> None:
         cache = particle_cache()
-        cache["environment"]["center_xy_m"] = [1.0, -2.0]
+        cache["environment"]["workspace_bounds_m"] = {
+            "min_m": [0.0, -3.0, -0.1],
+            "max_m": [2.0, -1.0, 2.0],
+        }
         for frame in cache["frames"]:
             frame["positions_m"] = [[row[0] + 1.0, row[1] - 2.0, row[2]] for row in frame["positions_m"]]
             frame["surface"] = {
@@ -87,179 +112,115 @@ class ParticleCacheVerifierTests(unittest.TestCase):
 
         self.assertEqual(report["status"], "pass", report)
 
-    def test_buoyant_and_dense_bodies_require_separation_and_splash(self) -> None:
+    def test_declared_measurements_and_assertions_pass(self) -> None:
         cache = particle_cache()
-        cache["environment"].update({
-            "initial_condition": {"type": "container_fill"},
-            "initial_liquid_surface_z_m": 0.9,
-            "minimum_splash_rise_m": 0.05,
-            "minimum_float_sink_separation_m": 0.04,
-            "maximum_initial_surface_outlier_m": 0.11,
-            "rigid_objects": [
-                {"id": "rubber", "radius_m": 0.05, "expected_response": "float"},
-                {"id": "lead", "radius_m": 0.05, "expected_response": "sink"},
-            ],
-        })
-        cache["frames"][0]["rigid_objects"] = {"rubber": {"position_m": [0, 0, 1]}, "lead": {"position_m": [0, 0, 1]}}
-        cache["frames"][1]["rigid_objects"] = {"rubber": {"position_m": [0, 0, 0.12]}, "lead": {"position_m": [0, 0, 0.05]}}
-        cache["frames"][1]["positions_m"][0][2] = 0.96
+        cache["environment"] = declared_environment([
+            assertion("initial_level", "level", "initial", ">=", 0.9),
+            assertion("final_level", "level", "final", "<=", 0.1),
+            assertion("level_change", "level", "initial_minus_final", ">=", 0.8),
+            assertion("minimum_width", "width", "max", ">=", 0.25),
+        ])
+        cache["frames"][0]["measurements"] = {"level": 1.0, "width": 0.05}
+        cache["frames"][1]["measurements"] = {"level": 0.05, "width": 0.28}
 
         report = verify_particle_cache(cache)
 
         self.assertEqual(report["status"], "pass", report)
-        self.assertGreaterEqual(report["checks"]["float_sink_separation_m"], 0.04)
-        self.assertGreaterEqual(report["checks"]["splash_rise_m"], 0.05)
-        self.assertEqual(report["checks"]["splash_measurement_start_frame"], 1)
+        self.assertTrue(report["checks"]["declared_measurements_checked"])
+        self.assertAlmostEqual(report["checks"]["measurement_reductions"]["level_change"], 0.95)
 
-    def test_preimpact_residual_droplet_does_not_inflate_splash(self) -> None:
+    def test_generic_assertion_failure_has_no_scenario_specific_code(self) -> None:
         cache = particle_cache()
-        cache["environment"].update({
-            "initial_condition": {"type": "container_fill"},
-            "initial_liquid_surface_z_m": 0.2,
-            "minimum_splash_rise_m": 0.05,
-            "minimum_float_sink_separation_m": 0.04,
-            "maximum_initial_surface_outlier_m": 1.0,
-            "rigid_objects": [
-                {"id": "rubber", "radius_m": 0.05, "expected_response": "float"},
-                {"id": "lead", "radius_m": 0.05, "expected_response": "sink"},
-            ],
-        })
-        cache["frames"][0]["positions_m"] = [[0, 0, 1.0], [0.1, 0, 0.2]]
-        cache["frames"][0]["rigid_objects"] = {"rubber": {"position_m": [0, 0, 1]}, "lead": {"position_m": [0, 0, 1]}}
-        cache["frames"][1]["positions_m"] = [[0, 0, 0.24], [0.1, 0, 0.26]]
-        cache["frames"][1]["rigid_objects"] = {"rubber": {"position_m": [0, 0, 0.12]}, "lead": {"position_m": [0, 0, 0.05]}}
-
-        report = verify_particle_cache(cache)
-
-        self.assertEqual(report["status"], "pass", report)
-        self.assertAlmostEqual(report["checks"]["splash_rise_m"], 0.06)
-
-    def test_unsettled_container_fill_is_rejected_before_render(self) -> None:
-        cache = particle_cache()
-        cache["environment"].update({
-            "initial_condition": {"type": "container_fill"},
-            "initial_liquid_surface_z_m": 0.2,
-            "maximum_initial_surface_outlier_m": 0.08,
-        })
-        cache["frames"][0]["positions_m"] = [[0, 0, 0.2], [0.1, 0, 0.6]]
+        cache["environment"] = declared_environment([
+            assertion("required_width", "width", "final", ">=", 0.2),
+        ])
+        cache["frames"][0]["measurements"] = {"level": 1.0, "width": 0.05}
+        cache["frames"][1]["measurements"] = {"level": 0.0, "width": 0.08}
 
         report = verify_particle_cache(cache)
 
         self.assertEqual(report["status"], "fail")
-        self.assertIn("initial_surface_not_settled", report["failure_codes"])
+        self.assertEqual(report["failure_codes"], ["solver_assertion_failed"])
+        self.assertEqual(report["checks"]["assertion_results"][0]["id"], "required_width")
 
-    def test_uniform_initial_flow_requires_speed_direction_and_displacement(self) -> None:
+    def test_missing_declared_measurement_fails(self) -> None:
         cache = particle_cache()
-        cache["environment"].update({
-            "initial_condition": {
-                "type": "container_fill",
-                "shape": "box",
-                "velocity_field": {"type": "uniform", "velocity_m_s": [0.5, 0.0, 0.0]},
-            },
-            "initial_liquid_surface_z_m": 1.0,
-            "maximum_initial_surface_outlier_m": 0.1,
-            "minimum_initial_flow_speed_m_s": 0.4,
-            "minimum_horizontal_displacement_m": 0.05,
-        })
-        cache["frames"][0]["velocities_m_s"] = [[0.5, 0.0, 0.0], [0.5, 0.0, 0.0]]
-        cache["frames"][1]["positions_m"] = [[0.1, 0.0, 0.9], [0.2, 0.0, 0.9]]
+        cache["environment"] = declared_environment([
+            assertion("required_width", "width", "final", ">=", 0.2),
+        ])
+        cache["frames"][0]["measurements"] = {"level": 1.0}
+        cache["frames"][1]["measurements"] = {"level": 0.0}
 
         report = verify_particle_cache(cache)
 
-        self.assertEqual(report["status"], "pass", report)
-        self.assertEqual(report["checks"]["initial_flow_type"], "uniform")
-        self.assertGreaterEqual(report["checks"]["horizontal_displacement_m"], 0.05)
+        self.assertIn("declared_measurement_missing", report["failure_codes"])
+        self.assertIn("solver_assertion_failed", report["failure_codes"])
 
-    def test_fragmented_final_surface_is_rejected(self) -> None:
+    def test_rigid_body_state_measurement_is_bound_to_structured_cache_state(self) -> None:
         cache = particle_cache()
-        cache["environment"]["minimum_final_surface_component_fraction"] = 0.8
-        cache["frames"][-1]["surface"] = {
-            **cache["frames"][-1]["surface"],
-            "connected_component_count": 12,
-            "largest_component_triangle_fraction": 0.3,
+        declaration = {
+            "id": "body_speed",
+            "type": "rigid_body_state",
+            "body_id": "body",
+            "field": "linear_velocity_m_s",
+            "component": "magnitude",
         }
-
-        report = verify_particle_cache(cache)
-
-        self.assertEqual(report["status"], "fail")
-        self.assertIn("final_surface_too_fragmented", report["failure_codes"])
-
-    def test_asset_bound_container_transfer_requires_source_to_receiver_occupancy(self) -> None:
-        cache = particle_cache()
         cache["environment"] = {
-            "type": "asset_bound_container_transfer",
-            "workspace_bounds_m": {"min_m": [-1.0, -1.0, -0.1], "max_m": [1.0, 1.0, 2.0]},
-            "penetration_tolerance_m": 0.01,
-            "minimum_initial_source_fraction": 0.9,
-            "minimum_final_receiver_fraction": 0.9,
-            "minimum_source_fraction_decrease": 0.85,
-            "maximum_final_spill_fraction": 0.08,
+            **declared_environment([assertion("moves", "body_speed", "max", ">=", 1.0)]),
+            "measurements": [declaration],
         }
-        cache["frames"][0]["transfer_state"] = {
-            "source_fraction": 0.95,
-            "receiver_fraction": 0.0,
-            "outside_both_fraction": 0.05,
-        }
-        cache["frames"][1]["transfer_state"] = {
-            "source_fraction": 0.0,
-            "receiver_fraction": 0.94,
-            "outside_both_fraction": 0.06,
-        }
+        for frame, velocity in zip(cache["frames"], ([0.0, 0.0, 0.0], [3.0, 4.0, 0.0]), strict=True):
+            frame["rigid_objects"] = {"body": {"linear_velocity_m_s": velocity}}
+            frame["measurements"] = {
+                "body_speed": sum(value * value for value in velocity) ** 0.5,
+            }
 
+        self.assertEqual(verify_particle_cache(cache)["status"], "pass")
+
+        cache["frames"][1]["measurements"]["body_speed"] = 4.0
         report = verify_particle_cache(cache)
+        self.assertIn("rigid_body_state_measurement_mismatch", report["failure_codes"])
 
-        self.assertEqual(report["status"], "pass", report)
-        self.assertEqual(report["checks"]["transfer_event_frame"], 1)
-        self.assertAlmostEqual(report["checks"]["final_receiver_fraction"], 0.94)
-
-    def test_asset_bound_container_transfer_rejects_spill(self) -> None:
+    def test_float_and_sink_expectations_are_declared_rigid_body_measurements(self) -> None:
         cache = particle_cache()
+        declarations = [
+            {"id": "light_height", "type": "rigid_body_state", "body_id": "light", "field": "position_m", "component": "z"},
+            {"id": "dense_height", "type": "rigid_body_state", "body_id": "dense", "field": "position_m", "component": "z"},
+        ]
         cache["environment"] = {
-            "type": "asset_bound_container_transfer",
-            "workspace_bounds_m": {"min_m": [-1.0, -1.0, -0.1], "max_m": [1.0, 1.0, 2.0]},
-            "penetration_tolerance_m": 0.01,
-            "minimum_initial_source_fraction": 0.9,
-            "minimum_final_receiver_fraction": 0.9,
-            "minimum_source_fraction_decrease": 0.85,
-            "maximum_final_spill_fraction": 0.08,
+            **declared_environment([
+                assertion("light_remains_high", "light_height", "final", ">=", 0.5),
+                assertion("dense_reaches_low", "dense_height", "final", "<=", 0.1),
+            ]),
+            "measurements": declarations,
         }
-        cache["frames"][0]["transfer_state"] = {"source_fraction": 0.95, "receiver_fraction": 0.0, "outside_both_fraction": 0.05}
-        cache["frames"][1]["transfer_state"] = {"source_fraction": 0.0, "receiver_fraction": 0.7, "outside_both_fraction": 0.3}
+        for frame, light_z, dense_z in zip(cache["frames"], (0.8, 0.7), (0.8, 0.05), strict=True):
+            frame["rigid_objects"] = {
+                "light": {"position_m": [0.0, 0.0, light_z]},
+                "dense": {"position_m": [0.0, 0.0, dense_z]},
+            }
+            frame["measurements"] = {"light_height": light_z, "dense_height": dense_z}
 
-        report = verify_particle_cache(cache)
+        self.assertEqual(verify_particle_cache(cache)["status"], "pass")
 
-        self.assertEqual(report["status"], "fail")
-        self.assertIn("container_transfer_receiver_fraction_too_low", report["failure_codes"])
-        self.assertIn("container_transfer_spill_too_high", report["failure_codes"])
+def assertion(assertion_id: str, measurement_id: str, reduction: str, operator: str, value: float) -> dict:
+    return {
+        "id": assertion_id,
+        "measurement_id": measurement_id,
+        "reduction": reduction,
+        "operator": operator,
+        "value": value,
+    }
 
-    def test_asset_bound_container_transfer_rejects_blob_like_ejection(self) -> None:
-        cache = particle_cache()
-        cache["environment"] = {
-            "type": "asset_bound_container_transfer",
-            "workspace_bounds_m": {"min_m": [-1.0, -1.0, -0.1], "max_m": [1.0, 1.0, 2.0]},
-            "penetration_tolerance_m": 0.01,
-            "minimum_source_evacuation_duration_s": 0.5,
-            "maximum_source_fraction_drop_per_frame": 0.2,
-        }
-        template = cache["frames"][0]
-        cache["frames"] = []
-        for frame, source in enumerate((1.0, 0.98, 0.62, 0.25, 0.0)):
-            cache["frames"].append({
-                **template,
-                "frame": frame,
-                "time_s": frame * 0.1,
-                "transfer_state": {
-                    "source_fraction": source,
-                    "receiver_fraction": 0.0 if source else 1.0,
-                    "outside_both_fraction": 1.0 - source if source else 0.0,
-                },
-            })
 
-        report = verify_particle_cache(cache)
-
-        self.assertEqual(report["status"], "fail")
-        self.assertIn("container_transfer_source_evacuation_too_abrupt", report["failure_codes"])
-        self.assertIn("container_transfer_single_frame_discharge_too_large", report["failure_codes"])
+def declared_environment(assertions: list[dict]) -> dict:
+    return {
+        "type": "rigid_sph_scene",
+        "workspace_bounds_m": {"min_m": [-1.0, -1.0, -0.1], "max_m": [1.0, 1.0, 2.0]},
+        "penetration_tolerance_m": 0.01,
+        "measurements": [{"id": "level"}, {"id": "width"}],
+        "assertions": assertions,
+    }
 
 
 def particle_cache() -> dict:
@@ -274,10 +235,12 @@ def particle_cache() -> dict:
         "schema_version": "harness_particle_cache_v1",
         "solver": {"gravity_m_s2": [0, 0, -9.81]},
         "particles": {"count": 2, "stable_ids": [0, 1]},
-        "environment": {"type": "five_plane_basin", "floor_z_m": 0.0, "wall_half_extent_m": 0.3, "penetration_tolerance_m": 0.01},
+        "environment": declared_environment([
+            assertion("bounded_final_level", "level", "final", "<=", 1.0),
+        ]),
         "frames": [
-            {"frame": 0, "time_s": 0.0, "positions_m": [[0, 0, 1], [0.1, 0, 1]], "velocities_m_s": [[0, 0, 0], [0, 0, 0]], "surface": surface},
-            {"frame": 1, "time_s": 0.1, "positions_m": [[0, 0, 0.9], [0.1, 0, 0.9]], "velocities_m_s": [[0, 0, -1], [0, 0, -1]], "surface": surface},
+            {"frame": 0, "time_s": 0.0, "positions_m": [[0, 0, 1], [0.1, 0, 1]], "velocities_m_s": [[0, 0, 0], [0, 0, 0]], "measurements": {"level": 1.0, "width": 0.1}, "surface": surface},
+            {"frame": 1, "time_s": 0.1, "positions_m": [[0, 0, 0.9], [0.1, 0, 0.9]], "velocities_m_s": [[0, 0, -1], [0, 0, -1]], "measurements": {"level": 0.9, "width": 0.1}, "surface": surface},
         ],
     }
 

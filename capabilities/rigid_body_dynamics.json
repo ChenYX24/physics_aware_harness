@@ -1,0 +1,22 @@
+{
+  "schema_version": "harness_capability_v1",
+  "id": "rigid_body_dynamics",
+  "description": "Execute declarative rigid bodies, colliders, forces, constraints and events without selecting a named physical-process template.",
+  "physical_assumptions": [
+    "Objects declare body type, collision geometry, material, initial state, forces and constraints as data.",
+    "The solver owns all subsequent motion and contact state.",
+    "Scenario names and dataset folders never select runtime or verifier code."
+  ],
+  "required_signals": ["trajectory", "contact_events"],
+  "required_assets": ["declared rigid-body geometry"],
+  "verifier_rules": ["Only explicitly declared atomic trajectory assertions are evaluated."],
+  "failure_taxonomy": ["trajectory_state_invalid", "declared_assertion_failed"],
+  "repair_suggestions": ["Correct the scene primitives, solver capability requirements or declarative assertion."],
+  "smoke_cases": [
+    "cases/falling/falling_block_on_floor.json",
+    "cases/sequential_contact/domino_chain.json"
+  ],
+  "regression_cases": [],
+  "capability_type": "physics_constraint",
+  "stage_ids": ["runtime_backend_execution", "physics_verifier_truth_gate"]
+}

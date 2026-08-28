@@ -26,10 +26,11 @@ def evaluate_parameter_matrix(
 
     ordered = sorted((float(value), Path(path).resolve()) for value, path in runs)
     failures: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
     normalized_specs: list[tuple[Path, dict[str, Any]]] = []
     timebases: list[tuple[Path, dict[str, int | float]]] = []
-    publication_tiers: list[tuple[Path, str]] = []
+    publication_tiers: list[tuple[Path, str, bool]] = []
 
     if len(ordered) < 2:
         add_failure(failures, "F_MATRIX_TOO_SMALL", "parameter matrix requires at least two runs")
@@ -60,6 +61,7 @@ def evaluate_parameter_matrix(
         row["hard_gate_passed"] = hard_gate_passed
         row["technical_score"] = ((quality.get("ranking") or {}).get("technical_score"))
         row["backend"] = readiness.get("backend")
+        ignore_provenance_and_release_gates = readiness.get("provenance_and_release_gate_override") is True
         if readiness.get("backend") != "ue":
             add_failure(failures, "F_BACKEND_NOT_UE", "formal parameter matrix requires UE source runs", value=value, run_path=str(run_dir))
         if not hard_gate_passed:
@@ -67,7 +69,13 @@ def evaluate_parameter_matrix(
 
         provenance = readiness.get("physics_provenance") if isinstance(readiness.get("physics_provenance"), dict) else {}
         if provenance.get("status") != "pass":
-            add_failure(failures, "F_PHYSICS_PROVENANCE", "physics provenance is not pass", value=value, run_path=str(run_dir))
+            add_failure(
+                warnings if ignore_provenance_and_release_gates else failures,
+                "W_PHYSICS_PROVENANCE_IGNORED" if ignore_provenance_and_release_gates else "F_PHYSICS_PROVENANCE",
+                "physics provenance is not pass",
+                value=value,
+                run_path=str(run_dir),
+            )
         raw_timebase = provenance.get("timebase") if isinstance(provenance.get("timebase"), dict) else {}
         timebase = {
             "physics_hz": positive_number(raw_timebase.get("physics_hz")),
@@ -82,16 +90,28 @@ def evaluate_parameter_matrix(
         tier = str(readiness.get("publication_tier") or "")
         row["publication_tier"] = tier or None
         if not tier:
-            add_failure(failures, "F_PUBLICATION_TIER_MISSING", "publication tier is missing", value=value, run_path=str(run_dir))
+            add_failure(
+                warnings if ignore_provenance_and_release_gates else failures,
+                "W_PUBLICATION_TIER_IGNORED" if ignore_provenance_and_release_gates else "F_PUBLICATION_TIER_MISSING",
+                "publication tier is missing",
+                value=value,
+                run_path=str(run_dir),
+            )
         else:
-            publication_tiers.append((run_dir, tier))
+            publication_tiers.append((run_dir, tier, ignore_provenance_and_release_gates))
             tier_ready = (
                 readiness.get("local_preview_ready") is True
                 if tier == "local_preview"
                 else readiness.get("reference_ready") is True
             )
             if not tier_ready:
-                add_failure(failures, "F_PUBLICATION_TIER_NOT_READY", f"{tier} tier is not ready", value=value, run_path=str(run_dir))
+                add_failure(
+                    warnings if ignore_provenance_and_release_gates else failures,
+                    "W_PUBLICATION_TIER_IGNORED" if ignore_provenance_and_release_gates else "F_PUBLICATION_TIER_NOT_READY",
+                    f"{tier} tier is not ready",
+                    value=value,
+                    run_path=str(run_dir),
+                )
 
         propagation = ((quality.get("contacts") or {}).get("complete_passive_propagation") or {})
         propagation_passed = (
@@ -148,11 +168,12 @@ def evaluate_parameter_matrix(
             )
 
     publication_tier = publication_tiers[0][1] if publication_tiers else None
-    for run_dir, tier in publication_tiers[1:]:
+    baseline_tier_override = publication_tiers[0][2] if publication_tiers else False
+    for run_dir, tier, tier_override in publication_tiers[1:]:
         if tier != publication_tier:
             add_failure(
-                failures,
-                "F_PUBLICATION_TIER_MISMATCH",
+                warnings if baseline_tier_override and tier_override else failures,
+                "W_PUBLICATION_TIER_IGNORED" if baseline_tier_override and tier_override else "F_PUBLICATION_TIER_MISMATCH",
                 "publication tier differs across runs",
                 run_path=str(run_dir),
                 expected=publication_tier,
@@ -191,6 +212,7 @@ def evaluate_parameter_matrix(
         "runs": rows,
         "failure_codes": sorted({str(item["code"]) for item in failures}),
         "failures": failures,
+        "warnings": warnings,
     }
 
 

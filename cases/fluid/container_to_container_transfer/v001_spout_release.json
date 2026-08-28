@@ -54,5 +54,5 @@
       "iso_surface_threshold": 0.125
     }
   },
-  "notes": "This is the transfer solver vertical slice: the source-spout boundary is represented by the released cylindrical stream. A rotating source vessel with explicit wall collision and retained-volume accounting is reserved for v002."
+  "notes": "This is a bounded-volume SPH case. More complex scenes use the same declarative rigid-body/SPH contract rather than a phenomenon-specific solver path."
 }

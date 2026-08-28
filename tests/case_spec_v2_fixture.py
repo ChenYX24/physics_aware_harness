@@ -14,8 +14,8 @@ def case_spec_v2_fixture() -> dict[str, Any]:
                 "source_request": "Make one ball hit another ball on a floor.",
             },
             "capabilities": {
-                "primary": "rigid_body_contact_causality",
-                "required": ["rigid_body_contact_causality"],
+                "primary": "rigid_body_dynamics",
+                "required": ["rigid_body_dynamics"],
             },
             "scene": {
                 "environment_intent": "minimal flat test floor",
@@ -106,7 +106,7 @@ def case_spec_v2_fixture() -> dict[str, Any]:
                 "signals": ["trajectory", "contact_events"],
             },
             "verification_requirements": {
-                "assertions": [{"type": "contact_occurs", "objects": ["cue_ball", "target_ball"]}],
+                "assertions": [{"type": "event_exists", "event": "contact", "objects": ["cue_ball", "target_ball"]}],
                 "thresholds": {},
             },
             "variant": {"should_pass": True},

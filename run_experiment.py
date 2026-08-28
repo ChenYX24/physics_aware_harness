@@ -20,7 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", choices=["rgb", "data", "both"], default="both")
     parser.add_argument("--batch", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--suite", choices=["billiards", "domino", "falling"], default="falling")
+    parser.add_argument("--case", required=True, help="Declarative CaseSpec JSON to replicate for the batch.")
     parser.add_argument("--out-root", default="runs/world_model_experiments")
     parser.add_argument("--parallel", type=int, default=1)
     return parser.parse_args()
@@ -29,13 +29,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     stamp = time.strftime("%Y%m%dT%H%M%S")
-    case_dir = workspace_path(None, default_relative=Path("tmp") / "generated_cases" / f"{args.suite}_m2_3_seed{args.seed}_{stamp}")
+    source_name = Path(args.case).stem
+    case_dir = workspace_path(None, default_relative=Path("tmp") / "generated_cases" / f"{source_name}_m2_3_seed{args.seed}_{stamp}")
     run_root = workspace_path(args.out_root, default_relative="runs/world_model_experiments")
     generate_cmd = [
         sys.executable,
         str(ROOT / "scripts" / "harness_generate_cases.py"),
-        "--suite",
-        args.suite,
+        "--case",
+        args.case,
         "--count",
         str(args.batch),
         "--seed",
@@ -66,7 +67,7 @@ def main() -> int:
     payload = {
         "schema_version": "m2_3_experiment_result.v1",
         "artifact_schema_version": "2.3",
-        "suite": args.suite,
+        "source_case": args.case,
         "mode": args.mode,
         "seed": args.seed,
         "batch": args.batch,
@@ -83,7 +84,7 @@ def main() -> int:
             "run_batch": batch.stderr,
         },
     }
-    report_path = run_root / f"experiment_{args.suite}_{args.mode}_seed{args.seed}_{stamp}.json"
+    report_path = run_root / f"experiment_{source_name}_{args.mode}_seed{args.seed}_{stamp}.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps({**payload, "report_path": str(report_path)}, indent=2, ensure_ascii=False))

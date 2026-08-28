@@ -1,0 +1,505 @@
+{
+  "schema_version": "harness_case_spec_v2",
+  "identity": {
+    "case_id": "five_domino_chain",
+    "title": "Five-domino sequential contact chain",
+    "source_request": "Five upright dominoes tip in order after the first domino starts from a small unstable angle. Only the initial state is prescribed; Unreal Engine Chaos solves every later transform and contact."
+  },
+  "capabilities": {
+    "primary": "rigid_body_dynamics",
+    "required": [
+      "rigid_body_dynamics"
+    ]
+  },
+  "scene": {
+    "environment_intent": "neutral five-domino line on a flat support floor",
+    "coordinate_system": "z_up",
+    "duration_s": 3.0,
+    "bounds_hint_m": [
+      2.4,
+      1.6,
+      1.6
+    ],
+    "layout": "neutral_five_domino_line",
+    "map_preference": "/Game/Maps/MarketEnvironment/Maps/Day.Day"
+  },
+  "timebase": {
+    "physics_hz": 120,
+    "observation_fps": 24,
+    "deterministic_seed": 42,
+    "sample_phase": "initial_then_post_step"
+  },
+  "backend_constraints": {
+    "required_solver_capabilities": [
+      "rigid_body",
+      "contact_events",
+      "trajectory"
+    ],
+    "allowed_solvers": [
+      "fallback",
+      "ue"
+    ],
+    "render_backend": null,
+    "allow_multi_backend": true
+  },
+  "asset_policy": {
+    "allow_local": true,
+    "allow_external": false,
+    "allow_generation": false,
+    "allow_analytic_proxy": true,
+    "required_license_tier": "local_preview"
+  },
+  "objects": [
+    {
+      "id": "domino_0",
+      "role": "domino",
+      "geometry": {
+        "shape_hint": "crate_box",
+        "approx_size_m": [
+          0.06,
+          0.18,
+          0.42
+        ]
+      },
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.08,
+        "collision_required": true,
+        "collider": "box",
+        "collision_profile": "PhysicsActor",
+        "material": {
+          "static_friction": 0.45,
+          "dynamic_friction": 0.32,
+          "restitution": 0.08
+        },
+        "linear_damping": 0.02,
+        "angular_damping": 0.02
+      },
+      "initial_state": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.21
+        ],
+        "rotation_deg": [
+          0.0,
+          -20.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "angular_velocity_rad_s": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "behavior": {}
+    },
+    {
+      "id": "domino_1",
+      "role": "domino",
+      "geometry": {
+        "shape_hint": "crate_box",
+        "approx_size_m": [
+          0.06,
+          0.18,
+          0.42
+        ]
+      },
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.08,
+        "collision_required": true,
+        "collider": "box",
+        "collision_profile": "PhysicsActor",
+        "material": {
+          "static_friction": 0.45,
+          "dynamic_friction": 0.32,
+          "restitution": 0.08
+        },
+        "linear_damping": 0.02,
+        "angular_damping": 0.02
+      },
+      "initial_state": {
+        "position_m": [
+          0.18,
+          0.0,
+          0.21
+        ],
+        "rotation_deg": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "angular_velocity_rad_s": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "behavior": {}
+    },
+    {
+      "id": "domino_2",
+      "role": "domino",
+      "geometry": {
+        "shape_hint": "crate_box",
+        "approx_size_m": [
+          0.06,
+          0.18,
+          0.42
+        ]
+      },
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.08,
+        "collision_required": true,
+        "collider": "box",
+        "collision_profile": "PhysicsActor",
+        "material": {
+          "static_friction": 0.45,
+          "dynamic_friction": 0.32,
+          "restitution": 0.08
+        },
+        "linear_damping": 0.02,
+        "angular_damping": 0.02
+      },
+      "initial_state": {
+        "position_m": [
+          0.36,
+          0.0,
+          0.21
+        ],
+        "rotation_deg": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "angular_velocity_rad_s": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "behavior": {}
+    },
+    {
+      "id": "domino_3",
+      "role": "domino",
+      "geometry": {
+        "shape_hint": "crate_box",
+        "approx_size_m": [
+          0.06,
+          0.18,
+          0.42
+        ]
+      },
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.08,
+        "collision_required": true,
+        "collider": "box",
+        "collision_profile": "PhysicsActor",
+        "material": {
+          "static_friction": 0.45,
+          "dynamic_friction": 0.32,
+          "restitution": 0.08
+        },
+        "linear_damping": 0.02,
+        "angular_damping": 0.02
+      },
+      "initial_state": {
+        "position_m": [
+          0.54,
+          0.0,
+          0.21
+        ],
+        "rotation_deg": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "angular_velocity_rad_s": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "behavior": {}
+    },
+    {
+      "id": "domino_4",
+      "role": "domino",
+      "geometry": {
+        "shape_hint": "crate_box",
+        "approx_size_m": [
+          0.06,
+          0.18,
+          0.42
+        ]
+      },
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.08,
+        "collision_required": true,
+        "collider": "box",
+        "collision_profile": "PhysicsActor",
+        "material": {
+          "static_friction": 0.45,
+          "dynamic_friction": 0.32,
+          "restitution": 0.08
+        },
+        "linear_damping": 0.02,
+        "angular_damping": 0.02
+      },
+      "initial_state": {
+        "position_m": [
+          0.72,
+          0.0,
+          0.21
+        ],
+        "rotation_deg": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "angular_velocity_rad_s": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "behavior": {}
+    },
+    {
+      "id": "domino_floor",
+      "role": "support",
+      "geometry": {
+        "shape_hint": "box",
+        "approx_size_m": [
+          2.0,
+          1.0,
+          0.1
+        ]
+      },
+      "physics": {
+        "body_type": "static",
+        "mass_kg": 100.0,
+        "collision_required": true,
+        "collider": "box",
+        "collision_profile": "BlockAll",
+        "material": {
+          "static_friction": 0.5,
+          "dynamic_friction": 0.4,
+          "restitution": 0.05
+        }
+      },
+      "initial_state": {
+        "position_m": [
+          0.36,
+          0.0,
+          0.0
+        ],
+        "rotation_deg": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "behavior": {}
+    }
+  ],
+  "relations": [
+    {
+      "type": "contact_order",
+      "source": "domino_0",
+      "target": "domino_1"
+    },
+    {
+      "type": "contact_order",
+      "source": "domino_1",
+      "target": "domino_2"
+    },
+    {
+      "type": "contact_order",
+      "source": "domino_2",
+      "target": "domino_3"
+    },
+    {
+      "type": "contact_order",
+      "source": "domino_3",
+      "target": "domino_4"
+    }
+  ],
+  "events": [
+    {
+      "type": "initial_unstable_pitch",
+      "object": "domino_0"
+    }
+  ],
+  "expected_behavior": {
+    "duration_s": 3.0,
+    "ordered_chain": [
+      "domino_0",
+      "domino_1",
+      "domino_2",
+      "domino_3",
+      "domino_4"
+    ],
+    "contact_order": [
+      [
+        "domino_0",
+        "domino_1"
+      ],
+      [
+        "domino_1",
+        "domino_2"
+      ],
+      [
+        "domino_2",
+        "domino_3"
+      ],
+      [
+        "domino_3",
+        "domino_4"
+      ]
+    ],
+    "support": {
+      "default": "domino_floor"
+    },
+    "passive_stationary_until_contact": true,
+    "simulation_contract": {
+      "input_mode": "initial_state_only",
+      "state_solver": "ue_chaos",
+      "trajectory_role": "solver_output_render_cache"
+    },
+    "camera": {
+      "static": [
+        "front_static",
+        "side_static",
+        "top_down"
+      ],
+      "dynamic": [
+        "event_closeup"
+      ]
+    }
+  },
+  "observation_requirements": {
+    "cameras": [
+      {
+        "role": "front_static",
+        "target_objects": [
+          "domino_0",
+          "domino_1",
+          "domino_2",
+          "domino_3",
+          "domino_4"
+        ]
+      },
+      {
+        "role": "side_static",
+        "target_objects": [
+          "domino_0",
+          "domino_1",
+          "domino_2",
+          "domino_3",
+          "domino_4"
+        ]
+      },
+      {
+        "role": "top_down",
+        "target_objects": [
+          "domino_0",
+          "domino_1",
+          "domino_2",
+          "domino_3",
+          "domino_4"
+        ]
+      },
+      {
+        "role": "event_closeup",
+        "target_objects": [
+          "domino_0",
+          "domino_1",
+          "domino_2",
+          "domino_3",
+          "domino_4"
+        ]
+      }
+    ],
+    "modalities": [
+      "rgb",
+      "depth",
+      "segmentation"
+    ],
+    "signals": [
+      "trajectory",
+      "contact_events",
+      "rotation",
+      "camera_trajectory"
+    ]
+  },
+  "verification_requirements": {
+    "assertions": [
+      {
+        "type": "event_sequence",
+        "pairs": [
+          ["domino_0", "domino_1"],
+          ["domino_1", "domino_2"],
+          ["domino_2", "domino_3"],
+          ["domino_3", "domino_4"]
+        ]
+      }
+    ],
+    "thresholds": {}
+  },
+  "variant": {
+    "should_pass": true,
+    "physical_parameters": {
+      "domino_size_m": [
+        0.06,
+        0.18,
+        0.42
+      ],
+      "domino_spacing_m": 0.18,
+      "domino_mass_kg": 0.08,
+      "initial_pitch_deg": -20.0,
+      "restitution": 0.08,
+      "dynamic_friction": 0.32
+    }
+  },
+  "provenance": {
+    "migrated_from": "cases/domino/five_domino_chain.json",
+    "migration_kind": "v1_to_v2_representative"
+  },
+  "notes": "Only initial state is prescribed. No scripted tip event or per-frame keyframe trajectory is part of formal evidence."
+}

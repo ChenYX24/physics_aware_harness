@@ -1,0 +1,4 @@
+interface:
+  display_name: "Run Physics Video"
+  short_description: "Drive durable Harness jobs from the Codex TUI"
+  default_prompt: "Use $run-physics-video to create or resume a durable physics-video job and advance it to its next structured boundary."

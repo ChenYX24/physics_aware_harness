@@ -10,9 +10,381 @@ from unittest.mock import patch
 
 from harness.core.timebase import build_timebase, sample_solver_trajectory
 from harness.verification.run_quality import EXR_MAGIC, evaluate_run
+from harness.verification.run_quality import (
+    validate_articulated_execution,
+    validate_contacts,
+    validate_runtime_binding_snapshot,
+)
 
 
 class RunQualityTests(unittest.TestCase):
+    def test_articulated_execution_requires_post_tick_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            self.write_json(run_dir / "case_spec.json", {
+                "objects": [{
+                    "id": "person",
+                    "solver": {
+                        "type": "articulated_body",
+                        "mode": "kinematic",
+                        "pose_source": {"type": "animation_sequence"},
+                        "root_transform_source": {"type": "character_movement"},
+                    },
+                }],
+            })
+            failures: list[dict] = []
+
+            report = validate_articulated_execution(
+                run_dir,
+                [{"frame": 0, "time": 0.0, "objects": {"person": {"position": [0.0, 0.0, 0.0]}}}],
+                failures,
+            )
+
+            self.assertEqual(report["status"], "fail")
+            self.assertEqual(failures[0]["code"], "F_ARTICULATED_EXECUTION_FAILED")
+
+    def test_articulated_execution_accepts_actual_character_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            self.write_json(run_dir / "case_spec.json", {
+                "objects": [{
+                    "id": "person",
+                    "solver": {
+                        "type": "articulated_body",
+                        "mode": "kinematic",
+                        "pose_source": {"type": "animation_sequence"},
+                        "root_transform_source": {"type": "character_movement"},
+                    },
+                }],
+            })
+            frames = []
+            for index, animation_time in enumerate((0.0, 0.04)):
+                frames.append({
+                    "frame": index,
+                    "time": animation_time,
+                    "objects": {"person": {"articulated_observed": {
+                        "sample_phase": "post_tick",
+                        "sample_time_s": animation_time,
+                        "frame_zero_evaluated": True,
+                        "pose_source_type": "animation_sequence",
+                        "root_transform_source_type": "character_movement",
+                        "actor_transform": {"position_m": [animation_time, 0.0, 0.0]},
+                        "bones": {"root": {"position_m": [animation_time, 0.0, 0.0]}},
+                        "movement_mode": "Walking",
+                        "velocity_m_s": [1.0, 0.0, 0.0],
+                        "animation_asset_path": "/Game/Test.Walk",
+                        "animation_time_s": animation_time,
+                        "animation_playing": True,
+                        "root_motion_delta": {"translation_m": [animation_time, 0.0, 0.0], "rotation_deg": [0.0, 0.0, 0.0]},
+                        "grounding": {
+                            "status": "applied",
+                            "support_gap_m": 0.0 if index == 0 else 0.25,
+                        },
+                        "ik": {},
+                        "errors": [],
+                    }}},
+                })
+            failures: list[dict] = []
+
+            report = validate_articulated_execution(run_dir, frames, failures)
+
+            self.assertEqual(report["status"], "pass")
+            self.assertEqual(failures, [])
+
+            frames[0]["objects"]["person"]["articulated_observed"]["grounding"]["support_gap_m"] = 0.03
+            self.assertEqual(validate_articulated_execution(run_dir, frames, [])["status"], "fail")
+
+    def test_articulated_control_layers_require_same_post_tick_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            self.write_json(run_dir / "case_spec.json", {
+                "objects": [{
+                    "id": "person",
+                    "solver": {
+                        "type": "articulated_body",
+                        "mode": "kinematic",
+                        "pose_source": {"type": "animation_sequence"},
+                        "pose_overlay": {"keyframes": [{}]},
+                        "ik_targets": [{"goal": "hand_r", "keyframes": [{}]}],
+                        "root_transform_source": {"type": "character_movement", "max_speed_m_s": 1.0},
+                    },
+                }],
+            })
+            frames = []
+            for index, sample_time in enumerate((0.0, 0.04)):
+                frames.append({
+                    "frame": index,
+                    "time": sample_time,
+                    "objects": {"person": {"articulated_observed": {
+                        "sample_phase": "post_tick",
+                        "sample_time_s": sample_time,
+                        "frame_zero_evaluated": True,
+                        "pose_source_type": "animation_sequence",
+                        "root_transform_source_type": "character_movement",
+                        "actor_transform": {"position_m": [sample_time, 0.0, 0.0]},
+                        "bones": {"root": {"position_m": [sample_time, 0.0, 0.0]}},
+                        "movement_mode": "Walking",
+                        "velocity_m_s": [1.0, 0.0, 0.0],
+                        "animation_asset_path": "/Game/Test.Walk",
+                        "animation_time_s": sample_time,
+                        "animation_playing": True,
+                        "root_motion_delta": {"translation_m": [sample_time, 0.0, 0.0], "rotation_deg": [0.0, 0.0, 0.0]},
+                        "control_rig": {
+                            "registered": True,
+                            "evaluation_time_s": sample_time,
+                            "evaluation_phase": "post_forwards_solve",
+                            "pre_initialize_executed": True,
+                            "backwards_solve_executed": True,
+                            "pre_forwards_solve_executed": True,
+                            "forwards_solve_executed": True,
+                            "post_forwards_solve_executed": True,
+                            "control_write_verified": True,
+                            "mesh_output_sampled": True,
+                            "coordinate_space": "control_rig_component_lifecycle",
+                        },
+                        "pose_overlay": {"results": [{
+                            "bone": "head",
+                            "commanded_rotation_deg": [0.0, 10.0, 0.0],
+                            "output_rotation_delta_deg": [0.0, 9.8, 0.0],
+                        }]},
+                        "ik": {
+                            "hand_r": {
+                                "weight": 0.5,
+                                "switch_value": 1.0,
+                                "commanded_target_transform": {"position_m": [0.4, 0.0, 1.2]},
+                                "target_control": {"observed_position_m": [0.4, 0.0, 1.2]},
+                                "pole": {
+                                    "target_position_m": [0.2, 0.0, 1.4],
+                                    "observed_position_m": [0.2, 0.0, 1.4],
+                                },
+                                "effector_transform": {"position_m": [0.0, 0.0, 1.0]},
+                                "error_m": 0.45,
+                                "tolerance_m": 0.1,
+                            }
+                        },
+                        "errors": [],
+                    }}},
+                })
+
+            failures: list[dict] = []
+            report = validate_articulated_execution(run_dir, frames, failures)
+            self.assertEqual(report["status"], "pass")
+
+            frames[0]["objects"]["person"]["articulated_observed"]["ik"]["hand_r"]["pole"]["observed_position_m"][2] = 0.4
+            report = validate_articulated_execution(run_dir, frames, [])
+            self.assertEqual(report["status"], "fail")
+            self.assertIn(
+                "ik_pole_control_mismatch",
+                {finding["metric"] for finding in report["objects"]["person"]["findings"]},
+            )
+            frames[0]["objects"]["person"]["articulated_observed"]["ik"]["hand_r"]["pole"]["observed_position_m"][2] = 1.4
+
+            frames[1]["objects"]["person"]["articulated_observed"]["bones"]["root"]["position_m"][2] = 0.5
+            report = validate_articulated_execution(run_dir, frames, [])
+            self.assertEqual(report["status"], "fail")
+            self.assertIn(
+                {"metric": "frame_zero_initialization_jump_m", "value": 0.501597, "allowed": 0.09, "source": "mesh_root"},
+                report["objects"]["person"]["findings"],
+            )
+            frames[1]["objects"]["person"]["articulated_observed"]["bones"]["root"]["position_m"][2] = 0.0
+
+            frames[0]["objects"]["person"]["articulated_observed"]["control_rig"]["evaluation_time_s"] = 0.1
+            report = validate_articulated_execution(run_dir, frames, [])
+            self.assertEqual(report["status"], "fail")
+
+            frames[0]["objects"]["person"]["articulated_observed"]["control_rig"]["evaluation_time_s"] = 0.0
+            frames[0]["objects"]["person"]["articulated_observed"]["control_rig"]["control_write_verified"] = False
+            report = validate_articulated_execution(run_dir, frames, [])
+            self.assertEqual(report["status"], "fail")
+            self.assertIn(
+                "control_rig_command_write_failed",
+                {finding["metric"] for finding in report["objects"]["person"]["findings"]},
+            )
+
+            frames[0]["objects"]["person"]["articulated_observed"]["control_rig"]["control_write_verified"] = True
+            frames[0]["objects"]["person"]["articulated_observed"]["ik"]["hand_r"]["weight"] = 1.0
+            frames[0]["objects"]["person"]["articulated_observed"]["ik"]["hand_r"]["switch_value"] = 1.0
+            frames[0]["objects"]["person"]["articulated_observed"]["ik"]["hand_r"]["error_m"] = 0.0
+            report = validate_articulated_execution(run_dir, frames, [])
+            self.assertEqual(report["status"], "fail")
+
+    def test_solver_declared_measurements_are_contact_evidence_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            self.write_json(
+                run_dir / "case_spec.json",
+                {
+                    "expected_physics": {
+                        "contact_required": True,
+                        "collision_graph": [["fluid", "support"]],
+                    },
+                    "objects": [],
+                },
+            )
+            self.write_json(
+                run_dir / "runtime_plan.json",
+                {
+                    "stages": [
+                        {"id": "solve", "kind": "solve", "outputs": ["trajectory", "declared_measurements"]},
+                        {"id": "render", "kind": "render", "outputs": ["render_artifacts"]},
+                    ]
+                },
+            )
+            self.write_json(run_dir / "contact_events.json", [])
+
+            failures: list[dict] = []
+            report = validate_contacts(run_dir, [], failures)
+
+            self.assertEqual(failures, [])
+            self.assertEqual(report["evidence_authority"], "declared_measurements")
+            self.assertEqual(report["initial_contact_scope"], "solver_declared_measurements")
+            self.assertIsNone(report["initial_expected_contact_free"])
+
+    def test_runtime_constraint_binding_is_compared_as_executed_state(self) -> None:
+        constraint = {
+            "constraint_id": "joint",
+            "body_a": {"object_id": "rod", "runtime_actor_id": "actor_rod"},
+            "body_b": {"object_id": "anchor", "runtime_actor_id": "actor_anchor"},
+            "frame_a": {"position_m": [0.0, 0.0, 0.5], "primary_axis": [0.0, 1.0, 0.0], "secondary_axis": [0.0, 0.0, 1.0]},
+            "frame_b": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [0.0, 1.0, 0.0], "secondary_axis": [0.0, 0.0, 1.0]},
+            "linear_motion": {"x": "locked", "y": "locked", "z": "locked"},
+            "angular_motion": {"x": "free", "y": "locked", "z": "locked"},
+            "angular_limits_deg": {},
+            "collision_enabled": False,
+        }
+        actual = {
+            **constraint,
+            "component_registered": True,
+            "body_bindings_verified": True,
+            "configuration_applied": True,
+            "broken": False,
+        }
+        report = validate_runtime_binding_snapshot(
+            {"constraints": [constraint]},
+            {"runtime_binding_snapshot": {"capture_phase": "pre_simulation", "objects": [], "constraints": [actual]}},
+        )
+        self.assertEqual(report["status"], "pass")
+        actual["body_bindings_verified"] = False
+        report = validate_runtime_binding_snapshot(
+            {"constraints": [constraint]},
+            {"runtime_binding_snapshot": {"capture_phase": "pre_simulation", "objects": [], "constraints": [actual]}},
+        )
+        self.assertEqual(report["status"], "fail")
+
+    def test_articulated_binding_includes_declared_base_rotation(self) -> None:
+        report = validate_runtime_binding_snapshot(
+            {
+                "dynamic_objects": [{
+                    "id": "adult",
+                    "initial_position_m": [0.0, 0.0, 0.0],
+                    "rotation_degrees": [0.0, 0.0, 0.0],
+                    "params": {"base_rotation_degrees": [0.0, 180.0, 0.0], "visible": False},
+                    "physics_properties": {"collision_enabled": False, "simulate_physics": False},
+                }],
+            },
+            {
+                "runtime_binding_snapshot": {
+                    "capture_phase": "pre_simulation",
+                    "objects": [{
+                        "object_id": "adult",
+                        "world_transform": {
+                            "position_m": [0.0, 0.0, 0.0],
+                            "rotation_deg": [0.0, 180.0, 0.0],
+                        },
+                        "asset": {
+                            "render_mesh_path": None,
+                            "collision_mesh_path": None,
+                            "asset_id": None,
+                            "sha256": None,
+                            "binding_metadata_registered": True,
+                        },
+                        "mesh_component": {
+                            "registered": True,
+                            "visible": False,
+                            "participates_in_rendering": False,
+                        },
+                        "visible": False,
+                        "collision_enabled": False,
+                        "simulate_physics": False,
+                        "collision_geometry": None,
+                    }],
+                    "constraints": [],
+                },
+            },
+        )
+
+        self.assertEqual(report["status"], "pass")
+        self.assertEqual(report["residuals"]["adult"]["rotation_deg"], 0.0)
+
+    def test_articulated_character_binding_requires_character_components(self) -> None:
+        expected = {
+            "id": "adult",
+            "behavior": "articulated_character",
+            "initial_position_m": [0.0, 0.0, 0.96],
+            "rotation_degrees": [0.0, 0.0, 0.0],
+            "params": {"base_rotation_degrees": [0.0, 0.0, 0.0], "visible": False},
+            "physics_properties": {"collision_enabled": False, "simulate_physics": False},
+        }
+        actual = {
+            "object_id": "adult",
+            "world_transform": {"position_m": [0.0, 0.0, 0.96], "rotation_deg": [0.0, 0.0, 0.0]},
+            "asset": {
+                "render_mesh_path": None,
+                "collision_mesh_path": None,
+                "asset_id": None,
+                "sha256": None,
+                "binding_metadata_registered": True,
+            },
+            "mesh_component": {
+                "actor_class": "Character",
+                "component_class": "SkeletalMeshComponent",
+                "registered": True,
+                "visible": False,
+                "participates_in_rendering": False,
+            },
+            "articulated_components": {
+                "capsule_registered": True,
+                "character_movement_registered": True,
+                "control_rig_registered": False,
+                "control_rig_path": None,
+            },
+            "visible": False,
+            "collision_enabled": False,
+            "simulate_physics": False,
+            "collision_geometry": None,
+        }
+
+        report = validate_runtime_binding_snapshot(
+            {"dynamic_objects": [expected]},
+            {"runtime_binding_snapshot": {"capture_phase": "pre_simulation", "objects": [actual], "constraints": []}},
+        )
+
+        self.assertEqual(report["status"], "pass")
+        actual["articulated_components"]["character_movement_registered"] = False
+        report = validate_runtime_binding_snapshot(
+            {"dynamic_objects": [expected]},
+            {"runtime_binding_snapshot": {"capture_phase": "pre_simulation", "objects": [actual], "constraints": []}},
+        )
+        self.assertEqual(report["status"], "fail")
+
+        actual["articulated_components"]["character_movement_registered"] = True
+        expected["params"]["articulated_body"] = {
+            "pose_overlay": {"keyframes": [{}]},
+            "control_rig_path": "/Game/Characters/Mannequins/Rigs/CR_Mannequin_Body.CR_Mannequin_Body",
+        }
+        report = validate_runtime_binding_snapshot(
+            {"dynamic_objects": [expected]},
+            {"runtime_binding_snapshot": {"capture_phase": "pre_simulation", "objects": [actual], "constraints": []}},
+        )
+        self.assertEqual(report["status"], "fail")
+        actual["articulated_components"]["control_rig_registered"] = True
+        actual["articulated_components"]["control_rig_path"] = expected["params"]["articulated_body"]["control_rig_path"]
+        report = validate_runtime_binding_snapshot(
+            {"dynamic_objects": [expected]},
+            {"runtime_binding_snapshot": {"capture_phase": "pre_simulation", "objects": [actual], "constraints": []}},
+        )
+        self.assertEqual(report["status"], "pass")
+
     def test_valid_run_passes_hard_gate_and_gets_technical_score(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = self.make_run(Path(tmp))
@@ -22,14 +394,137 @@ class RunQualityTests(unittest.TestCase):
             self.assertTrue(report["hard_gate_passed"])
             self.assertEqual(report["status"], "pass")
             self.assertEqual(report["solver_execution"]["status"], "pass")
+            self.assertEqual(report["solver_execution"]["contact_evidence"], "ue_postsolve_bounds_inference")
             self.assertTrue(report["contacts"]["initial_expected_contact_free"])
             self.assertEqual(report["contacts"]["initial_contact_scope"], "expected_collision_graph")
             self.assertTrue(report["ranking"]["eligible"])
             self.assertIsInstance(report["ranking"]["technical_score"], float)
             self.assertTrue((run_dir / "quality_report.json").is_file())
+            quality_stage = self.read_json(run_dir / "stage_results" / "quality_gate.json")
+            self.assertEqual(quality_stage["status"], "completed")
             readiness = self.read_json(run_dir / "run_readiness.json")
             self.assertTrue(readiness["physics_ready"])
             self.assertEqual(readiness["physics_provenance"]["status"], "pass")
+
+    def test_rgb_observability_failure_is_advisory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_run(Path(tmp))
+            self.write_json(
+                run_dir / "rgb_observability_report.json",
+                {
+                    "status": "fail",
+                    "enforcement": "advisory",
+                    "failures": [{"code": "F_RGB_EXPECTED_SUBJECT_NOT_OBSERVABLE"}],
+                },
+            )
+            with self.mock_ffprobe():
+                report = evaluate_run(run_dir, write=False)
+
+            self.assertTrue(report["hard_gate_passed"])
+            self.assertIn("W_RGB_OBSERVABILITY_LOW", {item["code"] for item in report["warnings"]})
+
+    def test_runtime_binding_mismatch_is_a_direct_hard_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_run(Path(tmp))
+            summary_path = run_dir / "logs" / "native_data" / "summary.json"
+            summary = self.read_json(summary_path)
+            summary["runtime_binding_snapshot"]["objects"][0]["collision_geometry"]["size_m"] = [0.4, 0.4, 0.4]
+            self.write_json(summary_path, summary)
+
+            with self.mock_ffprobe():
+                report = evaluate_run(run_dir, write=False)
+
+            failures = {item["code"]: item for item in report["hard_gate"]["failures"]}
+            self.assertIn("F_RUNTIME_BINDING_MISMATCH", failures)
+            mismatch_fields = {item["field"] for item in failures["F_RUNTIME_BINDING_MISMATCH"]["mismatches"]}
+            self.assertIn("collision_geometry.size_m", mismatch_fields)
+
+    def test_local_preview_requires_rgb_but_not_depth_or_segmentation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_run(Path(tmp))
+            self.write_json(
+                run_dir / "execution_profile.json",
+                {"name": "local_preview"},
+            )
+            self.write_json(run_dir / "inputs" / "render_config.json", {"passes": ["rgb"]})
+            for path in (
+                run_dir / "views" / "front_static" / "depth.exr",
+                run_dir / "views" / "front_static" / "segmentation.exr",
+            ):
+                path.unlink()
+            sensor = self.read_json(run_dir / "sensor_state.json")
+            sensor["depth"] = {"source": "missing"}
+            sensor["segmentation"] = {"instance_level": False}
+            self.write_json(run_dir / "sensor_state.json", sensor)
+            readiness = self.read_json(run_dir / "run_readiness.json")
+            readiness.update(
+                {
+                    "reference_ready": False,
+                    "local_preview_ready": True,
+                    "publication_tier": "local_preview",
+                }
+            )
+            self.write_json(run_dir / "run_readiness.json", readiness)
+
+            with self.mock_ffprobe():
+                report = evaluate_run(run_dir, write=False)
+
+            self.assertTrue(report["hard_gate_passed"], report["hard_gate"]["failures"])
+            self.assertEqual(report["quality_contract"]["required_modalities"], ["rgb"])
+            self.assertFalse(report["quality_contract"]["complete_sensor_contract"])
+            self.assertEqual(report["depth_geometry"]["status"], "not_required")
+            media = report["media"]["views"]["front_static"]
+            self.assertEqual(media["depth"]["status"], "not_required")
+            self.assertEqual(media["segmentation"]["status"], "not_required")
+
+    def test_highres_viewport_requires_complete_rgb_lighting_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_run(Path(tmp))
+            map_report = self.read_json(run_dir / "map_report.json")
+            map_report.pop("rgb_capture")
+            self.write_json(run_dir / "map_report.json", map_report)
+
+            with self.mock_ffprobe():
+                report = evaluate_run(run_dir, write=False)
+
+            self.assertIn(
+                "F_UE_LIGHTING_REPORT_MISSING",
+                {item["code"] for item in report["hard_gate"]["failures"]},
+            )
+
+    def test_highres_viewport_rejects_active_preview_shadow_indicator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_run(Path(tmp))
+            map_report = self.read_json(run_dir / "map_report.json")
+            map_report["rgb_capture"]["viewport_hygiene"]["preview_shadow_indicator_disabled"] = False
+            map_report["rgb_capture"]["preview_shadow_safe"] = False
+            self.write_json(run_dir / "map_report.json", map_report)
+
+            with self.mock_ffprobe():
+                report = evaluate_run(run_dir, write=False)
+
+            self.assertIn(
+                "F_UE_PREVIEW_SHADOW_INDICATOR_ACTIVE",
+                {item["code"] for item in report["hard_gate"]["failures"]},
+            )
+
+    def test_highres_viewport_rejects_non_movable_runtime_light(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_run(Path(tmp))
+            map_report = self.read_json(run_dir / "map_report.json")
+            audit = map_report["rgb_capture"]["runtime_light_audit"]
+            audit["preview_shadow_safe"] = False
+            audit["remaining_non_movable"] = ["StaticSun"]
+            map_report["rgb_capture"]["preview_shadow_safe"] = False
+            self.write_json(run_dir / "map_report.json", map_report)
+
+            with self.mock_ffprobe():
+                report = evaluate_run(run_dir, write=False)
+
+            self.assertIn(
+                "F_UE_RUNTIME_LIGHT_MOBILITY_INVALID",
+                {item["code"] for item in report["hard_gate"]["failures"]},
+            )
 
     def test_combined_native_pass_is_a_first_class_solver_evidence_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -118,7 +613,7 @@ class RunQualityTests(unittest.TestCase):
                     "contacts": ([{
                         "objects": ["ball_a", "ball_b"],
                         "method": "ue_postsolve_bounds_inference",
-                        "raw_method": "adp_cpp_runtime_bounds_overlap_or_near_contact",
+                        "raw_method": "adp_cpp_runtime_oriented_box_sat",
                     }] if contact else []),
                 }
 
@@ -408,7 +903,7 @@ class RunQualityTests(unittest.TestCase):
             codes = {item["code"] for item in report["hard_gate"]["failures"]}
             self.assertNotIn("F_SEGMENTATION_PALETTE_CLOSURE", codes)
 
-    def test_complete_rack_spreads_require_every_passive_contact_and_motion(self) -> None:
+    def test_named_spread_metadata_does_not_enable_hidden_quality_gate(self) -> None:
         for expected_spread in ("full_rack_break", "angled_rack_break"):
             with self.subTest(expected_spread=expected_spread), tempfile.TemporaryDirectory() as tmp:
                 run_dir = self.make_run(Path(tmp))
@@ -428,12 +923,9 @@ class RunQualityTests(unittest.TestCase):
                     report = evaluate_run(run_dir, write=False)
 
                 codes = {item["code"] for item in report["hard_gate"]["failures"]}
-                self.assertIn("F_FULL_RACK_CONTACT_INCOMPLETE", codes)
-                self.assertIn("F_FULL_RACK_MOTION_INCOMPLETE", codes)
-                self.assertEqual(
-                    report["contacts"]["complete_passive_propagation"]["expected_spread"],
-                    expected_spread,
-                )
+                self.assertNotIn("F_FULL_RACK_CONTACT_INCOMPLETE", codes)
+                self.assertNotIn("F_FULL_RACK_MOTION_INCOMPLETE", codes)
+                self.assertNotIn("complete_passive_propagation", report["contacts"])
 
     def test_precomputed_replay_cannot_pass_initial_state_live_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -466,6 +958,85 @@ class RunQualityTests(unittest.TestCase):
             self.assertFalse(readiness["reference_ready"])
             self.assertFalse(readiness["local_preview_ready"])
             self.assertEqual(readiness["publication_tier"], "rejected")
+
+    def test_kinematic_driver_object_does_not_require_live_chaos_body(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_run(Path(tmp))
+            runtime_scene = self.read_json(run_dir / "studio_runtime_scene.json")
+            actor = runtime_scene["dynamic_objects"][0]
+            actor["behavior"] = "articulated_kinematic"
+            actor["physics_properties"].update(
+                {
+                    "kinematic": True,
+                    "simulate_physics": False,
+                    "collision_enabled": False,
+                    "collision_geometry": None,
+                }
+            )
+            actor["params"]["expected_collision_mesh_path"] = None
+            self.write_json(run_dir / "studio_runtime_scene.json", runtime_scene)
+            summary_path = run_dir / "logs" / "native_data" / "summary.json"
+            summary = self.read_json(summary_path)
+            snapshot = summary["runtime_binding_snapshot"]["objects"][0]
+            snapshot["asset"]["collision_mesh_path"] = None
+            snapshot.update(
+                {
+                    "simulate_physics": False,
+                    "collision_enabled": False,
+                    "collision_geometry": None,
+                }
+            )
+            summary["chaos_runtime"]["actors"][0].update(
+                {"simulate_physics": False, "collision_enabled": False}
+            )
+            self.write_json(summary_path, summary)
+
+            with self.mock_ffprobe():
+                report = evaluate_run(run_dir, write=False)
+
+            self.assertEqual(report["solver_execution"]["status"], "pass")
+            self.assertNotIn(
+                "F_RIGID_SOLVER_PROVENANCE",
+                {item["code"] for item in report["hard_gate"]["failures"]},
+            )
+
+    def test_provenance_override_records_solver_failure_as_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_run(Path(tmp))
+            case = self.read_json(run_dir / "case_spec.json")
+            case["expected_physics"].pop("simulation_contract")
+            self.write_json(run_dir / "case_spec.json", case)
+            runtime_scene = self.read_json(run_dir / "studio_runtime_scene.json")
+            runtime_scene["precomputed_trajectory"] = self.read_json(run_dir / "trajectory.json")
+            runtime_scene["physics_controls"].update(
+                {
+                    "simulate_physics": False,
+                    "simulation_driver": "mujoco_rigid",
+                    "runtime_driver_backend": "precomputed_trajectory",
+                    "cpp_runtime_driver_enabled": False,
+                }
+            )
+            self.write_json(run_dir / "studio_runtime_scene.json", runtime_scene)
+            self.write_json(
+                run_dir / "quality_policy.json",
+                {
+                    "schema_version": "harness_quality_policy_v1",
+                    "ignore_provenance_and_release_gates": True,
+                },
+            )
+
+            with self.mock_ffprobe():
+                report = evaluate_run(run_dir, write=True)
+
+            self.assertTrue(report["hard_gate_passed"])
+            self.assertEqual(report["solver_execution"]["status"], "fail")
+            self.assertNotIn("F_RIGID_SOLVER_PROVENANCE", {item["code"] for item in report["hard_gate"]["failures"]})
+            warning = next(item for item in report["warnings"] if item.get("original_code") == "F_RIGID_SOLVER_PROVENANCE")
+            self.assertEqual(warning["code"], "W_PROVENANCE_AND_RELEASE_GATE_IGNORED")
+            readiness = self.read_json(run_dir / "run_readiness.json")
+            self.assertTrue(readiness["quality_gate_passed"])
+            self.assertTrue(readiness["local_preview_ready"])
+            self.assertTrue(readiness["provenance_and_release_gate_override"])
 
     def test_solver_provenance_uses_runtime_selected_by_native_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -547,6 +1118,22 @@ class RunQualityTests(unittest.TestCase):
         )
         self.write_json(run_dir / "harness_verifier.json", {"status": "pass", "failure_type": None})
         self.write_json(
+            run_dir / "runtime_plan.json",
+            {
+                "stages": [
+                    {
+                        "id": "solve_render",
+                        "kind": "solve_render",
+                        "outputs": ["trajectory", "render_artifacts", "signals", "contact_events"],
+                    }
+                ]
+            },
+        )
+        self.write_json(
+            run_dir / "inputs" / "render_config.json",
+            {"passes": ["rgb", "depth", "segmentation"]},
+        )
+        self.write_json(
             run_dir / "render_sync_report.json",
             {
                 "status": "pass",
@@ -555,7 +1142,38 @@ class RunQualityTests(unittest.TestCase):
                 "views": {"front_static": {"rgb_path": "views/front_static/rgb.mp4"}},
             },
         )
-        self.write_json(run_dir / "map_report.json", {"status": "pass", "map_opened": True, "selected_map": {"path": "/Game/Test.Test"}})
+        self.write_json(
+            run_dir / "map_report.json",
+            {
+                "status": "pass",
+                "map_opened": True,
+                "selected_map": {"path": "/Game/Test.Test"},
+                "rgb_capture": {
+                    "backend": "highres_viewport",
+                    "existing_map_lights": {
+                        "inspected": 1,
+                        "normalized_to_movable": 1,
+                        "failures": [],
+                        "preview_shadow_safe": True,
+                    },
+                    "runtime_light_audit": {
+                        "inspected": 1,
+                        "enabled": 1,
+                        "normalized_to_movable": 0,
+                        "remaining_non_movable": [],
+                        "failures": [],
+                        "preview_shadow_safe": True,
+                    },
+                    "viewport_hygiene": {
+                        "game_view_after": True,
+                        "preview_shadow_indicator_disabled": True,
+                        "failures": [],
+                        "preview_shadow_safe": True,
+                    },
+                    "preview_shadow_safe": True,
+                },
+            },
+        )
         self.write_json(run_dir / "sensor_state.json", {"frame_count": 2, "views": [{"camera_id": "front_static"}], "depth": {"source": "ue_scene_capture"}, "segmentation": {"instance_level": True}})
         self.write_json(
             run_dir / "asset_resolution.json",
@@ -628,7 +1246,25 @@ class RunQualityTests(unittest.TestCase):
                     {
                         "id": "ball_a",
                         "initial_position_m": [0.0, 0.0, 0.0],
-                        "physics_properties": {"initial_velocity_m_s": [1.0, 0.0, 0.0]},
+                        "rotation_degrees": [0.0, 0.0, 0.0],
+                        "params": {
+                            "visible": True,
+                            "expected_render_mesh_path": "/Engine/BasicShapes/Sphere.Sphere",
+                            "expected_collision_mesh_path": "/Engine/BasicShapes/Sphere.Sphere",
+                            "expected_asset_id": None,
+                            "expected_asset_sha256": None,
+                        },
+                        "physics_properties": {
+                            "initial_velocity_m_s": [1.0, 0.0, 0.0],
+                            "collision_enabled": True,
+                            "simulate_physics": True,
+                            "collision_geometry": {
+                                "shape": "sphere",
+                                "size_m": [0.2, 0.2, 0.2],
+                                "local_center_offset_m": [0.0, 0.0, 0.0],
+                                "world_center_m": [0.0, 0.0, 0.0],
+                            },
+                        },
                     }
                 ],
                 "precomputed_trajectory": [],
@@ -642,6 +1278,38 @@ class RunQualityTests(unittest.TestCase):
                 "studio_runtime_scene": {"path": str(run_dir / "studio_runtime_scene.json")},
                 "runtime_initial_transforms": {
                     "ball_a": {"position_cm": [0.0, 0.0, 0.0], "rotation_degrees": [0.0, 0.0, 0.0]}
+                },
+                "runtime_binding_snapshot": {
+                    "schema_version": "harness_ue_runtime_binding_snapshot_v1",
+                    "capture_phase": "pre_simulation",
+                    "objects": [{
+                        "object_id": "ball_a",
+                        "world_transform": {
+                            "position_m": [0.0, 0.0, 0.0],
+                            "rotation_deg": [0.0, 0.0, 0.0],
+                        },
+                        "asset": {
+                            "render_mesh_path": "/Engine/BasicShapes/Sphere.Sphere",
+                            "collision_mesh_path": "/Engine/BasicShapes/Sphere.Sphere",
+                            "asset_id": None,
+                            "sha256": None,
+                            "binding_metadata_registered": True,
+                        },
+                        "mesh_component": {
+                            "registered": True,
+                            "visible": True,
+                            "participates_in_rendering": True,
+                        },
+                        "visible": True,
+                        "collision_enabled": True,
+                        "simulate_physics": True,
+                        "collision_geometry": {
+                            "shape": "sphere",
+                            "size_m": [0.2, 0.2, 0.2],
+                            "local_center_offset_m": [0.0, 0.0, 0.0],
+                            "world_center_m": [0.0, 0.0, 0.0],
+                        },
+                    }],
                 },
                 "chaos_runtime": {
                     "controls": {
@@ -695,7 +1363,7 @@ class RunQualityTests(unittest.TestCase):
                                 "source": "adp_cpp_runtime_driver",
                             }
                         },
-                        "contacts": [] if contact_frame != 0 else [{"objects": ["ball_a", "ball_b"], "method": "adp_cpp_runtime_bounds_overlap_or_near_contact"}],
+                        "contacts": [] if contact_frame != 0 else [{"objects": ["ball_a", "ball_b"], "method": "adp_cpp_runtime_oriented_box_sat"}],
                     },
                     {
                         "frame": 1,
@@ -709,7 +1377,7 @@ class RunQualityTests(unittest.TestCase):
                                 "source": "adp_cpp_runtime_driver",
                             }
                         },
-                        "contacts": [] if contact_frame != 1 else [{"objects": ["ball_a", "ball_b"], "method": "adp_cpp_runtime_bounds_overlap_or_near_contact"}],
+                        "contacts": [] if contact_frame != 1 else [{"objects": ["ball_a", "ball_b"], "method": "adp_cpp_runtime_oriented_box_sat"}],
                     },
                 ],
             },
@@ -720,7 +1388,7 @@ class RunQualityTests(unittest.TestCase):
                 "frame": contact_frame,
                 "objects": ["ball_a", "ball_b"],
                 "method": "ue_postsolve_bounds_inference",
-                "raw_method": "adp_cpp_runtime_bounds_overlap_or_near_contact",
+                "raw_method": "adp_cpp_runtime_oriented_box_sat",
             }],
         )
         self.write_json(

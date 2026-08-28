@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def native_function_source(name: str) -> str:
-    path = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+    path = ROOT / "scripts" / "native_ue_scene.py"
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(path))
     node = next(item for item in tree.body if isinstance(item, ast.FunctionDef) and item.name == name)
@@ -34,7 +34,7 @@ class UECaseConfigurationTests(unittest.TestCase):
         self.assertIn("set_material(material_index, material)", source)
 
     def test_native_exr_capture_retries_a_missing_image_write(self) -> None:
-        path = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+        path = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         function = next(
             node for node in tree.body
@@ -134,13 +134,13 @@ class UECaseConfigurationTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             timebase = timebase_for_case(case)
 
-        self.assertEqual(timebase["physics_step_count"], 720)
-        self.assertEqual(timebase["full_solver_frame_count"], 721)
-        self.assertEqual(timebase["solver_frame_count"], 145)
-        self.assertEqual(timebase["raw_capture_frame_count"], 145)
-        self.assertEqual(timebase["canonical_frame_count"], 145)
+        self.assertEqual(timebase["physics_step_count"], 600)
+        self.assertEqual(timebase["full_solver_frame_count"], 601)
+        self.assertEqual(timebase["solver_frame_count"], 121)
+        self.assertEqual(timebase["raw_capture_frame_count"], 121)
+        self.assertEqual(timebase["canonical_frame_count"], 121)
         self.assertEqual(timebase["event_window_duration_s"], 5.0)
-        self.assertEqual(timebase["post_event_tail_s"], 1.0)
+        self.assertEqual(timebase["post_event_tail_s"], 0.0)
 
     def test_probe_duration_environment_override_wins(self) -> None:
         with patch.dict(os.environ, {"SIM_STUDIO_UE_DURATION": "1.25"}, clear=True):
@@ -148,11 +148,11 @@ class UECaseConfigurationTests(unittest.TestCase):
 
     def test_case_duration_prefers_expected_then_scene_and_clamps(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(duration_for_case({"expected_physics": {"duration_s": 5.0}, "scene": {"duration_s": 8.0}}), 6.0)
-            self.assertEqual(duration_for_case({"scene": {"duration_s": 7.0}}), 8.0)
-            self.assertEqual(duration_for_case({"scene": {"duration_s": 0.25}}), 2.0)
+            self.assertEqual(duration_for_case({"expected_physics": {"duration_s": 5.0}, "scene": {"duration_s": 8.0}}), 5.0)
+            self.assertEqual(duration_for_case({"scene": {"duration_s": 7.0}}), 7.0)
+            self.assertEqual(duration_for_case({"scene": {"duration_s": 0.25}}), 1.0)
             self.assertEqual(duration_for_case({"scene": {"duration_s": 20.0}}), 12.0)
-            self.assertEqual(duration_for_case({}), 5.0)
+            self.assertEqual(duration_for_case({}), 4.0)
 
     def test_post_event_tail_can_be_calibrated_or_disabled_per_case(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
@@ -199,7 +199,7 @@ class UECaseConfigurationTests(unittest.TestCase):
         self.assertNotIn("advance_", recapture_source)
 
     def test_domino_native_validation_accepts_formal_domino_ids_and_any_rotation_axis(self) -> None:
-        path = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+        path = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         function = next(
             node for node in tree.body
@@ -238,7 +238,7 @@ class UECaseConfigurationTests(unittest.TestCase):
         self.assertFalse(simultaneous["checks"]["domino_order"]["passed"])
 
     def test_formal_domino_case_preserves_the_requested_map(self) -> None:
-        path = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+        path = ROOT / "scripts" / "native_ue_scene.py"
         source = path.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(path))
         assignment = next(

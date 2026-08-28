@@ -19,6 +19,446 @@ class RuntimeActorPlacementTests(unittest.TestCase):
     def load_case(self, relative_path: str) -> dict:
         return json.loads((ROOT / relative_path).read_text(encoding="utf-8"))
 
+    def test_declared_physics_rate_is_not_lowered_by_execution_profile(self) -> None:
+        from scripts.harness_local_ue_runner import timebase_for_case
+
+        with patch.dict(
+            os.environ,
+            {"SIM_STUDIO_UE_FPS": "24", "SIM_STUDIO_UE_PHYSICS_HZ": "120"},
+            clear=False,
+        ):
+            timebase = timebase_for_case({
+                "scene": {"duration_s": 1.0},
+                "timebase": {"physics_hz": 360},
+            })
+
+        self.assertEqual(timebase["physics_hz"], 360)
+        self.assertEqual(timebase["substeps_per_render"], 15)
+
+    def test_required_segmentation_visibility_excludes_compiled_hidden_proxies(self) -> None:
+        from scripts.harness_local_ue_runner import required_visible_segmentation_object_ids
+
+        required = required_visible_segmentation_object_ids(
+            {
+                "views": [
+                    {
+                        "camera_id": "event_closeup",
+                        "target_object_ids": ["barrel", "table", "ground", "unresolved_target"],
+                    }
+                ]
+            },
+            {
+                "actor_bindings": [
+                    {"object_id": "barrel", "visual_representation": {"visible": True}},
+                    {"object_id": "table", "visual_representation": {"visible": True}},
+                    {"object_id": "ground", "visual_representation": {"visible": False}},
+                ]
+            },
+            live_fracture_ids={"fragment"},
+        )
+
+        self.assertEqual(
+            required,
+            {"event_closeup": {"barrel", "table", "unresolved_target", "fragment"}},
+        )
+
+    def test_generic_constraint_binding_reuses_compiled_actor_ids(self) -> None:
+        from harness.runtime.actor_placement import constraint_bindings_from_case
+
+        declaration = {
+            "id": "joint",
+            "body_a": "rod",
+            "body_b": "anchor",
+            "frame_a": {"position_m": [0.0, 0.0, 0.5], "primary_axis": [0.0, 1.0, 0.0], "secondary_axis": [0.0, 0.0, 1.0]},
+            "frame_b": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [0.0, 1.0, 0.0], "secondary_axis": [0.0, 0.0, 1.0]},
+            "linear_motion": {"x": "free", "y": "locked", "z": "locked"},
+            "angular_motion": {"x": "free", "y": "locked", "z": "locked"},
+            "angular_limits_deg": {},
+            "linear_drive": {
+                "position_enabled": {"x": True, "y": False, "z": False},
+                "velocity_enabled": {"x": False, "y": False, "z": False},
+                "position_target_m": [0.5, 0.0, 0.0],
+                "velocity_target_m_s": [0.0, 0.0, 0.0],
+                "stiffness_n_m": [100.0, 0.0, 0.0],
+                "damping_n_s_m": [2.0, 0.0, 0.0],
+                "max_force_n": [0.0, 0.0, 0.0],
+                "acceleration_mode": False,
+            },
+            "break_thresholds": {"linear_force_n": 500.0},
+            "axial_visual": {"object_id": "anchor", "mesh_forward_axis": "z"},
+            "collision_enabled": False,
+        }
+        bindings = constraint_bindings_from_case(
+            [declaration],
+            [
+                {"object_id": "rod", "runtime_actor_id": "actor_rod"},
+                {"object_id": "anchor", "runtime_actor_id": "actor_anchor"},
+            ],
+            [
+                {"id": "rod", "body_type": "dynamic", "visual_representation": {"source": "asset", "visible": True}},
+                {"id": "anchor", "body_type": "static", "visual_representation": {"source": "asset", "visible": True}},
+            ],
+            target_backend="ue",
+        )
+
+        self.assertEqual(bindings[0]["constraint_id"], "joint")
+        self.assertEqual(bindings[0]["body_a"]["runtime_actor_id"], "actor_rod")
+        self.assertEqual(bindings[0]["body_b"]["runtime_actor_id"], "actor_anchor")
+        self.assertEqual(bindings[0]["body_a"]["endpoint_type"], "rigid_body")
+        self.assertEqual(bindings[0]["body_b"]["frame_space"], "body_local")
+        self.assertNotIn("linear_limit_m", bindings[0])
+        self.assertEqual(bindings[0]["linear_drive"], declaration["linear_drive"])
+        self.assertEqual(bindings[0]["break_thresholds"], declaration["break_thresholds"])
+        self.assertEqual(bindings[0]["axial_visual"], declaration["axial_visual"])
+
+        scene = __import__("scripts.harness_local_ue_runner", fromlist=["build_runtime_scene"]).build_runtime_scene(
+            {"case_id": "constraint_case"},
+            {"views": []},
+            Namespace(map=""),
+            pass_mode="data",
+            actor_placement={"actor_bindings": [], "constraint_bindings": bindings},
+        )
+        self.assertEqual(scene["constraints"], bindings)
+
+    def test_unilateral_distance_spring_is_preserved_in_runtime_binding(self) -> None:
+        from harness.runtime.actor_placement import constraint_bindings_from_case
+
+        declaration = {
+            "id": "elastic_limit",
+            "body_a": "payload",
+            "body_b": "anchor",
+            "frame_a": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+            "frame_b": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+            "linear_motion": {"x": "free", "y": "free", "z": "free"},
+            "unilateral_distance_spring": {"rest_length_m": 1.0, "stiffness_n_m": 45.0, "damping_n_s_m": 3.0},
+            "angular_motion": {"x": "free", "y": "free", "z": "free"},
+            "angular_limits_deg": {},
+            "collision_enabled": False,
+        }
+        bindings = constraint_bindings_from_case(
+            [declaration],
+            [{"object_id": "payload", "runtime_actor_id": "actor_payload"}],
+            [
+                {"id": "payload", "body_type": "dynamic", "visual_representation": {"source": "asset", "visible": True}},
+                {"id": "anchor", "body_type": "static", "initial_position_m": [0.0, 0.0, 2.0], "initial_rotation_deg": [0.0, 0.0, 0.0], "visual_representation": {"source": "none", "visible": False}},
+            ],
+            target_backend="ue",
+        )
+
+        self.assertNotIn("linear_limit_m", bindings[0])
+        self.assertEqual(bindings[0]["unilateral_distance_spring"], declaration["unilateral_distance_spring"])
+
+    def test_hidden_static_constraint_endpoint_compiles_to_world_anchor(self) -> None:
+        from harness.runtime.actor_placement import compile_runtime_actor_placement
+        from harness.verification.runtime_actor_placement_verifier import verify_runtime_actor_placement
+
+        anchor = {
+            "id": "anchor",
+            "body_type": "static",
+            "collision_required": False,
+            "initial_position_m": [2.0, 3.0, 4.0],
+            "initial_rotation_deg": [90.0, 0.0, 0.0],
+            "visual_representation": {"source": "none", "visible": False},
+        }
+        bob = {
+            "id": "bob",
+            "body_type": "dynamic",
+            "collision_required": True,
+            "visual_representation": {"source": "asset", "visible": True},
+        }
+        constraint = {
+            "id": "joint",
+            "body_a": "bob",
+            "body_b": "anchor",
+            "frame_a": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+            "frame_b": {"position_m": [0.5, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+            "linear_motion": {"x": "locked", "y": "locked", "z": "locked"},
+            "angular_motion": {"x": "free", "y": "free", "z": "free"},
+            "angular_limits_deg": {},
+            "collision_enabled": False,
+        }
+        case = {"case_id": "world_anchor", "objects": [bob, anchor], "constraints": [constraint]}
+        scene_layout = {
+            "case_id": "world_anchor",
+            "object_nodes": [
+                {
+                    "object_id": "bob",
+                    "role": "dynamic body",
+                    "shape": "sphere",
+                    "physics_critical": True,
+                    "transform": {"position_m": [0.0, 0.0, 0.0], "rotation_deg": [0.0, 0.0, 0.0]},
+                    "bounds": {"extents_m": [0.1, 0.1, 0.1]},
+                    "visual_representation": {"source": "asset", "visible": True},
+                    "physics": {
+                        "state_kind": "rigid",
+                        "body_type": "dynamic",
+                        "collision_required": True,
+                        "collision_geometry": {"shape": "sphere", "size_m": [0.2, 0.2, 0.2], "world_center_m": [0.0, 0.0, 0.0]},
+                        "collider": "sphere",
+                        "mass_kg": 1.0,
+                    },
+                    "asset_binding": {
+                        "selected_asset_id": "sphere",
+                        "selected_asset_ue_path": "/Engine/BasicShapes/Sphere.Sphere",
+                        "asset_kind": "StaticMesh",
+                        "quality_gate": {"status": "pass"},
+                    },
+                },
+                {
+                    "object_id": "anchor",
+                    "role": "constraint endpoint",
+                    "shape": "fixed_point",
+                    "physics_critical": True,
+                    "transform": {"position_m": [2.0, 3.0, 4.0], "rotation_deg": [90.0, 0.0, 0.0]},
+                    "visual_representation": {"source": "none", "visible": False},
+                    "physics": {"state_kind": "rigid", "body_type": "static", "collision_required": False},
+                    "asset_binding": {},
+                },
+            ],
+            "camera_plan": {"views": [{"id": "front"}]},
+        }
+
+        placement = compile_runtime_actor_placement(case, scene_layout, target_backend="ue")
+        report = verify_runtime_actor_placement(case, placement)
+
+        self.assertEqual([item["object_id"] for item in placement["actor_bindings"]], ["bob"])
+        binding = placement["constraint_bindings"][0]
+        self.assertEqual(binding["body_a"]["endpoint_type"], "rigid_body")
+        self.assertEqual(binding["body_b"], {"endpoint_type": "world_anchor", "object_id": "anchor", "frame_space": "world"})
+        self.assertEqual(binding["frame_b"]["position_m"], [2.0, 3.0, 4.5])
+        for actual, expected in zip(binding["frame_b"]["primary_axis"], [0.0, 0.0, 1.0], strict=True):
+            self.assertAlmostEqual(actual, expected)
+        self.assertEqual(report["status"], "pass")
+
+        visible_case = deepcopy(case)
+        visible_case["objects"][1]["visual_representation"] = {"source": "asset", "visible": True}
+        visible_scene = deepcopy(scene_layout)
+        visible_anchor = visible_scene["object_nodes"][1]
+        visible_anchor["visual_representation"] = {"source": "asset", "visible": True}
+        visible_anchor["asset_binding"] = {
+            "selected_asset_id": "anchor_mesh",
+            "selected_asset_ue_path": "/Engine/BasicShapes/Sphere.Sphere",
+            "asset_kind": "StaticMesh",
+            "quality_gate": {"status": "pass"},
+        }
+        visible_placement = compile_runtime_actor_placement(visible_case, visible_scene, target_backend="ue")
+        visible_report = verify_runtime_actor_placement(visible_case, visible_placement)
+        self.assertEqual([item["object_id"] for item in visible_placement["actor_bindings"]], ["bob", "anchor"])
+        self.assertEqual(visible_placement["constraint_bindings"][0]["body_b"]["endpoint_type"], "world_anchor")
+        self.assertEqual(visible_report["status"], "pass")
+
+        forged = deepcopy(placement)
+        forged["constraint_bindings"][0]["body_a"] = {
+            "endpoint_type": "world_anchor",
+            "object_id": "bob",
+            "frame_space": "world",
+        }
+        forged_report = verify_runtime_actor_placement(case, forged)
+        self.assertEqual(forged_report["status"], "fail")
+        self.assertEqual(forged_report["first_failure"]["metric"], "invalid_runtime_constraint_body_binding")
+
+    def test_world_anchor_lowering_is_symmetric_and_strict(self) -> None:
+        from harness.runtime.actor_placement import (
+            constraint_bindings_from_case,
+            is_actorless_world_anchor_object,
+            is_world_constraint_endpoint_object,
+        )
+
+        anchor = {
+            "id": "anchor",
+            "body_type": "static",
+            "collision_required": False,
+            "initial_position_m": [0.0, 0.0, 0.0],
+            "initial_rotation_deg": [0.0, 0.0, 0.0],
+            "visual_representation": {"source": "none", "visible": False},
+        }
+        frame = {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]}
+        motion = {"x": "locked", "y": "locked", "z": "locked"}
+        constraints = [
+            {"id": "left", "body_a": "anchor", "body_b": "bob_a", "frame_a": frame, "frame_b": frame, "linear_motion": motion, "angular_motion": motion, "angular_limits_deg": {}, "collision_enabled": False},
+            {"id": "right", "body_a": "bob_b", "body_b": "anchor", "frame_a": frame, "frame_b": frame, "linear_motion": motion, "angular_motion": motion, "angular_limits_deg": {}, "collision_enabled": False},
+        ]
+        bodies = [
+            {"id": "bob_a", "body_type": "dynamic", "visual_representation": {"source": "asset", "visible": True}},
+            {"id": "bob_b", "body_type": "dynamic", "visual_representation": {"source": "asset", "visible": True}},
+            anchor,
+        ]
+        bindings = constraint_bindings_from_case(
+            constraints,
+            [
+                {"object_id": "bob_a", "runtime_actor_id": "actor_bob_a"},
+                {"object_id": "bob_b", "runtime_actor_id": "actor_bob_b"},
+            ],
+            bodies,
+            target_backend="ue",
+        )
+
+        self.assertEqual(bindings[0]["body_a"]["endpoint_type"], "world_anchor")
+        self.assertEqual(bindings[1]["body_b"]["endpoint_type"], "world_anchor")
+        self.assertTrue(is_world_constraint_endpoint_object(anchor))
+        self.assertTrue(is_actorless_world_anchor_object(anchor))
+        for field, value in (
+            ("body_type", "dynamic"),
+            ("body_type", "kinematic"),
+            ("collision_required", True),
+        ):
+            invalid = deepcopy(anchor)
+            invalid[field] = value
+            self.assertFalse(is_world_constraint_endpoint_object(invalid))
+        for visual in (
+            {"source": "none", "visible": True},
+            {"source": "asset", "visible": False},
+        ):
+            invalid = deepcopy(anchor)
+            invalid["visual_representation"] = visual
+            self.assertTrue(is_world_constraint_endpoint_object(invalid))
+            self.assertFalse(is_actorless_world_anchor_object(invalid))
+        invalid = deepcopy(anchor)
+        invalid["asset"] = {}
+        self.assertTrue(is_world_constraint_endpoint_object(invalid))
+        self.assertFalse(is_actorless_world_anchor_object(invalid))
+        invalid = deepcopy(anchor)
+        invalid["collision_geometry"] = {"shape": "box", "size_m": [0.1, 0.1, 0.1]}
+        self.assertFalse(is_world_constraint_endpoint_object(invalid))
+
+    def test_compiled_actor_placement_is_not_refit_without_explicit_opt_in(self) -> None:
+        from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement
+
+        binding = {
+            "object_id": "falling_block",
+            "runtime_actor_id": "actor_falling_block",
+            "role": "falling_body",
+            "asset": {"ue_path": "/Engine/BasicShapes/Cube.Cube", "proxy": True},
+            "transform": {"position_m": [0.0, 0.0, 1.2]},
+            "bounds": {"extents_m": [0.25, 0.25, 0.25]},
+            "physics": {
+                "simulate_physics": True,
+                "kinematic": False,
+                "collider": "box",
+                "enable_gravity": True,
+            },
+        }
+        placement = {"actor_bindings": [binding]}
+
+        dynamic, _ = runtime_objects_from_actor_placement(
+            placement,
+            {"objects": [{"id": "falling_block", "initial_position_m": [0.0, 0.0, 1.2]}]},
+        )
+        self.assertEqual(dynamic[0]["initial_position_m"], [0.0, 0.0, 1.2])
+        self.assertIs(dynamic[0]["params"]["fit_dynamic_plan"], False)
+
+        opted_in, _ = runtime_objects_from_actor_placement(
+            placement,
+            {
+                "objects": [
+                    {
+                        "id": "falling_block",
+                        "initial_position_m": [0.0, 0.0, 1.2],
+                        "fit_dynamic_plan": True,
+                    }
+                ]
+            },
+        )
+        self.assertIs(opted_in[0]["params"]["fit_dynamic_plan"], True)
+
+    def test_native_ue_snapshots_initial_pose_before_enabling_physics(self) -> None:
+        import ast
+
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        setup_scene = next(
+            node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "setup_scene"
+        )
+        snapshot_lines = sorted(
+            node.lineno
+            for node in ast.walk(setup_scene)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "record_runtime_initial_transform"
+        )
+        physics_lines = sorted(
+            node.lineno
+            for node in ast.walk(setup_scene)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "configure_runtime_physics"
+        )
+
+        self.assertEqual(len(snapshot_lines), 2)
+        self.assertEqual(len(physics_lines), 2)
+        self.assertTrue(all(snapshot < physics for snapshot, physics in zip(snapshot_lines, physics_lines, strict=True)))
+
+    def test_native_ue_reads_component_scale_from_ue57_property(self) -> None:
+        import ast
+
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "component_scale"
+        )
+        namespace = {}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+
+        class Component:
+            def get_editor_property(self, name):
+                self.requested_property = name
+                return [0.5, 0.6, 0.7]
+
+        component = Component()
+        self.assertEqual(namespace["component_scale"](component), [0.5, 0.6, 0.7])
+        self.assertEqual(component.requested_property, "relative_scale3d")
+
+    def test_native_python_exception_precedes_missing_rgb_classification(self) -> None:
+        from scripts.harness_local_ue_runner import classify_native_pass_failure
+
+        with tempfile.TemporaryDirectory() as temporary:
+            native_output = Path(temporary)
+            (native_output / "ue_process_stdout.log").write_text(
+                "LogPython: Error: Traceback (most recent call last):\n"
+                "LogEditorPythonExecuter: Error: Python script executed with errors\n",
+                encoding="utf-8",
+            )
+            result = classify_native_pass_failure(native_output, "rgb")
+
+        self.assertEqual(result["failure_code"], "F_UE_NATIVE_SCRIPT_EXCEPTION")
+
+    def test_native_callback_traceback_in_summary_precedes_missing_rgb_classification(self) -> None:
+        from scripts.harness_local_ue_runner import classify_native_pass_failure
+
+        with tempfile.TemporaryDirectory() as temporary:
+            native_output = Path(temporary)
+            (native_output / "summary.json").write_text(
+                json.dumps({"errors": [{"error": "Traceback (most recent call last):\nAttributeError: bad UE API"}]}),
+                encoding="utf-8",
+            )
+            result = classify_native_pass_failure(native_output, "rgb")
+
+        self.assertEqual(result["failure_code"], "F_UE_NATIVE_SCRIPT_EXCEPTION")
+
+    def test_constraint_binding_failure_precedes_missing_rgb_classification(self) -> None:
+        from scripts.harness_local_ue_runner import classify_native_pass_failure
+
+        with tempfile.TemporaryDirectory() as temporary:
+            native_output = Path(temporary)
+            (native_output / "summary.json").write_text(
+                json.dumps({"errors": [{"error": "F_RUNTIME_CONSTRAINT_BINDING_FAILED:constraint_binding_incomplete"}]}),
+                encoding="utf-8",
+            )
+            result = classify_native_pass_failure(native_output, "rgb")
+
+        self.assertEqual(result["failure_code"], "F_RUNTIME_CONSTRAINT_BINDING_FAILED")
+
+    def test_failed_native_pass_records_actual_ue_invocation(self) -> None:
+        from scripts.harness_local_ue_runner import fail_report
+
+        report = fail_report(
+            "F_UE_NATIVE_SCRIPT_EXCEPTION",
+            "native script failed",
+            native_ue_invoked=True,
+        )
+
+        self.assertTrue(report["native_ue_invoked"])
+
     def test_fracture_energy_matrix_changes_only_speed_and_expected_outcome(self) -> None:
         matrix_dir = ROOT / "cases" / "fracture" / "steel_ball_board_energy_matrix"
         cases = [json.loads(path.read_text(encoding="utf-8")) for path in sorted(matrix_dir.glob("*.json"))]
@@ -149,7 +589,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         placement = compile_runtime_actor_placement(case, scene_layout, asset_resolution=asset_resolution)
         report = verify_runtime_actor_placement(case, placement)
 
-        self.assertEqual(placement["schema_version"], "harness_runtime_actor_placement_v1")
+        self.assertEqual(placement["schema_version"], "harness_runtime_actor_placement_v2")
         self.assertEqual(report["status"], "pass")
         actor_ids = {binding["runtime_actor_id"] for binding in placement["actor_bindings"]}
         self.assertEqual(len(actor_ids), len(placement["actor_bindings"]))
@@ -184,6 +624,34 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual(by_object["magnet_source"]["physics"]["collision_enabled"], False)
         self.assertTrue(by_object["steel_ball"]["physics"]["simulate_physics"])
 
+    def test_collision_disabled_binding_reaches_runtime_scene(self) -> None:
+        from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement
+
+        binding = {
+            "object_id": "visual_container",
+            "runtime_actor_id": "actor_visual_container",
+            "role": "visible container",
+            "asset": {
+                "ue_path": "/Game/Props/SM_Container.SM_Container",
+                "runtime_usage": "collision_and_visual",
+            },
+            "bounds": {"extents_m": [0.5, 0.5, 0.5]},
+            "transform": {"position_m": [0.0, 0.0, 0.5]},
+            "physics": {
+                "simulate_physics": False,
+                "kinematic": True,
+                "collision_enabled": False,
+                "collider": "box",
+            },
+        }
+
+        _, static = runtime_objects_from_actor_placement(
+            {"actor_bindings": [binding]},
+            {"objects": [{"id": "visual_container"}]},
+        )
+
+        self.assertFalse(static[0]["physics_properties"]["collision_enabled"])
+
     def test_verifier_rejects_physics_object_without_asset_or_proxy(self) -> None:
         from harness.assets.asset_resolver import resolve_asset_intents
         from harness.planning.static_scene_builder import build_static_scene_layout
@@ -200,6 +668,122 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         first["physics"]["proxy"] = False
 
         placement = compile_runtime_actor_placement(case, bad_layout, asset_resolution=asset_resolution)
+        report = verify_runtime_actor_placement(case, placement)
+
+        self.assertEqual(report["status"], "fail")
+        self.assertEqual(report["failure_type"], "F2_asset_missing")
+        self.assertEqual(report["first_failure"]["metric"], "missing_asset_or_proxy_binding")
+
+    def test_solver_generated_particle_uses_render_cache_binding_without_asset(self) -> None:
+        from harness.runtime.actor_placement import compile_runtime_actor_placement
+        from harness.verification.runtime_actor_placement_verifier import verify_runtime_actor_placement
+
+        case = {
+            "case_id": "solver_generated_water",
+            "objects": [
+                {
+                    "id": "water",
+                    "role": "fluid",
+                    "body_type": "dynamic",
+                    "solver": {"material_model": "sph_liquid"},
+                    "visual_representation": {"source": "solver_generated", "visible": True},
+                }
+            ],
+        }
+        scene_layout = {
+            "case_id": case["case_id"],
+            "object_nodes": [
+                {
+                    "object_id": "water",
+                    "role": "fluid",
+                    "shape": "cylinder",
+                    "physics_critical": True,
+                    "solver_declared": True,
+                    "transform": {"position_m": [0.0, 0.0, 0.2], "rotation_deg": [0.0, 0.0, 0.0]},
+                    "bounds": {"extents_m": [0.1, 0.1, 0.2]},
+                    "visual_representation": {"source": "solver_generated", "visible": True},
+                    "physics": {
+                        "state_kind": "particle",
+                        "body_type": "particle",
+                        "collision_required": False,
+                    },
+                    "asset_binding": {},
+                }
+            ],
+            "camera_plan": {"views": [{"id": "front"}]},
+        }
+        handoff = {
+            "contract_id": "particle_surface_cache_v1",
+            "schema_version": "harness_particle_cache_v1",
+            "producer_backend": "genesis_sph",
+            "consumer_backend": "ue",
+            "required_artifacts": ["particle_cache.json"],
+            "adapter_contract": "surface_mesh_sequence_replay_v1",
+        }
+
+        placement = compile_runtime_actor_placement(
+            case,
+            scene_layout,
+            handoff_contract=handoff,
+            target_backend="ue",
+        )
+        report = verify_runtime_actor_placement(case, placement)
+
+        binding = placement["actor_bindings"][0]
+        self.assertEqual(binding["render_binding"]["kind"], "solver_generated")
+        self.assertEqual(binding["render_binding"]["cache_contract"], handoff)
+        self.assertIsNone(binding["asset"]["ue_path"])
+        self.assertFalse(binding["asset"]["proxy"])
+        self.assertEqual(report["status"], "pass")
+
+        missing_handoff = compile_runtime_actor_placement(case, scene_layout, target_backend="ue")
+        missing_report = verify_runtime_actor_placement(case, missing_handoff)
+        self.assertEqual(missing_report["status"], "fail")
+        self.assertEqual(missing_report["failure_type"], "F7_runtime_artifact_incomplete")
+        self.assertEqual(missing_report["first_failure"]["metric"], "solver_generated_render_cache_binding")
+
+    def test_ordinary_asset_representation_still_requires_asset_binding(self) -> None:
+        from harness.runtime.actor_placement import compile_runtime_actor_placement
+        from harness.verification.runtime_actor_placement_verifier import verify_runtime_actor_placement
+
+        case = {
+            "case_id": "missing_asset",
+            "objects": [
+                {
+                    "id": "mug",
+                    "role": "rigid_body",
+                    "body_type": "dynamic",
+                    "collision_required": True,
+                    "visual_representation": {"source": "asset", "visible": True},
+                }
+            ],
+        }
+        scene_layout = {
+            "case_id": "missing_asset",
+            "object_nodes": [
+                {
+                    "object_id": "mug",
+                    "role": "rigid_body",
+                    "shape": "box",
+                    "physics_critical": True,
+                    "transform": {"position_m": [0.0, 0.0, 0.1], "rotation_deg": [0.0, 0.0, 0.0]},
+                    "bounds": {"extents_m": [0.05, 0.05, 0.1]},
+                    "visual_representation": {"source": "asset", "visible": True},
+                    "physics": {
+                        "state_kind": "rigid",
+                        "body_type": "dynamic",
+                        "collision_required": True,
+                        "collider": "box",
+                        "collision_profile": "PhysicsActor",
+                        "mass_kg": 0.2,
+                    },
+                    "asset_binding": {},
+                }
+            ],
+            "camera_plan": {"views": [{"id": "front"}]},
+        }
+
+        placement = compile_runtime_actor_placement(case, scene_layout, target_backend="ue")
         report = verify_runtime_actor_placement(case, placement)
 
         self.assertEqual(report["status"], "fail")
@@ -279,7 +863,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertTrue(static[0]["params"]["generate_solid_material"])
         self.assertEqual(static[0]["params"]["metallic"], 0.65)
 
-    def test_newton_cradle_adds_one_tether_visual_per_ball(self) -> None:
+    def test_constraint_case_does_not_inject_tether_visuals(self) -> None:
         from harness.assets.asset_resolver import resolve_asset_intents
         from harness.planning.static_scene_builder import build_static_scene_layout
         from harness.runtime.actor_placement import compile_runtime_actor_placement
@@ -293,7 +877,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
 
         self.assertEqual(len([item for item in dynamic if item["id"].startswith("ball_")]), 5)
         self.assertTrue(all(item["params"]["fit_dynamic_plan"] is False for item in dynamic if item["id"].startswith("ball_")))
-        self.assertEqual(len([item for item in static if item["behavior"] == "elastic_tether_visual"]), 5)
+        self.assertEqual(len([item for item in static if item["behavior"] == "elastic_tether_visual"]), 0)
         with patch.dict(os.environ, {}, clear=False), patch(
             "scripts.harness_local_ue_runner.simulate_rigid_case",
             return_value=[{"frame": 0, "source": "mujoco_constraint_impulse"}],
@@ -340,12 +924,17 @@ class RuntimeActorPlacementTests(unittest.TestCase):
             placement["actor_bindings"][0]["ue_class"],
             "/Game/DD_Vehicles_Advanced/Blueprints/garage/BP_BoardDestructible.BP_BoardDestructible_C",
         )
-        self.assertEqual(static[0]["asset_kind"], "blueprint")
+        self.assertEqual(static[0]["asset_kind"], "static_mesh")
+        self.assertEqual(static[0]["params"]["visual_asset_kind"], "blueprint")
+        self.assertEqual(
+            static[0]["params"]["visual_ue5_path"],
+            "/Game/DD_Vehicles_Advanced/Blueprints/garage/BP_BoardDestructible.BP_BoardDestructible",
+        )
         self.assertEqual(static[0]["params"]["fracture_response"]["impactor_id"], "striker")
-        self.assertEqual(static[0]["class_name"], "Blueprint")
+        self.assertEqual(static[0]["class_name"], "StaticMesh")
         self.assertEqual(
             static[0]["ue5_path"],
-            "/Game/DD_Vehicles_Advanced/Blueprints/garage/BP_BoardDestructible.BP_BoardDestructible",
+            "/Engine/BasicShapes/Cube.Cube",
         )
 
     def test_geometry_collection_can_compile_an_intact_visual_shell(self) -> None:
@@ -410,6 +999,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         )
         self.assertEqual(dynamic[0]["scale"], [1.0, 1.0, 1.0])
         self.assertTrue(dynamic[0]["params"]["preserve_authored_scale"])
+        self.assertEqual(dynamic[0]["params"]["pose_anchor"], "bounds_center")
         self.assertEqual(dynamic[0]["params"]["desired_extent_cm"], 60.0)
 
         visual_binding = deepcopy(binding)
@@ -423,8 +1013,92 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual(visual[0]["scale"], [0.15, 0.15, 0.15])
         self.assertNotIn("preserve_authored_scale", visual[0]["params"])
         self.assertTrue(visual[0]["params"]["preserve_visual_authored_scale"])
-        native_source = (ROOT / "scripts" / "native_ue_physics_phenomena_scene.py").read_text(encoding="utf-8")
+        native_source = (ROOT / "scripts" / "native_ue_scene.py").read_text(encoding="utf-8")
         self.assertIn('get("preserve_visual_authored_scale")', native_source)
+
+    def test_uniform_instance_scale_reaches_runtime_mesh_and_visual_proxy(self) -> None:
+        from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement
+
+        binding = {
+            "object_id": "crate",
+            "runtime_actor_id": "actor_crate",
+            "role": "passive target",
+            "asset": {
+                "ue_path": "/Game/Provider/Crate.Crate",
+                "runtime_usage": "collision_and_visual",
+                "scale_policy": "fit_uniform_to_approx_size",
+                "scale_applied": True,
+                "instance_scale": [0.75, 0.75, 0.75],
+                "preserve_authored_scale": False,
+            },
+            "bounds": {"extents_m": [0.3, 0.2, 0.25]},
+            "transform": {"position_m": [0.0, 0.0, 0.25]},
+            "physics": {"simulate_physics": True, "collider": "mesh"},
+        }
+
+        dynamic, _ = runtime_objects_from_actor_placement(
+            {"actor_bindings": [binding]},
+            {"objects": [{"id": "crate"}]},
+        )
+        self.assertEqual(dynamic[0]["scale"], [0.75, 0.75, 0.75])
+        self.assertTrue(dynamic[0]["params"]["preserve_authored_scale"])
+        self.assertEqual(dynamic[0]["params"]["pose_anchor"], "bounds_center")
+
+        visual_binding = deepcopy(binding)
+        visual_binding["asset"]["runtime_usage"] = "visual_proxy"
+        visual_binding["physics"]["collider"] = "box"
+        visual, _ = runtime_objects_from_actor_placement(
+            {"actor_bindings": [visual_binding]},
+            {"objects": [{"id": "crate"}]},
+        )
+        self.assertEqual(visual[0]["params"]["visual_instance_scale"], [0.75, 0.75, 0.75])
+        self.assertTrue(visual[0]["params"]["preserve_visual_authored_scale"])
+
+    def test_runtime_verifier_rejects_unapplied_uniform_asset_scale(self) -> None:
+        from harness.verification.runtime_actor_placement_verifier import verify_runtime_actor_placement
+
+        placement = {
+            "schema_version": "harness_runtime_actor_placement_v2",
+            "actor_bindings": [
+                {
+                    "object_id": "crate",
+                    "runtime_actor_id": "actor_crate",
+                    "physics_critical": True,
+                    "asset": {
+                        "ue_path": "/Game/Provider/Crate.Crate",
+                        "proxy": False,
+                        "quality_gate": {"status": "pass_local_preview"},
+                        "scale_policy": "fit_uniform_to_approx_size",
+                        "scale_applied": False,
+                        "instance_scale": [1.0, 1.0, 1.0],
+                    },
+                    "physics": {
+                        "simulate_physics": True,
+                        "collision_enabled": True,
+                        "collider": "box",
+                        "collision_profile": "PhysicsActor",
+                        "mass_kg": 1.0,
+                    },
+                }
+            ],
+            "camera_bindings": [{"camera_id": "front"}],
+            "physics_graph": {"collision_edges": []},
+        }
+        case = {
+            "case_id": "invalid_scale",
+            "objects": [
+                {
+                    "id": "crate",
+                    "body_type": "dynamic",
+                    "collision_required": True,
+                }
+            ],
+        }
+
+        report = verify_runtime_actor_placement(case, placement)
+
+        self.assertEqual(report["status"], "fail")
+        self.assertEqual(report["first_failure"]["metric"], "invalid_uniform_asset_instance_scale")
 
     def test_dynamic_sphere_uses_controlled_collision_geometry(self) -> None:
         from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement, ue_path_for_binding
@@ -475,7 +1149,35 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual(dynamic[0]["params"]["release_time_s"], 1.0)
         self.assertEqual(dynamic[0]["params"]["hold_position_m"], [0.0, -1.4, 0.1])
 
-    def test_elastic_anchor_uses_compact_builtin_cube(self) -> None:
+    def test_v2_delayed_release_preserves_authored_hold_position(self) -> None:
+        from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement
+
+        binding = {
+            "object_id": "crate",
+            "runtime_actor_id": "actor_crate",
+            "role": "dynamic crate",
+            "asset": {"ue_path": "/Game/Props/SM_Crate.SM_Crate", "runtime_usage": "visual_proxy"},
+            "bounds": {"extents_m": [0.3, 0.3, 0.3]},
+            "transform": {"position_m": [1.0, 0.0, 0.83]},
+            "physics": {"simulate_physics": True, "collider": "box"},
+        }
+        dynamic, _ = runtime_objects_from_actor_placement(
+            {"actor_bindings": [binding]},
+            {
+                "v2_projection": {"source_schema_version": "harness_case_spec_v2"},
+                "expected_physics": {"support": {"crate": "ramp"}},
+                "objects": [{
+                    "id": "crate",
+                    "release_time_s": 0.7,
+                    "hold_position_m": [1.0, 0.0, 0.5],
+                    "release_position_m": [1.0, 0.0, 0.5],
+                }],
+            },
+        )
+        self.assertEqual(dynamic[0]["params"]["hold_position_m"], [1.0, 0.0, 0.5])
+        self.assertEqual(dynamic[0]["params"]["release_position_m"], [1.0, 0.0, 0.5])
+
+    def test_static_anchor_preserves_compiled_bounds_without_role_override(self) -> None:
         from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement, ue_path_for_binding
 
         binding = {
@@ -496,9 +1198,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         anchor = next(obj for obj in static if obj["id"] == "anchor")
         self.assertEqual(anchor["ue5_path"], "/Engine/BasicShapes/Cube.Cube")
         self.assertEqual(anchor["asset_kind"], "static_mesh")
-        self.assertEqual(anchor["scale"], [0.18, 0.18, 0.18])
-        self.assertTrue(anchor["params"]["preserve_authored_scale"])
-        self.assertFalse(anchor["params"]["fit_dynamic_plan"])
+        self.assertEqual(anchor["scale"], [0.09, 0.09, 0.09])
         self.assertEqual(anchor["params"]["desired_extent_cm"], 9.0)
 
     def test_compiled_dynamic_sphere_marks_selected_mesh_as_visual_only(self) -> None:
@@ -517,7 +1217,17 @@ class RuntimeActorPlacementTests(unittest.TestCase):
                         "physics_graph_member": True,
                         "transform": {"position_m": [0.0, 0.0, 0.09]},
                         "bounds": {"extents_m": [0.09, 0.09, 0.09]},
-                        "physics": {"collider": "sphere", "collision_profile": "PhysicsActor"},
+                        "physics": {
+                            "collider": "sphere",
+                            "collision_profile": "PhysicsActor",
+                            "collision_geometry": {
+                                "shape": "sphere",
+                                "size_m": [0.18, 0.18, 0.18],
+                                "local_center_offset_m": [0.0, 0.0, 0.0],
+                                "world_center_m": [0.0, 0.0, 0.09],
+                                "source": "analytic_sphere",
+                            },
+                        },
                         "asset_binding": {
                             "selected_asset_id": "game_props_decorative_sm_8ball",
                             "selected_asset_ue_path": "/Game/Props/Decorative/SM_8Ball.SM_8Ball",
@@ -533,6 +1243,175 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual(binding["physics"]["collision_geometry_source"], "analytic_sphere")
         self.assertEqual(binding["physics"]["collision_geometry_verification"], "runtime_controlled")
 
+    def test_static_selected_asset_and_hidden_collision_proxy_are_orthogonal(self) -> None:
+        from harness.runtime.actor_placement import compile_runtime_actor_placement
+        from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement
+
+        node = {
+            "object_id": "table",
+            "role": "support",
+            "shape": "box",
+            "physics_critical": True,
+            "transform": {"position_m": [0.0, 0.0, 0.55], "rotation_deg": [0.0, 0.0, 0.0]},
+            "bounds": {
+                "extents_m": [1.2, 0.55, 0.48],
+                "local_center_offset_m": [0.0, 0.0, -0.48],
+            },
+            "visual_representation": {"source": "asset", "visible": True},
+            "physics": {
+                "body_type": "static",
+                "collision_required": True,
+                "collider": "box",
+                "collision_profile": "BlockAll",
+                "collision_geometry": {
+                    "shape": "box",
+                    "size_m": [2.4, 1.1, 0.06],
+                    "local_center_offset_m": [0.0, 0.0, -0.03],
+                    "world_center_m": [0.0, 0.0, 0.52],
+                    "source": "declared",
+                },
+            },
+            "asset_binding": {
+                "selected_asset_id": "painted_table",
+                "selected_asset_ue_path": "/Game/Provider/SM_Table.SM_Table",
+                "sha256": "abc123",
+            },
+        }
+        placement = compile_runtime_actor_placement(
+            {"case_id": "table"},
+            {"case_id": "table", "object_nodes": [node]},
+        )
+        binding = placement["actor_bindings"][0]
+        dynamic, static = runtime_objects_from_actor_placement(
+            placement,
+            {"case_id": "table", "objects": [{"id": "table"}]},
+        )
+
+        self.assertEqual(dynamic, [])
+        self.assertEqual(binding["asset"]["runtime_usage"], "visual_proxy")
+        self.assertEqual(binding["transform"]["position_m"], [0.0, 0.0, 0.52])
+        self.assertEqual(binding["visual_representation"]["local_bounds_center_from_collision_m"], [0.0, 0.0, -0.44999999999999996])
+        self.assertEqual(static[0]["ue5_path"], "/Engine/BasicShapes/Cube.Cube")
+        self.assertEqual(static[0]["scale"], [2.4, 1.1, 0.06])
+        self.assertEqual(static[0]["params"]["visual_ue5_path"], "/Game/Provider/SM_Table.SM_Table")
+        self.assertTrue(static[0]["params"]["visible"])
+
+        hidden_node = deepcopy(node)
+        hidden_node["object_id"] = "hidden_proxy"
+        hidden_node["visual_representation"]["visible"] = False
+        hidden = compile_runtime_actor_placement(
+            {"case_id": "hidden"},
+            {"case_id": "hidden", "object_nodes": [hidden_node]},
+        )
+        _, hidden_static = runtime_objects_from_actor_placement(
+            hidden,
+            {"case_id": "hidden", "objects": [{"id": "hidden_proxy"}]},
+        )
+        self.assertEqual(hidden["actor_bindings"][0]["asset"]["runtime_usage"], "analytic_proxy")
+        self.assertFalse(hidden_static[0]["params"]["visible"])
+        self.assertNotIn("visual_ue5_path", hidden_static[0]["params"])
+        self.assertTrue(hidden_static[0]["physics_properties"]["collision_enabled"])
+
+    def test_hidden_explicit_collision_needs_no_asset_metadata(self) -> None:
+        from harness.runtime.actor_placement import compile_runtime_actor_placement
+        from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement
+
+        node = {
+            "object_id": "hidden_wall",
+            "role": "collision wall",
+            "shape": "box",
+            "physics_critical": True,
+            "transform": {"position_m": [0.0, 0.0, 0.5], "rotation_deg": [0.0, 0.0, 0.0]},
+            "visual_representation": {"source": "none", "visible": False},
+            "physics": {
+                "body_type": "static",
+                "collision_required": True,
+                "collider": "box",
+                "collision_geometry": {
+                    "shape": "box",
+                    "size_m": [0.1, 1.0, 1.0],
+                    "local_center_offset_m": [0.0, 0.0, 0.0],
+                    "world_center_m": [0.0, 0.0, 0.5],
+                    "source": "declared",
+                },
+            },
+            "asset_binding": {},
+        }
+
+        placement = compile_runtime_actor_placement(
+            {"case_id": "hidden"},
+            {"case_id": "hidden", "object_nodes": [node]},
+        )
+        binding = placement["actor_bindings"][0]
+        _, static = runtime_objects_from_actor_placement(
+            placement,
+            {"case_id": "hidden", "objects": [{"id": "hidden_wall"}]},
+        )
+
+        self.assertTrue(binding["asset"]["proxy"])
+        self.assertEqual(binding["asset"]["runtime_usage"], "analytic_proxy")
+        self.assertEqual(binding["physics"]["collision_profile"], "BlockAll")
+        self.assertEqual(binding["physics"]["collision_geometry_verification"], "runtime_controlled")
+        self.assertEqual(static[0]["ue5_path"], "/Engine/BasicShapes/Cube.Cube")
+        self.assertFalse(static[0]["params"]["visible"])
+
+    def test_asset_body_setup_remains_collision_and_visual(self) -> None:
+        from harness.runtime.actor_placement import compile_runtime_actor_placement
+        from harness.verification.runtime_actor_placement_verifier import verify_runtime_actor_placement
+        from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement
+
+        node = {
+            "object_id": "complex_asset",
+            "role": "dynamic body",
+            "shape": "irregular",
+            "physics_critical": True,
+            "transform": {"position_m": [0.0, 0.0, 1.0], "rotation_deg": [0.0, 0.0, 0.0]},
+            "visual_representation": {"source": "asset", "visible": True},
+            "physics": {
+                "body_type": "dynamic",
+                "collision_required": True,
+                "collider": "simple_convex",
+                "collision_profile": "PhysicsActor",
+                "mass_kg": 2.0,
+            },
+            "asset_binding": {
+                "selected_asset_id": "complex_asset",
+                "selected_asset_ue_path": "/Game/Generated/SM_Complex.SM_Complex",
+                "asset_kind": "StaticMesh",
+                "collision": {"present": True, "kind": "simple_convex"},
+                "collision_body_setup_verified": True,
+                "quality_gate": {"status": "pass"},
+                "instance_scale": [1.0, 1.0, 1.0],
+            },
+        }
+
+        placement = compile_runtime_actor_placement(
+            {"case_id": "asset_collision"},
+            {"case_id": "asset_collision", "object_nodes": [node]},
+        )
+        binding = placement["actor_bindings"][0]
+        dynamic, _ = runtime_objects_from_actor_placement(
+            placement,
+            {"case_id": "asset_collision", "objects": [{"id": "complex_asset"}]},
+        )
+
+        self.assertIsNone(binding["physics"]["collision_geometry"])
+        self.assertEqual(binding["physics"]["collision_geometry_source"], "asset_body_setup")
+        self.assertEqual(binding["physics"]["collision_geometry_verification"], "body_setup_verified")
+        self.assertEqual(binding["asset"]["runtime_usage"], "collision_and_visual")
+        self.assertEqual(dynamic[0]["ue5_path"], "/Game/Generated/SM_Complex.SM_Complex")
+        self.assertNotIn("visual_ue5_path", dynamic[0]["params"])
+
+        node["asset_binding"]["collision_body_setup_verified"] = False
+        unverified = compile_runtime_actor_placement(
+            {"case_id": "asset_collision"},
+            {"case_id": "asset_collision", "object_nodes": [node]},
+        )
+        report = verify_runtime_actor_placement({"case_id": "asset_collision"}, unverified)
+        self.assertEqual(report["status"], "fail")
+        self.assertEqual(report["failure_type"], "F2_asset_missing")
+        self.assertEqual(report["first_failure"]["metric"], "collision_binding_unverified")
+
     def test_declared_box_collider_overrides_unverified_selected_asset_collision(self) -> None:
         from harness.runtime.actor_placement import compile_runtime_actor_placement
         from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement, ue_path_for_binding
@@ -546,14 +1425,24 @@ class RuntimeActorPlacementTests(unittest.TestCase):
                     "role": "passive_target",
                     "shape": "box",
                     "physics_critical": True,
-                    "physics": {"collider": "box", "collision_profile": "PhysicsActor"},
+                    "physics": {
+                        "collider": "box",
+                        "collision_profile": "PhysicsActor",
+                        "collision_geometry": {
+                            "shape": "box",
+                            "size_m": [0.5, 0.5, 0.5],
+                            "local_center_offset_m": [0.0, 0.0, 0.0],
+                            "world_center_m": [0.0, 0.0, 0.0],
+                            "source": "analytic_box",
+                        },
+                    },
                     "asset_binding": {"selected_asset_ue_path": "/Game/Props/SM_Box.SM_Box"},
                 }],
             },
         )
 
         binding = placement["actor_bindings"][0]
-        self.assertEqual(binding["asset"]["runtime_usage"], "analytic_proxy")
+        self.assertEqual(binding["asset"]["runtime_usage"], "visual_proxy")
         self.assertEqual(binding["physics"]["collision_geometry_source"], "analytic_box")
         self.assertEqual(binding["physics"]["collision_geometry_verification"], "runtime_controlled")
         self.assertEqual(ue_path_for_binding(binding), "/Engine/BasicShapes/Cube.Cube")
@@ -563,8 +1452,71 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         )
         self.assertEqual(static, [])
         self.assertEqual(dynamic[0]["ue5_path"], "/Engine/BasicShapes/Cube.Cube")
-        self.assertNotIn("visual_ue5_path", dynamic[0]["params"])
+        self.assertEqual(dynamic[0]["params"]["visual_ue5_path"], "/Game/Props/SM_Box.SM_Box")
+        self.assertEqual(dynamic[0]["params"]["visual_collision_profile"], "NoCollision")
+        self.assertFalse(dynamic[0]["params"]["visual_simulate_physics"])
         self.assertEqual(dynamic[0]["physics_properties"]["collision_geometry_source"], "analytic_box")
+
+    def test_declared_cylinder_collider_uses_centered_proxy_for_provider_visual(self) -> None:
+        from harness.runtime.actor_placement import compile_runtime_actor_placement
+        from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement, ue_path_for_binding
+
+        placement = compile_runtime_actor_placement(
+            {"case_id": "bottle"},
+            {
+                "case_id": "bottle",
+                "object_nodes": [{
+                    "object_id": "bottle",
+                    "role": "passive_target",
+                    "shape": "cylinder",
+                    "physics_critical": True,
+                    "physics": {
+                        "collider": "cylinder",
+                        "collision_profile": "PhysicsActor",
+                        "collision_geometry": {
+                            "shape": "cylinder",
+                            "size_m": [0.5, 0.5, 0.5],
+                            "local_center_offset_m": [0.0, 0.0, 0.0],
+                            "world_center_m": [0.0, 0.0, 0.0],
+                            "source": "analytic_cylinder",
+                        },
+                    },
+                    "asset_binding": {
+                        "selected_asset_ue_path": "/Game/Provider/SM_Bottle.SM_Bottle",
+                        "preserve_authored_scale": True,
+                    },
+                }],
+            },
+        )
+
+        binding = placement["actor_bindings"][0]
+        self.assertEqual(binding["asset"]["runtime_usage"], "visual_proxy")
+        self.assertEqual(binding["physics"]["collision_geometry_source"], "analytic_cylinder")
+        self.assertEqual(binding["physics"]["collision_geometry_verification"], "runtime_controlled")
+        self.assertEqual(ue_path_for_binding(binding), "/Engine/BasicShapes/Cylinder.Cylinder")
+        dynamic, static = runtime_objects_from_actor_placement(
+            placement,
+            {"case_id": "bottle", "objects": [{"id": "bottle"}]},
+        )
+        self.assertEqual(static, [])
+        self.assertEqual(dynamic[0]["ue5_path"], "/Engine/BasicShapes/Cylinder.Cylinder")
+        self.assertEqual(dynamic[0]["params"]["visual_ue5_path"], "/Game/Provider/SM_Bottle.SM_Bottle")
+        self.assertTrue(dynamic[0]["params"]["preserve_visual_authored_scale"])
+
+    def test_native_visual_proxy_tracks_collision_bounds_center(self) -> None:
+        native_source = (ROOT / "scripts" / "native_ue_scene.py").read_text(encoding="utf-8")
+        self.assertIn("physics_origin, _ = actor_bounds(physics_actor)", native_source)
+        self.assertIn("visual_origin, _ = actor_bounds(visual)", native_source)
+        self.assertIn("center_delta = physics_origin + world_offset - visual_origin", native_source)
+        self.assertIn(
+            'obj.get("initial_position_m", [0.0, 0.0, 0.0]),\n                z_offset_cm=0.0,\n                origin=scene_origin,',
+            native_source,
+        )
+
+    def test_native_ue_preserves_selected_asset_materials_for_llm_objects(self) -> None:
+        native_source = (ROOT / "scripts" / "native_ue_scene.py").read_text(encoding="utf-8")
+        self.assertIn('params.get("binding_source") == "ue_asset"', native_source)
+        self.assertIn('params.get("asset_runtime_usage") in {"collision_and_visual", "visual_proxy"}', native_source)
 
     def test_local_ue_runner_preserves_compiled_actor_extent(self) -> None:
         from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement
@@ -580,6 +1532,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
                 "physics": {
                     "simulate_physics": True,
                     "collider": "sphere",
+                    "initial_angular_velocity_rad_s": [0.0, 0.0, 26.179939],
                     "material": {"static_friction": 0.05, "dynamic_friction": 0.035, "restitution": 0.88},
                 },
             }],
@@ -599,8 +1552,9 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual(dynamic[0]["params"]["desired_extent_cm"], 9.0)
         self.assertEqual(dynamic[0]["physics_properties"]["dynamic_friction"], 0.035)
         self.assertEqual(dynamic[0]["physics_properties"]["restitution"], 0.88)
-        self.assertEqual(dynamic[0]["physics_properties"]["linear_damping"], 0.01)
-        self.assertEqual(dynamic[0]["physics_properties"]["angular_damping"], 0.02)
+        self.assertIsNone(dynamic[0]["physics_properties"]["linear_damping"])
+        self.assertIsNone(dynamic[0]["physics_properties"]["angular_damping"])
+        self.assertEqual(dynamic[0]["physics_properties"]["initial_angular_velocity_rad_s"], [0.0, 0.0, 26.179939])
         self.assertEqual(dynamic[0]["params"]["visual_material_path"], "/Game/Materials/MI_Glass.MI_Glass")
 
     def test_domino_case_compiles_as_valid_initial_state_only_chaos_scene(self) -> None:
@@ -632,7 +1586,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertTrue(all(obj["ue5_path"] == "/Engine/BasicShapes/Cube.Cube" for obj in dynamic + static))
         self.assertTrue(
             all(
-                obj["physics_properties"]["collision_geometry_source"] == "analytic_box"
+                obj["physics_properties"]["collision_geometry_source"] == "compiled_default"
                 for obj in dynamic + static
             )
         )
@@ -642,7 +1596,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
                 for obj in dynamic + static
             )
         )
-        self.assertEqual(static[0]["params"]["support_top_m"], 0.0)
+        self.assertNotIn("support_top_m", static[0]["params"])
         self.assertEqual(dynamic[0]["rotation_degrees"], [0.0, -20.0, 0.0])
         self.assertTrue(all(obj.get("rotation_degrees") == [0.0, 0.0, 0.0] for obj in dynamic[1:]))
         self.assertTrue(all(obj["physics_properties"]["initial_velocity_m_s"] == [0.0, 0.0, 0.0] for obj in dynamic))
@@ -651,8 +1605,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
 
         drifted = deepcopy(case)
         drifted["physical_parameters"]["initial_pitch_deg"] = -10.0
-        with self.assertRaisesRegex(ValueError, "initial_pitch_deg"):
-            validate_case_spec(drifted)
+        validate_case_spec(drifted)
 
     def test_sixth_domino_extends_the_existing_initial_state_chain(self) -> None:
         from harness.assets.asset_resolver import resolve_asset_intents
@@ -696,8 +1649,12 @@ class RuntimeActorPlacementTests(unittest.TestCase):
             )
 
         self.assertEqual(runner.call_args.kwargs["env"]["CHAOS_SIMULATION_ENABLED"], "0")
+        self.assertEqual(runner.call_args.kwargs["env"]["RENDER_DEPTH_PASSES"], "0")
+        self.assertEqual(runner.call_args.kwargs["env"]["RENDER_SEGMENTATION_PASSES"], "1")
+        self.assertEqual(runner.call_args.kwargs["env"]["RENDER_DATA_SAMPLE_COUNT"], "6")
+        self.assertEqual((runner.call_args.kwargs["env"]["WIDTH"], runner.call_args.kwargs["env"]["HEIGHT"]), ("640", "360"))
 
-    def test_elastic_case_adds_non_physical_tether_visual(self) -> None:
+    def test_constraint_case_does_not_add_nonphysical_tether_visual(self) -> None:
         from harness.assets.asset_resolver import resolve_asset_intents
         from harness.planning.static_scene_builder import build_static_scene_layout
         from harness.runtime.actor_placement import compile_runtime_actor_placement
@@ -713,11 +1670,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual([obj["id"] for obj in dynamic], ["payload"])
         self.assertEqual(dynamic[0]["ue5_path"], "/Engine/BasicShapes/Sphere.Sphere")
         self.assertEqual(dynamic[0]["asset_kind"], "static_mesh")
-        tether = next(obj for obj in static if obj["id"] == "elastic_tether_visual")
-        self.assertEqual(tether["behavior"], "elastic_tether_visual")
-        self.assertEqual(tether["physics_properties"]["simulate_physics"], "force_off")
-        self.assertEqual(tether["params"]["anchor_id"], "anchor")
-        self.assertEqual(tether["params"]["body_id"], "payload")
+        self.assertNotIn("elastic_tether_visual", {obj["id"] for obj in static})
 
         from scripts.harness_local_ue_runner import ue_path_for_binding
 
@@ -729,7 +1682,7 @@ class RuntimeActorPlacementTests(unittest.TestCase):
                     "asset": {"ue_path": "/Game/Blueprints/BP_Projectile.BP_Projectile", "asset_kind": "Blueprint"},
                 }
             ),
-            "/Engine/BasicShapes/Sphere.Sphere",
+            "/Game/Blueprints/BP_Projectile.BP_Projectile",
         )
 
     def test_ue_rigid_defaults_to_live_chaos_without_precomputed_trajectory(self) -> None:
@@ -859,6 +1812,70 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertTrue(scene["physics_controls"]["simulate_physics"])
         self.assertEqual(scene["map_lighting_controls"]["capture_backend"], "highres_viewport")
 
+    def test_map_report_projects_lighting_from_the_actual_rgb_pass(self) -> None:
+        from scripts.harness_local_ue_runner import build_map_report
+
+        native_summary = {
+            "selected_map": {"opened": True, "opened_package": "/Game/Test"},
+            "loaded_map_actor_count": 2,
+            "lighting": {"existing_map_lights": {"source": "data_pass"}},
+        }
+        rgb_summary = {
+            "capture_backend": "highres_viewport",
+            "lighting": {
+                "capture_backend": "highres_viewport",
+                "existing_map_lights": {"source": "rgb_pass"},
+                "runtime_light_audit": {"preview_shadow_safe": True},
+                "highres_viewport": {
+                    "game_view_after": True,
+                    "preview_shadow_indicator_disabled": True,
+                },
+                "preview_shadow_safe": True,
+            },
+        }
+
+        report = build_map_report(
+            native_summary,
+            rgb_summary,
+            {"background": {"ue5_path": "/Game/Test.Test"}},
+            {"views": [{"camera_id": "front_static"}]},
+        )
+
+        self.assertEqual(report["status"], "pass")
+        self.assertEqual(report["available_lights"]["source"], "data_pass")
+        self.assertEqual(report["rgb_capture"]["existing_map_lights"]["source"], "rgb_pass")
+        self.assertEqual(report["rgb_capture"]["backend"], "highres_viewport")
+        self.assertTrue(report["rgb_capture"]["preview_shadow_safe"])
+
+    def test_unspecified_case_map_uses_controlled_runtime_stage(self) -> None:
+        from scripts.harness_local_ue_runner import build_map_report, build_runtime_scene, runtime_stage_map
+
+        self.assertEqual(runtime_stage_map({"scene": {}}), "studio_runtime")
+        self.assertEqual(
+            runtime_stage_map({"scene": {"map_preference": "/Game/Test.Test"}}),
+            "/Game/Test.Test",
+        )
+        report = build_map_report(
+            {
+                "selected_map": {"name": "StudioRuntimeBlank", "opened": False},
+                "loaded_map_actor_count": 0,
+            },
+            {},
+            {"background": {"ue5_path": "studio_runtime"}},
+            {"views": []},
+        )
+        self.assertEqual(report["status"], "pass")
+        self.assertTrue(report["opened"])
+        self.assertEqual(report["stage_mode"], "controlled_runtime")
+        runtime_scene = build_runtime_scene(
+            {"case_id": "controlled", "scene": {}},
+            {"views": []},
+            Namespace(map="/Game/Boot.Boot"),
+            pass_mode="rgb",
+        )
+        self.assertTrue(runtime_scene["map_lighting_controls"]["spawn_directional_sun"])
+        self.assertFalse(runtime_scene["map_lighting_controls"]["use_existing_map_lights"])
+
     def test_chaos_output_replay_is_not_labeled_as_mujoco(self) -> None:
         from scripts.harness_local_ue_runner import build_runtime_scene
 
@@ -880,6 +1897,27 @@ class RuntimeActorPlacementTests(unittest.TestCase):
 
         self.assertEqual(scene["physics_controls"]["simulation_driver"], "ue_chaos_output_replay")
         self.assertEqual(scene["physics_controls"]["trajectory_source"], "adp_cpp_runtime_driver")
+
+    def test_runtime_scene_preserves_declared_compliant_contacts(self) -> None:
+        from scripts.harness_local_ue_runner import build_runtime_scene
+
+        contacts = [{
+            "id": "ball_pair",
+            "body_a": "a",
+            "body_b": "b",
+            "activation_distance_m": 0.18,
+            "stiffness_n_m": 200000.0,
+            "damping_n_s_m": 5.0,
+        }]
+        scene = build_runtime_scene(
+            {"case_id": "contact_case", "compliant_contacts": contacts},
+            {"views": []},
+            Namespace(map=""),
+            pass_mode="data",
+            simulation_trajectory=None,
+        )
+
+        self.assertEqual(scene["compliant_contacts"], contacts)
 
     def test_camera_runtime_uses_compiled_plan_pose_and_fov(self) -> None:
         from scripts.harness_local_ue_runner import camera_intrinsics, camera_runtime_from_plan
@@ -1124,6 +2162,62 @@ class RuntimeActorPlacementTests(unittest.TestCase):
             self.assertTrue(source.samefile(frame))
             self.assertEqual(result["depth_type"], "view_z")
             self.assertEqual(result["stored_value_to_centimeter"], 10000.0)
+
+    def test_noncanonical_frame_cleanup_preserves_canonical_sensor_sequences(self) -> None:
+        from scripts.harness_local_ue_runner import cleanup_noncanonical_render_frames
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            native = run_dir / "logs" / "native_data"
+            source = native / "segmentation" / "front_static" / "frame_0000.exr"
+            raw = native / "segmentation_raw" / "front_static" / "frame_0000.exr"
+            depth = native / "depth_exr" / "front_static" / "frame_0000.exr"
+            rgb = native / "frames" / "frame_0000.png"
+            for path, payload in ((source, b"mask"), (raw, b"raw"), (depth, b"depth"), (rgb, b"rgb")):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(payload)
+            canonical = run_dir / "views" / "front_static" / "segmentation_frames" / "frame_0000.exr"
+            canonical.parent.mkdir(parents=True, exist_ok=True)
+            canonical.hardlink_to(source)
+            meta = run_dir / "views" / "front_static" / "meta.json"
+            meta.write_text(json.dumps({"segmentation_raw_frames": [str(raw)]}), encoding="utf-8")
+
+            report = cleanup_noncanonical_render_frames(
+                run_dir,
+                native_outputs=[native],
+                keep_render_frames=False,
+            )
+
+            self.assertEqual(report["status"], "pass")
+            self.assertTrue(report["canonical_sensor_sequences_retained"])
+            self.assertTrue(canonical.is_file())
+            self.assertEqual(canonical.read_bytes(), b"mask")
+            self.assertFalse((native / "segmentation").exists())
+            self.assertFalse((native / "segmentation_raw").exists())
+            self.assertFalse((native / "depth_exr").exists())
+            self.assertFalse((native / "frames").exists())
+            self.assertEqual(json.loads(meta.read_text())["segmentation_raw_frames"], [])
+
+    def test_noncanonical_frame_cleanup_honors_keep_switch(self) -> None:
+        from scripts.harness_local_ue_runner import cleanup_noncanonical_render_frames
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            native = run_dir / "logs" / "native_rgb"
+            frame = native / "frames" / "frame_0000.png"
+            frame.parent.mkdir(parents=True)
+            frame.write_bytes(b"rgb")
+
+            report = cleanup_noncanonical_render_frames(
+                run_dir,
+                native_outputs=[native],
+                keep_render_frames=True,
+            )
+
+            self.assertEqual(report["status"], "pass")
+            self.assertTrue(report["keep_render_frames"])
+            self.assertEqual(report["removed"], [])
+            self.assertTrue(frame.is_file())
 
     def test_ue_map_object_path_normalizes_to_package(self) -> None:
         from scripts.harness_local_ue_runner import canonical_game_package

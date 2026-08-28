@@ -288,6 +288,12 @@ catalog/adp/
 2. `harness_generate`：记录生成输入、导入结果和 provenance；协议已预留，端到端生成器未完成。
 3. `harness_find_at_runtime`：运行时发现候选；必须先 materialize 并完成许可检查，才能用于 reference 发布。
 
+Poly Haven `external_site` 在未给出明确 asset ID 时，会先过滤非 3D model 和不满足近似尺寸硬约束的候选，
+随后按名称/ID、标签、类别、描述、CaseSpec taxonomy 与尺寸接近度计算相关性，确定性选择最高分候选；最高分并列时按稳定
+asset ID 排序决胜，不随机、也不因存在多个高分候选而失败。前 20 个候选、分项得分和选择理由写入
+`discovery.json`，并随 Provider receipt 的 `provider_execution.discovery` 保存。明确 source URI 仍保持
+精确身份约束，找不到时 fail closed。
+
 ## 配置并运行 UE
 
 ```bash

@@ -1,0 +1,25 @@
+{
+  "schema_version": "harness_capability_v1",
+  "id": "articulated_body_motion",
+  "description": "Execute declared fixed-skeleton pose keyframes or fixed animation assets with one explicit root-transform owner, optional local pose overlay, hand/foot IK and head look, plus an explicit Chaos ragdoll transition.",
+  "physical_assumptions": [
+    "A single harness UE mannequin, fixed bone/control set and versioned Control Rig define the articulated body.",
+    "Pose and root-transform sources are orthogonal, explicit declarations; no action-name routing or runtime fallback is allowed.",
+    "Animation clips come from the fixed mannequin bundle; Character Movement consumes an explicit root path.",
+    "Execution evidence is sampled at one UE post-tick time from capsule, root, bones, animation, Control Rig, movement, overlay, IK and head-look state.",
+    "Initial ground alignment changes only Z and only when a unique explicit support is available.",
+    "Chaos ragdoll starts only at the explicitly declared time and never as an automatic fallback."
+  ],
+  "required_signals": ["trajectory", "articulated_pose", "articulated_observed"],
+  "required_assets": ["harness_ue_mannequin_v1"],
+  "verifier_rules": ["Validate articulated execution only from UE post-tick observed state; commanded trajectory is not execution evidence."],
+  "failure_taxonomy": ["invalid_articulated_body_contract", "articulated_body_asset_missing", "articulated_pose_application_failed", "F_ARTICULATED_EXECUTION_FAILED"],
+  "repair_suggestions": ["Correct the explicit pose/root source, fixed asset ID, standard bone/IK goal, keyframe timing or UE runtime binding."],
+  "smoke_cases": [
+    "cases_v2/representative/articulated_turn_and_hold.json",
+    "cases_v2/representative/articulated_character_walk_smoke.json"
+  ],
+  "regression_cases": [],
+  "capability_type": "physics_constraint",
+  "stage_ids": ["runtime_backend_execution", "physics_verifier_truth_gate"]
+}

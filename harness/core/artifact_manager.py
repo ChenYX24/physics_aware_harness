@@ -262,6 +262,7 @@ class ArtifactManager:
             "render_sync_report": "render_sync_report.json",
             "run_readiness": "run_readiness.json",
             "quality_report": "quality_report.json",
+            "render_frame_cleanup": "render_frame_cleanup.json",
             "raw_solver_capture": next(
                 (
                     path

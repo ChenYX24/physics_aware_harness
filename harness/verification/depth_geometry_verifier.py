@@ -27,14 +27,16 @@ def verify_depth_geometry(
 ) -> dict[str, Any]:
     run_dir = Path(run_dir)
     case_spec = read_optional_json(run_dir / "case_spec.json") or read_optional_json(run_dir / "inputs" / "case.json")
-    bounds = table_bounds(run_dir)
-    applicable = is_billiards_case(case_spec) and bounds is not None
+    reference = case_spec.get("depth_geometry_reference") if isinstance(case_spec.get("depth_geometry_reference"), dict) else {}
+    object_id = str(reference.get("object_id") or "")
+    bounds = reference_surface_bounds(run_dir, object_id) if object_id else None
+    applicable = bool(object_id and bounds is not None)
     if not applicable:
         report = base_report(
             run_dir,
             "not_applicable",
             False,
-            "case_is_not_billiards" if not is_billiards_case(case_spec) else "analytic_table_surface_missing",
+            "explicit_depth_geometry_reference_missing" if not object_id else "reference_surface_bounds_missing",
         )
         if write:
             write_json(run_dir / "depth_geometry_report.json", report)
@@ -74,7 +76,7 @@ def verify_depth_geometry(
         intrinsics = meta.get("camera_intrinsics") if isinstance(meta.get("camera_intrinsics"), dict) else {}
         width = positive_int(intrinsics.get("width"))
         height = positive_int(intrinsics.get("height"))
-        table_rgb = table_instance_rgb(meta)
+        table_rgb = reference_instance_rgb(meta, object_id)
         for frame_index, (depth_path, segmentation_path) in enumerate(zip(depth_paths, segmentation_paths)):
             frame_failures: list[dict[str, Any]] = []
             metrics: dict[str, Any] = {"support_pixel_count": 0, "mae_cm": None, "p95_cm": None}
@@ -83,7 +85,7 @@ def verify_depth_geometry(
                 frame_failures.append(
                     failure(
                         "F_DEPTH_GEOMETRY_METADATA",
-                        "camera intrinsics or table instance color is missing",
+                        "camera intrinsics or reference-surface instance color is missing",
                         camera_id=camera_id,
                         frame=frame_index,
                     )
@@ -127,7 +129,7 @@ def verify_depth_geometry(
                     frame_failures.append(
                         failure(
                             "F_DEPTH_GEOMETRY_SUPPORT",
-                            "analytic table support has too few visible pixels",
+                            "analytic reference surface has too few visible pixels",
                             camera_id=camera_id,
                             frame=frame_index,
                             actual=metrics["support_pixel_count"],
@@ -138,7 +140,7 @@ def verify_depth_geometry(
                     frame_failures.append(
                         failure(
                             "F_DEPTH_GEOMETRY_MAE",
-                            "table-plane depth MAE exceeds threshold",
+                            "reference-plane depth MAE exceeds threshold",
                             camera_id=camera_id,
                             frame=frame_index,
                             actual_cm=metrics["mae_cm"],
@@ -149,7 +151,7 @@ def verify_depth_geometry(
                     frame_failures.append(
                         failure(
                             "F_DEPTH_GEOMETRY_P95",
-                            "table-plane depth P95 exceeds threshold",
+                            "reference-plane depth P95 exceeds threshold",
                             camera_id=camera_id,
                             frame=frame_index,
                             actual_cm=metrics["p95_cm"],
@@ -194,7 +196,7 @@ def verify_depth_geometry(
     report.update(
         {
             "support_surface": {
-                "object_id": "table",
+                "object_id": object_id,
                 "plane": "world_z_top",
                 "origin_cm": bounds["origin"],
                 "extent_cm": bounds["extent"],
@@ -359,7 +361,7 @@ def load_camera_views(run_dir: Path) -> tuple[dict[str, dict[int, dict[str, Any]
     return views, sources
 
 
-def table_bounds(run_dir: Path) -> dict[str, list[float]] | None:
+def reference_surface_bounds(run_dir: Path, object_id: str) -> dict[str, list[float]] | None:
     summary = next(
         (
             payload
@@ -371,12 +373,12 @@ def table_bounds(run_dir: Path) -> dict[str, list[float]] | None:
         ),
         {},
     )
-    raw = (summary.get("runtime_actor_bounds") or {}).get("table")
+    raw = (summary.get("runtime_actor_bounds") or {}).get(object_id)
     if not isinstance(raw, dict):
         return None
     try:
-        origin = vector3(raw.get("origin"), "table origin")
-        extent = vector3(raw.get("extent"), "table extent")
+        origin = vector3(raw.get("origin"), "reference origin")
+        extent = vector3(raw.get("extent"), "reference extent")
     except ValueError:
         return None
     if any(value <= 0 for value in extent):
@@ -384,24 +386,12 @@ def table_bounds(run_dir: Path) -> dict[str, list[float]] | None:
     return {"origin": origin, "extent": extent}
 
 
-def is_billiards_case(case_spec: dict[str, Any]) -> bool:
-    objects = case_spec.get("objects") if isinstance(case_spec.get("objects"), list) else []
-    object_ids = {
-        str(item.get("id") or item.get("object_id"))
-        for item in objects
-        if isinstance(item, dict) and (item.get("id") or item.get("object_id"))
-    }
-    case_id = str(case_spec.get("case_id") or "").lower()
-    cue_or_ball = "cue_ball" in object_ids or any(item.startswith("target_ball") for item in object_ids)
-    return ("table" in object_ids and cue_or_ball) or any(token in case_id for token in ("billiard", "pool_break", "snooker"))
-
-
-def table_instance_rgb(meta: dict[str, Any]) -> list[float] | None:
+def reference_instance_rgb(meta: dict[str, Any], object_id: str) -> list[float] | None:
     mapping = meta.get("instance_mapping") if isinstance(meta.get("instance_mapping"), list) else []
     for item in mapping:
-        if isinstance(item, dict) and item.get("object_id") == "table":
+        if isinstance(item, dict) and item.get("object_id") == object_id:
             try:
-                return vector3(item.get("rgb"), "table RGB")
+                return vector3(item.get("rgb"), "reference RGB")
             except ValueError:
                 return None
     return None

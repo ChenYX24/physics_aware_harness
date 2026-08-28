@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from harness.core.case_spec import load_case_spec
+from harness.runtime.genesis_headless import import_headless_genesis
 from scripts.harness_taichi_cloth import object_with_role, write_run
 
 
@@ -43,7 +44,7 @@ def vector3(value: Any, name: str) -> tuple[float, float, float]:
 
 
 def simulate(case_data: dict[str, Any]) -> dict[str, Any]:
-    import genesis as gs
+    gs = import_headless_genesis()
 
     solid = object_with_role(case_data, "deformable_solid")
     floor = object_with_role(case_data, "support_surface")
@@ -164,8 +165,10 @@ def main() -> int:
     parser.add_argument("--output-dir", required=True)
     args = parser.parse_args()
     case = load_case_spec(args.case)
-    if case.capability_id != "soft_body_deformation":
-        raise SystemExit(f"Genesis FEM backend requires soft_body_deformation, got {case.capability_id}")
+    from harness.core.physics_contract import infer_scene_domain
+
+    if infer_scene_domain(case.data) != "deformable":
+        raise SystemExit("Genesis FEM backend requires a deformable-domain scene contract")
     result = simulate(case.data)
     verification = write_run(Path(args.output_dir).expanduser().resolve(), case.data, result)
     print(json.dumps(verification, indent=2, ensure_ascii=False))

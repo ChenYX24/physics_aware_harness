@@ -1,0 +1,1633 @@
+from __future__ import annotations
+
+import copy
+import hashlib
+import io
+import json
+import tempfile
+import unittest
+import urllib.error
+from pathlib import Path
+from typing import Any, Mapping
+from unittest.mock import patch
+
+from harness.assets.asset_registry import AssetRegistry
+from harness.assets.providers.contracts import BACKEND_IMPORT_RESULT_SCHEMA, BackendImportResult
+from harness.assets.providers.input_manifest import ProviderInputError, build_provider_input_manifest
+from harness.assets.providers.orchestrator import AssetProviderOrchestrator
+from harness.assets.providers.remote import (
+    MeshyModelGenerationAdapter,
+    PolyHavenExternalSiteAdapter,
+    RemoteProviderError,
+    UrllibRemoteTransport,
+)
+from harness.assets.sqlite_catalog import initialize_catalog
+from harness.core.case_spec_v2 import case_spec_v2_from_dict
+from harness.planning.runtime_compiler import RuntimeCompilationPaused, compile_runtime_case
+from tests.case_spec_v2_fixture import case_spec_v2_fixture
+
+
+class FakeTransport:
+    def __init__(self, *, json_responses: list[Any], downloads: Mapping[str, Any]) -> None:
+        self.json_responses = list(json_responses)
+        self.downloads = dict(downloads)
+        self.requests: list[dict[str, Any]] = []
+        self.download_requests: list[str] = []
+
+    def request_json(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        payload: Mapping[str, Any] | None = None,
+        timeout_s: float = 30.0,
+    ) -> dict[str, Any]:
+        self.requests.append(
+            {"method": method, "url": url, "headers": dict(headers), "payload": dict(payload or {}), "timeout_s": timeout_s}
+        )
+        if not self.json_responses:
+            raise AssertionError(f"unexpected JSON request: {method} {url}")
+        response = self.json_responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    def download(
+        self,
+        url: str,
+        destination: Path,
+        *,
+        headers: Mapping[str, str],
+        expected_md5: str | None = None,
+        timeout_s: float = 120.0,
+    ) -> dict[str, Any]:
+        del headers, timeout_s
+        self.download_requests.append(url)
+        response = self.downloads[url]
+        if isinstance(response, list):
+            response = response.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        payload = response
+        actual_md5 = hashlib.md5(payload, usedforsecurity=False).hexdigest()
+        if expected_md5 and actual_md5 != expected_md5:
+            raise RemoteProviderError("download_hash_mismatch", destination.name)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+        return {
+            "path": destination,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "md5": actual_md5,
+            "byte_size": len(payload),
+        }
+
+
+class StubImporter:
+    def import_asset(self, request, *, work_dir: Path, workspace: Path) -> BackendImportResult:
+        del workspace
+        work_dir.mkdir(parents=True, exist_ok=True)
+        asset_file = work_dir / "SM_Remote.uasset"
+        payload = b"FAKE_REMOTE_UE_STATIC_MESH\n"
+        asset_file.write_bytes(payload)
+        return BackendImportResult.from_dict(
+            {
+                "schema_version": BACKEND_IMPORT_RESULT_SCHEMA,
+                "request_id": request.data["request_id"],
+                "request_digest": request.data["request_digest"],
+                "asset_id": request.data["asset_id"],
+                "status": "fulfilled",
+                "object_path": "/Game/Generated/Provider/SM_Remote.SM_Remote",
+                "class_name": "StaticMesh",
+                "materialized": True,
+                "runtime_ready": True,
+                "files": [
+                    {
+                        "role": "primary",
+                        "local_path": str(asset_file),
+                        "format": "uasset",
+                        "sha256": hashlib.sha256(payload).hexdigest(),
+                        "byte_size": len(payload),
+                        "materialized": True,
+                    }
+                ],
+                "dependencies": [],
+            }
+        )
+
+
+class DependencyStubImporter(StubImporter):
+    def import_asset(self, request, *, work_dir: Path, workspace: Path) -> BackendImportResult:
+        result = super().import_asset(request, work_dir=work_dir, workspace=workspace).to_dict()
+        result["import_validation"] = {
+            "actual_size_cm": [17.0, 17.0, 17.0],
+            "expected_size_m": [0.18, 0.18, 0.18],
+        }
+        dependency_file = work_dir / "MI_Remote.uasset"
+        dependency_payload = b"FAKE_REMOTE_UE_MATERIAL\n"
+        dependency_file.write_bytes(dependency_payload)
+        result["dependencies"] = [
+            {
+                "dependency_id": "/Game/Generated/Provider/MI_Remote.MI_Remote",
+                "package": "/Game/Generated/Provider/MI_Remote",
+                "local_path": str(dependency_file),
+                "format": "uasset",
+                "sha256": hashlib.sha256(dependency_payload).hexdigest(),
+                "byte_size": len(dependency_payload),
+                "materialized": True,
+            }
+        ]
+        return BackendImportResult.from_dict(result)
+
+
+class FailingImporter:
+    def import_asset(self, request, *, work_dir: Path, workspace: Path) -> BackendImportResult:
+        del work_dir, workspace
+        return BackendImportResult.from_dict(
+            {
+                "schema_version": BACKEND_IMPORT_RESULT_SCHEMA,
+                "request_id": request.data["request_id"],
+                "request_digest": request.data["request_digest"],
+                "asset_id": request.data["asset_id"],
+                "status": "failed",
+                "failure": {"code": "backend_asset_import_failed", "message": "fixture failure", "retriable": False},
+            }
+        )
+
+
+class RemoteAssetProviderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.workspace = self.root / "workspace"
+        self.workspace.mkdir()
+        self.catalog_path = self.workspace / "catalog" / "assets" / "catalog.sqlite"
+        initialize_catalog(self.catalog_path)
+        self.registry = AssetRegistry(self.catalog_path)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_meshy_is_blocked_before_network_without_credentials(self) -> None:
+        transport = FakeTransport(json_responses=[], downloads={})
+        adapter = MeshyModelGenerationAdapter(transport=transport, api_key="")
+        with self.assertRaises(RemoteProviderError) as context:
+            adapter.acquire(self._meshy_request([]), destination=self.workspace / "provider", workspace=self.workspace)
+        self.assertEqual(context.exception.code, "provider_credentials_missing")
+        self.assertEqual(context.exception.status, "blocked")
+        self.assertEqual(transport.requests, [])
+
+    def test_insufficient_credits_http_response_is_a_non_retriable_blocker(self) -> None:
+        error = urllib.error.HTTPError(
+            "https://api.meshy.ai/openapi/v1/multi-image-to-3d",
+            402,
+            "Payment Required",
+            {},
+            io.BytesIO(b'{"message":"Insufficient credits"}'),
+        )
+        with patch("urllib.request.urlopen", side_effect=error):
+            with self.assertRaises(RemoteProviderError) as context:
+                UrllibRemoteTransport().request_json(
+                    "POST",
+                    "https://api.meshy.ai/openapi/v1/multi-image-to-3d",
+                    headers={"Authorization": "Bearer redacted"},
+                    payload={},
+                )
+        self.assertEqual(context.exception.code, "provider_http_error")
+        self.assertEqual(context.exception.status, "blocked")
+        self.assertFalse(context.exception.retriable)
+        self.assertIn("Insufficient credits", context.exception.message)
+
+    def test_verified_completed_download_is_reused_without_network(self) -> None:
+        destination = self.workspace / "cached.fbx"
+        payload = b"verified-fbx"
+        destination.write_bytes(payload)
+        expected_md5 = hashlib.md5(payload, usedforsecurity=False).hexdigest()
+
+        with patch("urllib.request.urlopen") as urlopen:
+            result = UrllibRemoteTransport().download(
+                "https://download.example/cached.fbx",
+                destination,
+                headers={},
+                expected_md5=expected_md5,
+            )
+
+        urlopen.assert_not_called()
+        self.assertTrue(result["cache_hit"])
+        self.assertEqual(result["sha256"], hashlib.sha256(payload).hexdigest())
+
+    def test_poly_haven_accepts_domain_name_as_provider_hint(self) -> None:
+        acquisition = PolyHavenExternalSiteAdapter(transport=self._poly_transport()).acquire(
+            {
+                **self._poly_request(),
+                "provider_hint": "polyhaven.com",
+            },
+            destination=self.workspace / "domain-provider-hint",
+            workspace=self.workspace,
+        )
+
+        self.assertEqual(acquisition.provider_id, "poly_haven_external_site_v1")
+        self.assertEqual(acquisition.source_asset_id, "dirty_football")
+
+    def test_poly_haven_retries_only_retriable_metadata_and_download_failures(self) -> None:
+        fbx = b"fbx"
+        assets = {
+            "round_ball": {
+                "type": 2,
+                "name": "Round Ball",
+                "tags": ["round", "ball"],
+                "dimensions": [220, 221, 219],
+            }
+        }
+        files = {
+            "fbx": {
+                "1k": {
+                    "fbx": {
+                        "url": "https://d/round.fbx",
+                        "md5": hashlib.md5(fbx, usedforsecurity=False).hexdigest(),
+                    }
+                }
+            }
+        }
+        transport = FakeTransport(
+            json_responses=[
+                RemoteProviderError("provider_network_error", "reset", retriable=True),
+                assets,
+                files,
+            ],
+            downloads={
+                "https://d/round.fbx": [
+                    RemoteProviderError("provider_download_failed", "timeout", retriable=True),
+                    fbx,
+                ]
+            },
+        )
+
+        with patch("harness.assets.providers.remote.time.sleep") as sleep:
+            acquisition = PolyHavenExternalSiteAdapter(transport=transport).acquire(
+                {
+                    "provider_hint": "polyhaven",
+                    "search_intent": {
+                        "raw_query": "round sphere ball",
+                        "taxonomy": {"subcategory": "ball"},
+                        "must": {"geometry_type": "sphere"},
+                    },
+                    "generation_spec": {"scale_policy": "fit_uniform_to_approx_size"},
+                },
+                destination=self.workspace / "retried-poly",
+                workspace=self.workspace,
+            )
+
+        self.assertEqual(acquisition.source_asset_id, "round_ball")
+        self.assertEqual(acquisition.metadata["remote_attempts"]["assets_metadata"], 2)
+        self.assertEqual(acquisition.metadata["remote_attempts"]["files_metadata"], 1)
+        self.assertEqual(acquisition.metadata["remote_attempts"]["downloads"]["round_ball.fbx"], 2)
+        self.assertEqual(sleep.call_count, 2)
+
+        blocked_transport = FakeTransport(
+            json_responses=[RemoteProviderError("provider_response_invalid", "bad payload")],
+            downloads={},
+        )
+        with self.assertRaises(RemoteProviderError) as context, patch(
+            "harness.assets.providers.remote.time.sleep"
+        ) as blocked_sleep:
+            PolyHavenExternalSiteAdapter(transport=blocked_transport).acquire(
+                {"provider_hint": "polyhaven", "search_intent": {"raw_query": "ball"}},
+                destination=self.workspace / "not-retried-poly",
+                workspace=self.workspace,
+            )
+        self.assertEqual(context.exception.code, "provider_response_invalid")
+        self.assertEqual(context.exception.details["attempt_count"], 1)
+        blocked_sleep.assert_not_called()
+
+    def test_meshy_requires_explicit_upload_authorization(self) -> None:
+        image = self.workspace / "input.png"
+        image.write_bytes(b"png")
+        request = self._meshy_request(
+            [{"input_id": "front", "local_path": str(image), "sha256": hashlib.sha256(b"png").hexdigest()}]
+        )
+        adapter = MeshyModelGenerationAdapter(transport=FakeTransport(json_responses=[], downloads={}), api_key="test")
+        with self.assertRaises(RemoteProviderError) as context:
+            adapter.acquire(request, destination=self.workspace / "provider", workspace=self.workspace)
+        self.assertEqual(context.exception.code, "upload_not_authorized")
+
+    def test_provider_manifest_keeps_planning_and_meshy_authorizations_separate(self) -> None:
+        image = self.workspace / "input.png"
+        image.write_bytes(b"png")
+        planning_only = build_provider_input_manifest(
+            [self._provider_input(image, planning_upload=True)],
+            workspace=self.workspace,
+            meshy_upload_authorized=False,
+        )
+        self.assertTrue(planning_only["inputs"][0]["authorizations"]["planning_llm_upload"])
+        self.assertFalse(planning_only["inputs"][0]["authorizations"]["meshy_upload"])
+        meshy_only = build_provider_input_manifest(
+            [self._provider_input(image)],
+            workspace=self.workspace,
+            meshy_upload_authorized=True,
+        )
+        self.assertFalse(meshy_only["inputs"][0]["authorizations"]["planning_llm_upload"])
+        self.assertTrue(meshy_only["inputs"][0]["authorizations"]["meshy_upload"])
+
+    def test_meshy_manifest_rejects_authorized_input_outside_workspace(self) -> None:
+        image = self.root / "outside.png"
+        image.write_bytes(b"png")
+        with self.assertRaises(ProviderInputError) as context:
+            build_provider_input_manifest(
+                [self._provider_input(image)],
+                workspace=self.workspace,
+                meshy_upload_authorized=True,
+            )
+        self.assertEqual(context.exception.code, "provider_input_outside_workspace")
+
+    def test_meshy_rejects_unverified_remote_reference_urls(self) -> None:
+        request = self._meshy_request(
+            [{"input_id": "front", "uri": "https://example.com/image.png", "sha256": "0" * 64, "upload_authorized": True}]
+        )
+        adapter = MeshyModelGenerationAdapter(transport=FakeTransport(json_responses=[], downloads={}), api_key="test")
+        with self.assertRaises(RemoteProviderError) as context:
+            adapter.acquire(request, destination=self.workspace / "remote-url", workspace=self.workspace)
+        self.assertEqual(context.exception.code, "remote_reference_url_unsupported")
+
+    def test_meshy_submits_polls_and_immediately_materializes_glb_and_obj(self) -> None:
+        image = self.workspace / "input.png"
+        image.write_bytes(b"png-image")
+        sha256 = hashlib.sha256(image.read_bytes()).hexdigest()
+        transport = FakeTransport(
+            json_responses=[
+                {"result": "task-123"},
+                {"id": "task-123", "status": "IN_PROGRESS", "progress": 50},
+                {
+                    "id": "task-123",
+                    "status": "SUCCEEDED",
+                    "progress": 100,
+                    "consumed_credits": 20,
+                    "model_urls": {
+                        "glb": "https://signed.example/model.glb?token=secret",
+                        "obj": "https://signed.example/model.obj?token=secret",
+                    },
+                },
+            ],
+            downloads={
+                "https://signed.example/model.glb?token=secret": b"glb",
+                "https://signed.example/model.obj?token=secret": b"v 0 0 0\n",
+            },
+        )
+        adapter = MeshyModelGenerationAdapter(
+            transport=transport,
+            api_key="secret-key",
+            poll_interval_s=0,
+            sleep=lambda _: None,
+        )
+        request = self._meshy_request(
+            [
+                {
+                    "input_id": "front",
+                    "local_path": str(image),
+                    "sha256": sha256,
+                    "upload_authorized": True,
+                }
+            ]
+        )
+        request["texture_prompt"] = "matte red painted wood"
+        acquisition = adapter.acquire(
+            request,
+            destination=self.workspace / "provider",
+            workspace=self.workspace,
+        )
+        self.assertEqual(acquisition.source_uri, "meshy://multi-image-to-3d/task-123")
+        self.assertTrue(acquisition.canonical_file.is_file())
+        self.assertTrue(acquisition.import_file.is_file())
+        create = transport.requests[0]
+        self.assertEqual(create["payload"]["target_formats"], ["glb", "obj"])
+        self.assertEqual(create["payload"]["texture_prompt"], "matte red painted wood")
+        self.assertEqual(acquisition.request_parameters["texture_prompt"], "matte red painted wood")
+        self.assertFalse(create["payload"]["image_enhancement"])
+        self.assertNotIn("secret-key", json.dumps(acquisition.metadata))
+        audited = json.loads((self.workspace / "provider" / "task_response_latest.json").read_text(encoding="utf-8"))
+        self.assertNotIn("token=secret", json.dumps(audited))
+        cache_only = MeshyModelGenerationAdapter(
+            transport=FakeTransport(json_responses=[], downloads={}),
+            api_key="",
+        ).acquire(request, destination=self.workspace / "provider", workspace=self.workspace)
+        self.assertEqual(cache_only.asset_id, acquisition.asset_id)
+        manifest = (self.workspace / "provider" / "acquisition.json").read_text(encoding="utf-8")
+        self.assertNotIn("secret-key", manifest)
+        self.assertNotIn("token=secret", manifest)
+
+    def test_meshy_resumes_checkpoint_without_duplicate_post(self) -> None:
+        image = self.workspace / "resume.png"
+        image.write_bytes(b"image")
+        request = self._meshy_request(
+            [
+                {
+                    "input_id": "front",
+                    "local_path": str(image),
+                    "sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
+                    "upload_authorized": True,
+                }
+            ]
+        )
+        destination = self.workspace / "resume-provider"
+        first_transport = FakeTransport(
+            json_responses=[
+                {"result": "paid-task-123"},
+                RemoteProviderError("provider_network_error", "connection lost", retriable=True),
+                RemoteProviderError("provider_network_error", "connection lost", retriable=True),
+                RemoteProviderError("provider_network_error", "connection lost", retriable=True),
+            ],
+            downloads={},
+        )
+        with self.assertRaises(RemoteProviderError) as context:
+            MeshyModelGenerationAdapter(transport=first_transport, api_key="test", sleep=lambda _: None).acquire(
+                request,
+                destination=destination,
+                workspace=self.workspace,
+            )
+        self.assertEqual(context.exception.details["task_id"], "paid-task-123")
+        self.assertNotIn("texture_prompt", first_transport.requests[0]["payload"])
+        checkpoint = json.loads((destination / "task_checkpoint.json").read_text(encoding="utf-8"))
+        self.assertEqual(checkpoint["task_id"], "paid-task-123")
+
+        resumed_transport = FakeTransport(
+            json_responses=[
+                {
+                    "status": "SUCCEEDED",
+                    "model_urls": {"glb": "https://d/model.glb", "obj": "https://d/model.obj"},
+                }
+            ],
+            downloads={"https://d/model.glb": b"glb", "https://d/model.obj": b"v 0 0 0\n"},
+        )
+        acquisition = MeshyModelGenerationAdapter(transport=resumed_transport, api_key="test").acquire(
+            request,
+            destination=destination,
+            workspace=self.workspace,
+        )
+        self.assertEqual(acquisition.source_asset_id, "paid-task-123")
+        self.assertEqual([row["method"] for row in resumed_transport.requests], ["GET"])
+
+    def test_meshy_retries_get_and_download_without_changing_task_id(self) -> None:
+        image = self.workspace / "retry.png"
+        image.write_bytes(b"image")
+        request = self._meshy_request(
+            [{
+                "input_id": "front",
+                "local_path": str(image),
+                "sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
+                "upload_authorized": True,
+            }]
+        )
+        get_error = RemoteProviderError("provider_network_error", "ssl eof", retriable=True)
+        download_error = RemoteProviderError("provider_download_failed", "ssl eof", retriable=True)
+        transport = FakeTransport(
+            json_responses=[
+                {"result": "same-task"},
+                get_error,
+                {
+                    "status": "SUCCEEDED",
+                    "model_urls": {"glb": "https://d/model.glb", "obj": "https://d/model.obj"},
+                },
+            ],
+            downloads={
+                "https://d/model.glb": [download_error, b"glb"],
+                "https://d/model.obj": b"v 0 0 0\n",
+            },
+        )
+
+        acquisition = MeshyModelGenerationAdapter(
+            transport=transport,
+            api_key="test",
+            poll_interval_s=0,
+            sleep=lambda _: None,
+        ).acquire(request, destination=self.workspace / "retry-meshy", workspace=self.workspace)
+
+        self.assertEqual(acquisition.source_asset_id, "same-task")
+        get_urls = [row["url"] for row in transport.requests if row["method"] == "GET"]
+        self.assertEqual(get_urls, [get_urls[0], get_urls[0]])
+        self.assertEqual([row["method"] for row in transport.requests].count("POST"), 1)
+        self.assertEqual(transport.download_requests.count("https://d/model.glb"), 2)
+
+    def test_meshy_post_timeout_records_unknown_state_and_never_resubmits(self) -> None:
+        image = self.workspace / "unknown.png"
+        image.write_bytes(b"image")
+        request = self._meshy_request(
+            [{
+                "input_id": "front",
+                "local_path": str(image),
+                "sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
+                "upload_authorized": True,
+            }]
+        )
+        destination = self.workspace / "unknown-submission"
+        first = FakeTransport(
+            json_responses=[RemoteProviderError("provider_network_error", "timed out", retriable=True)],
+            downloads={},
+        )
+        with self.assertRaises(RemoteProviderError) as context:
+            MeshyModelGenerationAdapter(transport=first, api_key="test").acquire(
+                request,
+                destination=destination,
+                workspace=self.workspace,
+            )
+        self.assertEqual(context.exception.code, "provider_submission_state_unknown")
+        state = json.loads((destination / "submission_attempt.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["state"], "unknown")
+
+        second = FakeTransport(json_responses=[], downloads={})
+        with self.assertRaises(RemoteProviderError) as context:
+            MeshyModelGenerationAdapter(transport=second, api_key="test").acquire(
+                request,
+                destination=destination,
+                workspace=self.workspace,
+            )
+        self.assertEqual(context.exception.code, "provider_submission_state_unknown")
+        self.assertEqual(second.requests, [])
+
+    def test_meshy_resume_mode_requires_exact_request_and_existing_checkpoint(self) -> None:
+        image = self.workspace / "resume-only.png"
+        image.write_bytes(b"image")
+        request = self._meshy_request(
+            [{
+                "input_id": "front",
+                "local_path": str(image),
+                "sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
+                "upload_authorized": True,
+            }]
+        )
+        transport = FakeTransport(json_responses=[], downloads={})
+        with self.assertRaises(RemoteProviderError) as context:
+            MeshyModelGenerationAdapter(
+                transport=transport,
+                api_key="test",
+                resume_request=request,
+            ).acquire(request, destination=self.workspace / "resume-only", workspace=self.workspace)
+        self.assertEqual(context.exception.code, "provider_resume_checkpoint_missing")
+        self.assertEqual(transport.requests, [])
+
+    def test_saved_meshy_request_resumes_through_catalog_and_single_resolve_without_post(self) -> None:
+        image = self.workspace / "resume-chain.png"
+        image.write_bytes(b"image")
+        case = self._case(
+            route="model_generation",
+            provider_hint="meshy",
+            references=[{"input_id": "front", "usage": ["generation_condition"]}],
+        )
+        manifest = build_provider_input_manifest(
+            [self._provider_input(image)],
+            workspace=self.workspace,
+            meshy_upload_authorized=True,
+        )
+        lost = RemoteProviderError("provider_network_error", "ssl eof", retriable=True)
+        first = MeshyModelGenerationAdapter(
+            transport=FakeTransport(
+                json_responses=[{"result": "resume-task"}, lost, lost, lost],
+                downloads={},
+            ),
+            api_key="test",
+            sleep=lambda _: None,
+        )
+        failed = compile_runtime_case(
+            case,
+            requested_backend="ue",
+            registry=self.registry,
+            provider_orchestrator=AssetProviderOrchestrator(
+                workspace=self.workspace,
+                importer=StubImporter(),
+                remote_providers={"model_generation": first},
+            ),
+            provider_input_manifest=manifest,
+        )
+        failed_request = failed.artifacts["asset_provider_batch"]["requests"][0]
+        saved_path = self.workspace / "providers" / first.provider_id / failed_request["request_digest"] / "provider_request.json"
+        saved_request = json.loads(saved_path.read_text(encoding="utf-8"))
+
+        resumed_transport = FakeTransport(
+            json_responses=[{
+                "status": "SUCCEEDED",
+                "model_urls": {"glb": "https://d/resumed.glb", "obj": "https://d/resumed.obj"},
+            }],
+            downloads={"https://d/resumed.glb": b"glb", "https://d/resumed.obj": b"v 0 0 0\n"},
+        )
+        resumed = compile_runtime_case(
+            case,
+            requested_backend="ue",
+            registry=self.registry,
+            provider_orchestrator=AssetProviderOrchestrator(
+                workspace=self.workspace,
+                importer=StubImporter(),
+                remote_providers={
+                    "model_generation": MeshyModelGenerationAdapter(
+                        transport=resumed_transport,
+                        api_key="test",
+                        resume_request=saved_request,
+                    )
+                },
+            ),
+            provider_input_manifest=manifest,
+        )
+
+        result = resumed.artifacts["asset_provider_batch"]["results"][0]
+        self.assertEqual(result["status"], "fulfilled")
+        self.assertEqual(resumed.report["asset_resolve_invocation_count"], 1)
+        self.assertEqual([row["method"] for row in resumed_transport.requests], ["GET"])
+        self.assertEqual(
+            self.registry.get_asset_by_id(result["catalog_asset_ids"][0])["lifecycle_status"],
+            "runtime_bound",
+        )
+
+    def test_meshy_texture_prompt_over_limit_fails_before_network(self) -> None:
+        image = self.workspace / "texture.png"
+        image.write_bytes(b"image")
+        request = self._meshy_request(
+            [{
+                "input_id": "front",
+                "local_path": str(image),
+                "sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
+                "upload_authorized": True,
+            }]
+        )
+        request["texture_prompt"] = "x" * 601
+        transport = FakeTransport(json_responses=[], downloads={})
+        with self.assertRaises(RemoteProviderError) as context:
+            MeshyModelGenerationAdapter(transport=transport, api_key="test").acquire(
+                request,
+                destination=self.workspace / "texture-too-long",
+                workspace=self.workspace,
+            )
+        self.assertEqual(context.exception.code, "texture_prompt_too_long")
+        self.assertEqual(transport.requests, [])
+
+    def test_meshy_failure_timeout_and_missing_outputs_are_structured(self) -> None:
+        image = self.workspace / "input.png"
+        image.write_bytes(b"image")
+        reference = {
+            "input_id": "front",
+            "local_path": str(image),
+            "sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
+            "upload_authorized": True,
+        }
+        fixtures = [
+            ([{"result": "task"}, {"status": "FAILED", "task_error": "moderation"}], 10, "provider_task_failed"),
+            ([{"result": "task"}, {"status": "CANCELED"}], 10, "provider_task_canceled"),
+            ([{"result": "task"}, {"status": "PENDING"}], 0, "provider_task_timeout"),
+            ([{"result": "task"}, {"status": "SUCCEEDED", "model_urls": {"glb": "https://d/model.glb"}}], 10, "provider_output_missing"),
+        ]
+        for responses, timeout_s, code in fixtures:
+            with self.subTest(code=code):
+                adapter = MeshyModelGenerationAdapter(
+                    transport=FakeTransport(json_responses=responses, downloads={}),
+                    api_key="test",
+                    poll_interval_s=0,
+                    timeout_s=timeout_s,
+                    sleep=lambda _: None,
+                )
+                with self.assertRaises(RemoteProviderError) as context:
+                    adapter.acquire(
+                        self._meshy_request([reference]),
+                        destination=self.workspace / code,
+                        workspace=self.workspace,
+                    )
+                self.assertEqual(context.exception.code, code)
+
+    def test_poly_haven_pins_identity_checks_md5_and_materializes_dependency_closure(self) -> None:
+        fbx = b"fbx"
+        texture = b"jpg"
+        assets = {
+            "dirty_football": {
+                "type": 2,
+                "name": "Dirty Football",
+                "description": "A scanned ball",
+                "category": "Leisure/Sports/Balls",
+                "tags": ["ball", "football"],
+                "authors": {"Artist": "All"},
+                "dimensions": [180, 180, 180],
+                "files_hash": "abcdef1234567890",
+            }
+        }
+        files = {
+            "fbx": {
+                "1k": {
+                    "fbx": {
+                        "url": "https://download.example/ball.fbx",
+                        "md5": hashlib.md5(fbx, usedforsecurity=False).hexdigest(),
+                        "include": {
+                            "textures/ball.jpg": {
+                                "url": "https://download.example/ball.jpg",
+                                "md5": hashlib.md5(texture, usedforsecurity=False).hexdigest(),
+                            }
+                        },
+                    }
+                }
+            }
+        }
+        transport = FakeTransport(
+            json_responses=[assets, files],
+            downloads={"https://download.example/ball.fbx": fbx, "https://download.example/ball.jpg": texture},
+        )
+        adapter = PolyHavenExternalSiteAdapter(transport=transport)
+        acquisition = adapter.acquire(
+            self._poly_request(),
+            destination=self.workspace / "poly",
+            workspace=self.workspace,
+        )
+        self.assertEqual(acquisition.source_asset_id, "dirty_football")
+        self.assertEqual(acquisition.license, "CC0-1.0")
+        self.assertEqual(acquisition.expected_size_m, (0.18, 0.18, 0.18))
+        self.assertTrue((self.workspace / "poly" / "textures" / "ball.jpg").is_file())
+        self.assertEqual(transport.requests[0]["headers"]["User-Agent"].split("/")[0], "PhysicsAwareHarness")
+
+    def test_poly_haven_ranks_candidates_and_breaks_score_ties_by_asset_id(self) -> None:
+        fbx = b"fbx"
+        files = {
+            "fbx": {
+                "1k": {
+                    "fbx": {
+                        "url": "https://d/model.fbx",
+                        "md5": hashlib.md5(fbx, usedforsecurity=False).hexdigest(),
+                    }
+                }
+            }
+        }
+        ambiguous = {
+            "red_ball": {"type": 2, "name": "Red Ball", "tags": [], "dimensions": [180, 180, 180]},
+            "blue_ball": {"type": 2, "name": "Blue Ball", "tags": [], "dimensions": [180, 180, 180]},
+        }
+        adapter = PolyHavenExternalSiteAdapter(
+            transport=FakeTransport(
+                json_responses=[ambiguous, files],
+                downloads={"https://d/model.fbx": fbx},
+            )
+        )
+        acquisition = adapter.acquire(
+            {"provider_hint": "polyhaven", "search_intent": {"raw_query": "ball"}},
+            destination=self.workspace / "ambiguous",
+            workspace=self.workspace,
+        )
+        self.assertEqual(acquisition.source_asset_id, "blue_ball")
+        discovery = acquisition.metadata["discovery"]
+        self.assertEqual(discovery["selection_reason"], "stable_asset_id_tiebreak")
+        self.assertEqual(discovery["tie_count"], 2)
+        self.assertEqual(
+            [row["asset_id"] for row in discovery["ranked_candidates"]],
+            ["blue_ball", "red_ball"],
+        )
+        self.assertTrue((self.workspace / "ambiguous" / "discovery.json").is_file())
+
+        ranked_assets = {
+            "generic_crate": {"type": 2, "name": "Crate", "tags": ["container"]},
+            "wooden_crate_02": {"type": 2, "name": "Wooden Crate", "tags": ["wood", "crate"]},
+        }
+        ranked = PolyHavenExternalSiteAdapter(
+            transport=FakeTransport(
+                json_responses=[ranked_assets, files],
+                downloads={"https://d/model.fbx": fbx},
+            )
+        ).acquire(
+            {"provider_hint": "polyhaven", "search_intent": {"raw_query": "realistic wooden crate"}},
+            destination=self.workspace / "ranked",
+            workspace=self.workspace,
+        )
+        self.assertEqual(ranked.source_asset_id, "wooden_crate_02")
+        self.assertEqual(ranked.metadata["discovery"]["selection_reason"], "highest_relevance_score")
+        scores = ranked.metadata["discovery"]["ranked_candidates"]
+        self.assertGreater(scores[0]["score"], scores[1]["score"])
+
+        drum_assets = {
+            "metal_stool_01": {
+                "type": 2,
+                "name": "Metal Stool 01",
+                "tags": ["metal", "industrial"],
+                "category": "Furniture/Seating/Stools",
+                "dimensions": [352, 355, 883],
+            },
+            "Barrel_01": {
+                "type": 2,
+                "name": "Barrel_01",
+                "tags": ["metal", "industrial", "oil", "drums"],
+                "category": "Containers & Storage/Barrels & Drums/Metal Drums",
+                "dimensions": [563, 563, 880],
+            },
+        }
+        drum = PolyHavenExternalSiteAdapter(
+            transport=FakeTransport(
+                json_responses=[drum_assets, files],
+                downloads={"https://d/model.fbx": fbx},
+            )
+        ).acquire(
+            {
+                "provider_hint": "polyhaven",
+                "search_intent": {
+                    "raw_query": "Industrial metal drum, cylindrical, dimensions approx 0.56 m diameter, 0.88 m height.",
+                    "must": {"approx_size_m": [0.56, 0.56, 0.88]},
+                    "taxonomy": {"category": "container", "object_type": "drum"},
+                },
+            },
+            destination=self.workspace / "drum",
+            workspace=self.workspace,
+        )
+        self.assertEqual(drum.source_asset_id, "Barrel_01")
+        self.assertIn("barrel", drum.metadata["discovery"]["query_tokens"])
+
+    def test_poly_haven_identity_and_exclusion_gates_reject_wrong_object_class(self) -> None:
+        fbx = b"fbx"
+        files = {
+            "fbx": {
+                "1k": {
+                    "fbx": {
+                        "url": "https://d/model.fbx",
+                        "md5": hashlib.md5(fbx, usedforsecurity=False).hexdigest(),
+                    }
+                }
+            }
+        }
+        assets = {
+            "metal_jug": {
+                "type": 2,
+                "name": "Metal Jug",
+                "tags": ["metal", "jug", "pitcher"],
+                "category": "Food & Kitchen/Tableware/Jugs & Pitchers",
+                "dimensions": [200, 200, 300],
+            },
+            "steel_cylinder": {
+                "type": 2,
+                "name": "Steel Cylinder",
+                "tags": ["metal", "cylindrical", "industrial"],
+                "category": "Industrial Equipment",
+                "dimensions": [300, 300, 200],
+            },
+        }
+        acquisition = PolyHavenExternalSiteAdapter(
+            transport=FakeTransport(
+                json_responses=[assets, files],
+                downloads={"https://d/model.fbx": fbx},
+            )
+        ).acquire(
+            {
+                "provider_hint": "polyhaven",
+                "search_intent": {
+                    "raw_query": "solid heavy metal cylinder",
+                    "taxonomy": {"category": "cylinder", "object_type": "rolling_cylinder"},
+                    "must_not": {"category": ["container"]},
+                },
+            },
+            destination=self.workspace / "cylinder",
+            workspace=self.workspace,
+        )
+
+        self.assertEqual(acquisition.source_asset_id, "steel_cylinder")
+        self.assertGreater(acquisition.metadata["discovery"]["exclusion_rejected_count"], 0)
+
+    def test_poly_haven_spherical_identity_uses_round_asset_and_uniform_fit_skips_authored_size_gate(self) -> None:
+        fbx = b"fbx"
+        files = {
+            "fbx": {
+                "1k": {
+                    "fbx": {
+                        "url": "https://d/round.fbx",
+                        "md5": hashlib.md5(fbx, usedforsecurity=False).hexdigest(),
+                    }
+                }
+            }
+        }
+        assets = {
+            "elongated_football": {
+                "type": 2,
+                "name": "Elongated Football",
+                "tags": ["ball", "football", "sport"],
+                "category": "Props",
+                "dimensions": [450, 250, 250],
+            },
+            "round_sports_ball": {
+                "type": 2,
+                "name": "Round Sports Ball",
+                "tags": ["ball", "round", "soccer", "sport"],
+                "category": "Props",
+                "dimensions": [220, 221, 219],
+            },
+        }
+
+        acquisition = PolyHavenExternalSiteAdapter(
+            transport=FakeTransport(
+                json_responses=[assets, files],
+                downloads={"https://d/round.fbx": fbx},
+            )
+        ).acquire(
+            {
+                "provider_hint": "polyhaven",
+                "search_intent": {
+                    "raw_query": "a spherical ball with authentic materials",
+                    "taxonomy": {"category": "sphere", "object_type": "sphere", "subcategory": "ball"},
+                    "must": {"geometry_type": "sphere", "approx_size_m": [0.5, 0.5, 0.5]},
+                },
+                "generation_spec": {
+                    "shape": "sphere",
+                    "size_m": [0.5, 0.5, 0.5],
+                    "scale_policy": "fit_uniform_to_approx_size",
+                },
+            },
+            destination=self.workspace / "round-sphere",
+            workspace=self.workspace,
+        )
+
+        discovery = acquisition.metadata["discovery"]
+        self.assertEqual(acquisition.source_asset_id, "round_sports_ball")
+        self.assertFalse(discovery["enforce_authored_size"])
+        self.assertEqual(discovery["size_rejected_count"], 0)
+        self.assertEqual(discovery["geometry_rejected_count"], 1)
+        self.assertIn("ball", discovery["identity_tokens"])
+        self.assertIn("sphere", discovery["identity_tokens"])
+
+    def test_poly_haven_specific_subcategory_overrides_generic_container_identity(self) -> None:
+        fbx = b"fbx"
+        files = {
+            "fbx": {
+                "1k": {
+                    "fbx": {
+                        "url": "https://d/crate.fbx",
+                        "md5": hashlib.md5(fbx, usedforsecurity=False).hexdigest(),
+                    }
+                }
+            }
+        }
+        assets = {
+            "wooden_bucket": {
+                "type": 2,
+                "name": "Wooden Bucket",
+                "tags": ["bucket", "container"],
+                "category": "Containers",
+            },
+            "plastic_crate": {
+                "type": 2,
+                "name": "Plastic Crate",
+                "tags": ["crate", "container"],
+                "category": "Containers",
+            },
+        }
+
+        acquisition = PolyHavenExternalSiteAdapter(
+            transport=FakeTransport(
+                json_responses=[assets, files],
+                downloads={"https://d/crate.fbx": fbx},
+            )
+        ).acquire(
+            {
+                "provider_hint": "polyhaven",
+                "search_intent": {
+                    "raw_query": "a visually distinct container or obstacle",
+                    "taxonomy": {
+                        "category": "container",
+                        "object_type": "container",
+                        "subcategory": "crate",
+                    },
+                },
+            },
+            destination=self.workspace / "specific-subcategory",
+            workspace=self.workspace,
+        )
+
+        self.assertEqual(acquisition.source_asset_id, "plastic_crate")
+        self.assertIn("crate", acquisition.metadata["discovery"]["identity_tokens"])
+
+    def test_poly_haven_rejects_contradictory_identity_and_parent_exclusion_before_download(self) -> None:
+        transport = FakeTransport(
+            json_responses=[
+                {
+                    "metal_barrel": {
+                        "type": 2,
+                        "name": "Metal Barrel",
+                        "tags": ["barrel", "container"],
+                        "category": "Containers & Storage/Barrels",
+                    }
+                }
+            ],
+            downloads={},
+        )
+        adapter = PolyHavenExternalSiteAdapter(transport=transport)
+
+        with self.assertRaises(RemoteProviderError) as context:
+            adapter.acquire(
+                {
+                    "request_id": "provider-request.chain-barrel",
+                    "object_id": "chain_target",
+                    "provider_hint": "poly_haven",
+                    "search_intent": {
+                        "raw_query": "heavy barrel",
+                        "taxonomy": {"category": "container", "object_type": "barrel"},
+                        "must_not": {"category": ["container"]},
+                    },
+                },
+                destination=self.workspace / "contradictory",
+                workspace=self.workspace,
+            )
+
+        error = context.exception
+        self.assertEqual(error.code, "contradictory_asset_constraints")
+        self.assertEqual(error.status, "blocked")
+        self.assertEqual(error.details["request_id"], "provider-request.chain-barrel")
+        self.assertEqual(error.details["object_id"], "chain_target")
+        self.assertEqual(error.details["positive_token"], "barrel")
+        self.assertEqual(error.details["excluded_token"], "container")
+        self.assertEqual(len(transport.requests), 1)
+        self.assertEqual(transport.downloads, {})
+
+    def test_poly_haven_specific_exclusion_does_not_exclude_parent_container_category(self) -> None:
+        fbx = b"fbx"
+        files = {
+            "fbx": {
+                "1k": {
+                    "fbx": {
+                        "url": "https://d/model.fbx",
+                        "md5": hashlib.md5(fbx, usedforsecurity=False).hexdigest(),
+                    }
+                }
+            }
+        }
+        assets = {
+            "plastic_crate_02": {
+                "type": 2,
+                "name": "Plastic Crate 02",
+                "tags": ["plastic", "crate", "container"],
+                "category": "Containers & Storage/Crates",
+            },
+            "metal_barrel": {
+                "type": 2,
+                "name": "Metal Barrel",
+                "tags": ["barrel", "container"],
+                "category": "Containers & Storage/Barrels",
+            },
+            "cardboard_box": {
+                "type": 2,
+                "name": "Cardboard Box",
+                "tags": ["box", "container"],
+                "category": "Containers & Storage/Boxes",
+            },
+        }
+        acquisition = PolyHavenExternalSiteAdapter(
+            transport=FakeTransport(
+                json_responses=[assets, files],
+                downloads={"https://d/model.fbx": fbx},
+            )
+        ).acquire(
+            {
+                "provider_hint": "polyhaven",
+                "search_intent": {
+                    "raw_query": "plastic crate container",
+                    "taxonomy": {"category": "crate", "object_type": "crate"},
+                    "must_not": {"category": ["barrel", "box"]},
+                },
+            },
+            destination=self.workspace / "specific-exclusion",
+            workspace=self.workspace,
+        )
+
+        self.assertEqual(acquisition.source_asset_id, "plastic_crate_02")
+        self.assertNotIn("container", acquisition.metadata["discovery"]["excluded_category_tokens"])
+
+    def test_poly_haven_rejects_hash_mismatch(self) -> None:
+        fbx = b"fbx"
+
+        bad_hash_transport = FakeTransport(
+            json_responses=[
+                {"ball": {"type": 2, "name": "Ball", "dimensions": [100, 100, 100]}},
+                {"fbx": {"1k": {"fbx": {"url": "https://d/ball.fbx", "md5": "0" * 32}}}},
+            ],
+            downloads={"https://d/ball.fbx": fbx},
+        )
+        adapter = PolyHavenExternalSiteAdapter(transport=bad_hash_transport)
+        with self.assertRaises(RemoteProviderError) as context:
+            adapter.acquire(
+                {"provider_hint": "polyhaven", "source_uri_hint": "polyhaven:ball", "search_intent": {}},
+                destination=self.workspace / "bad-hash",
+                workspace=self.workspace,
+            )
+        self.assertEqual(context.exception.code, "download_hash_mismatch")
+
+    def test_remote_providers_register_qualify_and_preserve_single_resolve(self) -> None:
+        image = self.workspace / "front.png"
+        image.write_bytes(b"image")
+        image_sha = hashlib.sha256(image.read_bytes()).hexdigest()
+        meshy_transport = FakeTransport(
+            json_responses=[
+                {"result": "task"},
+                {
+                    "status": "SUCCEEDED",
+                    "model_urls": {"glb": "https://d/model.glb", "obj": "https://d/model.obj"},
+                },
+            ],
+            downloads={"https://d/model.glb": b"glb", "https://d/model.obj": b"v 0 0 0\n"},
+        )
+        meshy = MeshyModelGenerationAdapter(transport=meshy_transport, api_key="test", poll_interval_s=0)
+        model_case_data = self._case(
+            route="model_generation",
+            provider_hint="meshy",
+            references=[
+                {
+                    "input_id": "front",
+                    "usage": ["generation_condition", "geometry_reference"],
+                    "allow_similarity_search": False,
+                }
+            ],
+        ).data
+        model_case_data["objects"][0]["asset"]["acquisition"]["texture_prompt"] = "matte red painted wood"
+        model_compilation = compile_runtime_case(
+            case_spec_v2_from_dict(model_case_data, available_input_ids=["front"]),
+            requested_backend="ue",
+            registry=self.registry,
+            provider_orchestrator=AssetProviderOrchestrator(
+                workspace=self.workspace,
+                importer=StubImporter(),
+                remote_providers={"model_generation": meshy},
+            ),
+            provider_input_manifest=build_provider_input_manifest(
+                [self._provider_input(image)],
+                workspace=self.workspace,
+                meshy_upload_authorized=True,
+            ),
+        )
+        self.assertEqual(model_compilation.report["asset_resolve_invocation_count"], 1)
+        model_result = model_compilation.artifacts["asset_provider_batch"]["results"][0]
+        self.assertEqual(model_result["status"], "fulfilled")
+        self.assertEqual(self.registry.get_asset_by_id(model_result["catalog_asset_ids"][0])["lifecycle_status"], "runtime_bound")
+        provider_reference = model_compilation.artifacts["asset_provider_batch"]["requests"][0]["reference_inputs"][0]
+        self.assertEqual(provider_reference["sha256"], image_sha)
+        self.assertTrue(provider_reference["upload_authorized"])
+        self.assertEqual(meshy_transport.requests[0]["payload"]["texture_prompt"], "matte red painted wood")
+        self.assertEqual(model_compilation.provider_receipts[0]["recipe_parameters"]["texture_prompt"], "matte red painted wood")
+        saved_request = self.workspace / "providers" / meshy.provider_id / model_result["request_digest"] / "provider_request.json"
+        self.assertEqual(json.loads(saved_request.read_text(encoding="utf-8"))["request_digest"], model_result["request_digest"])
+
+        poly_transport = self._poly_transport()
+        poly = PolyHavenExternalSiteAdapter(transport=poly_transport)
+        external_case = self._case(
+            route="external_site",
+            provider_hint="polyhaven",
+            source_uri="polyhaven:dirty_football",
+            asset_must={"license_tier": "local_preview", "geometry_type": "sphere"},
+        )
+        external_case.data["objects"][0]["geometry"]["scale_policy"] = "fit_uniform_to_approx_size"
+        external_compilation = compile_runtime_case(
+            external_case,
+            requested_backend="ue",
+            registry=self.registry,
+            provider_orchestrator=AssetProviderOrchestrator(
+                workspace=self.workspace,
+                importer=DependencyStubImporter(),
+                remote_providers={"external_site": poly},
+            ),
+        )
+        self.assertEqual(external_compilation.report["asset_resolve_invocation_count"], 1)
+        external_result = external_compilation.artifacts["asset_provider_batch"]["results"][0]
+        self.assertEqual(external_result["status"], "fulfilled")
+        self.assertEqual(
+            external_compilation.artifacts["asset_provider_batch"]["requests"][0]["generation_spec"]["scale_policy"],
+            "fit_uniform_to_approx_size",
+        )
+        selected = self.registry.get_asset_by_id(external_result["catalog_asset_ids"][0])
+        self.assertEqual(selected["license_tier"], "reference")
+        self.assertEqual(selected["source_uri"], "https://polyhaven.com/a/dirty_football")
+        self.assertEqual(selected["shape"], "sphere")
+        self.assertEqual(selected["collider"], "box")
+        self.assertEqual(selected["authored_size_m"], [0.17, 0.17, 0.17])
+        self.assertEqual(selected["provider_reported_size_m"], [0.18, 0.18, 0.18])
+
+    def test_paid_submission_budget_is_reserved_before_each_distinct_meshy_request(self) -> None:
+        image = self.workspace / "budget.png"
+        image.write_bytes(b"image")
+        references = [{"input_id": "front", "usage": ["generation_condition"]}]
+        data = self._case(route="model_generation", provider_hint="meshy", references=references).data
+        data["objects"][1]["asset"] = copy.deepcopy(data["objects"][0]["asset"])
+        transport = FakeTransport(
+            json_responses=[
+                {"result": "paid-task-1"},
+                {
+                    "status": "SUCCEEDED",
+                    "model_urls": {"glb": "https://d/one.glb", "obj": "https://d/one.obj"},
+                },
+            ],
+            downloads={"https://d/one.glb": b"glb", "https://d/one.obj": b"v 0 0 0\n"},
+        )
+        ledger = self.workspace / "jobs" / "job_budget" / "receipts" / "provider_usage.json"
+        manifest = build_provider_input_manifest(
+            [self._provider_input(image)],
+            workspace=self.workspace,
+            meshy_upload_authorized=True,
+        )
+        transaction = self.workspace / "transactions" / "paid-budget"
+
+        with self.assertRaises(RuntimeCompilationPaused):
+            compile_runtime_case(
+                case_spec_v2_from_dict(data, available_input_ids=["front"]),
+                requested_backend="ue",
+                registry=self.registry,
+                provider_orchestrator=AssetProviderOrchestrator(
+                    workspace=self.workspace,
+                    importer=StubImporter(),
+                    remote_providers={
+                        "model_generation": MeshyModelGenerationAdapter(
+                            transport=transport,
+                            api_key="test",
+                            poll_interval_s=0,
+                        )
+                    },
+                    max_paid_submissions=1,
+                    paid_submission_ledger_path=ledger,
+                ),
+                provider_input_manifest=manifest,
+                transaction_dir=transaction,
+            )
+
+        self.assertEqual([row["method"] for row in transport.requests].count("POST"), 1)
+        usage = json.loads(ledger.read_text(encoding="utf-8"))
+        self.assertEqual(len(usage["requests"]), 1)
+        batch = json.loads((transaction / "asset_provider_batch.json").read_text(encoding="utf-8"))
+        self.assertIn(
+            "paid_provider_budget_exhausted",
+            [(row.get("failure") or {}).get("code") for row in batch["results"]],
+        )
+
+        resumed_transport = FakeTransport(json_responses=[], downloads={})
+        with self.assertRaises(RuntimeCompilationPaused):
+            compile_runtime_case(
+                case_spec_v2_from_dict(data, available_input_ids=["front"]),
+                requested_backend="ue",
+                registry=self.registry,
+                provider_orchestrator=AssetProviderOrchestrator(
+                    workspace=self.workspace,
+                    importer=StubImporter(),
+                    remote_providers={
+                        "model_generation": MeshyModelGenerationAdapter(
+                            transport=resumed_transport,
+                            api_key="test",
+                            poll_interval_s=0,
+                        )
+                    },
+                    max_paid_submissions=1,
+                    paid_submission_ledger_path=ledger,
+                ),
+                provider_input_manifest=manifest,
+                transaction_dir=self.workspace / "transactions" / "paid-budget-resume",
+            )
+        self.assertEqual(resumed_transport.requests, [])
+
+    def test_external_shape_and_source_alias_compile_without_taxonomy(self) -> None:
+        data = case_spec_v2_fixture()
+        obj = data["objects"][0]
+        obj["geometry"] = {
+            "approx_size_m": [0.4, 0.4, 0.4],
+            "scale_policy": "fit_uniform_to_approx_size",
+            "shape_hint": "sphere",
+        }
+        obj["asset"] = {
+            "description": "A near-spherical impactor from Poly Haven",
+            "resource_kind": "mesh_3d",
+            "must": {
+                "physics_role": "dynamic_rigid_body",
+                "real_3d_geometry": True,
+                "source_kind": "external",
+            },
+            "must_not": {"source_kind": "procedural_generation"},
+            "taxonomy": {},
+            "acquisition": {
+                "route": "external_site",
+                "requirement": "required",
+                "origin": "user_explicit",
+                "provider_hint": "Poly_Haven",
+                "source_uri_hint": None,
+                "reference_inputs": [],
+                "fallback_order": [],
+            },
+        }
+
+        compilation = compile_runtime_case(
+            case_spec_v2_from_dict(data),
+            requested_backend="ue",
+            registry=self.registry,
+            provider_orchestrator=AssetProviderOrchestrator(
+                workspace=self.workspace,
+                importer=DependencyStubImporter(),
+                remote_providers={
+                    "external_site": PolyHavenExternalSiteAdapter(transport=self._poly_transport())
+                },
+            ),
+        )
+
+        request = compilation.artifacts["asset_provider_batch"]["requests"][0]
+        result = compilation.artifacts["asset_provider_batch"]["results"][0]
+        self.assertEqual(request["search_intent"]["must"]["source_kind"], "external_site")
+        self.assertEqual(request["search_intent"]["must"]["geometry_type"], "sphere")
+        self.assertEqual(request["search_intent"]["taxonomy"], {"category": "physics_critical"})
+        self.assertEqual(result["status"], "fulfilled")
+        self.assertIn(
+            "sphere",
+            compilation.provider_receipts[0]["provider_execution"]["discovery"]["identity_tokens"],
+        )
+
+    def test_uniform_fit_qualifies_specific_provider_asset_for_generic_requested_category(self) -> None:
+        fbx = b"crate-fbx"
+        data = case_spec_v2_fixture()
+        data["objects"][0]["geometry"]["approx_size_m"] = [0.5, 0.5, 0.5]
+        data["objects"][0]["geometry"]["scale_policy"] = "fit_uniform_to_approx_size"
+        data["objects"][0]["asset"] = {
+            "description": "a wooden crate container",
+            "resource_kind": "mesh_3d",
+            "must": {"category": "container", "license_tier": "local_preview"},
+            "taxonomy": {
+                "category": "container",
+                "object_type": "container",
+                "subcategory": "crate",
+            },
+            "acquisition": {
+                "route": "external_site",
+                "requirement": "required",
+                "origin": "user_explicit",
+                "provider_hint": "polyhaven",
+                "source_uri_hint": "polyhaven:wooden_crate_01",
+                "reference_inputs": [],
+                "fallback_order": [],
+            },
+        }
+        transport = FakeTransport(
+            json_responses=[
+                {
+                    "wooden_crate_01": {
+                        "type": 2,
+                        "name": "Wooden Crate",
+                        "category": "Props/Industrial",
+                        "tags": ["wooden", "crate"],
+                        "dimensions": [825, 409, 350],
+                    }
+                },
+                {
+                    "fbx": {
+                        "1k": {
+                            "fbx": {
+                                "url": "https://d/crate.fbx",
+                                "md5": hashlib.md5(fbx, usedforsecurity=False).hexdigest(),
+                            }
+                        }
+                    }
+                },
+            ],
+            downloads={"https://d/crate.fbx": fbx},
+        )
+
+        compilation = compile_runtime_case(
+            case_spec_v2_from_dict(data),
+            requested_backend="ue",
+            registry=self.registry,
+            provider_orchestrator=AssetProviderOrchestrator(
+                workspace=self.workspace,
+                importer=StubImporter(),
+                remote_providers={"external_site": PolyHavenExternalSiteAdapter(transport=transport)},
+            ),
+        )
+
+        result = compilation.artifacts["asset_provider_batch"]["results"][0]
+        self.assertEqual(result["status"], "fulfilled")
+        selected = self.registry.get_asset_by_id(result["catalog_asset_ids"][0])
+        self.assertEqual(selected["category"], "container")
+        self.assertEqual(selected["category_l2"], "crate")
+        compiled_intent = compilation.artifacts["asset_provider_batch"]["requests"][0]["search_intent"]
+        self.assertTrue(compiled_intent["relaxation_policy"]["allow_uniform_scale_to_approx_size"])
+        self.assertEqual(selected["provider_reported_size_m"], [0.825, 0.409, 0.35])
+
+    def test_external_asset_and_procedural_ground_qualify_in_same_case(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["asset"] = {
+            "description": "dirty football",
+            "resource_kind": "mesh_3d",
+            "acquisition": {
+                "route": "external_site",
+                "requirement": "required",
+                "origin": "user_explicit",
+                "provider_hint": "polyhaven",
+                "source_uri_hint": "polyhaven:dirty_football",
+                "reference_inputs": [],
+                "fallback_order": [],
+            },
+        }
+        data["objects"][2]["asset"] = {
+            "description": "procedural collision floor",
+            "resource_kind": "mesh_3d",
+            "acquisition": {
+                "route": "procedural_generation",
+                "requirement": "required",
+                "origin": "user_explicit",
+                "provider_hint": "box_mesh_v1",
+                "reference_inputs": [],
+                "fallback_order": [],
+            },
+        }
+        compilation = compile_runtime_case(
+            case_spec_v2_from_dict(data),
+            requested_backend="ue",
+            registry=self.registry,
+            provider_orchestrator=AssetProviderOrchestrator(
+                workspace=self.workspace,
+                importer=DependencyStubImporter(),
+                remote_providers={
+                    "external_site": PolyHavenExternalSiteAdapter(transport=self._poly_transport())
+                },
+            ),
+        )
+        self.assertEqual(compilation.report["asset_resolve_invocation_count"], 1)
+        results = compilation.artifacts["asset_provider_batch"]["results"]
+        self.assertEqual([row["status"] for row in results], ["fulfilled", "fulfilled"])
+        selected = {
+            row["intent"]["object_id"]: row["selected_asset"]["asset_id"]
+            for row in compilation.artifacts["asset_resolution"]["assets"]
+        }
+        self.assertTrue(selected["cue_ball"].startswith("external.polyhaven.dirty_football."))
+        self.assertTrue(selected["floor"].startswith("generated.local.box_mesh_v1."))
+
+    def test_normal_model_route_requires_manifest_and_independent_meshy_authorization(self) -> None:
+        image = self.workspace / "authorization.png"
+        image.write_bytes(b"image")
+        case = self._case(
+            route="model_generation",
+            provider_hint="meshy",
+            references=[{"input_id": "front", "usage": ["generation_condition"]}],
+        )
+        transport = FakeTransport(json_responses=[], downloads={})
+        orchestrator = AssetProviderOrchestrator(
+            workspace=self.workspace,
+            importer=StubImporter(),
+            remote_providers={
+                "model_generation": MeshyModelGenerationAdapter(transport=transport, api_key="test")
+            },
+        )
+        missing = compile_runtime_case(
+            case,
+            requested_backend="ue",
+            registry=self.registry,
+            provider_orchestrator=orchestrator,
+        )
+        self.assertEqual(
+            missing.artifacts["asset_provider_batch"]["results"][0]["failure"]["code"],
+            "provider_input_manifest_missing",
+        )
+        denied = compile_runtime_case(
+            case,
+            requested_backend="ue",
+            registry=self.registry,
+            provider_orchestrator=orchestrator,
+            provider_input_manifest=build_provider_input_manifest(
+                [self._provider_input(image, planning_upload=True)],
+                workspace=self.workspace,
+                meshy_upload_authorized=False,
+            ),
+        )
+        self.assertEqual(
+            denied.artifacts["asset_provider_batch"]["results"][0]["failure"]["code"],
+            "upload_not_authorized",
+        )
+        self.assertEqual(transport.requests, [])
+
+    def test_remote_import_failure_is_receipted_and_never_registered(self) -> None:
+        poly = PolyHavenExternalSiteAdapter(transport=self._poly_transport())
+        compilation = compile_runtime_case(
+            self._case(route="external_site", provider_hint="polyhaven", source_uri="polyhaven:dirty_football"),
+            requested_backend="ue",
+            registry=self.registry,
+            provider_orchestrator=AssetProviderOrchestrator(
+                workspace=self.workspace,
+                importer=FailingImporter(),
+                remote_providers={"external_site": poly},
+            ),
+        )
+        result = compilation.artifacts["asset_provider_batch"]["results"][0]
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["failure"]["code"], "backend_asset_import_failed")
+        self.assertEqual(compilation.report["asset_resolve_invocation_count"], 1)
+        self.assertEqual(len(result["receipt_ids"]), 1)
+        self.assertIsNone(self.registry.get_asset_by_id("external.polyhaven.dirty_football.abcdef123456"))
+
+    def test_meshy_paid_task_failure_has_receipt_with_checkpoint(self) -> None:
+        image = self.workspace / "failed.png"
+        image.write_bytes(b"image")
+        meshy = MeshyModelGenerationAdapter(
+            transport=FakeTransport(
+                json_responses=[{"result": "paid-task"}, {"status": "FAILED", "task_error": "moderation"}],
+                downloads={},
+            ),
+            api_key="test",
+            poll_interval_s=0,
+        )
+        compilation = compile_runtime_case(
+            self._case(
+                route="model_generation",
+                provider_hint="meshy",
+                references=[{"input_id": "front", "usage": ["generation_condition"]}],
+            ),
+            requested_backend="ue",
+            registry=self.registry,
+            provider_orchestrator=AssetProviderOrchestrator(
+                workspace=self.workspace,
+                importer=StubImporter(),
+                remote_providers={"model_generation": meshy},
+            ),
+            provider_input_manifest=build_provider_input_manifest(
+                [self._provider_input(image)],
+                workspace=self.workspace,
+                meshy_upload_authorized=True,
+            ),
+        )
+        result = compilation.artifacts["asset_provider_batch"]["results"][0]
+        self.assertEqual(result["failure"]["code"], "provider_task_failed")
+        self.assertEqual(len(result["receipt_ids"]), 1)
+        receipt = compilation.provider_receipts[0]
+        self.assertEqual(receipt["provider_execution"]["task_id"], "paid-task")
+        self.assertEqual(receipt["output_files"][0]["role"], "provider_task_checkpoint")
+
+    def _case(
+        self,
+        *,
+        route: str,
+        provider_hint: str,
+        references: list[dict[str, Any]] | None = None,
+        source_uri: str | None = None,
+        asset_must: dict[str, Any] | None = None,
+    ):
+        data = case_spec_v2_fixture()
+        data["objects"][0]["asset"] = {
+            "description": "dirty football",
+            "resource_kind": "mesh_3d",
+            "must": dict(asset_must or {}),
+            "acquisition": {
+                "route": route,
+                "requirement": "required",
+                "origin": "user_explicit",
+                "provider_hint": provider_hint,
+                "source_uri_hint": source_uri,
+                "reference_inputs": list(references or []),
+                "fallback_order": [],
+            },
+        }
+        available = [str(row["input_id"]) for row in references or []]
+        return case_spec_v2_from_dict(data, available_input_ids=available)
+
+    @staticmethod
+    def _meshy_request(references: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "provider_hint": "meshy",
+            "reference_inputs": references,
+            "search_intent": {"raw_query": "a real ball"},
+            "generation_spec": {"size_m": [0.18, 0.18, 0.18]},
+        }
+
+    @staticmethod
+    def _poly_request() -> dict[str, Any]:
+        return {
+            "provider_hint": "polyhaven",
+            "source_uri_hint": "polyhaven:dirty_football",
+            "search_intent": {"raw_query": "dirty football"},
+            "generation_spec": {"size_m": [0.18, 0.18, 0.18]},
+        }
+
+    @staticmethod
+    def _provider_input(path: Path, *, planning_upload: bool = False) -> dict[str, Any]:
+        payload = path.read_bytes()
+        return {
+            "input_id": "front",
+            "kind": "image",
+            "local_path": str(path),
+            "mime_type": "image/png",
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "byte_size": len(payload),
+            "external_upload_authorized": planning_upload,
+        }
+
+    @staticmethod
+    def _poly_transport() -> FakeTransport:
+        fbx = b"fbx"
+        return FakeTransport(
+            json_responses=[
+                {
+                    "dirty_football": {
+                        "type": 2,
+                        "name": "Dirty Football",
+                        "description": "A scanned ball",
+                        "category": "Leisure/Sports/Balls",
+                        "tags": ["ball", "football"],
+                        "authors": {"Artist": "All"},
+                        "dimensions": [180, 180, 180],
+                        "files_hash": "abcdef1234567890",
+                    }
+                },
+                {
+                    "fbx": {
+                        "1k": {
+                            "fbx": {
+                                "url": "https://d/ball.fbx",
+                                "md5": hashlib.md5(fbx, usedforsecurity=False).hexdigest(),
+                            }
+                        }
+                    }
+                },
+            ],
+            downloads={"https://d/ball.fbx": fbx},
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

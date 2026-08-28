@@ -11,6 +11,26 @@ CAPABILITY_SCHEMA_VERSION = "harness_capability_v1"
 DEPRECATED_CAPABILITY_ALIASES = {
     "billiard_causality_compiler": "rigid_body_contact_causality",
 }
+LEGACY_PROCESS_LABELS = {
+    "agent_rigidbody_action_coupling",
+    "angular_damping_spin_decay",
+    "bounce_restitution_ball",
+    "brittle_impact_fracture",
+    "constraint_distance_pendulum_motion",
+    "constraint_momentum_transfer",
+    "elastic_constraint_rebound",
+    "elastic_energy_launch",
+    "force_field_wind_drift",
+    "magnetic_force_field",
+    "mass_ratio_momentum_transfer",
+    "projectile_gravity_motion",
+    "ramp_sliding_friction",
+    "rigid_body_contact_causality",
+    "rigid_body_gravity_collision",
+    "rolling_friction_ball",
+    "sequential_contact_propagation",
+    "sliding_crate_friction",
+}
 PIPELINE_EXECUTION_ORDER = (
     "prompt_case_capability_planning",
     "asset_intent_resolution",
@@ -47,8 +67,10 @@ class Capability:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Capability":
         validate_capability_dict(data)
+        capability_id = str(data["id"])
+        compatibility_label = capability_id in LEGACY_PROCESS_LABELS or capability_id == "soft_body_deformation"
         return cls(
-            id=str(data["id"]),
+            id=capability_id,
             description=str(data["description"]),
             physical_assumptions=[str(item) for item in data.get("physical_assumptions", [])],
             required_signals=[str(item) for item in data.get("required_signals", [])],
@@ -58,9 +80,17 @@ class Capability:
             repair_suggestions=[str(item) for item in data.get("repair_suggestions", [])],
             smoke_cases=[str(item) for item in data.get("smoke_cases", [])],
             regression_cases=[str(item) for item in data.get("regression_cases", [])],
-            capability_type=str(data.get("capability_type") or infer_capability_type(str(data["id"]))),
+            capability_type="compatibility_alias" if compatibility_label else str(data.get("capability_type") or infer_capability_type(capability_id)),
             stage_ids=[str(item) for item in data.get("stage_ids", [])],
-            deprecated_by=str(data["deprecated_by"]) if data.get("deprecated_by") else None,
+            deprecated_by=(
+                "deformable_body_dynamics"
+                if capability_id == "soft_body_deformation"
+                else "rigid_body_dynamics"
+                if capability_id in LEGACY_PROCESS_LABELS
+                else str(data["deprecated_by"])
+                if data.get("deprecated_by")
+                else None
+            ),
         )
 
     def to_summary(self) -> dict[str, Any]:
@@ -175,8 +205,6 @@ def infer_capability_type(capability_id: str) -> str:
         return "verification"
     if capability_id in {"dataset_artifact_packaging"}:
         return "dataset_packaging"
-    if capability_id in {"billiard_causality_compiler"}:
-        return "compatibility_alias"
     return "physics_constraint"
 
 

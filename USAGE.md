@@ -113,7 +113,7 @@ python3.13 scripts/harness_run_case.py \
 
 每次运行目录通常包含：
 
-- `case_spec_v2.json`、`runtime_case_spec_v1.json`
+- `case_spec_v2.json`、`runtime_case.json`（同时写入执行入口 `case_spec.json`）
 - `asset_provider_batch.json`、`provider_receipts/`
 - `asset_resolution.json`（V2 compilation 的调用数必须为 1）
 - `scene_layout.json`、`runtime_actor_placement.json`

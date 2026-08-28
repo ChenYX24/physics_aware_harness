@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from harness.core.capability import canonical_capability_id
+from harness.core.physics_contract import execution_capability_id, infer_scene_domain
 from tools.capability_planner import CapabilityPlanner, DEFAULT_PROFILE_PATH
 from tools.capability_verifier import CapabilityVerifier
 
@@ -91,8 +91,7 @@ def build_capability_execution_trace(
     trajectory: list[dict[str, Any]],
     capability_plan: dict[str, Any],
 ) -> dict[str, Any]:
-    capability_id = str(capability_plan.get("primary_capability_id") or "")
-    objects = normalize_objects(spec, trajectory, capability_id)
+    objects = normalize_objects(spec, trajectory)
     normalized_trajectory = normalize_trajectory(trajectory)
     return {
         "schema_version": "capability_execution_trace_v1",
@@ -105,6 +104,7 @@ def build_capability_execution_trace(
         "environment": normalize_environment(spec),
         "objects": objects,
         "trajectory": normalized_trajectory,
+        "verification_assertions": list(spec.get("verification_assertions") or []),
         "render_evidence": render_evidence(output_dir, summary, readiness, pass_manifest, normalized_trajectory),
         "source_artifacts": {
             "spec": str(run_dir / "spec.json"),
@@ -116,7 +116,7 @@ def build_capability_execution_trace(
     }
 
 
-def normalize_objects(spec: dict[str, Any], trajectory: list[dict[str, Any]], capability_id: str) -> list[dict[str, Any]]:
+def normalize_objects(spec: dict[str, Any], trajectory: list[dict[str, Any]]) -> list[dict[str, Any]]:
     scene_objects = list(((spec.get("scene") or {}).get("objects") or []))
     if not scene_objects:
         runtime_scene = spec.get("runtime_scene") if isinstance(spec.get("runtime_scene"), dict) else {}
@@ -139,7 +139,7 @@ def normalize_objects(spec: dict[str, Any], trajectory: list[dict[str, Any]], ca
         objects.append(
             {
                 "id": object_id,
-                "role": infer_role(object_id, raw, capability_id),
+                "role": str(raw.get("role") or ""),
                 "dynamic": dynamic,
                 "asset_key": raw.get("asset_key") or raw.get("asset_id") or raw.get("asset_name"),
                 "initial_state": initial_state,
@@ -252,9 +252,14 @@ def render_evidence(
 
 def existing_plan_or_plan_prompt(spec: dict[str, Any], prompt: str, planner: CapabilityPlanner) -> dict[str, Any]:
     existing = spec.get("capability_plan") if isinstance(spec.get("capability_plan"), dict) else {}
-    if existing.get("schema_version") == "capability_plan_v1":
+    if existing.get("schema_version") == "capability_plan_v2":
         return existing
-    return planner.plan(prompt)
+    plan = planner.plan(prompt)
+    plan["primary_capability_id"] = execution_capability_id(spec)
+    plan["scene_domain"] = infer_scene_domain(spec)
+    if existing:
+        plan["source_capability_plan"] = existing
+    return plan
 
 
 def prompt_from_spec_or_summary(spec: dict[str, Any], summary: dict[str, Any], fallback: str) -> str:
@@ -345,30 +350,12 @@ def normalize_environment(spec: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def infer_role(object_id: str, raw: dict[str, Any], capability_id: str) -> str:
-    capability_id = canonical_capability_id(capability_id)
-    source = f"{object_id} {raw.get('role') or ''} {raw.get('behavior') or ''}".casefold()
-    if capability_id == "rigid_body_contact_causality":
-        if any(term in source for term in ("cue", "striker", "impactor", "active")):
-            return "active_striker"
-        if any(term in source for term in ("target", "rack", "ball")):
-            return "passive_target"
-    if capability_id == "rigid_body_gravity_collision":
-        if any(term in source for term in ("ground", "floor", "support", "table")) or raw.get("dynamic") is False:
-            return "support"
-        return "falling_body"
-    if capability_id == "sequential_contact_propagation":
-        if any(term in source for term in ("domino", "bottle", "chain", "sequential")):
-            return "domino"
-    role = str(raw.get("role") or "").strip()
-    return role or ("dynamic_subject" if infer_dynamic(object_id, raw) else "static_support")
-
-
 def infer_dynamic(object_id: str, raw: dict[str, Any]) -> bool:
-    source = f"{object_id} {raw.get('role') or ''}".casefold()
-    if any(term in source for term in ("ground", "floor", "support", "table", "surface")):
-        return False
-    return True
+    if raw.get("body_type") is not None:
+        return str(raw.get("body_type")).casefold() == "dynamic"
+    if raw.get("kinematic") is not None:
+        return not bool(raw.get("kinematic"))
+    return bool(raw.get("dynamic", True))
 
 
 def first_frame_objects(trajectory: list[dict[str, Any]]) -> dict[str, Any]:

@@ -429,8 +429,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     case = load_case_spec(args.case)
-    if case.capability_id != "soft_body_deformation":
-        raise SystemExit(f"Taichi cloth backend requires soft_body_deformation, got {case.capability_id}")
+    from harness.core.physics_contract import infer_scene_domain
+
+    if infer_scene_domain(case.data) != "deformable":
+        raise SystemExit("Taichi cloth backend requires a deformable-domain scene contract")
     result = simulate(case.data)
     verification = write_run(Path(args.output_dir).expanduser().resolve(), case.data, result)
     print(json.dumps(verification, indent=2, ensure_ascii=False))

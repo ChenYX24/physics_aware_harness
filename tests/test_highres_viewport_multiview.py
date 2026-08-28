@@ -22,8 +22,920 @@ class Vector:
 
 
 class HighresViewportMultiviewTests(unittest.TestCase):
+    def test_diagnostic_data_capture_uses_uniform_sparse_frames(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "data_capture_frame_indices"
+        )
+        namespace = {"RENDER_DATA_SAMPLE_COUNT": 6}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+
+        self.assertEqual(namespace["data_capture_frame_indices"](121), {0, 24, 48, 72, 96, 120})
+
+    def test_only_character_frame_zero_waits_for_world_tick(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "articulated_frame_zero_needs_post_tick"
+        )
+        namespace = {}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+        needs_post_tick = namespace["articulated_frame_zero_needs_post_tick"]
+
+        self.assertFalse(needs_post_tick({"dynamic_objects": [{"behavior": "articulated_kinematic"}]}))
+        self.assertFalse(needs_post_tick({"dynamic_objects": [{"behavior": "articulated_ragdoll"}]}))
+        self.assertTrue(needs_post_tick({"dynamic_objects": [{"behavior": "articulated_character"}]}))
+
+    def test_control_rig_rotation_readback_uses_quaternion_equivalence(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "articulated_quaternion_angular_error_deg"
+        )
+        namespace = {"math": __import__("math")}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+        angular_error = namespace["articulated_quaternion_angular_error_deg"]
+        quat = types.SimpleNamespace(x=0.0, y=0.0, z=0.70710678, w=0.70710678)
+        equivalent = types.SimpleNamespace(x=0.0, y=0.0, z=-0.70710674, w=-0.70710674)
+        identity = types.SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0)
+
+        self.assertAlmostEqual(angular_error(quat, equivalent), 0.0, places=6)
+        self.assertAlmostEqual(angular_error(identity, quat), 90.0, places=5)
+
+    def test_direct_articulated_attachment_suspends_declared_collision(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "apply_articulated_attachments"
+        )
+
+        class Component:
+            def __init__(self, body: bool = False) -> None:
+                self.body = body
+                self.simulation = []
+                self.collision = []
+
+            def set_simulate_physics(self, enabled):
+                self.simulation.append(enabled)
+
+            def set_collision_enabled(self, enabled):
+                self.collision.append(enabled)
+
+            def transform_from_bone_space(self, *_args):
+                return Vector(1.0, 2.0, 3.0), "rotation"
+
+        class Actor:
+            def __init__(self, component) -> None:
+                self.component = component
+
+            def set_actor_location(self, *_args):
+                pass
+
+            def set_actor_rotation(self, *_args):
+                pass
+
+        collision = types.SimpleNamespace(NO_COLLISION="none", QUERY_AND_PHYSICS="query_and_physics")
+        namespace = {
+            "unreal": types.SimpleNamespace(CollisionEnabled=collision, Name=str, Vector=Vector),
+            "actor_runtime_component": lambda actor: actor.component,
+            "actor_skeletal_component_with_socket": lambda actor, _socket: actor.component,
+            "runtime_rotator": lambda value: value,
+            "bool_control": lambda value, default: default if value is None else bool(value),
+        }
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+        body_component = Component(body=True)
+        target_component = Component()
+        actors = {"person": Actor(body_component), "prop": Actor(target_component)}
+        runtime_scene = {
+            "dynamic_objects": [
+                {
+                    "id": "person",
+                    "behavior": "articulated_character",
+                    "params": {"articulated_body": {"attachments": [{
+                        "object_id": "prop",
+                        "bone": "hand_r",
+                        "start_time_s": 0.0,
+                        "end_time_s": 1.0,
+                    }] }},
+                },
+                {
+                    "id": "prop",
+                    "physics_properties": {"collision_enabled": True, "simulate_physics": False},
+                },
+            ],
+            "static_objects": [],
+        }
+
+        namespace["apply_articulated_attachments"](actors, runtime_scene, 0.0)
+        namespace["apply_articulated_attachments"](actors, runtime_scene, 1.0)
+
+        self.assertEqual(target_component.simulation, [False])
+        self.assertEqual(target_component.collision, ["none", "query_and_physics"])
+
+    def test_articulated_observation_uses_canonical_frame_time(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        source_text = source.read_text(encoding="utf-8")
+        tree = ast.parse(source_text, filename=str(source))
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "record_physics_transform_frame"
+        ]
+
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(
+            isinstance(call.args[3], ast.Call)
+            and isinstance(call.args[3].func, ast.Name)
+            and call.args[3].func.id == "frame_time_s"
+            for call in calls
+        ))
+        self.assertIn('anim.get_editor_property("sequence_length")', source_text)
+        self.assertNotIn("anim.get_play_length()", source_text)
+        self.assertNotIn("MathLibrary.make_transform", source_text)
+        self.assertIn("on_pre_initialize_delegate.add_callable_unique", source_text)
+        self.assertIn("on_pre_forwards_solve_delegate.add_callable_unique", source_text)
+        self.assertIn("on_post_forwards_solve_delegate.add_callable_unique", source_text)
+        self.assertIn("component.clear_mapped_elements()", source_text)
+        self.assertIn("pre_initialize_count < 1 or not rig_component.can_execute()", source_text)
+        self.assertNotIn("PreInitialize mapping did not execute exactly once", source_text)
+        self.assertIn('ARTICULATED_ANIMATION_SOURCE_TAG = "HarnessArticulatedAnimationSource"', source_text)
+        self.assertIn("animation_source = add_articulated_animation_source(actor, component, asset)", source_text)
+        self.assertIn("articulated_animation_source_component(actor)", source_text)
+        self.assertIn("seed_control_rig_from_animation(rig, animation_source, overlay)", source_text)
+        self.assertIn("compose_transforms(offset_transform, base_local)", source_text)
+        self.assertIn("RTS_PARENT_BONE_SPACE", source_text)
+        self.assertNotIn("ARTICULATED_POSE_OVERLAY_CONTROLS", source_text)
+        self.assertIn('head_world = component.get_bone_transform(', source_text)
+        self.assertIn("articulated_quaternion_angular_error_deg(", source_text)
+        self.assertLess(
+            source_text.index("rig.set_bone_transform(bone_name, target_local"),
+            source_text.index('control_rig.execute(unreal.Name("Backwards Solve"))'),
+        )
+        self.assertLess(
+            source_text.index("on_pre_initialize_delegate.add_callable_unique"),
+            source_text.index("rig_component.set_control_rig_class(rig_class)"),
+        )
+        self.assertIn("rig.update(0.0)", source_text)
+        self.assertIn("rig_component.update(0.0)", source_text)
+        self.assertEqual(source_text.count("actor.cache_initial_mesh_offset("), 2)
+        self.assertIn("RigHierarchy.make_control_value_from_bool(weight > 0.0)", source_text)
+        self.assertIn("component.set_control_transform(", source_text)
+        self.assertIn("component.set_control_position(", source_text)
+        self.assertIn("component.get_control_bool(", source_text)
+        self.assertIn('ARTICULATED_HEAD_LOOK_CONTROLS["switch"]', source_text)
+        self.assertNotIn("component.set_control_float(unreal.Name(controls[\"switch\"]), weight)", source_text)
+        self.assertNotIn("animation_source.get_component_transform()", source_text)
+        self.assertNotIn("hierarchy.set_global_transform(", source_text)
+        self.assertNotIn('control_rig.execute(unreal.Name("Forwards Solve"))', source_text)
+        self.assertNotIn("world.tick(tick_enum, 0.001)", source_text)
+        self.assertIn("disable_runtime_stage_helper_collision(actor)", source_text)
+        self.assertIn("actor.set_actor_enable_collision(False)", source_text)
+        self.assertIn('component.set_collision_profile_name("NoCollision")', source_text)
+        self.assertIn("location=head_position", source_text)
+        self.assertIn("articulated_rig_position_from_world(component, pole_world)", source_text)
+        self.assertIn("articulated_world_position_from_rig(component, pole_rig)", source_text)
+        self.assertIn("align_articulated_control_rig_component(rig_component, skeletal_component)", source_text)
+        self.assertIn("align_articulated_control_rig_component(rig, skeletal)", source_text)
+        self.assertEqual(source_text.count("component.get_world_transform()"), 2)
+        self.assertNotIn('state["character_advanced_frame"] = 0', source_text)
+        self.assertIn("if pending_frame == 0:", source_text)
+        self.assertIn("restore_articulated_frame_zero_roots(actors, runtime_scene)", source_text)
+        self.assertIn('"status": "pending_post_tick"', source_text)
+        self.assertIn('"sample_phase": "pre_tick"', source_text)
+        self.assertIn('result["post_solve_control_position_delta_cm"]', source_text)
+        self.assertNotIn('result["control_write_position_error_cm"] = round(position_error, 6)', source_text)
+        self.assertIn("target_world = ue_vec_from_meters(target, z_offset_cm=0.0, origin=scene_origin)", source_text)
+        pre_solve = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "articulated_control_rig_pre_forwards_solve"
+        )
+        world_target_conversions = [
+            node
+            for node in ast.walk(pre_solve)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "ue_vec_from_meters"
+        ]
+        self.assertEqual(len(world_target_conversions), 3)
+        self.assertTrue(all(
+            any(
+                keyword.arg == "z_offset_cm"
+                and isinstance(keyword.value, ast.Constant)
+                and keyword.value.value == 0.0
+                for keyword in call.keywords
+            )
+            for call in world_target_conversions
+        ))
+
+    def test_matching_solver_and_visual_mesh_reuses_compiled_scale(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "runtime_visual_scale"
+        )
+        namespace = {}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+
+        obj = {
+            "ue5_path": "/Engine/BasicShapes/Cube.Cube",
+            "scale": [3.0, 2.0, 0.1],
+            "params": {},
+        }
+        self.assertEqual(
+            namespace["runtime_visual_scale"](obj, "/Engine/BasicShapes/Cube.Cube"),
+            [3.0, 2.0, 0.1],
+        )
+        self.assertIsNone(namespace["runtime_visual_scale"](obj, "/Game/Visuals/Table.Table"))
+
+    def test_compiled_camera_plan_is_the_exact_view_set(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        functions = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name in {"ue_vec_from_meters", "compiled_camera_view_specs"}
+        ]
+        namespace = {"unreal": types.SimpleNamespace(Vector=Vector)}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"), namespace)
+        runtime_scene = {
+            "camera": {
+                "views": [
+                    {
+                        "camera_id": "overview",
+                        "role": "overview",
+                        "location": [1.5, -1.5, 1.5],
+                        "target": [0.0, 0.0, 0.0],
+                        "fov": 60.0,
+                    }
+                ]
+            }
+        }
+
+        views = namespace["compiled_camera_view_specs"](runtime_scene, Vector(10.0, 20.0, 30.0))
+
+        self.assertEqual([view["view_id"] for view in views], ["overview"])
+        self.assertEqual((views[0]["location"].x, views[0]["location"].y, views[0]["location"].z), (160.0, -130.0, 180.0))
+        self.assertEqual((views[0]["target"].x, views[0]["target"].y, views[0]["target"].z), (10.0, 20.0, 30.0))
+        with self.assertRaisesRegex(RuntimeError, "contains no views"):
+            namespace["compiled_camera_view_specs"]({"camera": {"views": []}}, Vector(0.0, 0.0, 0.0))
+
+    def test_runtime_constraint_is_bound_by_registered_cpp_driver(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        rebind = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "rebind_runtime_actors_to_simulation_world"
+        )
+        create = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "spawn_runtime_constraints_in_game_world"
+        )
+        rebound_calls = {
+            node.func.id
+            for node in ast.walk(rebind)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        called = {
+            node.func.id
+            for node in ast.walk(create)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+
+        self.assertNotIn("spawn_runtime_constraints_in_game_world", rebound_calls)
+        self.assertIn("binder", called)
+
+    def test_runtime_constraint_creation_precedes_body_activation(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "initialize_cpp_runtime_driver"
+        )
+        call_lines = {
+            node.func.id: node.lineno
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in {
+                "prepare_cpp_runtime_driver",
+                "spawn_runtime_constraints_in_game_world",
+                "start_prepared_cpp_runtime_driver",
+            }
+        }
+
+        self.assertLess(
+            call_lines["prepare_cpp_runtime_driver"],
+            call_lines["spawn_runtime_constraints_in_game_world"],
+        )
+        self.assertLess(
+            call_lines["spawn_runtime_constraints_in_game_world"],
+            call_lines["start_prepared_cpp_runtime_driver"],
+        )
+
+    def test_final_body_instance_is_not_recreated_after_constraint_binding(self) -> None:
+        source = (
+            ROOT
+            / "ue_template/Plugins/ADPPhysicsRuntime/Source/ADPPhysicsRuntime/Private/ADPPhysicsRuntimeDriver.cpp"
+        ).read_text(encoding="utf-8")
+        prepare = source.split("void AADPPhysicsRuntimeDriver::PrepareBody", 1)[1].split(
+            "void AADPPhysicsRuntimeDriver::ActivateBody", 1
+        )[0]
+        activate = source.split("void AADPPhysicsRuntimeDriver::ActivateBody", 1)[1].split(
+            "void AADPPhysicsRuntimeDriver::CaptureFrame", 1
+        )[0]
+
+        self.assertIn("SetSimulatePhysics", prepare)
+        self.assertNotIn("SetSimulatePhysics", activate)
+
+    def test_constraint_scene_requires_successful_cpp_body_setup(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "require_final_constraint_body_setup"
+        )
+        namespace = {}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+
+        with self.assertRaisesRegex(RuntimeError, "F_RUNTIME_CONSTRAINT_BINDING_FAILED"):
+            namespace["require_final_constraint_body_setup"](
+                {"constraints": [{"constraint_id": "joint"}]},
+                {"cpp_runtime_driver": {"prepared": False}},
+            )
+        namespace["require_final_constraint_body_setup"](
+            {"constraints": [{"constraint_id": "joint"}]},
+            {"cpp_runtime_driver": {"prepared": True}},
+        )
+        namespace["require_final_constraint_body_setup"]({}, {})
+
+    def test_runtime_component_registration_falls_back_to_live_owner(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "runtime_component_registered"
+        )
+        namespace = {}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+
+        class Component:
+            def is_registered(self):
+                raise AttributeError("not exported to Python")
+
+            def get_editor_property(self, _name):
+                raise AttributeError("not exported to Python")
+
+            def get_owner(self):
+                return object()
+
+        self.assertTrue(namespace["runtime_component_registered"](Component()))
+
+    def test_runtime_driver_owns_constraint_binding_and_readback(self) -> None:
+        plugin = ROOT / "ue_template" / "Plugins" / "ADPPhysicsRuntime" / "Source" / "ADPPhysicsRuntime"
+        header = (plugin / "Public" / "ADPPhysicsRuntimeDriver.h").read_text(encoding="utf-8")
+        implementation = (plugin / "Private" / "ADPPhysicsRuntimeDriver.cpp").read_text(encoding="utf-8")
+        native_scene = (ROOT / "scripts" / "native_ue_scene.py").read_text(encoding="utf-8")
+
+        self.assertIn("APhysicsConstraintActor* BindConstraint(", header)
+        self.assertNotIn("SetSoftLinearLimitParams(", implementation)
+        self.assertIn("bBodyAWorld ? nullptr : FindRegisteredPrimitive(BodyAId)", implementation)
+        self.assertIn("bBodyBWorld ? nullptr : FindRegisteredPrimitive(BodyBId)", implementation)
+        self.assertIn("bBodyAWorld && bBodyBWorld", implementation)
+        self.assertIn('ue_name("None" if body_a_world else body_a_id)', native_scene)
+        self.assertIn('ue_name("None" if body_b_world else body_b_id)', native_scene)
+        self.assertIn("World->SpawnActor<APhysicsConstraintActor>", implementation)
+        self.assertIn("Component->SetConstraintReferenceFrame(EConstraintFrame::Frame1, FrameA);", implementation)
+        self.assertIn("Component->SetConstraintReferenceFrame(EConstraintFrame::Frame2, FrameB);", implementation)
+        self.assertNotIn("Component->SetConstraintReferencePosition", implementation)
+        self.assertNotIn("Component->SetConstraintReferenceOrientation", implementation)
+        self.assertNotIn("Component->TermComponentConstraint();", implementation)
+        self.assertNotIn("Component->InitComponentConstraint();", implementation)
+        self.assertIn("Instance.IsValidConstraintInstance()", implementation)
+        self.assertIn("FPhysicsInterface::GetLocalPose", implementation)
+
+        self.assertIn("&& bLinearDriveVerified && bAngularDriveVerified && bBreakThresholdsVerified && bSolverFramesVerified", implementation)
+        self.assertIn("SetLinearPositionDrive", implementation)
+        self.assertIn("SetLinearVelocityDrive", implementation)
+        self.assertIn("SetAngularDriveParams", implementation)
+        self.assertIn("SetLinearBreakable", implementation)
+        self.assertIn("USplineMeshComponent", implementation)
+        self.assertIn("SetStartAndEnd", implementation)
+        self.assertIn("SetSplineUpDir", implementation)
+        self.assertIn("ConstraintVisualSegmentCount = 8", implementation)
+        self.assertIn("ConstraintVisualExtraSegments", header)
+        self.assertIn("DistanceSpring->RestLengthCm > DistanceCm", implementation)
+        self.assertIn("const float SagDepthCm", implementation)
+        self.assertIn("const FVector SegmentStartWorld = CurvePoint(StartT)", implementation)
+        self.assertIn("AxialVisualObjectId", header)
+        self.assertIn("GetConstraintVisualComponent", header)
+        self.assertIn("void RefreshConstraintVisuals();", header)
+        self.assertIn('getattr(driver, "refresh_constraint_visuals", None)', native_scene)
+        self.assertIn("Source->SetVisibility(false, true);", implementation)
+        self.assertIn('getattr(driver, "get_constraint_visual_component", None)', native_scene)
+        self.assertIn('actor_bindings.get("constraint_visual_components")', native_scene)
+        self.assertIn('separate_visual_actor.set_actor_hidden_in_game(True)', native_scene)
+        self.assertIn('visual_component.set_material(material_index, separate_visual_component.get_material(material_index))', native_scene)
+        self.assertIn('for object_id in (actors.get("constraint_visual_components") or {})', native_scene)
+        self.assertIn("FVector AngularVelocityRadPerSec", header)
+        self.assertIn("GetPhysicsAngularVelocityInRadians", implementation)
+        self.assertIn('TEXT("angular_velocity_rad_s")', implementation)
+        self.assertIn('properties.get("initial_angular_velocity_rad_s")', native_scene)
+        self.assertIn("F_RUNTIME_ANGULAR_VELOCITY_CAPTURE_FAILED", native_scene)
+        self.assertLess(
+            implementation.index("Component->SetConstrainedComponents(BodyA, NAME_None, BodyB, NAME_None);"),
+            implementation.index("Component->SetConstraintReferenceFrame(EConstraintFrame::Frame1"),
+        )
+
+    def test_runtime_driver_applies_auditable_unilateral_distance_springs(self) -> None:
+        plugin = ROOT / "ue_template" / "Plugins" / "ADPPhysicsRuntime" / "Source" / "ADPPhysicsRuntime"
+        header = (plugin / "Public" / "ADPPhysicsRuntimeDriver.h").read_text(encoding="utf-8")
+        implementation = (plugin / "Private" / "ADPPhysicsRuntimeDriver.cpp").read_text(encoding="utf-8")
+        native_scene = (ROOT / "scripts" / "native_ue_scene.py").read_text(encoding="utf-8")
+
+        self.assertIn("FADPUnilateralDistanceSpringConfig", header)
+        self.assertIn("AddCustomPhysics(UnilateralDistanceSpringDelegate)", implementation)
+        self.assertIn("Spring.StiffnessNPerM * (ExtensionCm / 100.0f)", implementation)
+        self.assertIn("+ Spring.DampingNsPerM * SeparationSpeedMPerSec", implementation)
+        self.assertIn("BodyB->AddImpulseAtPosition(ImpulseOnBEngineUnits, PointB)", implementation)
+        self.assertIn('TEXT("distance_spring_evaluation_count")', implementation)
+        self.assertIn('binding.get("unilateral_distance_spring")', native_scene)
+
+    def test_runtime_driver_applies_and_records_declared_continuous_forces(self) -> None:
+        plugin = ROOT / "ue_template" / "Plugins" / "ADPPhysicsRuntime" / "Source" / "ADPPhysicsRuntime"
+        header = (plugin / "Public" / "ADPPhysicsRuntimeDriver.h").read_text(encoding="utf-8")
+        implementation = (plugin / "Private" / "ADPPhysicsRuntimeDriver.cpp").read_text(encoding="utf-8")
+        native_scene = (ROOT / "scripts" / "native_ue_scene.py").read_text(encoding="utf-8")
+
+        self.assertIn("bool RegisterContinuousForce(", header)
+        self.assertIn("ApplyContinuousForces(ElapsedSeconds);", implementation)
+        self.assertIn("Primitive->AddForce(Force.ForceNewton * 100.0f", implementation)
+        self.assertIn('FrameObject->SetArrayField(TEXT("forces"), ForcesJson)', implementation)
+        self.assertIn("driver.register_continuous_force(", native_scene)
+
+    def test_runtime_driver_applies_declared_unilateral_compliant_contacts(self) -> None:
+        plugin = ROOT / "ue_template" / "Plugins" / "ADPPhysicsRuntime" / "Source" / "ADPPhysicsRuntime"
+        header = (plugin / "Public" / "ADPPhysicsRuntimeDriver.h").read_text(encoding="utf-8")
+        implementation = (plugin / "Private" / "ADPPhysicsRuntimeDriver.cpp").read_text(encoding="utf-8")
+        native_scene = (ROOT / "scripts" / "native_ue_scene.py").read_text(encoding="utf-8")
+
+        self.assertIn("bool RegisterCompliantContact(", header)
+        self.assertIn("FCalculateCustomPhysics CompliantContactDelegate", header)
+        self.assertIn("AddCustomPhysics(CompliantContactDelegate)", implementation)
+        self.assertIn("GetUnrealWorldTransform_AssumesLocked(false, false)", implementation)
+        self.assertIn("ForceNewton * DeltaSeconds * 100.0f", implementation)
+        self.assertIn("Contact.StiffnessNPerM * (CompressionCm / 100.0f)", implementation)
+        self.assertIn("FMath::Max(", implementation)
+        self.assertIn("BodyA->AddImpulse(-ImpulseEngineUnits", implementation)
+        self.assertIn("BodyB->AddImpulse(ImpulseEngineUnits", implementation)
+        self.assertIn("driver.register_compliant_contact(", native_scene)
+
+    def test_delayed_release_rebinds_declared_constraints_after_body_state_change(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "rebind_constraints_after_body_physics_state_change"
+        )
+
+        class BodyComponent:
+            pass
+
+        class ConstraintComponent:
+            def __init__(self):
+                self.bound = []
+
+            def set_constrained_components(self, body_a, _bone_a, body_b, _bone_b):
+                self.bound = [body for body in (body_a, body_b) if body is not None]
+
+        cart_component = BodyComponent()
+        constraint_component = ConstraintComponent()
+        actors = {
+            "driven_cart": object(),
+            "constraint_actors": {"spring_drive": object()},
+            "constraint_binding_details": {
+                "spring_drive": {
+                    "body_a": {"endpoint_type": "world_anchor", "object_id": "spring_anchor"},
+                    "body_b": {"endpoint_type": "rigid_body", "object_id": "driven_cart"},
+                }
+            },
+        }
+        namespace = {
+            "actor_runtime_component": lambda actor: cart_component if actor is actors["driven_cart"] else None,
+            "physics_constraint_component": lambda _actor: constraint_component,
+            "constrained_runtime_components": lambda component: component.bound,
+            "ue_name": str,
+        }
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+        status = {}
+
+        rebound = namespace["rebind_constraints_after_body_physics_state_change"](
+            actors,
+            "driven_cart",
+            status,
+        )
+
+        self.assertEqual(rebound, ["spring_drive"])
+        self.assertEqual(constraint_component.bound, [cart_component])
+        self.assertEqual(
+            status["delayed_release_constraint_rebinds"],
+            [{"body_id": "driven_cart", "constraint_ids": ["spring_drive"]}],
+        )
+
+    def test_delayed_release_rebind_occurs_before_release_velocity(self) -> None:
+        source = (ROOT / "scripts" / "native_ue_scene.py").read_text(encoding="utf-8")
+        body = source.split("def apply_delayed_release_projectiles(", 1)[1].split(
+            "\ndef physics_capture_enabled(", 1
+        )[0]
+        release_body = body.split("component.set_simulate_physics(True)", 1)[1]
+
+        self.assertLess(
+            release_body.index("rebind_constraints_after_body_physics_state_change"),
+            release_body.index("component.set_physics_linear_velocity"),
+        )
+
+    def test_runtime_binding_snapshot_refresh_replaces_pre_registration_state(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        functions = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name in {
+                "refresh_runtime_binding_snapshot",
+                "runtime_binding_snapshot_registered",
+            }
+        ]
+        namespace = {}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"), namespace)
+        snapshots = [
+            {
+                "capture_phase": "pre_simulation",
+                "objects": [{"mesh_component": {"registered": False}}],
+                "constraints": [{"component_registered": False, "body_bindings_verified": False, "configuration_applied": False, "broken": False}],
+            },
+            {
+                "capture_phase": "pre_simulation",
+                "objects": [{"mesh_component": {"registered": True}}],
+                "constraints": [{"component_registered": True, "body_bindings_verified": True, "configuration_applied": True, "broken": False}],
+            },
+        ]
+        actors = {
+            "runtime_binding_snapshot": {
+                "capture_phase": "component_registration_pending",
+                "objects": [],
+            },
+            "capture_runtime_binding_snapshot": lambda _actors: snapshots.pop(0),
+        }
+        summary = {"runtime_binding_snapshot": actors["runtime_binding_snapshot"]}
+
+        first = namespace["refresh_runtime_binding_snapshot"](actors, summary)
+        self.assertFalse(namespace["runtime_binding_snapshot_registered"](first))
+        second = namespace["refresh_runtime_binding_snapshot"](actors, summary)
+
+        self.assertTrue(namespace["runtime_binding_snapshot_registered"](second))
+        self.assertIs(actors["runtime_binding_snapshot"], second)
+        self.assertIs(summary["runtime_binding_snapshot"], second)
+
+    def test_runtime_binding_position_respects_pose_anchor(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "runtime_binding_pose_position"
+        )
+        namespace = {}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+        actor_origin = object()
+        bounds_center = object()
+
+        self.assertIs(
+            namespace["runtime_binding_pose_position"](
+                actor_origin,
+                bounds_center,
+                "bounds_center",
+            ),
+            bounds_center,
+        )
+        self.assertIs(
+            namespace["runtime_binding_pose_position"](
+                actor_origin,
+                bounds_center,
+                "actor_origin",
+            ),
+            actor_origin,
+        )
+
+    def test_bounds_center_alignment_applies_compiled_visual_center_offset(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "align_runtime_actor_to_pose_anchor"
+        )
+
+        class TestVector(Vector):
+            def __add__(self, other):
+                return TestVector(self.x + other.x, self.y + other.y, self.z + other.z)
+
+            def __sub__(self, other):
+                return TestVector(self.x - other.x, self.y - other.y, self.z - other.z)
+
+        class Actor:
+            def __init__(self) -> None:
+                self.location = TestVector(0.0, 0.0, 0.0)
+                self.origin = TestVector(0.0, 0.0, 0.0)
+
+            def get_actor_location(self):
+                return self.location
+
+            def get_actor_transform(self):
+                return object()
+
+            def set_actor_location(self, location, *_args):
+                delta = location - self.location
+                self.location = location
+                self.origin = self.origin + delta
+
+        actor = Actor()
+        unreal = types.SimpleNamespace(
+            Vector=TestVector,
+            MathLibrary=types.SimpleNamespace(
+                transform_direction=lambda _transform, value: value,
+            ),
+        )
+        namespace = {
+            "unreal": unreal,
+            "math": __import__("math"),
+            "actor_bounds": lambda value: (value.origin, TestVector(1.0, 1.0, 1.0)),
+        }
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+
+        origin, _extent = namespace["align_runtime_actor_to_pose_anchor"](
+            actor,
+            {
+                "id": "table_visual",
+                "params": {
+                    "pose_anchor": "bounds_center",
+                    "visual_local_bounds_center_from_collision_m": [0.0, 0.0, -0.31506566],
+                },
+            },
+            TestVector(0.0, 0.0, 16.0131),
+        )
+
+        self.assertAlmostEqual(origin.z, -15.493466, places=6)
+
+    def test_existing_static_and_stationary_map_lights_are_normalized_to_movable(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        names = {
+            "set_editor_property_if_available",
+            "get_light_component",
+            "unreal_class_name",
+            "light_mobility_name",
+            "read_light_mobility",
+            "make_light_movable",
+            "light_component_enabled",
+            "inspect_runtime_light",
+            "is_light_actor",
+            "configure_existing_map_lights",
+            "audit_runtime_lights",
+        }
+        functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+
+        class UnrealClass:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            def get_name(self) -> str:
+                return self.name
+
+        class LightComponent:
+            def __init__(self, class_name: str, mobility: str, *, mobility_failure: bool = False) -> None:
+                self.class_name = class_name
+                self.properties = {"mobility": mobility, "visible": True, "hidden_in_game": False}
+                self.mobility_failure = mobility_failure
+
+            def get_class(self):
+                return UnrealClass(self.class_name)
+
+            def get_editor_property(self, name):
+                return self.properties[name]
+
+            def set_editor_property(self, name, value):
+                if name == "mobility" and self.mobility_failure:
+                    raise RuntimeError("mobility property rejected")
+                self.properties[name] = value
+
+            def set_mobility(self, value):
+                if self.mobility_failure:
+                    raise RuntimeError("mobility setter rejected")
+                self.properties["mobility"] = value
+
+            def set_visibility(self, value, _propagate):
+                self.properties["visible"] = value
+
+            def set_hidden_in_game(self, value, _propagate):
+                self.properties["hidden_in_game"] = value
+
+        class Actor:
+            def __init__(self, label: str, class_name: str, component=None) -> None:
+                self.label = label
+                self.class_name = class_name
+                self.component = component
+                self.hidden = False
+
+            def get_actor_label(self):
+                return self.label
+
+            def get_path_name(self):
+                return f"/Game/Test.{self.label}"
+
+            def get_class(self):
+                return UnrealClass(self.class_name)
+
+            def get_component_by_class(self, _class):
+                return self.component
+
+            def set_actor_hidden_in_game(self, value):
+                self.hidden = value
+
+            def is_hidden(self):
+                return self.hidden
+
+        static = Actor("Sun", "DirectionalLight", LightComponent("DirectionalLightComponent", "STATIC"))
+        stationary = Actor("Sky", "SkyLight", LightComponent("SkyLightComponent", "STATIONARY"))
+        movable = Actor("Fill", "PointLight", LightComponent("PointLightComponent", "MOVABLE"))
+        atmosphere = Actor("Atmosphere", "SkyAtmosphere")
+        unreal = types.SimpleNamespace(
+            LightComponent=type("UnrealLightComponent", (), {}),
+            ComponentMobility=types.SimpleNamespace(MOVABLE="MOVABLE"),
+        )
+        namespace = {"unreal": unreal}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"), namespace)
+
+        report = namespace["configure_existing_map_lights"](
+            types.SimpleNamespace(get_all_level_actors=lambda: [static, stationary, movable, atmosphere]),
+            True,
+            normalize_to_movable=True,
+        )
+
+        self.assertEqual(report["inspected"], 3)
+        self.assertEqual(report["normalized_to_movable"], 2)
+        self.assertEqual([item["final_mobility"] for item in report["lights"]], ["MOVABLE", "MOVABLE", "MOVABLE"])
+        self.assertEqual(report["failures"], [])
+        self.assertTrue(report["preview_shadow_safe"])
+
+        runtime_fill = Actor(
+            "native_phenomena_demo_runtime_fill",
+            "PointLight",
+            LightComponent("PointLightComponent", "STATIC"),
+        )
+        audit = namespace["audit_runtime_lights"](
+            types.SimpleNamespace(get_all_level_actors=lambda: [static, stationary, movable, atmosphere, runtime_fill]),
+            normalize_to_movable=True,
+        )
+        self.assertEqual(audit["inspected"], 4)
+        self.assertEqual(audit["normalized_to_movable"], 1)
+        self.assertTrue(audit["preview_shadow_safe"])
+
+    def test_map_light_mobility_failure_is_structured(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        names = {
+            "set_editor_property_if_available",
+            "get_light_component",
+            "unreal_class_name",
+            "light_mobility_name",
+            "read_light_mobility",
+            "make_light_movable",
+            "inspect_runtime_light",
+            "is_light_actor",
+            "configure_existing_map_lights",
+        }
+        functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+
+        class Component:
+            def __init__(self) -> None:
+                self.properties = {"mobility": "STATIC", "visible": True, "hidden_in_game": False}
+
+            def get_class(self):
+                return types.SimpleNamespace(get_name=lambda: "DirectionalLightComponent")
+
+            def get_editor_property(self, name):
+                return self.properties[name]
+
+            def set_editor_property(self, name, value):
+                if name == "mobility":
+                    raise RuntimeError("rejected")
+                self.properties[name] = value
+
+            def set_mobility(self, _value):
+                raise RuntimeError("rejected")
+
+            def set_visibility(self, *_args):
+                pass
+
+            def set_hidden_in_game(self, *_args):
+                pass
+
+        component = Component()
+        actor = types.SimpleNamespace(
+            get_actor_label=lambda: "BrokenSun",
+            get_path_name=lambda: "/Game/Test.BrokenSun",
+            get_class=lambda: types.SimpleNamespace(get_name=lambda: "DirectionalLight"),
+            get_component_by_class=lambda _class: component,
+            set_actor_hidden_in_game=lambda _value: None,
+        )
+        namespace = {
+            "unreal": types.SimpleNamespace(
+                LightComponent=type("UnrealLightComponent", (), {}),
+                ComponentMobility=types.SimpleNamespace(MOVABLE="MOVABLE"),
+            )
+        }
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"), namespace)
+
+        report = namespace["configure_existing_map_lights"](
+            types.SimpleNamespace(get_all_level_actors=lambda: [actor]),
+            True,
+            normalize_to_movable=True,
+        )
+
+        self.assertFalse(report["preview_shadow_safe"])
+        self.assertEqual(report["remaining_non_movable"], ["BrokenSun"])
+        self.assertIn("light_mobility_update_failed", {item["code"] for item in report["failures"]})
+
+    def test_highres_viewport_disables_preview_shadow_indicator_and_confirms_game_view(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "configure_clean_highres_viewport"
+        )
+        commands = []
+
+        class LevelEditor:
+            def __init__(self) -> None:
+                self.game_view = False
+
+            def editor_get_game_view(self):
+                return self.game_view
+
+            def editor_set_game_view(self, value):
+                self.game_view = value
+
+        level_editor = LevelEditor()
+        unreal = types.SimpleNamespace(
+            LevelEditorSubsystem=type("LevelEditorSubsystem", (), {}),
+            get_editor_subsystem=lambda _class: level_editor,
+            SystemLibrary=types.SimpleNamespace(execute_console_command=lambda _world, command: commands.append(command)),
+            EditorLevelLibrary=types.SimpleNamespace(editor_invalidate_viewports=lambda: None),
+        )
+        namespace = {"unreal": unreal}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+
+        report = namespace["configure_clean_highres_viewport"]()
+
+        self.assertTrue(report["game_view_after"])
+        self.assertIn("showflag.PreviewShadowsIndicator 0", commands)
+        self.assertTrue(report["preview_shadow_indicator_disabled"])
+        self.assertTrue(report["preview_shadow_safe"])
+
     def test_precomputed_trajectory_uses_named_runtime_rotator_mapping(self) -> None:
-        source = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+        source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
         functions = {
             node.name: node
@@ -54,6 +966,8 @@ class HighresViewportMultiviewTests(unittest.TestCase):
             "ue_vec_from_meters": lambda *_args, **_kwargs: None,
             "runtime_combined_rotation": lambda _obj, values: list(values),
             "runtime_rotator": runtime_rotator,
+            "align_runtime_actor_to_pose_anchor": lambda *_args, **_kwargs: None,
+            "apply_articulated_attachments": lambda *_args, **_kwargs: None,
         }
         exec(
             compile(ast.Module(body=[tether_helper, function], type_ignores=[]), str(source), "exec"),
@@ -79,8 +993,74 @@ class HighresViewportMultiviewTests(unittest.TestCase):
         self.assertEqual(mapped, [[-52.0, 0.0, 0.0]])
         self.assertEqual(actor.rotation, ("named_pyr", -52.0, 0.0, 0.0))
 
+    def test_initial_state_reset_preserves_pitch_yaw_roll_semantics(self) -> None:
+        source = ROOT / "scripts" / "native_ue_scene.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        functions = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name in {"runtime_rotator", "reset_runtime_actors_to_initial_state"}
+        ]
+
+        class Rotator:
+            # Unreal's Python positional constructor does not expose the
+            # CaseSpec [pitch, yaw, roll] order.
+            def __init__(self, roll=0.0, pitch=0.0, yaw=0.0) -> None:
+                self.pitch = pitch
+                self.yaw = yaw
+                self.roll = roll
+
+        class Component:
+            def __init__(self) -> None:
+                self.simulating = True
+
+            def set_simulate_physics(self, value) -> None:
+                self.simulating = bool(value)
+
+        class Actor:
+            def __init__(self) -> None:
+                self.component = Component()
+                self.location = None
+                self.rotation = None
+
+            def set_actor_location(self, value, *_args) -> None:
+                self.location = value
+
+            def set_actor_rotation(self, value, *_args) -> None:
+                self.rotation = value
+
+        unreal = types.SimpleNamespace(Rotator=Rotator, Vector=lambda *values: tuple(values))
+        namespace = {
+            "unreal": unreal,
+            "actor_runtime_component": lambda actor: actor.component,
+        }
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"), namespace)
+        actor = Actor()
+        actors = {
+            "domino_10": actor,
+            "runtime_initial_transforms": {
+                "domino_10": {
+                    "position_cm": [49.21, 43.61, 40.0],
+                    "rotation_degrees": [0.0, 25.74, 0.0],
+                }
+            },
+        }
+        status = {}
+
+        namespace["reset_runtime_actors_to_initial_state"](
+            actors,
+            {"static_objects": [], "dynamic_objects": [{"id": "domino_10"}]},
+            status,
+        )
+
+        self.assertEqual((actor.rotation.pitch, actor.rotation.yaw, actor.rotation.roll), (0.0, 25.74, 0.0))
+        self.assertEqual(actor.location, (49.21, 43.61, 40.0))
+        self.assertFalse(actor.component.simulating)
+        self.assertEqual(status["initial_state_reset_ids"], ["domino_10"])
+
     def test_geometry_collection_strain_is_gated_by_measured_incident_energy(self) -> None:
-        source = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+        source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
         function = next(
             node
@@ -267,7 +1247,7 @@ class HighresViewportMultiviewTests(unittest.TestCase):
         self.assertIn("panel:native_contact_impact_point_unavailable", status["geometry_collection_fracture"]["errors"])
 
     def test_measured_energy_is_attached_to_authoritative_solver_contact(self) -> None:
-        source = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+        source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
         function = next(
             node
@@ -305,7 +1285,7 @@ class HighresViewportMultiviewTests(unittest.TestCase):
         self.assertFalse(contact["external_strain_applied"])
 
     def test_runtime_physics_enables_ccd_for_fast_impactor(self) -> None:
-        source = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+        source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
         function = next(
             node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "configure_runtime_physics"
@@ -346,7 +1326,7 @@ class HighresViewportMultiviewTests(unittest.TestCase):
         self.assertTrue(detail["use_ccd"])
 
     def test_instance_mask_material_enables_geometry_collection_usage(self) -> None:
-        source = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+        source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
         function = next(
             node
@@ -372,7 +1352,7 @@ class HighresViewportMultiviewTests(unittest.TestCase):
         self.assertEqual(calls, ["set", "compile", "save"])
 
     def test_each_solver_frame_is_captured_once_for_every_requested_view(self) -> None:
-        source = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+        source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
         function = next(
             node
@@ -465,6 +1445,14 @@ class HighresViewportMultiviewTests(unittest.TestCase):
                 callbacks[0](1 / 24)
             return {"ticks": 0}
 
+        def refresh_binding_snapshot(_actors, summary):
+            snapshot = {
+                "capture_phase": "pre_simulation",
+                "objects": [{"mesh_component": {"registered": True}}],
+            }
+            summary["runtime_binding_snapshot"] = snapshot
+            return snapshot
+
         namespace = {
             "Path": Path,
             "time": time,
@@ -494,11 +1482,19 @@ class HighresViewportMultiviewTests(unittest.TestCase):
             "camera_view_specs": lambda *_: views,
             "initialize_data_pass_dirs": lambda *_: {},
             "runtime_timebase": lambda *_: {"fps": 24, "frame_count": 2},
+            "articulated_runtime_ids": lambda *_: [],
             "physics_capture_enabled": lambda *_: True,
             "start_editor_physics_capture": lambda *_: {"enabled": True},
+            "refresh_runtime_binding_snapshot": refresh_binding_snapshot,
+            "runtime_binding_snapshot_registered": lambda *_: True,
             "runtime_physics_controls": lambda *_: {},
             "int_control": lambda value, default, *_: default if value is None else int(value),
-            "configure_clean_highres_viewport": lambda: [],
+            "configure_clean_highres_viewport": lambda: {
+                "game_view_after": True,
+                "preview_shadow_indicator_disabled": True,
+                "preview_shadow_safe": True,
+                "failures": [],
+            },
             "settle_highres_viewport": settle_viewport,
             "write_summary": lambda summary: summaries.append(copy.deepcopy(summary)),
             "analytic_contact_solver_enabled": lambda *_: True,
@@ -528,10 +1524,12 @@ class HighresViewportMultiviewTests(unittest.TestCase):
             "sync_runtime_visuals": lambda *_: None,
             "camera_view_for_frame": lambda view, *_: view,
             "set_capture_view": lambda *_: None,
+            "should_capture_data_frame": lambda *_: True,
             "export_depth_and_segmentation_frame": export_data,
             "frame_time_s": lambda frame, *_: frame["frame"] / 24,
             "vector_payload": lambda value: [value.x, value.y, value.z],
             "look_at_rotation": lambda *_: None,
+            "capture_component_audit": lambda *_: {},
             "file_fingerprint": lambda *_: {},
             "print": lambda *_args, **_kwargs: None,
         }

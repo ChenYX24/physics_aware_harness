@@ -33,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     outputs = parser.add_mutually_exclusive_group()
     outputs.add_argument("--output-root", help="Absolute path, or a path relative to the local harness workspace.")
     outputs.add_argument("--case-route", help="Canonical physics/scenario/vNNN_description route under workspace/cases.")
-    parser.add_argument("--video-root", default="review/probes", help="Batch previews default to review/probes; publish only a validated selection to review/inbox.")
+    parser.add_argument("--video-root", help="Batch previews default to review/probes; publish only a validated selection to review/inbox.")
     parser.add_argument("--timestamp", default="")
     parser.add_argument("--views", default="front_static")
     parser.add_argument("--render-passes", default="rgb")
@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--profile",
         choices=sorted(EXECUTION_PROFILES),
-        help="Named UE capture cost/quality contract; overrides views, passes, mode, resolution, and FPS.",
+        help="Named UE capture cost/quality contract controlling resolution and FPS.",
     )
     return parser.parse_args()
 
@@ -78,10 +78,6 @@ def run_one_case(
     started = time.perf_counter()
     case = load_case_spec(case_path)
     profile = execution_profile(profile_name) if profile_name else None
-    if profile:
-        requested_views = list(profile.views)
-        render_passes = list(profile.render_passes)
-        render_mode = profile.render_mode
     if backend_name == "ue":
         import os
 
@@ -104,6 +100,7 @@ def run_one_case(
         height=height,
         camera_strategy=camera_strategy,
         profile=profile.name if profile else "custom",
+        source_case_filename="case_spec.json",
     )
     write_run_control_page(
         run_dir,
@@ -119,7 +116,7 @@ def run_one_case(
             "camera_strategy": camera_strategy,
         }
         if backend_name == "ue":
-            run_kwargs["complete_sensor_contract"] = profile.complete_sensor_contract if profile else False
+            run_kwargs["complete_sensor_contract"] = {"rgb", "depth", "segmentation"}.issubset(render_passes)
         run_dir = backend.run_case(case, output_root, **run_kwargs)
         report = read_optional_json(run_dir / "fluid_report.json") if backend_name == "genesis_sph" else verifier.verify_run_dir(run_dir, write=True)
         status = report["status"]
@@ -150,8 +147,13 @@ def run_one_case(
         run_error = str(exc)
         render_sync = {}
 
-    expected_negative_caught = (not case.should_pass) and status == "fail" and failure_category == "verifier_failure"
-    expectation_met = (case.should_pass and status == "pass") or expected_negative_caught
+    has_explicit_assertions = bool(case.data.get("verification_assertions"))
+    expected_negative_caught = has_explicit_assertions and (not case.should_pass) and status == "fail" and failure_category == "verifier_failure"
+    expectation_met = (
+        (case.should_pass and status == "pass") or expected_negative_caught
+        if has_explicit_assertions
+        else status == "pass"
+    )
     published_videos = ArtifactManager(run_dir).publish_videos(video_root, case_id=case.case_id, backend=backend_name)
     video_exists = bool(published_videos) or (run_dir / "video.mp4").exists()
     video_missing_expected = failure_category == "preflight_failure" and not video_exists
@@ -171,6 +173,7 @@ def run_one_case(
         "case_path": str(case_path),
         "capability_id": case.capability_id,
         "should_pass": case.should_pass,
+        "explicit_assertion_contract": has_explicit_assertions,
         "status": status,
         "failure_type": failure_type,
         "failure_category": failure_category,
@@ -244,7 +247,13 @@ def main() -> int:
         case_dir = ROOT / case_dir
     timestamp = args.timestamp or time.strftime("%Y%m%dT%H%M%S")
     output_root = case_output_root(args.case_route) if args.case_route else workspace_path(args.output_root, default_relative="runs/harness_cases") / f"{case_dir.name}_{args.backend}_{timestamp}"
-    video_root = workspace_path(args.video_root, default_relative="review/probes")
+    video_root = (
+        workspace_path(args.video_root, default_relative="review/probes")
+        if args.video_root
+        else output_root / "review" / "probes"
+        if args.output_root and Path(args.output_root).expanduser().is_absolute()
+        else workspace_path(None, default_relative="review/probes")
+    )
     output_root.mkdir(parents=True, exist_ok=True)
 
     case_paths = [path for path in sorted(case_dir.glob("*.json")) if path.name != "manifest.json"]
@@ -293,7 +302,7 @@ def main() -> int:
         "video_count": sum(1 for row in rows if row["video_exists"]),
         "video_missing_expected_count": sum(1 for row in rows if row["video_missing_expected"]),
         "parallel": worker_count,
-        "render_mode": (selected_profile.render_mode if selected_profile else args.mode) if args.backend == "ue" else ("surface_preview" if args.backend == "genesis_sph" else "debug_fallback"),
+        "render_mode": args.mode if args.backend == "ue" else ("surface_preview" if args.backend == "genesis_sph" else "debug_fallback"),
         "execution_profile": args.profile or "custom",
         "cases": rows,
     }

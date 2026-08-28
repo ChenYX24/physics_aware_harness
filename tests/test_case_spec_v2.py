@@ -1,34 +1,780 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import unittest
 
 from harness.core.case_spec_v2 import (
     CaseSpecV2ValidationError,
     case_spec_v2_from_dict,
-    project_case_spec_v2_to_v1,
+    compile_case_spec_v2_runtime,
+    validate_agent_case_spec_contract,
 )
 from tests.case_spec_v2_fixture import case_spec_v2_fixture
 
 
 class CaseSpecV2Tests(unittest.TestCase):
-    def test_defaults_validation_and_v1_projection(self) -> None:
+    def driven_constraint_case(self) -> dict:
+        data = case_spec_v2_fixture()
+        data["backend_constraints"]["required_solver_capabilities"].append("rigid_constraints")
+        data["backend_constraints"]["allowed_solvers"] = ["ue"]
+        data["objects"][2]["physics"]["collision_required"] = False
+        data["constraints"] = [
+            {
+                "id": "driven_joint",
+                "body_a": "cue_ball",
+                "body_b": "floor",
+                "frame_a": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+                "frame_b": {"position_m": [-0.55, 0.0, 0.09], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+                "linear_motion": {"x": "free", "y": "locked", "z": "locked"},
+                "angular_motion": {"x": "free", "y": "locked", "z": "locked"},
+                "angular_limits_deg": {},
+                "linear_drive": {
+                    "position_enabled": {"x": True, "y": False, "z": False},
+                    "velocity_enabled": {"x": True, "y": False, "z": False},
+                    "position_target_m": [0.16, 0.0, 0.0],
+                    "velocity_target_m_s": [0.0, 0.0, 0.0],
+                    "stiffness_n_m": [120.0, 0.0, 0.0],
+                    "damping_n_s_m": [3.0, 0.0, 0.0],
+                    "max_force_n": [0.0, 0.0, 0.0],
+                    "acceleration_mode": False,
+                },
+                "angular_drive": {
+                    "mode": "twist_and_swing",
+                    "position_enabled": {"twist": True, "swing": False, "slerp": False},
+                    "velocity_enabled": {"twist": True, "swing": False, "slerp": False},
+                    "orientation_target_deg": [10.0, 0.0, 0.0],
+                    "velocity_target_rad_s": [0.5, 0.0, 0.0],
+                    "stiffness_n_m_per_rad": 4.0,
+                    "damping_n_m_s_per_rad": 0.5,
+                    "max_torque_n_m": 12.0,
+                    "acceleration_mode": False,
+                },
+                "break_thresholds": {"linear_force_n": 300.0, "angular_torque_n_m": 25.0},
+                "axial_visual": {"object_id": "floor", "mesh_forward_axis": "x"},
+                "collision_enabled": False,
+            }
+        ]
+        return data
+
+    def test_constraint_drives_and_break_thresholds_validate_and_project(self) -> None:
+        data = self.driven_constraint_case()
+
+        case = case_spec_v2_from_dict(data)
+        runtime = compile_case_spec_v2_runtime(case)
+
+        self.assertEqual(runtime.data["constraints"], data["constraints"])
+
+    def test_unilateral_distance_spring_validates_and_projects(self) -> None:
+        data = self.driven_constraint_case()
+        constraint = data["constraints"][0]
+        constraint["linear_motion"] = {"x": "free", "y": "free", "z": "free"}
+        constraint.pop("linear_drive")
+        constraint["unilateral_distance_spring"] = {
+            "rest_length_m": 0.8,
+            "stiffness_n_m": 45.0,
+            "damping_n_s_m": 3.0,
+        }
+
+        runtime = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data))
+
+        self.assertEqual(runtime.data["constraints"][0]["unilateral_distance_spring"], constraint["unilateral_distance_spring"])
+
+    def test_unilateral_distance_spring_requires_free_axes_and_known_fields(self) -> None:
+        data = self.driven_constraint_case()
+        data["constraints"][0]["unilateral_distance_spring"] = {
+            "rest_length_m": 0.8,
+            "stiffness_n_m": 45.0,
+            "damping_n_s_m": 3.0,
+            "unsupported": True,
+        }
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        codes = {issue.code for issue in context.exception.issues}
+        self.assertIn("unilateral_distance_spring_requires_free_linear_axes", codes)
+        self.assertIn("unilateral_distance_spring_with_linear_drive", codes)
+        self.assertIn("unknown_unilateral_distance_spring_fields", codes)
+
+    def test_constraint_drive_rejects_locked_axis_and_unknown_field(self) -> None:
+        data = self.driven_constraint_case()
+        data["constraints"][0]["linear_motion"]["x"] = "locked"
+        data["constraints"][0]["linear_drive"]["unsupported"] = 1
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        codes = {issue.code for issue in context.exception.issues}
+        self.assertIn("constraint_drive_on_locked_axis", codes)
+        self.assertIn("invalid_linear_drive_fields", codes)
+
+    def test_constraint_drive_allows_omitted_neutral_fields(self) -> None:
+        data = self.driven_constraint_case()
+        for field in ("position_target_m", "velocity_target_m_s", "max_force_n", "acceleration_mode"):
+            data["constraints"][0]["linear_drive"].pop(field)
+        for field in ("orientation_target_deg", "velocity_target_rad_s", "max_torque_n_m", "acceleration_mode"):
+            data["constraints"][0]["angular_drive"].pop(field)
+
+        case = case_spec_v2_from_dict(data)
+
+        self.assertEqual(case.data["constraints"], data["constraints"])
+
+    def test_constraint_drive_rejects_nonpositive_enabled_strength_and_bad_break_threshold(self) -> None:
+        data = self.driven_constraint_case()
+        data["constraints"][0]["linear_drive"]["stiffness_n_m"][0] = 0.0
+        data["constraints"][0]["angular_drive"]["damping_n_m_s_per_rad"] = 0.0
+        data["constraints"][0]["break_thresholds"]["linear_force_n"] = -1.0
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        codes = {issue.code for issue in context.exception.issues}
+        self.assertIn("constraint_position_drive_without_stiffness", codes)
+        self.assertIn("constraint_velocity_drive_without_damping", codes)
+        self.assertIn("invalid_number", codes)
+
+    def test_constraint_axial_visual_rejects_unknown_object_and_axis(self) -> None:
+        data = self.driven_constraint_case()
+        data["constraints"][0]["axial_visual"] = {
+            "object_id": "missing_visual",
+            "mesh_forward_axis": "forward",
+        }
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        codes = {issue.code for issue in context.exception.issues}
+        self.assertIn("unknown_object_reference", codes)
+        self.assertIn("invalid_enum", codes)
+
+    def test_constraint_axial_visual_requires_render_only_object(self) -> None:
+        data = self.driven_constraint_case()
+        data["constraints"][0]["axial_visual"]["object_id"] = "cue_ball"
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        codes = {issue.code for issue in context.exception.issues}
+        self.assertIn("constraint_axial_visual_requires_static_object", codes)
+        self.assertIn("constraint_axial_visual_requires_collision_disabled", codes)
+
+    def test_generic_rigid_constraint_validates_and_projects_without_inference(self) -> None:
+        data = case_spec_v2_fixture()
+        data["backend_constraints"]["required_solver_capabilities"].append("rigid_constraints")
+        data["backend_constraints"]["allowed_solvers"] = ["ue"]
+        data["objects"][2]["physics"]["collision_required"] = False
+        data["constraints"] = [
+            {
+                "id": "cue_pivot",
+                "body_a": "cue_ball",
+                "body_b": "floor",
+                "frame_a": {
+                    "position_m": [0.0, 0.0, 0.0],
+                    "primary_axis": [0.0, 1.0, 0.0],
+                    "secondary_axis": [0.0, 0.0, 1.0],
+                },
+                "frame_b": {
+                    "position_m": [-0.8, 0.0, 0.09],
+                    "primary_axis": [0.0, 1.0, 0.0],
+                    "secondary_axis": [0.0, 0.0, 1.0],
+                },
+                "linear_motion": {"x": "locked", "y": "locked", "z": "locked"},
+                "angular_motion": {"x": "free", "y": "locked", "z": "locked"},
+                "angular_limits_deg": {},
+                "collision_enabled": False,
+            }
+        ]
+
+        case = case_spec_v2_from_dict(data)
+        runtime = compile_case_spec_v2_runtime(case)
+
+        self.assertEqual(runtime.data["constraints"], data["constraints"])
+
+    def test_rigid_constraint_rejects_collisionless_dynamic_body(self) -> None:
+        data = case_spec_v2_fixture()
+        data["backend_constraints"]["required_solver_capabilities"].append("rigid_constraints")
+        data["backend_constraints"]["allowed_solvers"] = ["ue"]
+        data["objects"][0]["physics"]["collision_required"] = False
+        data["constraints"] = [
+            {
+                "id": "cue_pivot",
+                "body_a": "cue_ball",
+                "body_b": "floor",
+                "frame_a": {
+                    "position_m": [0.0, 0.0, 0.0],
+                    "primary_axis": [0.0, 1.0, 0.0],
+                    "secondary_axis": [0.0, 0.0, 1.0],
+                },
+                "frame_b": {
+                    "position_m": [-0.8, 0.0, 0.09],
+                    "primary_axis": [0.0, 1.0, 0.0],
+                    "secondary_axis": [0.0, 0.0, 1.0],
+                },
+                "linear_motion": {"x": "locked", "y": "locked", "z": "locked"},
+                "angular_motion": {"x": "free", "y": "locked", "z": "locked"},
+                "angular_limits_deg": {},
+                "collision_enabled": False,
+            }
+        ]
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        self.assertIn(
+            "constraint_dynamic_body_collision_disabled",
+            {issue.code for issue in context.exception.issues},
+        )
+
+    def test_rigid_constraint_rejects_distinct_initial_world_frames(self) -> None:
+        data = case_spec_v2_fixture()
+        data["backend_constraints"]["required_solver_capabilities"].append("rigid_constraints")
+        data["backend_constraints"]["allowed_solvers"] = ["ue"]
+        data["constraints"] = [
+            {
+                "id": "cue_pivot",
+                "body_a": "cue_ball",
+                "body_b": "floor",
+                "frame_a": {
+                    "position_m": [0.0, 0.0, 0.0],
+                    "primary_axis": [0.0, 1.0, 0.0],
+                    "secondary_axis": [0.0, 0.0, 1.0],
+                },
+                "frame_b": {
+                    "position_m": [0.0, 0.0, 0.09],
+                    "primary_axis": [1.0, 0.0, 0.0],
+                    "secondary_axis": [0.0, 0.0, 1.0],
+                },
+                "linear_motion": {"x": "locked", "y": "locked", "z": "locked"},
+                "angular_motion": {"x": "free", "y": "locked", "z": "locked"},
+                "angular_limits_deg": {},
+                "collision_enabled": False,
+            }
+        ]
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        codes = {issue.code for issue in context.exception.issues}
+        self.assertIn("constraint_frame_position_mismatch", codes)
+        self.assertIn("constraint_frame_axis_mismatch", codes)
+
+    def test_rigid_constraint_rejects_implicit_frames_and_capability(self) -> None:
+        data = case_spec_v2_fixture()
+        data["constraints"] = [
+            {
+                "id": "bad_joint",
+                "body_a": "cue_ball",
+                "body_b": "floor",
+                "frame_a": {"position_m": [0.0, 0.0, 0.0]},
+                "frame_b": {
+                    "position_m": [0.0, 0.0, 0.0],
+                    "primary_axis": [1.0, 0.0, 0.0],
+                    "secondary_axis": [1.0, 0.0, 0.0],
+                },
+                "linear_motion": {"x": "locked", "y": "locked", "z": "locked"},
+                "angular_motion": {"x": "limited", "y": "locked", "z": "locked"},
+                "angular_limits_deg": {},
+                "collision_enabled": False,
+            }
+        ]
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        codes = {issue.code for issue in context.exception.issues}
+        self.assertIn("rigid_constraint_capability_missing", codes)
+        self.assertIn("constraint_axes_not_orthogonal", codes)
+        self.assertIn("constraint_angular_limits_mismatch", codes)
+
+    def test_collision_geometry_and_visibility_project_without_rescaling(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["visual_representation"] = {"source": "asset", "visible": False}
+        data["objects"][0]["physics"]["collision_geometry"] = {
+            "shape": "box",
+            "size_m": [1.2, 0.8, 0.06],
+            "local_center_offset_m": [0.0, 0.0, -0.03],
+        }
+
+        case = case_spec_v2_from_dict(data)
+        runtime = compile_case_spec_v2_runtime(case)
+        subject = runtime.data["objects"][0]
+
+        self.assertEqual(subject["visual_representation"], {"source": "asset", "visible": False})
+        self.assertEqual(
+            subject["collision_geometry"],
+            {
+                "shape": "box",
+                "size_m": [1.2, 0.8, 0.06],
+                "local_center_offset_m": [0.0, 0.0, -0.03],
+            },
+        )
+
+    def test_collision_geometry_shape_dimensions_and_collision_flag_are_strict(self) -> None:
+        invalid_declarations = [
+            ({"shape": "sphere", "size_m": [0.2, 0.21, 0.2]}, "invalid_sphere_collision_size"),
+            ({"shape": "cylinder", "size_m": [0.2, 0.21, 0.5]}, "invalid_cylinder_collision_size"),
+            ({"shape": "capsule", "size_m": [0.2, 0.2, 0.5]}, "invalid_collision_geometry_shape"),
+        ]
+        for declaration, expected_code in invalid_declarations:
+            with self.subTest(expected_code=expected_code):
+                data = case_spec_v2_fixture()
+                data["objects"][0]["physics"]["collision_geometry"] = declaration
+                with self.assertRaises(CaseSpecV2ValidationError) as context:
+                    case_spec_v2_from_dict(data)
+                self.assertIn(expected_code, {issue.code for issue in context.exception.issues})
+
+        data = case_spec_v2_fixture()
+        data["objects"][0]["physics"].update({
+            "collision_required": False,
+            "collision_geometry": {"shape": "sphere", "size_m": [0.2, 0.2, 0.2]},
+        })
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("collision_geometry_without_collision", {issue.code for issue in context.exception.issues})
+
+    def test_hidden_collision_requires_explicit_geometry(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["visual_representation"] = {"source": "none", "visible": False}
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        self.assertIn("missing_hidden_collision_geometry", {issue.code for issue in context.exception.issues})
+
+        data["objects"][0]["physics"]["collision_geometry"] = {
+            "shape": "sphere",
+            "size_m": [0.18, 0.18, 0.18],
+        }
+        case_spec_v2_from_dict(data)
+
+    def test_event_sequence_requires_multiple_explicit_events(self) -> None:
+        data = case_spec_v2_fixture()
+        data["verification_requirements"]["assertions"] = [
+            {"type": "event_sequence", "objects": ["cue_ball", "target_ball"]}
+        ]
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        self.assertIn(
+            "event_sequence_requires_multiple_events",
+            {issue.code for issue in context.exception.issues},
+        )
+
+    def test_event_sequence_pairs_validate_nested_object_references(self) -> None:
+        data = case_spec_v2_fixture()
+        data["verification_requirements"]["assertions"] = [
+            {
+                "type": "event_sequence",
+                "pairs": [
+                    ["cue_ball", "target_ball"],
+                    ["target_ball", "missing_body"],
+                ],
+            }
+        ]
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        self.assertIn("unknown_object_reference", {issue.code for issue in context.exception.issues})
+
+    def test_agent_contract_requires_canonical_local_procedural_shape(self) -> None:
+        data = case_spec_v2_fixture()
+        subject = data["objects"][0]
+        subject["geometry"]["shape_hint"] = "upright rectangular box with longest edge vertical"
+        subject["geometry"]["approx_size_m"] = [0.03, 0.12, 0.3]
+        subject["asset"] = {
+            "description": "a procedural domino",
+            "resource_kind": "mesh_3d",
+            "must": {
+                "geometry_type": "box",
+                "source_kind": "procedural_generation",
+            },
+            "acquisition": {
+                "route": "procedural_generation",
+                "requirement": "required",
+                "origin": "user_explicit",
+                "provider_hint": "box_mesh_v1",
+                "reference_inputs": [],
+                "fallback_order": [],
+            },
+        }
+
+        historical = case_spec_v2_from_dict(data)
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            validate_agent_case_spec_contract(historical.data)
+
+        self.assertIn(
+            "procedural_shape_hint_not_canonical",
+            {issue.code for issue in context.exception.issues},
+        )
+
+    def test_agent_contract_requires_registered_provider_hint_for_route(self) -> None:
+        data = case_spec_v2_fixture()
+        acquisition = {
+            "route": "external_site",
+            "requirement": "required",
+            "origin": "user_explicit",
+            "provider_hint": "Poly Haven",
+            "source_uri_hint": "https://polyhaven.com/a/Barrel_02",
+            "reference_inputs": [],
+            "fallback_order": [],
+        }
+        data["objects"][0]["asset"] = {
+            "description": "required external asset",
+            "resource_kind": "mesh_3d",
+            "acquisition": acquisition,
+        }
+        parsed = case_spec_v2_from_dict(data)
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            validate_agent_case_spec_contract(parsed.data)
+
+        self.assertIn("unsupported_provider_hint", {issue.code for issue in context.exception.issues})
+
+        acquisition["provider_hint"] = "poly_haven"
+        validate_agent_case_spec_contract(case_spec_v2_from_dict(data).data)
+
+    def test_agent_contract_rejects_mechanical_relations(self) -> None:
+        data = case_spec_v2_fixture()
+        data["relations"].append({"type": "hinged_to", "source": "cue_ball", "target": "floor"})
+        parsed = case_spec_v2_from_dict(data)
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            validate_agent_case_spec_contract(parsed.data)
+
+        self.assertIn(
+            "unsupported_agent_relation_type",
+            {issue.code for issue in context.exception.issues},
+        )
+
+    def test_agent_contract_rejects_recipe_and_geometry_type_conflicts(self) -> None:
+        data = case_spec_v2_fixture()
+        subject = data["objects"][0]
+        subject["geometry"]["shape_hint"] = "sphere"
+        subject["asset"] = {
+            "description": "a conflicting primitive",
+            "resource_kind": "mesh_3d",
+            "must": {
+                "geometry_type": "cylinder",
+                "source_kind": "procedural_generation",
+            },
+            "acquisition": {
+                "route": "procedural_generation",
+                "requirement": "required",
+                "origin": "user_explicit",
+                "provider_hint": "box_mesh_v1",
+                "reference_inputs": [],
+                "fallback_order": [],
+            },
+        }
+
+        parsed = case_spec_v2_from_dict(data)
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            validate_agent_case_spec_contract(parsed.data)
+
+        self.assertEqual(
+            {issue.code for issue in context.exception.issues},
+            {"procedural_geometry_type_mismatch", "procedural_recipe_shape_mismatch"},
+        )
+
+    def test_defaults_validation_and_runtime_compilation(self) -> None:
         data = case_spec_v2_fixture()
         del data["timebase"]["deterministic_seed"]
         case = case_spec_v2_from_dict(data)
-        projection = project_case_spec_v2_to_v1(case)
+        runtime = compile_case_spec_v2_runtime(case)
 
         self.assertEqual(case.data["timebase"]["deterministic_seed"], 42)
-        self.assertEqual(projection.data["schema_version"], "harness_case_spec_v1")
-        self.assertEqual(projection.case_id, "v2_ball_contact")
-        self.assertEqual(projection.data["active_objects"], ["cue_ball"])
-        self.assertIn("target_ball", projection.data["passive_objects"])
-        self.assertTrue(projection.data["objects"][0]["force_analytic_proxy"])
-        self.assertEqual(projection.data["timebase"]["render_fps"], 24)
-        self.assertEqual(projection.data["seed"], 42)
-        self.assertEqual(projection.data["v2_projection"]["source_schema_version"], "harness_case_spec_v2")
-        self.assertEqual(projection.data["objects"][0]["body_type"], "dynamic")
-        self.assertTrue(projection.data["objects"][0]["collision_required"])
-        self.assertEqual(projection.data["objects"][2]["body_type"], "static")
+        self.assertEqual(runtime.data["schema_version"], "harness_runtime_case_v2")
+        self.assertEqual(runtime.case_id, "v2_ball_contact")
+        self.assertEqual(runtime.data["active_objects"], ["cue_ball"])
+        self.assertIn("target_ball", runtime.data["passive_objects"])
+        self.assertTrue(runtime.data["objects"][0]["force_analytic_proxy"])
+        self.assertEqual(runtime.data["timebase"]["render_fps"], 24)
+        self.assertEqual(runtime.data["seed"], 42)
+        self.assertEqual(runtime.data["source_contract"]["source_schema_version"], "harness_case_spec_v2")
+        self.assertEqual(runtime.data["objects"][0]["body_type"], "dynamic")
+        self.assertTrue(runtime.data["objects"][0]["collision_required"])
+        self.assertEqual(runtime.data["objects"][2]["body_type"], "static")
+
+    def test_historical_gravity_label_does_not_rewrite_object_roles(self) -> None:
+        data = case_spec_v2_fixture()
+        data["capabilities"] = {
+            "primary": "rigid_body_gravity_collision",
+            "required": ["rigid_body_gravity_collision"],
+        }
+        data["objects"][0]["role"] = "自由描述的下落物体"
+        data["objects"][0]["initial_state"]["linear_velocity_m_s"] = [0.0, 0.0, 0.0]
+
+        projection = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data)).data
+        subject = projection["objects"][0]
+
+        self.assertEqual(subject["role"], "自由描述的下落物体")
+        self.assertNotIn("verification_role", subject)
+        self.assertEqual(projection["objects"][2]["role"], "support")
+
+    def test_uniform_asset_scale_policy_is_validated_and_projected(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["geometry"]["scale_policy"] = "fit_uniform_to_approx_size"
+
+        projection = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data))
+
+        self.assertEqual(
+            projection.data["objects"][0]["asset_scale_policy"],
+            "fit_uniform_to_approx_size",
+        )
+
+        data["objects"][0]["geometry"]["scale_policy"] = "stretch_each_axis"
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("invalid_enum", {issue.code for issue in context.exception.issues})
+
+    def test_generic_solver_declarations_survive_runtime_compilation(self) -> None:
+        data = case_spec_v2_fixture()
+        data["capabilities"] = {
+            "primary": "fluid_particle_dynamics",
+            "required": ["fluid_particle_dynamics"],
+        }
+        data["backend_constraints"] = {
+            "required_solver_capabilities": ["particle_dynamics", "fluid_dynamics", "particle_cache"],
+            "allowed_solvers": ["genesis_sph"],
+            "render_backend": "genesis_sph",
+            "allow_multi_backend": True,
+        }
+        data["workspace_bounds_m"] = {"min_m": [-1.0, -1.0, -0.1], "max_m": [1.0, 1.0, 1.0]}
+        data["solver_scene"] = {
+            "type": "rigid_sph",
+            "initialization": {"state": "settled", "pre_roll_s": 0.25, "capture_after_pre_roll": True},
+            "measurements": [
+                {"id": "span", "type": "axis_span", "axes": ["x", "y"]},
+                {
+                    "id": "body_speed",
+                    "type": "rigid_body_state",
+                    "body_id": "target_ball",
+                    "field": "linear_velocity_m_s",
+                    "component": "magnitude",
+                },
+            ],
+            "assertions": [
+                {
+                    "id": "span_grows",
+                    "measurement_id": "span",
+                    "reduction": "final",
+                    "operator": ">=",
+                    "value": 0.1,
+                },
+                {
+                    "id": "body_speed_finite",
+                    "measurement_id": "body_speed",
+                    "reduction": "max",
+                    "operator": ">=",
+                    "value": 0.0,
+                },
+            ],
+        }
+        data["objects"][0]["role"] = "fluid"
+        data["objects"][0]["solver"] = {
+            "material_model": "sph_liquid",
+            "initial_volume": {
+                "shape": "cylinder",
+                "frame": {"type": "body_local", "body_id": "target_ball"},
+                "position_m": [0.0, 0.0, 0.0],
+                "radius_m": 0.025,
+                "height_m": 0.06,
+            },
+        }
+        data["objects"][1]["role"] = "rigid_body"
+        data["objects"][1]["solver"] = {
+            "mobility": "kinematic",
+            "transform": {
+                "position_m": [0.0, 0.0, 0.09],
+                "euler_xyz_deg": [0.0, 0.0, 0.0],
+                "ue_rotation_pyr_deg": [0.0, 0.0, 0.0],
+            },
+            "collision": {
+                "type": "axisymmetric_profile",
+                "asset_geometry_match": True,
+                "fit_method": "fixture_profile_fit_v1",
+                "inner_profile": [{"z_m": -0.04, "radius_m": 0.03}, {"z_m": 0.04, "radius_m": 0.04}],
+                "wall_thickness_m": 0.005,
+                "panel_count": 16,
+            },
+            "motion": {
+                "type": "pivot_rotation",
+                "start_time_s": 0.3,
+                "duration_s": 1.0,
+                "pivot_local_m": [0.04, 0.0, 0.04],
+                "solver_end_rotation_xyz_deg": [0.0, 90.0, 0.0],
+                "ue_end_rotation_pyr_deg": [-90.0, 0.0, 0.0],
+            },
+        }
+        data["objects"][2]["role"] = "rigid_body"
+        data["objects"][2]["solver"] = {
+            "mobility": "static",
+            "transform": {
+                "position_m": [0.0, 0.0, -0.025],
+                "euler_xyz_deg": [0.0, 0.0, 0.0],
+                "ue_rotation_pyr_deg": [0.0, 0.0, 0.0],
+            },
+            "collision": {
+                "type": "plane",
+                "position_m": [0.0, 0.0, 0.0],
+                "normal": [0.0, 0.0, 1.0],
+                "asset_geometry_match": True,
+            },
+        }
+
+        projection = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data)).data
+
+        self.assertEqual(projection["solver_scene"], data["solver_scene"])
+        self.assertEqual(projection["workspace_bounds_m"], data["workspace_bounds_m"])
+        self.assertEqual(projection["objects"][1]["solver"], data["objects"][1]["solver"])
+
+        dynamic = deepcopy(data)
+        dynamic["objects"][1]["solver"]["mobility"] = "dynamic"
+        dynamic["objects"][1]["solver"]["collision"] = {"type": "asset"}
+        dynamic["objects"][1]["solver"].pop("motion")
+        dynamic_projection = compile_case_spec_v2_runtime(case_spec_v2_from_dict(dynamic)).data
+        self.assertEqual(dynamic_projection["objects"][1]["solver"]["collision"], {"type": "asset"})
+
+        invalid_state_measurement = deepcopy(data)
+        invalid_state_measurement["solver_scene"]["measurements"][1]["field"] = "acceleration_m_s2"
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(invalid_state_measurement)
+        self.assertIn("invalid_rigid_body_state_field", {issue.code for issue in context.exception.issues})
+
+        invalid_rotation = deepcopy(data)
+        invalid_rotation["objects"][1]["solver"]["motion"]["ue_end_rotation_pyr_deg"] = [90.0, 0.0, 0.0]
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(invalid_rotation)
+        self.assertIn("rigid_sph_rotation_mapping_mismatch", {issue.code for issue in context.exception.issues})
+
+        missing_fit = deepcopy(data)
+        missing_fit["objects"][1]["solver"]["collision"].pop("fit_method")
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(missing_fit)
+        self.assertIn("missing_collision_fit_evidence", {issue.code for issue in context.exception.issues})
+
+        no_clearance = deepcopy(data)
+        no_clearance["objects"][0]["solver"]["initial_volume"]["radius_m"] = 0.03
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(no_clearance)
+        self.assertIn("insufficient_initial_fluid_clearance", {issue.code for issue in context.exception.issues})
+
+    def test_invalid_rigid_sph_nested_contract_is_rejected_before_projection(self) -> None:
+        data = case_spec_v2_fixture()
+        data["capabilities"] = {
+            "primary": "fluid_particle_dynamics",
+            "required": ["fluid_particle_dynamics"],
+        }
+        data["backend_constraints"] = {
+            "required_solver_capabilities": ["particle_dynamics", "fluid_dynamics", "particle_cache"],
+            "allowed_solvers": ["genesis_sph"],
+            "render_backend": "genesis_sph",
+            "allow_multi_backend": True,
+        }
+        data["workspace_bounds_m"] = {"min_m": [-1.0, -1.0, -0.1], "max_m": [1.0, 1.0, 1.0]}
+        data["solver_scene"] = {
+            "type": "rigid_sph",
+            "measurements": [{"id": "inside", "type": "volume_query"}],
+            "assertions": [
+                {"id": "inside", "measurement_id": "inside", "operator": ">", "value": 0.5}
+            ],
+        }
+        data["objects"][0]["role"] = "coffee mug container"
+        data["objects"][0]["solver"] = {
+            "mobility": "kinematic",
+            "transform": {"position_m": [0.0, 0.0, 0.1], "rotation_deg": [0.0, 0.0, 0.0]},
+            "collision": {"type": "composite", "primitives": []},
+            "motion": {
+                "type": "pivot_rotation",
+                "start_s": 0.3,
+                "duration_s": 1.5,
+                "angle_deg": 110.0,
+            },
+        }
+        data["objects"][1]["role"] = "support surface"
+        data["objects"][1].pop("solver", None)
+        data["objects"][2]["role"] = "fluid"
+        data["objects"][2]["solver"] = {
+            "material_model": "sph_liquid",
+            "initial_volume": {
+                "shape": "cylinder",
+                "frame": "body_local",
+                "body_id": "target_ball",
+                "dimensions_m": {"radius": 0.03, "height": 0.06},
+                "pose": {"position_m": [0.0, 0.0, 0.0]},
+            },
+        }
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        codes = {issue.code for issue in context.exception.issues}
+        self.assertIn("rigid_sph_role_required", codes)
+        self.assertIn("unsupported_rigid_sph_collision", codes)
+        self.assertIn("invalid_rigid_sph_frame", codes)
+        self.assertIn("unsupported_rigid_sph_measurement", codes)
+        self.assertIn("unsupported_rigid_sph_reduction", codes)
+        self.assertIn("unsupported_rigid_sph_operator", codes)
+
+    def test_allowed_solver_must_provide_every_required_solver_capability(self) -> None:
+        data = case_spec_v2_fixture()
+        data["backend_constraints"]["allowed_solvers"] = ["genesis_sph"]
+        data["backend_constraints"]["required_solver_capabilities"] = ["particle_dynamics", "contact_events"]
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        self.assertIn("solver_capability_mismatch", {issue.code for issue in context.exception.issues})
+
+    def test_explicit_object_color_is_validated_and_projected(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["color_rgb"] = [1.0, 0.2, 0.05]
+        data["objects"][0]["fixed_material_color"] = True
+
+        projection = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data))
+
+        self.assertEqual(projection.data["objects"][0]["color_rgb"], [1.0, 0.2, 0.05])
+        self.assertTrue(projection.data["objects"][0]["fixed_material_color"])
+
+        data["objects"][0]["color_rgb"] = [1.01, 0.2, 0.05]
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("invalid_color", {issue.code for issue in context.exception.issues})
+
+        data["objects"][0]["color_rgb"] = [1.0, 0.2, 0.05]
+        data["objects"][0]["fixed_material_color"] = "yes"
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("invalid_type", {issue.code for issue in context.exception.issues})
+
+    def test_visual_material_path_is_validated_and_projected(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["visual_material_path"] = "/Game/Materials/M_Oak.M_Oak"
+
+        projection = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data))
+
+        self.assertEqual(
+            projection.data["objects"][0]["visual_material_path"],
+            "/Game/Materials/M_Oak.M_Oak",
+        )
+
+        data["objects"][0]["visual_material_path"] = "Materials/M_Oak"
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("invalid_ue_asset_path", {issue.code for issue in context.exception.issues})
+
+    def test_uniform_asset_scale_policy_requires_a_target_size(self) -> None:
+        data = case_spec_v2_fixture()
+        geometry = data["objects"][0]["geometry"]
+        geometry["scale_policy"] = "fit_uniform_to_approx_size"
+        del geometry["approx_size_m"]
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        self.assertIn("scale_target_missing", {issue.code for issue in context.exception.issues})
 
     def test_text_can_require_model_generation_without_reference_image(self) -> None:
         data = case_spec_v2_fixture()
@@ -70,6 +816,39 @@ class CaseSpecV2Tests(unittest.TestCase):
         case = case_spec_v2_from_dict(data, available_input_ids=["request_image_0"])
         reference = case.data["objects"][0]["asset"]["acquisition"]["reference_inputs"][0]
         self.assertFalse(reference["allow_similarity_search"])
+
+    def test_meshy_texture_prompt_is_optional_and_limited_to_600_characters(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["asset"] = {
+            "description": "a generated ball",
+            "resource_kind": "mesh_3d",
+            "acquisition": {
+                "route": "model_generation",
+                "requirement": "required",
+                "origin": "user_explicit",
+                "provider_hint": "meshy",
+                "reference_inputs": [],
+                "fallback_order": [],
+                "texture_prompt": "matte red painted wood",
+            },
+        }
+        acquisition = data["objects"][0]["asset"]["acquisition"]
+        case = case_spec_v2_from_dict(data)
+        self.assertEqual(
+            case.data["objects"][0]["asset"]["acquisition"]["texture_prompt"],
+            "matte red painted wood",
+        )
+
+        acquisition["texture_prompt"] = "x" * 601
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("texture_prompt_too_long", {issue.code for issue in context.exception.issues})
+
+        acquisition["texture_prompt"] = "red"
+        acquisition["route"] = "procedural_generation"
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("texture_prompt_route_mismatch", {issue.code for issue in context.exception.issues})
 
     def test_llm_inferred_route_cannot_become_a_hard_requirement(self) -> None:
         data = case_spec_v2_fixture()
@@ -113,6 +892,315 @@ class CaseSpecV2Tests(unittest.TestCase):
             case_spec_v2_from_dict(data)
         self.assertIn("kinetic_energy_mismatch", {issue.code for issue in context.exception.issues})
 
+    def test_semantic_role_does_not_add_a_process_specific_rotation_rule(self) -> None:
+        data = case_spec_v2_fixture()
+        ramp = data["objects"][2]
+        ramp["role"] = "static inclined ramp"
+        ramp["geometry"]["shape_hint"] = "box"
+        ramp["initial_state"]["rotation_deg"] = [0.0, -12.0, 0.0]
+        case_spec_v2_from_dict(data)
+
+        ramp["initial_state"]["rotation_deg"] = [-12.0, 0.0, 0.0]
+        case_spec_v2_from_dict(data)
+
+    def test_box_that_only_mentions_a_ramp_is_not_an_inclined_surface(self) -> None:
+        roles = (
+            "static block supporting high end of ramp",
+            "first target container closest to slope",
+            "third target container farthest from ramp",
+            "ramp support block",
+        )
+        for role in roles:
+            with self.subTest(role=role):
+                data = case_spec_v2_fixture()
+                subject = data["objects"][2]
+                subject["id"] = "ordinary_box"
+                subject["role"] = role
+                subject["geometry"]["shape_hint"] = "box"
+                subject["initial_state"]["rotation_deg"] = [0.0, 0.0, 0.0]
+                case_spec_v2_from_dict(data)
+
+    def test_support_relations_project_to_explicit_runtime_support_map(self) -> None:
+        data = case_spec_v2_fixture()
+        data["relations"].append({"type": "supported_by", "source": "cue_ball", "target": "floor"})
+        projection = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data))
+        self.assertEqual(
+            projection.data["expected_physics"]["support"],
+            {"cue_ball": "floor"},
+        )
+
+    def test_plain_contact_does_not_project_as_support(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["initial_state"]["linear_velocity_m_s"] = [0.0, 0.0, 0.0]
+        data["relations"].append({"type": "contact", "source": "cue_ball", "target": "floor"})
+        data["expected_behavior"]["support"] = {"cue_ball": "floor"}
+
+        projection = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data)).data
+
+        self.assertNotIn("support", projection["expected_physics"])
+        self.assertEqual(
+            projection["expected_physics"]["collision_graph"],
+            [["cue_ball", "target_ball"]],
+        )
+
+    def test_singular_impact_relation_is_canonicalized_and_projected(self) -> None:
+        data = case_spec_v2_fixture()
+        data["relations"] = [{"type": "impact", "source": "cue_ball", "target": "target_ball"}]
+
+        parsed = case_spec_v2_from_dict(data)
+        projection = compile_case_spec_v2_runtime(parsed).data
+
+        self.assertEqual(parsed.data["relations"][0]["type"], "impacts")
+        self.assertEqual(
+            projection["expected_physics"]["collision_graph"],
+            [["cue_ball", "target_ball"]],
+        )
+
+    def test_explicit_collision_surface_gap_is_validated_and_projected(self) -> None:
+        data = case_spec_v2_fixture()
+        data["relations"][0]["surface_gap_m"] = 0.12
+
+        projection = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data)).data
+
+        self.assertEqual(
+            projection["expected_physics"]["collision_surface_gaps_m"],
+            [{"source": "cue_ball", "target": "target_ball", "surface_gap_m": 0.12}],
+        )
+
+        data["relations"][0]["surface_gap_m"] = -0.1
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("invalid_surface_gap", {issue.code for issue in context.exception.issues})
+
+        data = case_spec_v2_fixture()
+        data["relations"].append({
+            "type": "supported_by",
+            "source": "cue_ball",
+            "target": "floor",
+            "surface_gap_m": 0.01,
+        })
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("surface_gap_requires_collision_relation", {issue.code for issue in context.exception.issues})
+
+    def test_explicit_support_must_contain_subject_horizontal_bounds(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["initial_state"]["position_m"][0] = 3.0
+        data["relations"].append({"type": "supported_by", "source": "cue_ball", "target": "floor"})
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("support_footprint_too_small", {issue.code for issue in context.exception.issues})
+
+    def test_static_ramp_can_be_locally_supported_by_smaller_high_end_block(self) -> None:
+        data = case_spec_v2_fixture()
+        ramp = data["objects"][2]
+        ramp["id"] = "ramp"
+        ramp["role"] = "static inclined ramp"
+        ramp["geometry"]["approx_size_m"] = [5.0, 1.0, 0.1]
+        ramp["initial_state"]["position_m"] = [0.0, 0.0, 0.7]
+        ramp["initial_state"]["rotation_deg"] = [15.0, 0.0, 0.0]
+        support = {
+            "id": "support_block",
+            "role": "high end support",
+            "geometry": {"shape_hint": "box", "approx_size_m": [0.5, 1.0, 1.3]},
+            "physics": {"body_type": "static", "collision_required": True},
+            "initial_state": {"position_m": [-2.4, 0.0, 0.65]},
+            "behavior": {},
+        }
+        data["objects"].append(support)
+        data["relations"].append({"type": "supported_by", "source": "ramp", "target": "support_block"})
+
+        parsed = case_spec_v2_from_dict(data)
+
+        self.assertEqual(parsed.data["objects"][-1]["id"], "support_block")
+
+    def test_fast_dynamic_body_defaults_to_ccd_but_preserves_explicit_false(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["initial_state"]["linear_velocity_m_s"] = [4.0, 0.0, 0.0]
+        projected = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data)).data
+        self.assertTrue(projected["objects"][0]["use_ccd"])
+
+        data["objects"][0]["physics"]["use_ccd"] = False
+        projected = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data)).data
+        self.assertFalse(projected["objects"][0]["use_ccd"])
+
+    def test_ccd_must_be_declared_in_physics_not_behavior(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["behavior"]["use_ccd"] = True
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        self.assertIn("misplaced_physics_field", {issue.code for issue in context.exception.issues})
+
+    def test_object_angular_velocity_degrees_compiles_to_canonical_radians(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["initial_state"]["angular_velocity_deg_s"] = [0.0, 0.0, 1500.0]
+
+        projected = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data)).data
+        cue = next(obj for obj in projected["objects"] if obj["id"] == "cue_ball")
+
+        self.assertAlmostEqual(cue["initial_angular_velocity_rad_s"][2], 26.17993877991494)
+        self.assertNotIn("initial_angular_velocity_deg_s", cue)
+
+        data["objects"][0]["initial_state"]["angular_velocity_rad_s"] = [0.0, 0.0, 1.0]
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("ambiguous_angular_velocity_units", {issue.code for issue in context.exception.issues})
+
+    def test_release_event_velocity_overrides_zero_hold_velocity(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["initial_state"]["linear_velocity_m_s"] = [0.0, 0.0, 0.0]
+        data["events"] = [{
+            "type": "release",
+            "object": "cue_ball",
+            "time_s": 0.8,
+            "linear_velocity_m_s": [1.2, 0.0, 0.0],
+            "angular_velocity_rad_s": [0.0, 1.0, 0.0],
+        }]
+
+        projected = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data)).data
+        ball = next(obj for obj in projected["objects"] if obj["id"] == "cue_ball")
+        self.assertEqual(ball["initial_velocity_m_s"], [0.0, 0.0, 0.0])
+        self.assertEqual(ball["release_time_s"], 0.8)
+        self.assertEqual(ball["release_velocity_m_s"], [1.2, 0.0, 0.0])
+        self.assertEqual(ball["release_angular_velocity_deg_s"], [0.0, 57.29577951308232, 0.0])
+
+    def test_continuous_force_requires_dynamic_target_vector_and_time_window(self) -> None:
+        data = case_spec_v2_fixture()
+        data["backend_constraints"]["required_solver_capabilities"].append("continuous_external_force")
+        data["forces"] = [
+            {
+                "id": "wind_force",
+                "type": "continuous_force",
+                "object": "cue_ball",
+                "vector_n": [1.5, 0.0, 0.0],
+                "start_time_s": 0.25,
+                "end_time_s": 1.75,
+            }
+        ]
+
+        source = case_spec_v2_from_dict(data)
+        projected = compile_case_spec_v2_runtime(source).data
+
+        self.assertEqual(projected["forces"], data["forces"])
+
+        invalid = deepcopy(data)
+        invalid["forces"][0]["object"] = "floor"
+        invalid["forces"][0]["vector_n"] = [0.0, 0.0, 0.0]
+        invalid["forces"][0]["end_time_s"] = 9.0
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(invalid)
+        self.assertTrue(
+            {"force_target_not_dynamic", "zero_force", "force_window_outside_scene"}.issubset(
+                {issue.code for issue in context.exception.issues}
+            )
+        )
+
+    def test_compliant_sphere_contact_validates_and_projects(self) -> None:
+        data = case_spec_v2_fixture()
+        data["backend_constraints"]["required_solver_capabilities"].append("compliant_contact")
+        data["backend_constraints"]["allowed_solvers"] = ["ue"]
+        data["timebase"]["physics_hz"] = 360
+        data["timebase"]["observation_fps"] = 30
+        for obj in data["objects"][:2]:
+            obj["physics"]["mass_kg"] = 0.62
+            obj["physics"]["collision_geometry"] = {
+                "shape": "sphere",
+                "size_m": [0.176, 0.176, 0.176],
+            }
+        data["compliant_contacts"] = [{
+            "id": "ball_pair",
+            "body_a": "cue_ball",
+            "body_b": "target_ball",
+            "activation_distance_m": 0.18,
+            "stiffness_n_m": 50000.0,
+            "damping_n_s_m": 5.0,
+        }]
+
+        projected = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data)).data
+
+        self.assertEqual(projected["compliant_contacts"], data["compliant_contacts"])
+
+    def test_compliant_contact_rejects_missing_capability_and_hard_stop_clearance(self) -> None:
+        data = case_spec_v2_fixture()
+        data["backend_constraints"]["allowed_solvers"] = ["ue"]
+        data["timebase"]["physics_hz"] = 360
+        data["timebase"]["observation_fps"] = 30
+        for obj in data["objects"][:2]:
+            obj["physics"]["mass_kg"] = 0.62
+            obj["physics"]["collision_geometry"] = {
+                "shape": "sphere",
+                "size_m": [0.18, 0.18, 0.18],
+            }
+        data["compliant_contacts"] = [{
+            "id": "ball_pair",
+            "body_a": "cue_ball",
+            "body_b": "target_ball",
+            "activation_distance_m": 0.18,
+            "stiffness_n_m": 200000.0,
+            "damping_n_s_m": 5.0,
+        }]
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        codes = {issue.code for issue in context.exception.issues}
+        self.assertIn("compliant_contact_capability_missing", codes)
+        self.assertIn("compliant_contact_requires_hard_stop_clearance", codes)
+        self.assertIn("compliant_contact_explicit_step_unstable", codes)
+
+    def test_release_event_infers_active_body_without_language_specific_role(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["role"] = "撞击球"
+        data["objects"][0]["initial_state"]["linear_velocity_m_s"] = [0.0, 0.0, 0.0]
+        data["objects"][1]["role"] = "第一个目标"
+        data["objects"][2]["role"] = "桌面"
+        data["events"] = [{
+            "type": "release",
+            "object": "cue_ball",
+            "time_s": 0.5,
+            "linear_velocity_m_s": [1.2, 0.0, 0.0],
+        }]
+
+        projection = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data)).data
+
+        self.assertEqual(projection["active_objects"], ["cue_ball"])
+        self.assertEqual(projection["passive_objects"], ["target_ball"])
+
+    def test_release_event_rejects_invalid_velocity(self) -> None:
+        data = case_spec_v2_fixture()
+        data["events"] = [{
+            "type": "release",
+            "object": "cue_ball",
+            "time_s": 0.8,
+            "linear_velocity_m_s": [1.2, 0.0],
+        }]
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("invalid_vector", {issue.code for issue in context.exception.issues})
+
+    def test_release_velocity_must_point_toward_single_impacts_target(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["initial_state"]["linear_velocity_m_s"] = [0.0, 0.0, 0.0]
+        data["relations"] = [{"type": "impacts", "source": "cue_ball", "target": "target_ball"}]
+        data["events"] = [{
+            "type": "release",
+            "object": "cue_ball",
+            "time_s": 0.4,
+            "linear_velocity_m_s": [-1.2, 0.0, 0.0],
+        }]
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        self.assertIn(
+            "release_velocity_points_away_from_impact_target",
+            {issue.code for issue in context.exception.issues},
+        )
+        data["events"][0]["linear_velocity_m_s"] = [1.2, 0.0, 0.0]
+        case_spec_v2_from_dict(data)
+
     def test_invalid_energy_inputs_remain_structured_validation_errors(self) -> None:
         data = case_spec_v2_fixture()
         data["objects"][0]["initial_state"]["linear_velocity_m_s"] = ["fast", 0.0, 0.0]
@@ -128,6 +1216,33 @@ class CaseSpecV2Tests(unittest.TestCase):
             case_spec_v2_from_dict(data)
         self.assertIn("unknown_object_reference", {issue.code for issue in context.exception.issues})
 
+    def test_full_subject_camera_requires_a_declared_subject(self) -> None:
+        data = case_spec_v2_fixture()
+        camera = data["observation_requirements"]["cameras"][0]
+        camera["framing"] = "full_subject"
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("camera_subject_required", {issue.code for issue in context.exception.issues})
+
+        camera["subject"] = "cue_ball"
+        case_spec_v2_from_dict(data)
+
+    def test_explicit_camera_pose_is_complete_world_static_truth(self) -> None:
+        data = case_spec_v2_fixture()
+        camera = data["observation_requirements"]["cameras"][0]
+        camera.update({
+            "coordinate_frame": "world",
+            "position_m": [4.0, -4.0, 1.4],
+            "look_at_m": [0.0, 0.0, 0.9],
+            "fov_deg": 50.0,
+        })
+        case_spec_v2_from_dict(data)
+
+        del camera["look_at_m"]
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("invalid_vector", {issue.code for issue in context.exception.issues})
+
     def test_unsupported_capability_backend_combination_is_rejected_before_compilation(self) -> None:
         data = case_spec_v2_fixture()
         data["capabilities"] = {
@@ -137,7 +1252,7 @@ class CaseSpecV2Tests(unittest.TestCase):
         data["backend_constraints"]["allowed_solvers"] = ["taichi_cloth"]
         with self.assertRaises(CaseSpecV2ValidationError) as context:
             case_spec_v2_from_dict(data)
-        self.assertIn("unsupported_capability_backend", {issue.code for issue in context.exception.issues})
+        self.assertIn("unsupported_scene_backend", {issue.code for issue in context.exception.issues})
 
     def test_rigid_primary_cannot_be_routed_to_a_specialized_solver_by_omission(self) -> None:
         data = case_spec_v2_fixture()
@@ -145,7 +1260,7 @@ class CaseSpecV2Tests(unittest.TestCase):
         data["backend_constraints"]["allowed_solvers"] = ["genesis_sph"]
         with self.assertRaises(CaseSpecV2ValidationError) as context:
             case_spec_v2_from_dict(data)
-        self.assertIn("unsupported_capability_backend", {issue.code for issue in context.exception.issues})
+        self.assertIn("unsupported_scene_backend", {issue.code for issue in context.exception.issues})
 
     def test_required_solver_capability_must_use_registered_vocabulary(self) -> None:
         data = case_spec_v2_fixture()
@@ -209,6 +1324,34 @@ class CaseSpecV2Tests(unittest.TestCase):
         with self.assertRaises(CaseSpecV2ValidationError) as context:
             case_spec_v2_from_dict(data)
         self.assertIn("asset_required", {issue.code for issue in context.exception.issues})
+
+    def test_non_asset_visual_representations_do_not_require_asset_intents(self) -> None:
+        data = case_spec_v2_fixture()
+        data["asset_policy"]["allow_analytic_proxy"] = False
+        data["objects"][0]["visual_representation"] = {"source": "solver_generated"}
+        data["objects"][0]["solver"] = {"output": "renderable_geometry"}
+        data["objects"][1]["visual_representation"] = {"source": "none"}
+        data["objects"][2]["visual_representation"] = {"source": "none"}
+        data["objects"][1]["physics"]["collision_geometry"] = {
+            "shape": "sphere",
+            "size_m": [0.18, 0.18, 0.18],
+        }
+        data["objects"][2]["physics"]["collision_geometry"] = {
+            "shape": "box",
+            "size_m": [3.0, 2.0, 0.1],
+        }
+
+        case = case_spec_v2_from_dict(data)
+        projection = compile_case_spec_v2_runtime(case)
+
+        self.assertEqual(projection.data["objects"][0]["visual_representation"]["source"], "solver_generated")
+        self.assertNotIn("force_analytic_proxy", projection.data["objects"][0])
+
+        conflict = deepcopy(data)
+        conflict["objects"][0]["asset"] = {"description": "incorrect placeholder asset"}
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(conflict)
+        self.assertIn("visual_representation_conflict", {issue.code for issue in context.exception.issues})
 
     def test_runtime_vocabulary_is_validated_before_compilation(self) -> None:
         data = case_spec_v2_fixture()

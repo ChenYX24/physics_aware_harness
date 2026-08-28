@@ -1,0 +1,216 @@
+{
+  "schema_version": "harness_case_spec_v2",
+  "identity": {
+    "case_id": "low_speed_single_contact",
+    "title": "Low-speed single billiard-ball contact",
+    "source_request": "A low-speed cue ball hits one passive target ball on a flat low-friction table."
+  },
+  "capabilities": {
+    "primary": "rigid_body_dynamics",
+    "required": [
+      "rigid_body_dynamics"
+    ]
+  },
+  "scene": {
+    "environment_intent": "flat low-friction billiards test table",
+    "coordinate_system": "z_up",
+    "duration_s": 2.0,
+    "bounds_hint_m": [
+      3.0,
+      2.0,
+      1.0
+    ]
+  },
+  "timebase": {
+    "physics_hz": 120,
+    "observation_fps": 24,
+    "deterministic_seed": 42
+  },
+  "backend_constraints": {
+    "required_solver_capabilities": [
+      "rigid_body",
+      "contact_events",
+      "trajectory"
+    ],
+    "allowed_solvers": [
+      "fallback",
+      "ue"
+    ],
+    "render_backend": null,
+    "allow_multi_backend": true
+  },
+  "asset_policy": {
+    "allow_local": true,
+    "allow_external": false,
+    "allow_generation": false,
+    "allow_analytic_proxy": true,
+    "required_license_tier": "local_preview"
+  },
+  "objects": [
+    {
+      "id": "cue_ball",
+      "role": "active_striker",
+      "geometry": {
+        "shape_hint": "sphere",
+        "approx_size_m": [
+          0.18,
+          0.18,
+          0.18
+        ]
+      },
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.17,
+        "collision_required": true
+      },
+      "initial_state": {
+        "position_m": [
+          -1.0,
+          0.0,
+          0.09
+        ],
+        "rotation_deg": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          1.0,
+          0.0,
+          0.0
+        ]
+      },
+      "behavior": {}
+    },
+    {
+      "id": "target_ball_1",
+      "role": "passive_target",
+      "geometry": {
+        "shape_hint": "sphere",
+        "approx_size_m": [
+          0.18,
+          0.18,
+          0.18
+        ]
+      },
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.17,
+        "collision_required": true
+      },
+      "initial_state": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.09
+        ],
+        "rotation_deg": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "behavior": {}
+    },
+    {
+      "id": "table",
+      "role": "support",
+      "geometry": {
+        "shape_hint": "box"
+      },
+      "physics": {
+        "body_type": "static",
+        "collision_required": true
+      },
+      "initial_state": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation_deg": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "behavior": {}
+    }
+  ],
+  "relations": [
+    {
+      "type": "collision",
+      "source": "cue_ball",
+      "target": "target_ball_1"
+    }
+  ],
+  "events": [
+    {
+      "type": "initial_motion",
+      "object": "cue_ball"
+    }
+  ],
+  "expected_behavior": {
+    "speed": "low",
+    "collision_graph": [
+      [
+        "cue_ball",
+        "target_ball_1"
+      ]
+    ],
+    "camera": {
+      "mode": "top_down_fixed"
+    },
+    "passive_stationary_until_contact": true
+  },
+  "observation_requirements": {
+    "cameras": [
+      {
+        "role": "top_down",
+        "target_objects": [
+          "cue_ball",
+          "target_ball_1"
+        ]
+      }
+    ],
+    "modalities": [
+      "rgb"
+    ],
+    "signals": [
+      "trajectory",
+      "contact_events",
+      "camera_trajectory"
+    ]
+  },
+  "verification_requirements": {
+    "assertions": [
+      {
+        "type": "event_exists",
+        "event": "contact",
+        "objects": [
+          "cue_ball",
+          "target_ball_1"
+        ]
+      }
+    ],
+    "thresholds": {}
+  },
+  "variant": {
+    "should_pass": true
+  },
+  "provenance": {
+    "migrated_from": "cases/billiards/low_speed_single_contact.json",
+    "migration_kind": "v1_to_v2_representative"
+  },
+  "notes": "V2 migration of the positive V1 contact-causality case; the passive target remains stationary until contact."
+}

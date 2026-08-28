@@ -1,63 +1,39 @@
 # Capability Authoring
 
-新增能力时，先写 capability JSON，再写最小正负 case，再写 verifier 或 adapter。
+## 边界
 
-## 文件
+不要为新的物理现象新增 capability、runtime mode、fallback 函数或 verifier。台球、坠落、连续碰撞、泼洒、反弹等都是 CaseSpec 实例，不是软件能力类别。
 
-```text
-capabilities/<capability_id>.json
-cases/<family>/<case>.json
-harness/verification/<family>_verifier.py
-tests/test_<family>_verifier.py
-```
+只有以下扩展值得新增 active capability：
 
-## 必填内容
+- 新的通用 state representation；
+- 新的 solver primitive 或 coupling；
+- 新的 backend adapter；
+- 新的 pipeline/asset/runtime bridge；
+- 新的通用 measurement reduction 或 assertion operator；
+- 新的 artifact/readiness gate。
 
-Capability 必须包含：
+## 当前物理 capability
 
-- `capability_type`: `pipeline_stage`、`physics_constraint`、`verification`、`asset_operation`、`runtime_bridge`、`dataset_packaging` 或 `compatibility_alias`
-- `stage_ids`: 该能力在哪些 pipeline 阶段被调用
-- physical assumptions
-- required signals
-- required assets
-- verifier rules
-- failure taxonomy
-- repair suggestions
-- smoke cases
-- regression cases
+- `rigid_body_dynamics`
+- `fluid_particle_dynamics`
+- `deformable_body_dynamics`
 
-## 原则
+旧现象 capability 只能是 `compatibility_alias`，不得进入 active profile，也不得拥有专用 verifier。
 
-- 不要把 capability 写成某个 prompt 模板。
-- 不要把 capability 写成某个具体物体模板，例如“台球编译器”。应抽象成 active/passive contact causality、gravity collision、friction response、restitution envelope、force-field drift 等不变量。
-- 不要为单一 case family 保留 active capability JSON；历史名称只能放在 taxonomy 的 deprecated alias 或兼容读取逻辑中。
-- case family 只能放在 `smoke_cases`、`regression_cases` 和 `cases/templates/` 中。
-- 要写清楚物理因果规则。
-- 要写清楚这个能力属于 pipeline stage、物理约束、校验、资产操作、runtime bridge 还是 dataset packaging。
-- 资产能力要区分 retrieval 和 invocation：`asset_intent_resolution` 找候选，`asset_runtime_binding_invocation` 负责把 selected asset/proxy 绑定到 runtime actor。
-- 约束能力要区分 visual helper 和 physics graph：绳子/链条/杆件可以是 visual-only，但 distance/joint/hinge constraint 必须进入 `expected_physics` 和 `constraint_trace`。
-- negative case 必须能稳定 fail。
-- fallback backend 可以先用 deterministic toy trajectory，但必须显式标记 source。
+## 实现顺序
 
-## 推荐能力粒度
-
-| 不推荐 | 推荐 |
-|---|---|
-| `billiard_causality_compiler` 作为主能力 | `rigid_body_contact_causality`，台球/保龄球/箱体撞击作为 case family |
-| `pretty_video_generator` | `canonical_signal_capture` + `physics_verifier_truth_gate` |
-| `find_assets` | `asset_intent_resolution` + `asset_runtime_binding_invocation` |
-| `friction_demo_template` | `physics_property_constraint_validation` + `rolling_friction_ball` / `sliding_crate_friction` |
-| `scene_prompt_rewrite` | `prompt_case_capability_planning` + `scene_spec_compilation` |
-| `pendulum_template` 作为主能力 | `constraint_distance_pendulum_motion`，单摆/绳索/铰链作为 case family |
-| `newton_cradle_template` 作为主能力 | `constraint_momentum_transfer`，牛顿摆/悬挂球链作为 case family |
-| `spring_launcher_template` 作为主能力 | `elastic_energy_launch`，弹簧/弹射器作为 case family |
-| `bungee_template` 作为主能力 | `elastic_constraint_rebound`，蹦极/弹性绳作为 case family |
-| `glass_break_template` 作为主能力 | `brittle_impact_fracture`，玻璃/镜子/杯子/木箱作为 case family |
+1. 扩展 CaseSpec 的通用字段和结构校验。
+2. 在 `physics_contract` 中声明状态域/backend 支持关系；不要读取 prompt 或 case id。
+3. 扩展 backend adapter，使其消费通用字段。
+4. 如需验证，扩展通用 assertion vocabulary，而不是新增 `<family>_verifier.py`。
+5. 增加至少两个语义不同、但使用同一 primitive 的 case 回归。
+6. 更新 `tests/test_no_process_dispatch.py`，证明旧现象标签不会改变执行。
 
 ## 验证
 
 ```bash
-python3 -m json.tool capabilities/<capability_id>.json >/dev/null
-python3.13 scripts/harness_smoke.py --backend fallback
-python3.13 -m unittest discover -s tests -p 'test*.py'
+python scripts/harness_list_capabilities.py --json
+conda run -n base python -m unittest tests.test_no_process_dispatch
+conda run -n base python -m unittest discover -s tests -p 'test_*.py'
 ```

@@ -8,8 +8,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from harness.assets.providers.local_procedural_mesh import RECIPE_BY_SHAPE
 from harness.core.capability import CapabilityStore, canonical_capability_id
-from harness.core.case_spec import CaseSpec, validate_case_spec
+from harness.core.physics_contract import allowed_backends_for_scene
+from harness.core.runtime_case import RUNTIME_CASE_SCHEMA_VERSION, RuntimeCase
+from harness.core.scene_layout import rotate_local_vector_ue
+from harness.runtime.articulated_body import (
+    ArticulatedBodyContractError,
+    compile_articulated_body_contract,
+    is_articulated_body_solver,
+)
 
 
 CASE_SPEC_V2_SCHEMA_VERSION = "harness_case_spec_v2"
@@ -22,6 +30,13 @@ ACQUISITION_ROUTES = {
 }
 ACQUISITION_REQUIREMENTS = {"preferred", "required"}
 ACQUISITION_ORIGINS = {"user_explicit", "llm_inferred", "system_default"}
+PROVIDER_HINTS_BY_ACQUISITION_ROUTE = {
+    "default": frozenset(),
+    "local_catalog": frozenset(),
+    "external_site": frozenset({"poly_haven"}),
+    "procedural_generation": frozenset(RECIPE_BY_SHAPE.values()),
+    "model_generation": frozenset({"meshy"}),
+}
 REFERENCE_INPUT_USAGES = {
     "similarity_search",
     "generation_condition",
@@ -40,46 +55,49 @@ CAMERA_ROLES = {
     "tracking_subject",
     "event_closeup",
 }
+CAMERA_FRAMINGS = {"scene", "full_subject"}
 OBSERVATION_MODALITIES = {"rgb", "depth", "segmentation", "instance_segmentation"}
 VERIFICATION_ASSERTION_TYPES = {
-    "action_effect_occurs",
-    "angular_speed_decay",
-    "ballistic_gravity_impact",
-    "constraint_impulse_transfer",
-    "constraint_preserved",
-    "contact_causality",
-    "contact_occurs",
-    "displacement_along_force",
-    "elastic_launch_occurs",
-    "elastic_rebound_occurs",
-    "fracture_after_contact",
-    "frictional_ramp_motion",
-    "gravity_then_support_contact",
-    "magnetic_response",
-    "mesh_cache_complete",
-    "momentum_transfer",
-    "ordered_contact_propagation",
-    "particle_cache_complete",
-    "restitution_envelope",
-    "rolling_deceleration",
-    "sliding_deceleration",
+    "artifact_complete",
+    "event_count",
+    "event_exists",
+    "event_sequence",
+    "state_delta",
+    "state_value",
+    "trajectory_integrity",
 }
+AGENT_RELATION_TYPES = {
+    "cascade_collision",
+    "collision",
+    "contact",
+    "contact_order",
+    "hits",
+    "impacts",
+    "supported_by",
+}
+CONSTRAINT_FRAME_POSITION_TOLERANCE_M = 0.002
+CONSTRAINT_FRAME_AXIS_TOLERANCE_DEG = 0.1
 LICENSE_TIERS = {"local_preview", "reference"}
 BODY_TYPES = {"dynamic", "static", "kinematic"}
+COLLISION_GEOMETRY_SHAPES = {"box", "sphere", "cylinder"}
+GEOMETRY_SCALE_POLICIES = {"preserve_authored", "fit_uniform_to_approx_size"}
 BACKEND_SOLVERS = {"fallback", "genesis_fem", "genesis_sph", "taichi_cloth", "ue"}
 BACKEND_SOLVER_CAPABILITIES = {
     "fallback": {"rigid_body", "contact_events", "trajectory"},
-    "ue": {"rigid_body", "contact_events", "trajectory", "fracture_events", "geometry_collection"},
-    "genesis_sph": {"particle_dynamics", "fluid_dynamics", "particle_cache", "surface_mesh_cache", "trajectory"},
+    "ue": {"rigid_body", "rigid_constraints", "compliant_contact", "continuous_external_force", "articulated_body", "contact_events", "trajectory", "fracture_events", "geometry_collection"},
+    "genesis_sph": {
+        "particle_dynamics",
+        "fluid_dynamics",
+        "particle_cache",
+        "surface_mesh_cache",
+        "trajectory",
+        "declared_measurements",
+    },
     "genesis_fem": {"soft_body", "finite_element", "mesh_cache", "deformable_mesh_cache", "trajectory"},
     "taichi_cloth": {"soft_body", "cloth", "mesh_cache", "trajectory"},
 }
+ANGULAR_DRIVE_MODES = {"twist_and_swing", "slerp"}
 REGISTERED_SOLVER_CAPABILITIES = frozenset().union(*BACKEND_SOLVER_CAPABILITIES.values())
-CAPABILITY_ALLOWED_SOLVERS = {
-    "fluid_particle_dynamics": {"fallback", "genesis_sph"},
-    "soft_body_deformation": {"fallback", "genesis_fem", "taichi_cloth"},
-}
-DEFAULT_CAPABILITY_ALLOWED_SOLVERS = {"fallback", "ue"}
 RESOURCE_KINDS = {
     "mesh_3d",
     "skeletal_mesh",
@@ -135,9 +153,14 @@ TOP_LEVEL_FIELDS = {
     "backend_constraints",
     "asset_policy",
     "objects",
+    "constraints",
+    "compliant_contacts",
     "relations",
     "events",
+    "forces",
     "expected_behavior",
+    "solver_scene",
+    "workspace_bounds_m",
     "observation_requirements",
     "verification_requirements",
     "variant",
@@ -236,8 +259,11 @@ def normalize_case_spec_v2(data: Mapping[str, Any]) -> dict[str, Any]:
     policy.setdefault("required_license_tier", "local_preview")
     for key, default in (
         ("objects", []),
+        ("constraints", []),
+        ("compliant_contacts", []),
         ("relations", []),
         ("events", []),
+        ("forces", []),
         ("expected_behavior", {}),
         ("observation_requirements", {}),
         ("verification_requirements", {}),
@@ -246,9 +272,20 @@ def normalize_case_spec_v2(data: Mapping[str, Any]) -> dict[str, Any]:
     ):
         normalized.setdefault(key, copy.deepcopy(default))
     normalized.setdefault("notes", "")
+    solver_scene = normalized.get("solver_scene")
+    if isinstance(solver_scene, dict) and solver_scene.get("type") == "rigid_sph":
+        initialization = solver_scene.setdefault("initialization", {})
+        if isinstance(initialization, dict):
+            initialization.setdefault("state", "settled")
+            initialization.setdefault("pre_roll_s", 0.25)
+            initialization.setdefault("capture_after_pre_roll", True)
     for obj in normalized.get("objects") or []:
         if not isinstance(obj, dict):
             continue
+        representation = obj.setdefault("visual_representation", {})
+        if isinstance(representation, dict):
+            representation.setdefault("source", "asset")
+            representation.setdefault("visible", True)
         asset = obj.get("asset")
         for request in asset_requests(asset):
             acquisition = request.setdefault("acquisition", {})
@@ -261,6 +298,9 @@ def normalize_case_spec_v2(data: Mapping[str, Any]) -> dict[str, Any]:
             acquisition.setdefault("source_uri_hint", None)
             acquisition.setdefault("reference_inputs", [])
             acquisition.setdefault("fallback_order", [])
+    for relation in normalized.get("relations") or []:
+        if isinstance(relation, dict) and relation.get("type") is not None:
+            relation["type"] = _canonical_relation_type(relation.get("type"))
     return normalized
 
 
@@ -272,6 +312,89 @@ def validate_case_spec_v2(
     issues = collect_case_spec_v2_issues(data, available_input_ids=available_input_ids)
     if issues:
         raise CaseSpecV2ValidationError(issues)
+
+
+def validate_agent_case_spec_contract(data: Mapping[str, Any]) -> None:
+    """Validate strict Agent-facing contracts that old persisted V2 files may predate.
+
+    The ordinary V2 reader remains able to inspect historical jobs. New native
+    submissions and revisions use this stricter boundary before any Provider is
+    called.
+    """
+    issues = collect_agent_case_spec_contract_issues(data)
+    if issues:
+        raise CaseSpecV2ValidationError(issues)
+
+
+def collect_agent_case_spec_contract_issues(data: Mapping[str, Any]) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    recipe_shapes = {recipe: shape for shape, recipe in RECIPE_BY_SHAPE.items()}
+    for index, obj in enumerate(data.get("objects") or []):
+        if not isinstance(obj, Mapping):
+            continue
+        geometry = obj.get("geometry") if isinstance(obj.get("geometry"), Mapping) else {}
+        shape = str(geometry.get("shape_hint") or "").strip().casefold()
+        for request in asset_requests(obj.get("asset")):
+            acquisition = request.get("acquisition") if isinstance(request.get("acquisition"), Mapping) else {}
+            route = str(acquisition.get("route") or "default")
+            provider_hint = str(acquisition.get("provider_hint") or "").strip()
+            registered_hints = PROVIDER_HINTS_BY_ACQUISITION_ROUTE.get(route, frozenset())
+            if provider_hint and provider_hint not in registered_hints:
+                _issue(
+                    issues,
+                    f"/objects/{index}/asset/acquisition/provider_hint",
+                    "unsupported_provider_hint",
+                    f"provider_hint for route={route} must be one of {sorted(registered_hints)} or null",
+                )
+            if route != "procedural_generation":
+                continue
+            shape_path = f"/objects/{index}/geometry/shape_hint"
+            if shape not in RECIPE_BY_SHAPE:
+                _issue(
+                    issues,
+                    shape_path,
+                    "procedural_shape_hint_not_canonical",
+                    "built-in procedural generation requires shape_hint box, sphere, or cylinder",
+                )
+            expected_shape = recipe_shapes.get(provider_hint)
+            if expected_shape is not None and shape in RECIPE_BY_SHAPE and shape != expected_shape:
+                _issue(
+                    issues,
+                    shape_path,
+                    "procedural_recipe_shape_mismatch",
+                    f"{provider_hint} requires shape_hint={expected_shape}",
+                )
+            must = request.get("must") if isinstance(request.get("must"), Mapping) else {}
+            geometry_type = str(must.get("geometry_type") or "").strip().casefold()
+            if geometry_type and geometry_type not in RECIPE_BY_SHAPE:
+                _issue(
+                    issues,
+                    f"/objects/{index}/asset/must/geometry_type",
+                    "procedural_geometry_type_not_canonical",
+                    "built-in procedural generation requires geometry_type box, sphere, or cylinder",
+                )
+            elif geometry_type and shape in RECIPE_BY_SHAPE and geometry_type != shape:
+                _issue(
+                    issues,
+                    f"/objects/{index}/asset/must/geometry_type",
+                    "procedural_geometry_type_mismatch",
+                    "asset.must.geometry_type must match geometry.shape_hint",
+                )
+    for index, relation in enumerate(data.get("relations") or []):
+        if not isinstance(relation, Mapping):
+            continue
+        relation_type = _canonical_relation_type(relation.get("type"))
+        if relation_type not in AGENT_RELATION_TYPES:
+            _issue(
+                issues,
+                f"/relations/{index}/type",
+                "unsupported_agent_relation_type",
+                (
+                    f"must be one of {sorted(AGENT_RELATION_TYPES)}; "
+                    "mechanical connections belong only in top-level constraints"
+                ),
+            )
+    return issues
 
 
 def collect_case_spec_v2_issues(
@@ -363,10 +486,7 @@ def collect_case_spec_v2_issues(
             "unsupported_backend",
             f"unregistered solvers: {', '.join(unsupported_solvers)}",
         )
-    capability_solvers = CAPABILITY_ALLOWED_SOLVERS.get(
-        canonical_primary,
-        DEFAULT_CAPABILITY_ALLOWED_SOLVERS,
-    )
+    capability_solvers = allowed_backends_for_scene(data)
     incompatible_solvers = [
         value
         for value in allowed_solvers
@@ -376,8 +496,25 @@ def collect_case_spec_v2_issues(
         _issue(
             issues,
             "/backend_constraints/allowed_solvers",
-            "unsupported_capability_backend",
-            f"{primary} does not support: {', '.join(incompatible_solvers)}",
+            "unsupported_scene_backend",
+            f"the declared scene primitives do not support: {', '.join(incompatible_solvers)}",
+        )
+    registered_allowed_solvers = [solver for solver in allowed_solvers if solver in BACKEND_SOLVER_CAPABILITIES]
+    required_solver_set = set(required_solver_capabilities)
+    if (
+        registered_allowed_solvers
+        and required_solver_set
+        and not any(required_solver_set <= BACKEND_SOLVER_CAPABILITIES[solver] for solver in registered_allowed_solvers)
+    ):
+        missing_by_solver = "; ".join(
+            f"{solver}: {', '.join(sorted(required_solver_set - BACKEND_SOLVER_CAPABILITIES[solver]))}"
+            for solver in registered_allowed_solvers
+        )
+        _issue(
+            issues,
+            "/backend_constraints/required_solver_capabilities",
+            "solver_capability_mismatch",
+            f"no allowed solver provides every required capability ({missing_by_solver})",
         )
     render_backend = backend.get("render_backend")
     if render_backend is not None and not isinstance(render_backend, str):
@@ -414,9 +551,42 @@ def collect_case_spec_v2_issues(
         if object_id:
             object_ids.append(object_id)
         _nonempty_string(obj.get("role"), f"{path}/role", issues)
+        color_rgb = obj.get("color_rgb")
+        if color_rgb is not None:
+            color_values = _finite_vec3(color_rgb, f"{path}/color_rgb", issues)
+            if color_values and any(value < 0.0 or value > 1.0 for value in color_values):
+                _issue(
+                    issues,
+                    f"{path}/color_rgb",
+                    "invalid_color",
+                    "components must be between 0 and 1",
+                )
+        if obj.get("fixed_material_color") is not None and not isinstance(obj.get("fixed_material_color"), bool):
+            _issue(issues, f"{path}/fixed_material_color", "invalid_type", "must be boolean")
+        visual_material_path = obj.get("visual_material_path")
+        if visual_material_path is not None:
+            if not isinstance(visual_material_path, str) or not visual_material_path.strip():
+                _issue(issues, f"{path}/visual_material_path", "invalid_type", "must be a non-empty string")
+            elif not visual_material_path.startswith("/Game/"):
+                _issue(issues, f"{path}/visual_material_path", "invalid_ue_asset_path", "must start with /Game/")
         geometry = _mapping(obj.get("geometry"), f"{path}/geometry", issues, required=False)
         if geometry.get("approx_size_m") is not None:
             _positive_vec3(geometry.get("approx_size_m"), f"{path}/geometry/approx_size_m", issues)
+        scale_policy = geometry.get("scale_policy")
+        if scale_policy is not None and scale_policy not in GEOMETRY_SCALE_POLICIES:
+            _issue(
+                issues,
+                f"{path}/geometry/scale_policy",
+                "invalid_enum",
+                f"must be one of {sorted(GEOMETRY_SCALE_POLICIES)}",
+            )
+        if scale_policy == "fit_uniform_to_approx_size" and geometry.get("approx_size_m") is None:
+            _issue(
+                issues,
+                f"{path}/geometry/scale_policy",
+                "scale_target_missing",
+                "fit_uniform_to_approx_size requires geometry.approx_size_m",
+            )
         physics = _mapping(obj.get("physics"), f"{path}/physics", issues, required=False)
         if physics:
             if physics.get("body_type") not in BODY_TYPES:
@@ -425,14 +595,137 @@ def collect_case_spec_v2_issues(
                 _positive_number(physics.get("mass_kg"), f"{path}/physics/mass_kg", issues)
             if physics.get("collision_required") is not None and not isinstance(physics.get("collision_required"), bool):
                 _issue(issues, f"{path}/physics/collision_required", "invalid_type", "must be boolean")
+            if physics.get("use_ccd") is not None and not isinstance(physics.get("use_ccd"), bool):
+                _issue(issues, f"{path}/physics/use_ccd", "invalid_type", "must be boolean")
+            collision_geometry = physics.get("collision_geometry")
+            if collision_geometry is not None:
+                collision_geometry = _mapping(
+                    collision_geometry,
+                    f"{path}/physics/collision_geometry",
+                    issues,
+                )
+                unknown_collision_fields = sorted(
+                    str(key)
+                    for key in collision_geometry
+                    if str(key) not in {"shape", "size_m", "local_center_offset_m"}
+                )
+                if unknown_collision_fields:
+                    _issue(
+                        issues,
+                        f"{path}/physics/collision_geometry",
+                        "unknown_collision_geometry_fields",
+                        f"unsupported fields: {', '.join(unknown_collision_fields)}",
+                    )
+                collision_shape = str(collision_geometry.get("shape") or "")
+                if collision_shape not in COLLISION_GEOMETRY_SHAPES:
+                    _issue(
+                        issues,
+                        f"{path}/physics/collision_geometry/shape",
+                        "invalid_collision_geometry_shape",
+                        f"must be one of {sorted(COLLISION_GEOMETRY_SHAPES)}",
+                    )
+                collision_size = _positive_vec3(
+                    collision_geometry.get("size_m"),
+                    f"{path}/physics/collision_geometry/size_m",
+                    issues,
+                )
+                if collision_geometry.get("local_center_offset_m") is not None:
+                    _finite_vec3(
+                        collision_geometry.get("local_center_offset_m"),
+                        f"{path}/physics/collision_geometry/local_center_offset_m",
+                        issues,
+                    )
+                if collision_shape == "sphere" and collision_size and not _components_equal(collision_size):
+                    _issue(
+                        issues,
+                        f"{path}/physics/collision_geometry/size_m",
+                        "invalid_sphere_collision_size",
+                        "sphere requires x=y=z and the value is its diameter",
+                    )
+                if collision_shape == "cylinder" and collision_size and not math.isclose(
+                    collision_size[0], collision_size[1], rel_tol=0.0, abs_tol=1e-9
+                ):
+                    _issue(
+                        issues,
+                        f"{path}/physics/collision_geometry/size_m",
+                        "invalid_cylinder_collision_size",
+                        "cylinder requires x=y as its diameter and z as its height",
+                    )
+                if physics.get("collision_required") is False:
+                    _issue(
+                        issues,
+                        f"{path}/physics/collision_geometry",
+                        "collision_geometry_without_collision",
+                        "collision_geometry cannot be declared when collision_required is false",
+                    )
         initial = _mapping(obj.get("initial_state"), f"{path}/initial_state", issues, required=False)
-        for field in ("position_m", "rotation_deg", "linear_velocity_m_s", "angular_velocity_rad_s"):
+        for field in (
+            "position_m",
+            "rotation_deg",
+            "linear_velocity_m_s",
+            "angular_velocity_rad_s",
+            "angular_velocity_deg_s",
+        ):
             if initial.get(field) is not None:
                 _finite_vec3(initial.get(field), f"{path}/initial_state/{field}", issues)
+        if initial.get("angular_velocity_rad_s") is not None and initial.get("angular_velocity_deg_s") is not None:
+            _issue(
+                issues,
+                f"{path}/initial_state",
+                "ambiguous_angular_velocity_units",
+                "declare angular velocity in either rad/s or deg/s, not both",
+            )
         behavior = _mapping(obj.get("behavior"), f"{path}/behavior", issues, required=False)
+        if behavior.get("use_ccd") is not None:
+            _issue(
+                issues,
+                f"{path}/behavior/use_ccd",
+                "misplaced_physics_field",
+                "use_ccd belongs in object.physics.use_ccd, not object.behavior",
+            )
         declared_energy = behavior.get("initial_kinetic_energy_j")
         if declared_energy is not None:
             _validate_initial_kinetic_energy(physics, initial, declared_energy, f"{path}/behavior/initial_kinetic_energy_j", issues)
+        if obj.get("solver") is not None:
+            _mapping(obj.get("solver"), f"{path}/solver", issues)
+        representation = _mapping(
+            obj.get("visual_representation"),
+            f"{path}/visual_representation",
+            issues,
+        )
+        representation_source = str(representation.get("source") or "")
+        if representation_source not in {"asset", "solver_generated", "none"}:
+            _issue(
+                issues,
+                f"{path}/visual_representation/source",
+                "invalid_visual_representation_source",
+                "must be asset, solver_generated, or none",
+            )
+        if not isinstance(representation.get("visible"), bool):
+            _issue(
+                issues,
+                f"{path}/visual_representation/visible",
+                "invalid_type",
+                "must be boolean",
+            )
+        if (
+            representation_source == "none"
+            and physics.get("collision_required") is True
+            and not isinstance(physics.get("collision_geometry"), Mapping)
+        ):
+            _issue(
+                issues,
+                f"{path}/physics/collision_geometry",
+                "missing_hidden_collision_geometry",
+                "source=none with collision_required=true requires explicit collision_geometry",
+            )
+        if representation_source == "solver_generated" and not isinstance(obj.get("solver"), Mapping):
+            _issue(
+                issues,
+                f"{path}/visual_representation/source",
+                "solver_generated_representation_without_solver",
+                "solver_generated requires object.solver",
+            )
         raw_asset = obj.get("asset")
         if raw_asset is not None and not isinstance(raw_asset, Mapping):
             _issue(issues, f"{path}/asset", "invalid_type", "must be an object")
@@ -449,23 +742,82 @@ def collect_case_spec_v2_issues(
                 "unsupported_asset_shape",
                 "V2 currently supports one direct asset request per object",
             )
-        if not asset_requests(raw_asset) and not policy.get("allow_analytic_proxy"):
+        requests = asset_requests(raw_asset)
+        if representation_source != "asset" and requests:
+            _issue(
+                issues,
+                f"{path}/asset",
+                "visual_representation_conflict",
+                f"asset must be omitted when visual_representation.source is {representation_source}",
+            )
+        if representation_source == "asset" and not requests and not policy.get("allow_analytic_proxy"):
             _issue(
                 issues,
                 f"{path}/asset",
                 "asset_required",
                 "an asset request is required when analytic proxies are disabled",
             )
-        for request_index, request in enumerate(asset_requests(raw_asset)):
+        for request_index, request in enumerate(requests):
             request_path = f"{path}/asset" if request_index == 0 else f"{path}/asset/slot_{request_index}"
             _validate_asset_request(request, request_path, policy, allowed_inputs, issues)
+        _validate_procedural_primitive_size(geometry, requests, path, issues)
 
     duplicates = sorted({value for value in object_ids if object_ids.count(value) > 1})
     if duplicates:
         _issue(issues, "/objects", "duplicate_object_ids", f"duplicate ids: {', '.join(duplicates)}")
     known_objects = set(object_ids)
+    duration_s = float((data.get("scene") or {}).get("duration_s") or 0.0)
+    for index, obj in enumerate(objects):
+        if not isinstance(obj, Mapping) or not is_articulated_body_solver(obj.get("solver")):
+            continue
+        path = f"/objects/{index}"
+        physics = obj.get("physics") if isinstance(obj.get("physics"), Mapping) else {}
+        solver = obj.get("solver") if isinstance(obj.get("solver"), Mapping) else {}
+        mode = str(solver.get("mode") or "")
+        if obj.get("role") != "articulated_body":
+            _issue(issues, f"{path}/role", "invalid_articulated_body_role", "articulated_body solver requires role=articulated_body")
+        expected_body_type = "kinematic" if mode == "kinematic" else "dynamic" if mode == "ragdoll" else None
+        if expected_body_type and physics.get("body_type") != expected_body_type:
+            _issue(
+                issues,
+                f"{path}/physics/body_type",
+                "articulated_body_mode_mismatch",
+                f"{mode} mode requires body_type={expected_body_type}",
+            )
+        if mode == "kinematic" and physics.get("collision_required") is not False:
+            _issue(
+                issues,
+                f"{path}/physics/collision_required",
+                "kinematic_articulated_collision_mismatch",
+                "kinematic articulated bodies require collision_required=false",
+            )
+        if mode == "ragdoll" and physics.get("collision_required") is not True:
+            _issue(
+                issues,
+                f"{path}/physics/collision_required",
+                "ragdoll_articulated_collision_mismatch",
+                "ragdoll articulated bodies require collision_required=true",
+            )
+        try:
+            compile_articulated_body_contract(
+                solver,
+                duration_s=duration_s,
+                known_object_ids=known_objects,
+                object_id=str(obj.get("id") or ""),
+            )
+        except ArticulatedBodyContractError as exc:
+            _issue(issues, f"{path}/solver", "invalid_articulated_body_contract", str(exc))
+    _validate_rigid_constraints(data.get("constraints"), objects, known_objects, backend, issues)
+    _validate_compliant_contacts(data.get("compliant_contacts"), objects, known_objects, backend, physics_hz, issues)
     _validate_references(data.get("relations"), "/relations", known_objects, issues)
+    _validate_relation_surface_gaps(data.get("relations"), issues)
     _validate_references(data.get("events"), "/events", known_objects, issues)
+    _validate_event_payloads(data.get("events"), issues)
+    _validate_references(data.get("forces"), "/forces", known_objects, issues)
+    _validate_continuous_forces(data.get("forces"), objects, duration_s, issues)
+    _validate_release_impact_directions(objects, data.get("relations"), data.get("events"), issues)
+    _validate_articulated_support_selection(objects, data.get("relations"), issues)
+    _validate_support_footprints(objects, data.get("relations"), issues)
     verification = _mapping(data.get("verification_requirements"), "/verification_requirements", issues)
     assertions = verification.get("assertions")
     _validate_references(assertions, "/verification_requirements/assertions", known_objects, issues)
@@ -485,6 +837,13 @@ def collect_case_spec_v2_issues(
                     "unsupported_verification_assertion",
                     f"unsupported assertion type: {assertion_type}",
                 )
+            if assertion_type == "event_sequence":
+                _validate_event_sequence_assertion(
+                    assertion,
+                    f"/verification_requirements/assertions/{index}",
+                    known_objects,
+                    issues,
+                )
     observation = _mapping(data.get("observation_requirements"), "/observation_requirements", issues)
     cameras = observation.get("cameras")
     _validate_references(cameras, "/observation_requirements/cameras", known_objects, issues)
@@ -500,6 +859,69 @@ def collect_case_spec_v2_issues(
                     "unsupported_camera_role",
                     f"unsupported camera role: {role}",
                 )
+            framing = camera.get("framing")
+            if framing is not None and framing not in CAMERA_FRAMINGS:
+                _issue(
+                    issues,
+                    f"/observation_requirements/cameras/{index}/framing",
+                    "unsupported_camera_framing",
+                    f"unsupported camera framing: {framing}",
+                )
+            if framing == "full_subject" and not camera.get("subject"):
+                _issue(
+                    issues,
+                    f"/observation_requirements/cameras/{index}/subject",
+                    "camera_subject_required",
+                    "full_subject framing requires one declared subject object",
+                )
+            if framing == "full_subject" and role not in {"front", "front_static", "side", "side_static"}:
+                _issue(
+                    issues,
+                    f"/observation_requirements/cameras/{index}/framing",
+                    "camera_framing_role_mismatch",
+                    "full_subject framing requires a front or side camera role",
+                )
+            explicit_pose = any(
+                camera.get(field) is not None
+                for field in ("coordinate_frame", "position_m", "look_at_m", "fov_deg")
+            )
+            if explicit_pose:
+                if camera.get("coordinate_frame") != "world":
+                    _issue(
+                        issues,
+                        f"/observation_requirements/cameras/{index}/coordinate_frame",
+                        "unsupported_camera_coordinate_frame",
+                        "explicit camera pose requires coordinate_frame=world",
+                    )
+                position = _finite_vec3(
+                    camera.get("position_m"),
+                    f"/observation_requirements/cameras/{index}/position_m",
+                    issues,
+                )
+                target = _finite_vec3(
+                    camera.get("look_at_m"),
+                    f"/observation_requirements/cameras/{index}/look_at_m",
+                    issues,
+                )
+                fov = _finite_number(
+                    camera.get("fov_deg"),
+                    f"/observation_requirements/cameras/{index}/fov_deg",
+                    issues,
+                )
+                if position and target and math.dist(position, target) <= 1e-6:
+                    _issue(
+                        issues,
+                        f"/observation_requirements/cameras/{index}/look_at_m",
+                        "degenerate_camera_pose",
+                        "camera position and look-at point must differ",
+                    )
+                if fov is not None and not 10.0 <= fov <= 120.0:
+                    _issue(
+                        issues,
+                        f"/observation_requirements/cameras/{index}/fov_deg",
+                        "invalid_camera_fov",
+                        "camera FOV must be between 10 and 120 degrees",
+                    )
     for key in ("modalities", "signals"):
         if observation.get(key) is not None:
             values = _string_list(observation.get(key), f"/observation_requirements/{key}", issues)
@@ -513,6 +935,23 @@ def collect_case_spec_v2_issues(
                         f"unsupported modalities: {', '.join(unsupported_modalities)}",
                     )
     _mapping(data.get("expected_behavior"), "/expected_behavior", issues)
+    if data.get("solver_scene") is not None:
+        solver_scene = _mapping(data.get("solver_scene"), "/solver_scene", issues)
+        if solver_scene.get("type") == "rigid_sph":
+            _validate_rigid_sph_declarations(solver_scene, objects, issues)
+        elif solver_scene:
+            _issue(
+                issues,
+                "/solver_scene/type",
+                "unsupported_solver_scene",
+                "the only registered explicit solver scene is rigid_sph",
+            )
+    if data.get("workspace_bounds_m") is not None:
+        workspace_bounds = _mapping(data.get("workspace_bounds_m"), "/workspace_bounds_m", issues)
+        minimum = _finite_vec3(workspace_bounds.get("min_m"), "/workspace_bounds_m/min_m", issues)
+        maximum = _finite_vec3(workspace_bounds.get("max_m"), "/workspace_bounds_m/max_m", issues)
+        if minimum and maximum and any(minimum[index] >= maximum[index] for index in range(3)):
+            _issue(issues, "/workspace_bounds_m", "invalid_bounds", "min_m must be less than max_m on every axis")
     variant = _mapping(data.get("variant"), "/variant", issues)
     if variant.get("should_pass") is not None and not isinstance(variant.get("should_pass"), bool):
         _issue(issues, "/variant/should_pass", "invalid_type", "must be boolean")
@@ -524,18 +963,34 @@ def collect_case_spec_v2_issues(
     return issues
 
 
-def project_case_spec_v2_to_v1(case_spec: CaseSpecV2) -> CaseSpec:
+def compile_case_spec_v2_runtime(case_spec: CaseSpecV2) -> RuntimeCase:
     data = case_spec.data
     allow_analytic_proxy = bool((data.get("asset_policy") or {}).get("allow_analytic_proxy"))
+    capability_id = case_spec.capability_id
     projected_objects = [
         _project_object(
             obj,
-            force_analytic_proxy=allow_analytic_proxy and not asset_requests(obj.get("asset")),
+            force_analytic_proxy=(
+                visual_representation_source(obj) == "asset"
+                and allow_analytic_proxy
+                and not asset_requests(obj.get("asset"))
+            ),
         )
         for obj in case_spec.objects
     ]
+    known_object_ids = {str(obj.get("id") or "") for obj in case_spec.objects}
+    duration_s = float((data.get("scene") or {}).get("duration_s") or 3.0)
+    for source_object, projected_object in zip(case_spec.objects, projected_objects):
+        solver = source_object.get("solver")
+        if is_articulated_body_solver(solver):
+            projected_object["solver"] = compile_articulated_body_contract(
+                solver,
+                duration_s=duration_s,
+                known_object_ids=known_object_ids,
+                object_id=str(source_object.get("id") or ""),
+            )
+    _project_release_events(data.get("events") or [], projected_objects)
     active, passive = _infer_active_passive(projected_objects)
-    capability_id = case_spec.capability_id
     capability = CapabilityStore().get(capability_id)
     observation = data.get("observation_requirements") or {}
     expected = copy.deepcopy(data.get("expected_behavior") or {})
@@ -543,6 +998,13 @@ def project_case_spec_v2_to_v1(case_spec: CaseSpecV2) -> CaseSpec:
     collision_graph = _collision_graph(data.get("relations") or [])
     if collision_graph and "collision_graph" not in expected:
         expected["collision_graph"] = collision_graph
+    collision_surface_gaps = _collision_surface_gaps(data.get("relations") or [])
+    if collision_surface_gaps:
+        expected["collision_surface_gaps_m"] = collision_surface_gaps
+    support_map = _support_map(data.get("relations") or [])
+    expected.pop("support", None)
+    if support_map:
+        expected["support"] = support_map
     assertions = [item for item in (data.get("verification_requirements") or {}).get("assertions", []) if isinstance(item, dict)]
     verification_rules = [str(item.get("type")) for item in assertions if item.get("type")]
     required_assets = [
@@ -557,8 +1019,8 @@ def project_case_spec_v2_to_v1(case_spec: CaseSpecV2) -> CaseSpec:
     variant = data.get("variant") or {}
     projected_timebase = copy.deepcopy(data.get("timebase") or {})
     projected_timebase["render_fps"] = int(projected_timebase.get("observation_fps") or 24)
-    projection = {
-        "schema_version": "harness_case_spec_v1",
+    runtime_contract = {
+        "schema_version": RUNTIME_CASE_SCHEMA_VERSION,
         "case_id": case_spec.case_id,
         "capability_id": capability_id,
         "prompt": str((data.get("identity") or {}).get("source_request") or (data.get("identity") or {}).get("title") or ""),
@@ -575,11 +1037,15 @@ def project_case_spec_v2_to_v1(case_spec: CaseSpecV2) -> CaseSpec:
         "physical_parameters": copy.deepcopy(variant.get("physical_parameters") or {}),
         "expected_physics": expected,
         "objects": projected_objects,
+        "constraints": copy.deepcopy(data.get("constraints") or []),
+        "compliant_contacts": copy.deepcopy(data.get("compliant_contacts") or []),
+        "forces": copy.deepcopy(data.get("forces") or []),
         "active_objects": active,
         "passive_objects": passive,
         "required_assets": required_assets,
         "required_signals": required_signals,
         "verification_rules": verification_rules,
+        "verification_assertions": copy.deepcopy(assertions),
         "asset_requirements": {
             "acquisition_routes": list(
                 dict.fromkeys(
@@ -596,15 +1062,18 @@ def project_case_spec_v2_to_v1(case_spec: CaseSpecV2) -> CaseSpec:
         "verifier_expectation": {"status": "pass" if variant.get("should_pass", True) else "fail"},
         "should_pass": bool(variant.get("should_pass", True)),
         "notes": str(data.get("notes") or ""),
-        "v2_projection": {
+        "source_contract": {
             "source_schema_version": CASE_SPEC_V2_SCHEMA_VERSION,
-            "projection_version": "harness_case_spec_v2_to_v1_projection_v1",
+            "compiler_version": "case_spec_v2_runtime_compiler_v1",
             "source_digest": stable_case_spec_digest(data),
             "source_provenance": copy.deepcopy(data.get("provenance") or {}),
         },
     }
-    validate_case_spec(projection)
-    return CaseSpec(projection)
+    if isinstance(data.get("solver_scene"), Mapping):
+        runtime_contract["solver_scene"] = copy.deepcopy(dict(data["solver_scene"]))
+    if isinstance(data.get("workspace_bounds_m"), Mapping):
+        runtime_contract["workspace_bounds_m"] = copy.deepcopy(dict(data["workspace_bounds_m"]))
+    return RuntimeCase(runtime_contract)
 
 
 def asset_requests(asset: Any) -> list[dict[str, Any]]:
@@ -618,6 +1087,20 @@ def asset_requests(asset: Any) -> list[dict[str, Any]]:
         if isinstance(value, dict):
             requests.append(value)
     return requests
+
+
+def visual_representation_source(obj: Mapping[str, Any]) -> str:
+    representation = obj.get("visual_representation")
+    if not isinstance(representation, Mapping):
+        return "asset"
+    return str(representation.get("source") or "asset")
+
+
+def visual_representation_visible(obj: Mapping[str, Any]) -> bool:
+    representation = obj.get("visual_representation")
+    if not isinstance(representation, Mapping):
+        return True
+    return representation.get("visible") is not False
 
 
 def stable_case_spec_digest(data: Mapping[str, Any]) -> str:
@@ -645,7 +1128,14 @@ def _project_object(
         "initial_rotation_deg": _vec3_or_default(initial.get("rotation_deg"), [0.0, 0.0, 0.0]),
         "initial_velocity_m_s": _vec3_or_default(initial.get("linear_velocity_m_s"), [0.0, 0.0, 0.0]),
         "asset_query": str(primary.get("description") or obj.get("role") or obj.get("id") or "asset"),
+        "visual_representation": {
+            "source": visual_representation_source(obj),
+            "visible": visual_representation_visible(obj),
+        },
     }
+    for appearance_field in ("color_rgb", "fixed_material_color", "visual_material_path"):
+        if obj.get(appearance_field) is not None:
+            projected[appearance_field] = copy.deepcopy(obj[appearance_field])
     if force_analytic_proxy:
         projected["force_analytic_proxy"] = True
         projected["asset_policy"] = "analytic_proxy"
@@ -654,6 +1144,8 @@ def _project_object(
         projected["size_m"] = [float(value) for value in size]
         if "sphere" in shape.casefold():
             projected["radius_m"] = max(float(value) for value in size) / 2.0
+    if geometry.get("scale_policy") is not None:
+        projected["asset_scale_policy"] = str(geometry["scale_policy"])
     for source, target in (
         ("mass_kg", "mass_kg"),
         ("material", "material"),
@@ -673,11 +1165,34 @@ def _project_object(
         projected["body_type"] = body_type
     if physics.get("collision_required") is not None:
         projected["collision_required"] = bool(physics["collision_required"])
+    if isinstance(physics.get("collision_geometry"), Mapping):
+        collision_geometry = physics["collision_geometry"]
+        projected["collision_geometry"] = {
+            "shape": str(collision_geometry.get("shape") or ""),
+            "size_m": [float(value) for value in collision_geometry.get("size_m") or []],
+            "local_center_offset_m": _vec3_or_default(
+                collision_geometry.get("local_center_offset_m"),
+                [0.0, 0.0, 0.0],
+            ),
+        }
+    if (
+        "use_ccd" not in projected
+        and body_type == "dynamic"
+        and physics.get("collision_required") is not False
+        and math.sqrt(sum(float(value) ** 2 for value in projected["initial_velocity_m_s"])) >= 2.0
+    ):
+        projected["use_ccd"] = True
     if initial.get("angular_velocity_rad_s") is not None:
         projected["initial_angular_velocity_rad_s"] = copy.deepcopy(initial["angular_velocity_rad_s"])
+    elif initial.get("angular_velocity_deg_s") is not None:
+        projected["initial_angular_velocity_rad_s"] = [
+            math.radians(float(value)) for value in initial["angular_velocity_deg_s"]
+        ]
     fracture = behavior.get("fracture") if isinstance(behavior.get("fracture"), Mapping) else None
     if fracture:
         projected["fracture_response"] = copy.deepcopy(dict(fracture))
+    if isinstance(obj.get("solver"), Mapping):
+        projected["solver"] = copy.deepcopy(dict(obj["solver"]))
     return projected
 
 
@@ -686,14 +1201,60 @@ def _infer_active_passive(objects: list[dict[str, Any]]) -> tuple[list[str], lis
     passive: list[str] = []
     for obj in objects:
         object_id = str(obj.get("id") or "")
-        role = str(obj.get("role") or "").casefold()
+        if obj.get("kinematic") is True or str(obj.get("body_type") or "").casefold() in {"static", "kinematic"}:
+            continue
         velocity = obj.get("initial_velocity_m_s") or [0.0, 0.0, 0.0]
+        release_velocity = obj.get("release_velocity_m_s") or [0.0, 0.0, 0.0]
         moving = any(abs(float(value)) > 1e-9 for value in velocity)
-        if moving or any(token in role for token in ("active", "projectile", "striker", "driver", "falling", "launched")):
+        released = obj.get("release_time_s") is not None
+        release_moving = any(abs(float(value)) > 1e-9 for value in release_velocity)
+        if moving or released or release_moving or obj.get("enable_gravity") is True:
             active.append(object_id)
-        elif not any(token in role for token in ("support", "floor", "ground", "field", "anchor")):
+        else:
             passive.append(object_id)
     return active, passive
+
+
+def _project_release_events(events: Iterable[Any], objects: list[dict[str, Any]]) -> None:
+    """Compile delayed-release semantics into the canonical runtime contract."""
+    by_id = {str(obj.get("id") or ""): obj for obj in objects}
+    for event in events:
+        if not isinstance(event, Mapping):
+            continue
+        event_type = str(event.get("type") or "").casefold().replace("-", "_").replace(" ", "_")
+        if event_type not in {"release", "delayed_release", "staged_release"}:
+            continue
+        object_id = str(event.get("object") or event.get("actor") or "")
+        projected = by_id.get(object_id)
+        if projected is None:
+            continue
+        raw_time = event.get("time_s", event.get("time"))
+        if raw_time is None or isinstance(raw_time, bool):
+            continue
+        try:
+            release_time = float(raw_time)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(release_time) or release_time < 0.0:
+            continue
+        projected["release_time_s"] = release_time
+        event_velocity = event.get("linear_velocity_m_s")
+        projected["release_velocity_m_s"] = (
+            [float(value) for value in event_velocity]
+            if _is_finite_vec3(event_velocity)
+            else copy.deepcopy(projected["initial_velocity_m_s"])
+        )
+        angular_velocity_deg = event.get("angular_velocity_deg_s")
+        angular_velocity_rad = event.get("angular_velocity_rad_s")
+        if _is_finite_vec3(angular_velocity_deg):
+            projected["release_angular_velocity_deg_s"] = [float(value) for value in angular_velocity_deg]
+        elif _is_finite_vec3(angular_velocity_rad):
+            projected["release_angular_velocity_deg_s"] = [
+                math.degrees(float(value)) for value in angular_velocity_rad
+            ]
+        if release_time > 0.0:
+            projected["hold_position_m"] = copy.deepcopy(projected["initial_position_m"])
+            projected["release_position_m"] = copy.deepcopy(projected["initial_position_m"])
 
 
 def _collision_graph(relations: Iterable[Any]) -> list[list[str]]:
@@ -701,8 +1262,11 @@ def _collision_graph(relations: Iterable[Any]) -> list[list[str]]:
     for relation in relations:
         if not isinstance(relation, Mapping):
             continue
-        relation_type = str(relation.get("type") or "").casefold()
-        if relation_type not in {"contact", "collision", "impacts", "hits", "contact_order"}:
+        relation_type = _canonical_relation_type(relation.get("type"))
+        # A plain contact relation describes the initial/static scene contract.
+        # Runtime propagation edges must be declared as collision/impacts so a
+        # resting support contact cannot masquerade as a completed impact.
+        if relation_type not in {"collision", "cascade_collision", "impacts", "hits", "contact_order"}:
             continue
         values = relation.get("objects")
         if not isinstance(values, list):
@@ -710,6 +1274,50 @@ def _collision_graph(relations: Iterable[Any]) -> list[list[str]]:
         pair = [str(value) for value in values if value]
         if len(pair) >= 2:
             result.append(pair[:2])
+    return result
+
+
+def _collision_surface_gaps(relations: Iterable[Any]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for relation in relations:
+        if not isinstance(relation, Mapping) or relation.get("surface_gap_m") is None:
+            continue
+        values = relation.get("objects")
+        if not isinstance(values, list):
+            values = [relation.get("source"), relation.get("target")]
+        pair = [str(value) for value in values if value]
+        if len(pair) < 2:
+            continue
+        result.append(
+            {
+                "source": pair[0],
+                "target": pair[1],
+                "surface_gap_m": float(relation["surface_gap_m"]),
+            }
+        )
+    return result
+
+
+def _canonical_relation_type(value: Any) -> str:
+    relation_type = str(value or "").strip().casefold().replace("-", "_").replace(" ", "_")
+    return {
+        "impact": "impacts",
+        "hit": "hits",
+    }.get(relation_type, relation_type)
+
+
+def _support_map(relations: Iterable[Any]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for relation in relations:
+        if not isinstance(relation, Mapping):
+            continue
+        relation_type = str(relation.get("type") or "").casefold().replace("-", "_").replace(" ", "_")
+        source = relation.get("source")
+        target = relation.get("target")
+        if not source or not target:
+            continue
+        if relation_type == "supported_by":
+            result[str(source)] = str(target)
     return result
 
 
@@ -771,6 +1379,24 @@ def _validate_asset_request(
     for field in ("provider_hint", "source_uri_hint"):
         if acquisition.get(field) is not None and not isinstance(acquisition.get(field), str):
             _issue(issues, f"{path}/acquisition/{field}", "invalid_type", "must be null or a string")
+    if "texture_prompt" in acquisition:
+        texture_prompt = acquisition.get("texture_prompt")
+        if not isinstance(texture_prompt, str):
+            _issue(issues, f"{path}/acquisition/texture_prompt", "invalid_type", "must be a string when present")
+        elif len(texture_prompt) > 600:
+            _issue(
+                issues,
+                f"{path}/acquisition/texture_prompt",
+                "texture_prompt_too_long",
+                "must contain at most 600 characters",
+            )
+        if route != "model_generation":
+            _issue(
+                issues,
+                f"{path}/acquisition/texture_prompt",
+                "texture_prompt_route_mismatch",
+                "is supported only for model_generation acquisition",
+            )
     fallback = _string_list(acquisition.get("fallback_order"), f"{path}/acquisition/fallback_order", issues)
     invalid_fallback = [value for value in fallback if value not in ACQUISITION_ROUTES or value == "default"]
     if invalid_fallback:
@@ -814,6 +1440,49 @@ def _validate_asset_request(
             _issue(issues, reference_path, "contradictory_image_use", "similarity_search usage conflicts with allow_similarity_search=false")
 
 
+def _validate_procedural_primitive_size(
+    geometry: Mapping[str, Any],
+    requests: list[dict[str, Any]],
+    object_path: str,
+    issues: list[ValidationIssue],
+) -> None:
+    if not any(
+        isinstance(request.get("acquisition"), Mapping)
+        and request["acquisition"].get("route") == "procedural_generation"
+        for request in requests
+    ):
+        return
+    size = geometry.get("approx_size_m")
+    if not _is_finite_vec3(size) or any(float(value) <= 0.0 for value in size):
+        return
+    shape = str(geometry.get("shape_hint") or "").strip().casefold()
+    if shape in {"sphere", "ball"} and not all(
+        math.isclose(float(size[0]), float(size[index]), rel_tol=1e-9, abs_tol=1e-12)
+        for index in (1, 2)
+    ):
+        _issue(
+            issues,
+            f"{object_path}/geometry/approx_size_m",
+            "procedural_sphere_size_mismatch",
+            "procedural spheres require equal x/y/z diameters",
+        )
+    if shape in {"cylinder", "rod", "pole", "column", "disc", "disk"} and not math.isclose(
+        float(size[0]),
+        float(size[1]),
+        rel_tol=1e-9,
+        abs_tol=1e-12,
+    ):
+        _issue(
+            issues,
+            f"{object_path}/geometry/approx_size_m",
+            "procedural_cylinder_local_axis_size_mismatch",
+            (
+                "procedural cylinders use local Z as their axis: x/y must be equal diameters, z is length; "
+                "use initial_state.rotation_deg to orient the axis in world space"
+            ),
+        )
+
+
 def _validate_route_policy(
     route: str,
     policy: Mapping[str, Any],
@@ -855,6 +1524,767 @@ def _validate_references(
                 _issue(issues, f"{path}/{index}", "unknown_object_reference", f"unknown object id: {reference}")
 
 
+def _validate_event_sequence_assertion(
+    assertion: Mapping[str, Any],
+    path: str,
+    known_objects: set[str],
+    issues: list[ValidationIssue],
+) -> None:
+    pairs = assertion.get("pairs")
+    objects = assertion.get("objects")
+    if pairs is not None and objects is not None:
+        _issue(
+            issues,
+            path,
+            "ambiguous_event_sequence",
+            "event_sequence must use either pairs or objects, not both",
+        )
+        return
+    if pairs is not None:
+        if not isinstance(pairs, list) or len(pairs) < 2:
+            _issue(
+                issues,
+                f"{path}/pairs",
+                "event_sequence_requires_multiple_events",
+                "event_sequence.pairs must contain at least two ordered object pairs",
+            )
+            return
+        for index, pair in enumerate(pairs):
+            pair_path = f"{path}/pairs/{index}"
+            if not isinstance(pair, list) or len(pair) != 2 or any(not isinstance(value, str) or not value for value in pair):
+                _issue(issues, pair_path, "invalid_event_pair", "each event_sequence pair must contain exactly two object IDs")
+                continue
+            for reference in pair:
+                if reference not in known_objects:
+                    _issue(issues, pair_path, "unknown_object_reference", f"unknown object id: {reference}")
+        return
+    if not isinstance(objects, list) or len(objects) < 3:
+        _issue(
+            issues,
+            f"{path}/objects",
+            "event_sequence_requires_multiple_events",
+            "event_sequence.objects must contain at least three ordered object IDs",
+        )
+
+
+def _validate_relation_surface_gaps(relations: Any, issues: list[ValidationIssue]) -> None:
+    if not isinstance(relations, list):
+        return
+    collision_types = {"collision", "cascade_collision", "impacts", "hits", "contact_order"}
+    for index, relation in enumerate(relations):
+        if not isinstance(relation, Mapping) or relation.get("surface_gap_m") is None:
+            continue
+        path = f"/relations/{index}/surface_gap_m"
+        gap = relation.get("surface_gap_m")
+        if isinstance(gap, bool) or not isinstance(gap, (int, float)) or not math.isfinite(float(gap)) or float(gap) < 0.0:
+            _issue(issues, path, "invalid_surface_gap", "must be a finite nonnegative number")
+        if _canonical_relation_type(relation.get("type")) not in collision_types:
+            _issue(
+                issues,
+                path,
+                "surface_gap_requires_collision_relation",
+                "is supported only on a collision/impacts propagation relation",
+            )
+
+
+def _validate_support_footprints(
+    objects: Iterable[Any],
+    relations: Any,
+    issues: list[ValidationIssue],
+) -> None:
+    if not isinstance(relations, list):
+        return
+    by_id: dict[str, tuple[int, Mapping[str, Any]]] = {
+        str(obj.get("id")): (index, obj)
+        for index, obj in enumerate(objects)
+        if isinstance(obj, Mapping) and obj.get("id")
+    }
+    for subject_id, support_id in _support_map(relations).items():
+        subject_entry = by_id.get(subject_id)
+        support_entry = by_id.get(support_id)
+        if subject_entry is None or support_entry is None:
+            continue
+        _, subject = subject_entry
+        support_index, support = support_entry
+        subject_physics = subject.get("physics") if isinstance(subject.get("physics"), Mapping) else {}
+        if str(subject_physics.get("body_type") or "dynamic").casefold() in {"static", "kinematic"}:
+            # Structural supports commonly contact only one part of a static
+            # body, such as a block under the high end of a ramp. Full-footprint
+            # containment is required for resting dynamic bodies, not for this
+            # local structural contact.
+            continue
+        subject_geometry = subject.get("geometry") if isinstance(subject.get("geometry"), Mapping) else {}
+        support_geometry = support.get("geometry") if isinstance(support.get("geometry"), Mapping) else {}
+        subject_initial = subject.get("initial_state") if isinstance(subject.get("initial_state"), Mapping) else {}
+        support_initial = support.get("initial_state") if isinstance(support.get("initial_state"), Mapping) else {}
+        subject_size = subject_geometry.get("approx_size_m")
+        support_size = support_geometry.get("approx_size_m")
+        subject_position = subject_initial.get("position_m")
+        support_position = support_initial.get("position_m")
+        vectors = (subject_size, support_size, subject_position, support_position)
+        if not all(
+            isinstance(vector, list)
+            and len(vector) == 3
+            and all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in vector)
+            for vector in vectors
+        ):
+            continue
+        margins = [
+            float(support_size[axis]) / 2.0
+            - abs(float(subject_position[axis]) - float(support_position[axis]))
+            - float(subject_size[axis]) / 2.0
+            for axis in (0, 1)
+        ]
+        if any(margin < 0.0 for margin in margins):
+            _issue(
+                issues,
+                f"/objects/{support_index}/geometry/approx_size_m",
+                "support_footprint_too_small",
+                f"support {support_id} does not contain the full horizontal bounds of {subject_id}; enlarge or reposition it",
+            )
+
+
+def _validate_articulated_support_selection(
+    objects: Iterable[Any],
+    relations: Any,
+    issues: list[ValidationIssue],
+) -> None:
+    if not isinstance(relations, list):
+        return
+    targets: dict[str, list[str]] = {}
+    for relation in relations:
+        if not isinstance(relation, Mapping) or _canonical_relation_type(relation.get("type")) != "supported_by":
+            continue
+        if relation.get("source") and relation.get("target"):
+            targets.setdefault(str(relation["source"]), []).append(str(relation["target"]))
+    by_id = {
+        str(obj.get("id") or ""): obj
+        for obj in objects
+        if isinstance(obj, Mapping) and obj.get("id")
+    }
+    for index, obj in enumerate(objects):
+        if not isinstance(obj, Mapping) or not is_articulated_body_solver(obj.get("solver")):
+            continue
+        candidates = list(dict.fromkeys(targets.get(str(obj.get("id") or "")) or []))
+        declared = str((obj.get("solver") or {}).get("support_object_id") or "")
+        if len(candidates) > 1 and not declared:
+            _issue(
+                issues,
+                f"/objects/{index}/solver/support_object_id",
+                "ambiguous_articulated_support",
+                "multiple supported_by targets require an explicit support_object_id",
+            )
+        elif len(candidates) == 1 and not declared:
+            support = by_id.get(candidates[0]) or {}
+            rotation = ((support.get("initial_state") or {}).get("rotation_deg") or [0.0, 0.0, 0.0])
+            if len(rotation) == 3 and (abs(float(rotation[0])) > 1e-4 or abs(float(rotation[2])) > 1e-4):
+                _issue(
+                    issues,
+                    f"/objects/{index}/solver/support_object_id",
+                    "inclined_articulated_support_requires_explicit_id",
+                    "an inclined supported_by target requires an explicit support_object_id",
+                )
+        elif declared and candidates and declared not in candidates:
+            _issue(
+                issues,
+                f"/objects/{index}/solver/support_object_id",
+                "articulated_support_mismatch",
+                "support_object_id must match one of the declared supported_by targets",
+            )
+
+
+def _validate_event_payloads(events: Any, issues: list[ValidationIssue]) -> None:
+    if not isinstance(events, list):
+        return
+    for index, event in enumerate(events):
+        if not isinstance(event, Mapping):
+            continue
+        event_type = str(event.get("type") or "").casefold().replace("-", "_").replace(" ", "_")
+        if event_type not in {"release", "delayed_release", "staged_release"}:
+            continue
+        path = f"/events/{index}"
+        raw_time = event.get("time_s", event.get("time"))
+        if (
+            not isinstance(raw_time, (int, float))
+            or isinstance(raw_time, bool)
+            or not math.isfinite(float(raw_time))
+            or float(raw_time) < 0.0
+        ):
+            _issue(issues, f"{path}/time_s", "invalid_release_time", "must be a non-negative finite number")
+        for field in ("linear_velocity_m_s", "angular_velocity_rad_s", "angular_velocity_deg_s"):
+            if event.get(field) is not None:
+                _finite_vec3(event.get(field), f"{path}/{field}", issues)
+
+
+def _validate_continuous_forces(
+    forces: Any,
+    objects: Iterable[Any],
+    duration_s: float,
+    issues: list[ValidationIssue],
+) -> None:
+    if not isinstance(forces, list):
+        return
+    dynamic_ids = {
+        str(obj.get("id"))
+        for obj in objects
+        if isinstance(obj, Mapping)
+        and isinstance(obj.get("physics"), Mapping)
+        and obj["physics"].get("body_type") == "dynamic"
+    }
+    seen_ids: set[str] = set()
+    allowed = {"id", "type", "object", "vector_n", "start_time_s", "end_time_s"}
+    for index, force in enumerate(forces):
+        path = f"/forces/{index}"
+        if not isinstance(force, Mapping):
+            continue
+        unknown = sorted(str(key) for key in force if str(key) not in allowed)
+        if unknown:
+            _issue(issues, path, "unknown_force_fields", f"unsupported fields: {', '.join(unknown)}")
+        force_id = _nonempty_string(force.get("id"), f"{path}/id", issues)
+        if force_id in seen_ids:
+            _issue(issues, f"{path}/id", "duplicate_force_id", f"duplicate force id: {force_id}")
+        elif force_id:
+            seen_ids.add(force_id)
+        if force.get("type") != "continuous_force":
+            _issue(issues, f"{path}/type", "unsupported_force_type", "type must be continuous_force")
+        object_id = str(force.get("object") or "")
+        if object_id and object_id not in dynamic_ids:
+            _issue(issues, f"{path}/object", "force_target_not_dynamic", "continuous force target must be a dynamic rigid body")
+        vector = _finite_vec3(force.get("vector_n"), f"{path}/vector_n", issues)
+        if vector is not None and all(abs(value) <= 1e-12 for value in vector):
+            _issue(issues, f"{path}/vector_n", "zero_force", "continuous force vector must be non-zero")
+        start = force.get("start_time_s")
+        end = force.get("end_time_s")
+        if not _is_finite_nonnegative(start):
+            _issue(issues, f"{path}/start_time_s", "invalid_force_time", "must be a non-negative finite number")
+        if not _is_finite_nonnegative(end):
+            _issue(issues, f"{path}/end_time_s", "invalid_force_time", "must be a non-negative finite number")
+        if _is_finite_nonnegative(start) and _is_finite_nonnegative(end):
+            if float(end) <= float(start):
+                _issue(issues, path, "invalid_force_window", "end_time_s must be greater than start_time_s")
+            if float(end) > duration_s + 1e-9:
+                _issue(issues, f"{path}/end_time_s", "force_window_outside_scene", "must not exceed scene.duration_s")
+
+
+def _is_finite_nonnegative(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        and float(value) >= 0.0
+    )
+
+
+def _validate_release_impact_directions(
+    objects: Iterable[Any],
+    relations: Any,
+    events: Any,
+    issues: list[ValidationIssue],
+) -> None:
+    if not isinstance(relations, list) or not isinstance(events, list):
+        return
+    positions = {
+        str(obj.get("id")): initial.get("position_m")
+        for obj in objects
+        if isinstance(obj, Mapping)
+        and obj.get("id")
+        and isinstance((initial := obj.get("initial_state")), Mapping)
+        and _is_finite_vec3(initial.get("position_m"))
+    }
+    impact_targets: dict[str, list[str]] = {}
+    for relation in relations:
+        if (
+            not isinstance(relation, Mapping)
+            or _canonical_relation_type(relation.get("type")) not in {"impacts", "hits"}
+        ):
+            continue
+        source = str(relation.get("source") or "")
+        target = str(relation.get("target") or "")
+        if source and target:
+            impact_targets.setdefault(source, []).append(target)
+    for index, event in enumerate(events):
+        if not isinstance(event, Mapping):
+            continue
+        event_type = str(event.get("type") or "").casefold().replace("-", "_").replace(" ", "_")
+        if event_type not in {"release", "delayed_release", "staged_release"}:
+            continue
+        source = str(event.get("object") or "")
+        targets = list(dict.fromkeys(impact_targets.get(source, [])))
+        velocity = event.get("linear_velocity_m_s")
+        if len(targets) != 1 or not _is_finite_vec3(velocity):
+            continue
+        source_position = positions.get(source)
+        target_position = positions.get(targets[0])
+        if not _is_finite_vec3(source_position) or not _is_finite_vec3(target_position):
+            continue
+        direction = [float(target_position[axis]) - float(source_position[axis]) for axis in range(3)]
+        speed_squared = sum(float(value) ** 2 for value in velocity)
+        distance_squared = sum(value * value for value in direction)
+        if speed_squared <= 1e-18 or distance_squared <= 1e-18:
+            continue
+        if sum(float(velocity[axis]) * direction[axis] for axis in range(3)) <= 0.0:
+            _issue(
+                issues,
+                f"/events/{index}/linear_velocity_m_s",
+                "release_velocity_points_away_from_impact_target",
+                f"release velocity for {source} must point toward its impacts target {targets[0]}",
+            )
+
+
+def _validate_rigid_sph_declarations(
+    scene: Mapping[str, Any],
+    objects: Iterable[Any],
+    issues: list[ValidationIssue],
+) -> None:
+    initialization = _mapping(scene.get("initialization"), "/solver_scene/initialization", issues)
+    initialization_state = str(initialization.get("state") or "")
+    if initialization_state not in {"as_authored", "settled"}:
+        _issue(
+            issues,
+            "/solver_scene/initialization/state",
+            "invalid_solver_initialization_state",
+            "must be as_authored or settled",
+        )
+    pre_roll_s = _finite_number(
+        initialization.get("pre_roll_s"),
+        "/solver_scene/initialization/pre_roll_s",
+        issues,
+    )
+    if pre_roll_s is not None and pre_roll_s < 0.0:
+        _issue(
+            issues,
+            "/solver_scene/initialization/pre_roll_s",
+            "invalid_solver_initialization_time",
+            "must be non-negative",
+        )
+    if not isinstance(initialization.get("capture_after_pre_roll"), bool):
+        _issue(
+            issues,
+            "/solver_scene/initialization/capture_after_pre_roll",
+            "invalid_type",
+            "must be boolean",
+        )
+    if initialization_state == "settled" and (
+        pre_roll_s is None
+        or pre_roll_s <= 0.0
+        or initialization.get("capture_after_pre_roll") is not True
+    ):
+        _issue(
+            issues,
+            "/solver_scene/initialization",
+            "invalid_settled_initialization",
+            "settled requires positive pre_roll_s and capture_after_pre_roll=true",
+        )
+    entries = [(index, obj) for index, obj in enumerate(objects) if isinstance(obj, Mapping)]
+    fluids = [(index, obj) for index, obj in entries if str(obj.get("role") or "") in {"fluid", "fluid_volume"}]
+    rigid_candidates = [(index, obj) for index, obj in entries if (index, obj) not in fluids]
+
+    if len(fluids) != 1:
+        _issue(
+            issues,
+            "/objects",
+            "invalid_rigid_sph_fluid_count",
+            "rigid_sph requires exactly one object with role fluid or fluid_volume",
+        )
+    if not rigid_candidates:
+        _issue(
+            issues,
+            "/objects",
+            "rigid_sph_rigid_body_missing",
+            "rigid_sph requires at least one rigid_body",
+        )
+
+    rigid_ids: set[str] = set()
+    collision_types: dict[str, str] = {}
+    rigid_profiles: dict[str, list[dict[str, float]]] = {}
+    for index, body in rigid_candidates:
+        path = f"/objects/{index}"
+        body_id = str(body.get("id") or "")
+        if body.get("role") != "rigid_body":
+            _issue(
+                issues,
+                f"{path}/role",
+                "rigid_sph_role_required",
+                "every non-fluid rigid_sph participant must use role rigid_body",
+            )
+        if body_id:
+            rigid_ids.add(body_id)
+        solver = _mapping(body.get("solver"), f"{path}/solver", issues)
+        mobility = str(solver.get("mobility") or "")
+        if mobility not in {"static", "kinematic", "dynamic"}:
+            _issue(
+                issues,
+                f"{path}/solver/mobility",
+                "unsupported_rigid_sph_mobility",
+                "must be static, kinematic, or dynamic",
+            )
+        physics = _mapping(body.get("physics"), f"{path}/physics", issues, required=False)
+        if mobility == "dynamic" and physics.get("mass_kg") is None:
+            _issue(
+                issues,
+                f"{path}/physics/mass_kg",
+                "dynamic_rigid_sph_mass_missing",
+                "dynamic rigid_sph bodies require a positive mass_kg",
+            )
+        material = _mapping(physics.get("material"), f"{path}/physics/material", issues, required=False)
+        if material.get("density_kg_m3") is not None:
+            _positive_number(
+                material.get("density_kg_m3"),
+                f"{path}/physics/material/density_kg_m3",
+                issues,
+            )
+        transform = _mapping(solver.get("transform"), f"{path}/solver/transform", issues)
+        _finite_vec3(transform.get("position_m"), f"{path}/solver/transform/position_m", issues)
+        solver_rotation = _finite_vec3(
+            transform.get("euler_xyz_deg"),
+            f"{path}/solver/transform/euler_xyz_deg",
+            issues,
+        )
+        ue_rotation = _finite_vec3(
+            transform.get("ue_rotation_pyr_deg"),
+            f"{path}/solver/transform/ue_rotation_pyr_deg",
+            issues,
+        )
+        if solver_rotation and ue_rotation and not _ue_rotation_matches_solver(solver_rotation, ue_rotation):
+            _issue(
+                issues,
+                f"{path}/solver/transform/ue_rotation_pyr_deg",
+                "rigid_sph_rotation_mapping_mismatch",
+                "must equal [-solver_y, -solver_z, solver_x]",
+            )
+        if transform.get("scale") is not None:
+            _positive_vec3(transform.get("scale"), f"{path}/solver/transform/scale", issues)
+
+        collision = _mapping(solver.get("collision"), f"{path}/solver/collision", issues)
+        collision_type = str(collision.get("type") or "")
+        if body_id:
+            collision_types[body_id] = collision_type
+        if collision_type == "asset":
+            representation = body.get("visual_representation") if isinstance(body.get("visual_representation"), Mapping) else {}
+            if representation.get("source") != "asset":
+                _issue(
+                    issues,
+                    f"{path}/visual_representation/source",
+                    "asset_collision_requires_asset",
+                    "must be asset when solver collision type is asset",
+                )
+            if physics.get("collision_required") is False:
+                _issue(
+                    issues,
+                    f"{path}/physics/collision_required",
+                    "asset_collision_disabled",
+                    "must not be false when solver collision type is asset",
+                )
+        elif collision_type == "plane":
+            _finite_vec3(collision.get("position_m"), f"{path}/solver/collision/position_m", issues)
+            normal = _finite_vec3(collision.get("normal"), f"{path}/solver/collision/normal", issues)
+            if normal and math.sqrt(sum(value * value for value in normal)) <= 1e-12:
+                _issue(issues, f"{path}/solver/collision/normal", "invalid_plane_normal", "must be non-zero")
+            if collision.get("asset_geometry_match") is not True:
+                _issue(
+                    issues,
+                    f"{path}/solver/collision/asset_geometry_match",
+                    "asset_geometry_match_required",
+                    "must be true for a declared plane collision",
+                )
+        elif collision_type == "axisymmetric_profile":
+            if collision.get("asset_geometry_match") is not True:
+                _issue(
+                    issues,
+                    f"{path}/solver/collision/asset_geometry_match",
+                    "asset_geometry_match_required",
+                    "must be true for an axisymmetric_profile collision",
+                )
+            panel_count = collision.get("panel_count")
+            if not isinstance(panel_count, int) or isinstance(panel_count, bool) or panel_count < 12:
+                _issue(
+                    issues,
+                    f"{path}/solver/collision/panel_count",
+                    "invalid_panel_count",
+                    "must be an integer of at least 12",
+                )
+            _positive_number(
+                collision.get("wall_thickness_m"),
+                f"{path}/solver/collision/wall_thickness_m",
+                issues,
+            )
+            if not isinstance(collision.get("fit_method"), str) or not str(collision.get("fit_method")).strip():
+                _issue(
+                    issues,
+                    f"{path}/solver/collision/fit_method",
+                    "missing_collision_fit_evidence",
+                    "must be a non-empty method identifying how the profile was fitted to the render asset",
+                )
+            profile = collision.get("inner_profile")
+            if not isinstance(profile, list) or len(profile) < 2:
+                _issue(
+                    issues,
+                    f"{path}/solver/collision/inner_profile",
+                    "invalid_inner_profile",
+                    "must contain at least two {z_m, radius_m} points",
+                )
+            else:
+                previous_z: float | None = None
+                compiled_profile: list[dict[str, float]] = []
+                profile_is_valid = True
+                for point_index, point in enumerate(profile):
+                    point_path = f"{path}/solver/collision/inner_profile/{point_index}"
+                    point_map = _mapping(point, point_path, issues)
+                    z_m = _finite_number(point_map.get("z_m"), f"{point_path}/z_m", issues)
+                    radius_m = _positive_number(point_map.get("radius_m"), f"{point_path}/radius_m", issues)
+                    if z_m is not None and previous_z is not None and z_m <= previous_z:
+                        profile_is_valid = False
+                        _issue(
+                            issues,
+                            f"{point_path}/z_m",
+                            "non_increasing_profile",
+                            "z_m values must be strictly increasing",
+                        )
+                    if z_m is not None:
+                        previous_z = z_m
+                    if z_m is not None and radius_m > 0.0:
+                        compiled_profile.append({"z_m": z_m, "radius_m": radius_m})
+                    else:
+                        profile_is_valid = False
+                if body_id and profile_is_valid and len(compiled_profile) == len(profile):
+                    rigid_profiles[body_id] = compiled_profile
+        else:
+            _issue(
+                issues,
+                f"{path}/solver/collision/type",
+                "unsupported_rigid_sph_collision",
+                "must be exactly asset, plane, or axisymmetric_profile; composite collisions are not registered",
+            )
+
+        motion = solver.get("motion")
+        if motion is not None:
+            motion_map = _mapping(motion, f"{path}/solver/motion", issues)
+            if mobility != "kinematic" or motion_map.get("type") != "pivot_rotation":
+                _issue(
+                    issues,
+                    f"{path}/solver/motion/type",
+                    "unsupported_rigid_sph_motion",
+                    "motion must be pivot_rotation on a kinematic rigid_body",
+                )
+            start_time = _finite_number(
+                motion_map.get("start_time_s"),
+                f"{path}/solver/motion/start_time_s",
+                issues,
+            )
+            if start_time is not None and start_time < 0.0:
+                _issue(
+                    issues,
+                    f"{path}/solver/motion/start_time_s",
+                    "invalid_motion_time",
+                    "must be non-negative",
+                )
+            _positive_number(motion_map.get("duration_s"), f"{path}/solver/motion/duration_s", issues)
+            _finite_vec3(motion_map.get("pivot_local_m"), f"{path}/solver/motion/pivot_local_m", issues)
+            solver_end_rotation = _finite_vec3(
+                motion_map.get("solver_end_rotation_xyz_deg"),
+                f"{path}/solver/motion/solver_end_rotation_xyz_deg",
+                issues,
+            )
+            ue_end_rotation = _finite_vec3(
+                motion_map.get("ue_end_rotation_pyr_deg"),
+                f"{path}/solver/motion/ue_end_rotation_pyr_deg",
+                issues,
+            )
+            if solver_end_rotation and ue_end_rotation and not _ue_rotation_matches_solver(
+                solver_end_rotation,
+                ue_end_rotation,
+            ):
+                _issue(
+                    issues,
+                    f"{path}/solver/motion/ue_end_rotation_pyr_deg",
+                    "rigid_sph_rotation_mapping_mismatch",
+                    "must equal [-solver_y, -solver_z, solver_x]",
+                )
+
+    for index, fluid in fluids:
+        path = f"/objects/{index}/solver"
+        solver = _mapping(fluid.get("solver"), path, issues)
+        if solver.get("material_model") != "sph_liquid":
+            _issue(issues, f"{path}/material_model", "unsupported_fluid_model", "must be sph_liquid")
+        initial = _mapping(solver.get("initial_volume"), f"{path}/initial_volume", issues)
+        if initial.get("shape") != "cylinder":
+            _issue(
+                issues,
+                f"{path}/initial_volume/shape",
+                "unsupported_fluid_volume",
+                "rigid_sph currently requires a cylinder",
+            )
+        frame = _mapping(initial.get("frame"), f"{path}/initial_volume/frame", issues)
+        frame_type = str(frame.get("type") or "")
+        if frame_type not in {"world", "body_local"}:
+            _issue(
+                issues,
+                f"{path}/initial_volume/frame/type",
+                "invalid_rigid_sph_frame",
+                "must be world or body_local",
+            )
+        if frame_type == "body_local":
+            body_id = str(frame.get("body_id") or "")
+            if body_id not in rigid_ids:
+                _issue(
+                    issues,
+                    f"{path}/initial_volume/frame/body_id",
+                    "unknown_rigid_sph_body",
+                    "must reference a declared rigid_body",
+                )
+        position_m = _finite_vec3(initial.get("position_m"), f"{path}/initial_volume/position_m", issues)
+        euler_xyz_deg = [0.0, 0.0, 0.0]
+        if initial.get("euler_xyz_deg") is not None:
+            euler_xyz_deg = _finite_vec3(
+                initial.get("euler_xyz_deg"),
+                f"{path}/initial_volume/euler_xyz_deg",
+                issues,
+            )
+        radius_m = _positive_number(initial.get("radius_m"), f"{path}/initial_volume/radius_m", issues)
+        height_m = _positive_number(initial.get("height_m"), f"{path}/initial_volume/height_m", issues)
+        if (
+            frame_type == "body_local"
+            and body_id in rigid_profiles
+            and position_m
+            and euler_xyz_deg
+            and radius_m > 0.0
+            and height_m > 0.0
+            and not _body_local_cylinder_has_clearance(
+                position_m,
+                euler_xyz_deg,
+                radius_m,
+                height_m,
+                rigid_profiles[body_id],
+                clearance_m=0.003,
+            )
+        ):
+            _issue(
+                issues,
+                f"{path}/initial_volume",
+                "insufficient_initial_fluid_clearance",
+                "body-local cylinder must clear the profile wall, bottom, and rim by at least 0.003 m",
+            )
+
+    measurements = scene.get("measurements")
+    measurement_ids: set[str] = set()
+    if not isinstance(measurements, list) or not measurements:
+        _issue(issues, "/solver_scene/measurements", "missing_rigid_sph_measurements", "must be a non-empty list")
+        measurements = []
+    for index, measurement in enumerate(measurements):
+        path = f"/solver_scene/measurements/{index}"
+        item = _mapping(measurement, path, issues)
+        measurement_id = _nonempty_string(item.get("id"), f"{path}/id", issues)
+        if measurement_id in measurement_ids:
+            _issue(issues, f"{path}/id", "duplicate_measurement_id", "must be unique")
+        if measurement_id:
+            measurement_ids.add(measurement_id)
+        kind = str(item.get("type") or "")
+        if kind == "body_interior_fraction":
+            body_id = str(item.get("body_id") or "")
+            if body_id not in rigid_ids or collision_types.get(body_id) != "axisymmetric_profile":
+                _issue(
+                    issues,
+                    f"{path}/body_id",
+                    "invalid_measurement_body",
+                    "must reference an axisymmetric_profile rigid_body",
+                )
+        elif kind == "outside_body_interiors_fraction":
+            body_ids = _string_list(item.get("body_ids"), f"{path}/body_ids", issues)
+            if not body_ids or any(body_id not in rigid_ids for body_id in body_ids):
+                _issue(issues, f"{path}/body_ids", "invalid_measurement_body", "must reference known rigid_bodies")
+        elif kind == "plane_proximity_fraction":
+            body_id = str(item.get("body_id") or "")
+            if body_id not in rigid_ids or collision_types.get(body_id) != "plane":
+                _issue(issues, f"{path}/body_id", "invalid_measurement_body", "must reference a plane rigid_body")
+            _positive_number(item.get("distance_m"), f"{path}/distance_m", issues)
+        elif kind == "axis_span":
+            axes = _string_list(item.get("axes"), f"{path}/axes", issues)
+            if not axes or any(axis not in {"x", "y", "z"} for axis in axes):
+                _issue(issues, f"{path}/axes", "invalid_measurement_axes", "must use x, y, or z")
+        elif kind == "rigid_body_state":
+            body_id = str(item.get("body_id") or "")
+            if body_id not in rigid_ids:
+                _issue(issues, f"{path}/body_id", "invalid_measurement_body", "must reference a known rigid_body")
+            if item.get("field") not in {
+                "position_m",
+                "linear_velocity_m_s",
+                "angular_velocity_rad_s",
+            }:
+                _issue(
+                    issues,
+                    f"{path}/field",
+                    "invalid_rigid_body_state_field",
+                    "must be position_m, linear_velocity_m_s, or angular_velocity_rad_s",
+                )
+            if item.get("component") not in {"x", "y", "z", "magnitude"}:
+                _issue(
+                    issues,
+                    f"{path}/component",
+                    "invalid_rigid_body_state_component",
+                    "must be x, y, z, or magnitude",
+                )
+        else:
+            _issue(
+                issues,
+                f"{path}/type",
+                "unsupported_rigid_sph_measurement",
+                "must be body_interior_fraction, outside_body_interiors_fraction, plane_proximity_fraction, "
+                "axis_span, or rigid_body_state",
+            )
+
+    assertions = scene.get("assertions")
+    assertion_ids: set[str] = set()
+    if not isinstance(assertions, list) or not assertions:
+        _issue(issues, "/solver_scene/assertions", "missing_rigid_sph_assertions", "must be a non-empty list")
+        assertions = []
+    reductions = {
+        "initial",
+        "final",
+        "max",
+        "min",
+        "initial_minus_final",
+        "max_frame_decrease",
+        "threshold_crossing_duration",
+    }
+    for index, assertion in enumerate(assertions):
+        path = f"/solver_scene/assertions/{index}"
+        item = _mapping(assertion, path, issues)
+        assertion_id = _nonempty_string(item.get("id"), f"{path}/id", issues)
+        if assertion_id in assertion_ids:
+            _issue(issues, f"{path}/id", "duplicate_assertion_id", "must be unique")
+        if assertion_id:
+            assertion_ids.add(assertion_id)
+        measurement_id = str(item.get("measurement_id") or "")
+        if measurement_id not in measurement_ids:
+            _issue(
+                issues,
+                f"{path}/measurement_id",
+                "unknown_measurement_id",
+                "must reference a declared solver_scene measurement",
+            )
+        reduction = str(item.get("reduction") or "")
+        if reduction not in reductions:
+            _issue(
+                issues,
+                f"{path}/reduction",
+                "unsupported_rigid_sph_reduction",
+                f"must be one of {sorted(reductions)}",
+            )
+        if item.get("operator") not in {">=", "<="}:
+            _issue(
+                issues,
+                f"{path}/operator",
+                "unsupported_rigid_sph_operator",
+                "must be >= or <=",
+            )
+        _finite_number(item.get("value"), f"{path}/value", issues)
+        if reduction == "threshold_crossing_duration":
+            if item.get("start_delta") is not None:
+                _positive_number(item.get("start_delta"), f"{path}/start_delta", issues)
+            if item.get("end_value") is not None:
+                _finite_number(item.get("end_value"), f"{path}/end_value", issues)
+
+
 def _mapping(
     value: Any,
     path: str,
@@ -868,6 +2298,694 @@ def _mapping(
         _issue(issues, path, "invalid_type", "must be an object")
         return {}
     return value
+
+
+def _validate_compliant_contacts(
+    value: Any,
+    objects: list[Any],
+    known_objects: set[str],
+    backend_constraints: Mapping[str, Any],
+    physics_hz: int,
+    issues: list[ValidationIssue],
+) -> None:
+    if not isinstance(value, list):
+        _issue(issues, "/compliant_contacts", "invalid_type", "must be a list")
+        return
+    if value and "compliant_contact" not in set(backend_constraints.get("required_solver_capabilities") or []):
+        _issue(
+            issues,
+            "/backend_constraints/required_solver_capabilities",
+            "compliant_contact_capability_missing",
+            "declared compliant contacts require compliant_contact",
+        )
+    objects_by_id = {
+        str(obj.get("id") or ""): obj
+        for obj in objects
+        if isinstance(obj, Mapping) and obj.get("id")
+    }
+    contact_ids: list[str] = []
+    for index, raw in enumerate(value):
+        path = f"/compliant_contacts/{index}"
+        contact = _mapping(raw, path, issues)
+        allowed = {
+            "id",
+            "body_a",
+            "body_b",
+            "activation_distance_m",
+            "stiffness_n_m",
+            "damping_n_s_m",
+        }
+        unknown = sorted(str(key) for key in contact if str(key) not in allowed)
+        if unknown:
+            _issue(issues, path, "unknown_compliant_contact_fields", f"unsupported fields: {', '.join(unknown)}")
+        contact_id = _nonempty_string(contact.get("id"), f"{path}/id", issues)
+        if contact_id:
+            contact_ids.append(contact_id)
+        body_a = _nonempty_string(contact.get("body_a"), f"{path}/body_a", issues)
+        body_b = _nonempty_string(contact.get("body_b"), f"{path}/body_b", issues)
+        if body_a and body_b and body_a == body_b:
+            _issue(issues, path, "compliant_contact_self_reference", "body_a and body_b must be different objects")
+        for field, body_id in (("body_a", body_a), ("body_b", body_b)):
+            if body_id and body_id not in known_objects:
+                _issue(issues, f"{path}/{field}", "unknown_object_reference", f"unknown object id: {body_id}")
+        pair_objects = [objects_by_id.get(body_a), objects_by_id.get(body_b)]
+        dynamic_count = 0
+        dynamic_masses_kg: list[float] = []
+        hard_contact_distance_m = 0.0
+        sphere_pair_valid = True
+        for field, obj in zip(("body_a", "body_b"), pair_objects, strict=True):
+            if not isinstance(obj, Mapping):
+                sphere_pair_valid = False
+                continue
+            physics = obj.get("physics") if isinstance(obj.get("physics"), Mapping) else {}
+            if physics.get("body_type") == "dynamic":
+                dynamic_count += 1
+                mass_kg = physics.get("mass_kg")
+                if isinstance(mass_kg, (int, float)) and not isinstance(mass_kg, bool) and float(mass_kg) > 0.0:
+                    dynamic_masses_kg.append(float(mass_kg))
+            if physics.get("collision_required") is not True:
+                _issue(
+                    issues,
+                    f"{path}/{field}",
+                    "compliant_contact_collision_required",
+                    "compliant contact bodies require physics.collision_required=true",
+                )
+            collision = physics.get("collision_geometry") if isinstance(physics.get("collision_geometry"), Mapping) else {}
+            size_m = collision.get("size_m")
+            if collision.get("shape") != "sphere" or not _is_finite_vec3(size_m) or not _components_equal(size_m):
+                sphere_pair_valid = False
+                _issue(
+                    issues,
+                    f"{path}/{field}",
+                    "compliant_contact_requires_sphere",
+                    "compliant contact currently requires explicit sphere collision_geometry",
+                )
+            else:
+                hard_contact_distance_m += float(size_m[0]) / 2.0
+        if pair_objects[0] is not None and pair_objects[1] is not None and dynamic_count == 0:
+            _issue(issues, path, "compliant_contact_without_dynamic_body", "at least one body must be dynamic")
+        activation_distance_m = _positive_number(
+            contact.get("activation_distance_m"),
+            f"{path}/activation_distance_m",
+            issues,
+        )
+        stiffness_n_m = _positive_number(contact.get("stiffness_n_m"), f"{path}/stiffness_n_m", issues)
+        damping_n_s_m = _nonnegative_number(contact.get("damping_n_s_m"), f"{path}/damping_n_s_m", issues)
+        if dynamic_count == len(dynamic_masses_kg) and dynamic_masses_kg and physics_hz and damping_n_s_m is not None:
+            effective_mass_kg = 1.0 / sum(1.0 / mass_kg for mass_kg in dynamic_masses_kg)
+            step_s = 1.0 / physics_hz
+            stability_value = (
+                stiffness_n_m * step_s * step_s / effective_mass_kg
+                + 2.0 * damping_n_s_m * step_s / effective_mass_kg
+            )
+            if stability_value >= 4.0:
+                _issue(
+                    issues,
+                    f"{path}/stiffness_n_m",
+                    "compliant_contact_explicit_step_unstable",
+                    f"explicit substep stability requires k*dt^2/m_eff + 2*c*dt/m_eff < 4; got {stability_value:.6g}",
+                )
+        if sphere_pair_valid and activation_distance_m <= hard_contact_distance_m:
+            _issue(
+                issues,
+                f"{path}/activation_distance_m",
+                "compliant_contact_requires_hard_stop_clearance",
+                "must exceed the sum of sphere collision radii so the compliant force activates before hard collision",
+            )
+    duplicates = sorted({value for value in contact_ids if contact_ids.count(value) > 1})
+    if duplicates:
+        _issue(issues, "/compliant_contacts", "duplicate_compliant_contact_ids", f"duplicate ids: {', '.join(duplicates)}")
+
+
+def _validate_rigid_constraints(
+    value: Any,
+    objects: list[Any],
+    known_objects: set[str],
+    backend_constraints: Mapping[str, Any],
+    issues: list[ValidationIssue],
+) -> None:
+    if not isinstance(value, list):
+        _issue(issues, "/constraints", "invalid_type", "must be a list")
+        return
+    if value and "rigid_constraints" not in set(backend_constraints.get("required_solver_capabilities") or []):
+        _issue(
+            issues,
+            "/backend_constraints/required_solver_capabilities",
+            "rigid_constraint_capability_missing",
+            "declared constraints require rigid_constraints",
+        )
+    body_types = {
+        str(obj.get("id") or ""): str((obj.get("physics") or {}).get("body_type") or "")
+        for obj in objects
+        if isinstance(obj, Mapping)
+    }
+    collision_requirements = {
+        str(obj.get("id") or ""): (obj.get("physics") or {}).get("collision_required")
+        for obj in objects
+        if isinstance(obj, Mapping)
+    }
+    initial_transforms = {
+        str(obj.get("id") or ""): _constraint_object_initial_transform(obj)
+        for obj in objects
+        if isinstance(obj, Mapping)
+    }
+    objects_by_id = {
+        str(obj.get("id") or ""): obj
+        for obj in objects
+        if isinstance(obj, Mapping) and obj.get("id")
+    }
+    constraint_ids: list[str] = []
+    allowed_fields = {
+        "id",
+        "body_a",
+        "body_b",
+        "frame_a",
+        "frame_b",
+        "linear_motion",
+        "linear_limit_m",
+        "unilateral_distance_spring",
+        "angular_motion",
+        "angular_limits_deg",
+        "linear_drive",
+        "angular_drive",
+        "break_thresholds",
+        "axial_visual",
+        "collision_enabled",
+    }
+    motion_values = {"locked", "limited", "free"}
+    for index, raw in enumerate(value):
+        path = f"/constraints/{index}"
+        constraint = _mapping(raw, path, issues)
+        unknown = sorted(str(key) for key in constraint if str(key) not in allowed_fields)
+        if unknown:
+            _issue(issues, path, "unknown_constraint_fields", f"unsupported fields: {', '.join(unknown)}")
+        constraint_id = _nonempty_string(constraint.get("id"), f"{path}/id", issues)
+        if constraint_id:
+            constraint_ids.append(constraint_id)
+        body_a = _nonempty_string(constraint.get("body_a"), f"{path}/body_a", issues)
+        body_b = _nonempty_string(constraint.get("body_b"), f"{path}/body_b", issues)
+        for field, body_id in (("body_a", body_a), ("body_b", body_b)):
+            if body_id and body_id not in known_objects:
+                _issue(issues, f"{path}/{field}", "unknown_object_reference", f"unknown object id: {body_id}")
+            elif body_id and body_types.get(body_id) not in BODY_TYPES:
+                _issue(issues, f"{path}/{field}", "constraint_body_type_missing", "constrained objects require physics.body_type")
+            elif (
+                body_id
+                and body_types.get(body_id) == "dynamic"
+                and collision_requirements.get(body_id) is False
+            ):
+                _issue(
+                    issues,
+                    f"{path}/{field}",
+                    "constraint_dynamic_body_collision_disabled",
+                    "a constrained dynamic body requires collision_required=true to create a physics state",
+                )
+        if body_a and body_b and body_a == body_b:
+            _issue(issues, path, "constraint_self_reference", "body_a and body_b must be different objects")
+        if body_a in body_types and body_b in body_types and body_types[body_a] != "dynamic" and body_types[body_b] != "dynamic":
+            _issue(issues, path, "constraint_without_dynamic_body", "at least one constrained body must be dynamic")
+        for frame_name in ("frame_a", "frame_b"):
+            frame_path = f"{path}/{frame_name}"
+            frame = _mapping(constraint.get(frame_name), frame_path, issues)
+            frame_unknown = sorted(
+                str(key) for key in frame if str(key) not in {"position_m", "primary_axis", "secondary_axis"}
+            )
+            if frame_unknown:
+                _issue(issues, frame_path, "unknown_constraint_frame_fields", f"unsupported fields: {', '.join(frame_unknown)}")
+            _finite_vec3(frame.get("position_m"), f"{frame_path}/position_m", issues)
+            primary = _finite_vec3(frame.get("primary_axis"), f"{frame_path}/primary_axis", issues)
+            secondary = _finite_vec3(frame.get("secondary_axis"), f"{frame_path}/secondary_axis", issues)
+            if primary and not math.isclose(math.sqrt(sum(component * component for component in primary)), 1.0, abs_tol=1e-6):
+                _issue(issues, f"{frame_path}/primary_axis", "constraint_axis_not_unit", "must be a unit vector")
+            if secondary and not math.isclose(math.sqrt(sum(component * component for component in secondary)), 1.0, abs_tol=1e-6):
+                _issue(issues, f"{frame_path}/secondary_axis", "constraint_axis_not_unit", "must be a unit vector")
+            if primary and secondary and not math.isclose(sum(a * b for a, b in zip(primary, secondary)), 0.0, abs_tol=1e-6):
+                _issue(issues, frame_path, "constraint_axes_not_orthogonal", "primary_axis and secondary_axis must be orthogonal")
+        if body_a in initial_transforms and body_b in initial_transforms:
+            _validate_constraint_initial_frames(
+                constraint,
+                initial_transforms[body_a],
+                initial_transforms[body_b],
+                path,
+                issues,
+            )
+        linear = _validate_constraint_motion(constraint.get("linear_motion"), f"{path}/linear_motion", motion_values, issues)
+        angular = _validate_constraint_motion(constraint.get("angular_motion"), f"{path}/angular_motion", motion_values, issues)
+        linear_limited = any(value == "limited" for value in linear.values())
+        linear_limit = constraint.get("linear_limit_m")
+        if linear_limited:
+            _positive_number(linear_limit, f"{path}/linear_limit_m", issues)
+        elif linear_limit is not None:
+            _issue(issues, f"{path}/linear_limit_m", "unused_constraint_limit", "must be omitted when no linear axis is limited")
+        distance_spring = constraint.get("unilateral_distance_spring")
+        if distance_spring is not None:
+            spring_path = f"{path}/unilateral_distance_spring"
+            spring = _mapping(distance_spring, spring_path, issues)
+            unknown_spring = sorted(
+                str(key)
+                for key in spring
+                if str(key) not in {"rest_length_m", "stiffness_n_m", "damping_n_s_m"}
+            )
+            if unknown_spring:
+                _issue(
+                    issues,
+                    spring_path,
+                    "unknown_unilateral_distance_spring_fields",
+                    f"unsupported fields: {', '.join(unknown_spring)}",
+                )
+            if any(mode != "free" for mode in linear.values()):
+                _issue(
+                    issues,
+                    spring_path,
+                    "unilateral_distance_spring_requires_free_linear_axes",
+                    "requires all linear axes to be free so no positional limit also acts on the bodies",
+                )
+            if constraint.get("linear_drive") is not None:
+                _issue(
+                    issues,
+                    spring_path,
+                    "unilateral_distance_spring_with_linear_drive",
+                    "cannot be combined with a bilateral linear drive",
+                )
+            _positive_number(spring.get("rest_length_m"), f"{spring_path}/rest_length_m", issues)
+            _positive_number(spring.get("stiffness_n_m"), f"{spring_path}/stiffness_n_m", issues)
+            _nonnegative_number(spring.get("damping_n_s_m"), f"{spring_path}/damping_n_s_m", issues)
+        angular_limits = _mapping(constraint.get("angular_limits_deg"), f"{path}/angular_limits_deg", issues)
+        expected_angular_limits = {axis for axis, motion in angular.items() if motion == "limited"}
+        actual_angular_limits = set(str(key) for key in angular_limits)
+        if actual_angular_limits != expected_angular_limits:
+            _issue(
+                issues,
+                f"{path}/angular_limits_deg",
+                "constraint_angular_limits_mismatch",
+                f"must contain exactly the limited axes: {sorted(expected_angular_limits)}",
+            )
+        for axis, limit in angular_limits.items():
+            if str(axis) in {"x", "y", "z"}:
+                _positive_number(limit, f"{path}/angular_limits_deg/{axis}", issues)
+        _validate_linear_constraint_drive(
+            constraint.get("linear_drive"),
+            linear,
+            f"{path}/linear_drive",
+            issues,
+        )
+        _validate_angular_constraint_drive(
+            constraint.get("angular_drive"),
+            angular,
+            f"{path}/angular_drive",
+            issues,
+        )
+        _validate_constraint_break_thresholds(
+            constraint.get("break_thresholds"),
+            f"{path}/break_thresholds",
+            issues,
+        )
+        _validate_constraint_axial_visual(
+            constraint.get("axial_visual"),
+            objects_by_id,
+            f"{path}/axial_visual",
+            issues,
+        )
+        if not isinstance(constraint.get("collision_enabled"), bool):
+            _issue(issues, f"{path}/collision_enabled", "invalid_type", "must be boolean")
+    duplicates = sorted({value for value in constraint_ids if constraint_ids.count(value) > 1})
+    if duplicates:
+        _issue(issues, "/constraints", "duplicate_constraint_ids", f"duplicate ids: {', '.join(duplicates)}")
+
+
+def _validate_linear_constraint_drive(
+    value: Any,
+    motion: Mapping[str, Any],
+    path: str,
+    issues: list[ValidationIssue],
+) -> None:
+    if value is None:
+        return
+    drive = _mapping(value, path, issues)
+    allowed_fields = {
+        "position_enabled",
+        "velocity_enabled",
+        "position_target_m",
+        "velocity_target_m_s",
+        "stiffness_n_m",
+        "damping_n_s_m",
+        "max_force_n",
+        "acceleration_mode",
+    }
+    actual_fields = {str(key) for key in drive}
+    unknown_fields = actual_fields - allowed_fields
+    if unknown_fields:
+        _issue(
+            issues,
+            path,
+            "invalid_linear_drive_fields",
+            f"unsupported fields: {sorted(unknown_fields)}",
+        )
+    position_enabled = (
+        _validate_constraint_axis_flags(drive.get("position_enabled"), f"{path}/position_enabled", issues)
+        if drive.get("position_enabled") is not None
+        else {axis: False for axis in ("x", "y", "z")}
+    )
+    velocity_enabled = (
+        _validate_constraint_axis_flags(drive.get("velocity_enabled"), f"{path}/velocity_enabled", issues)
+        if drive.get("velocity_enabled") is not None
+        else {axis: False for axis in ("x", "y", "z")}
+    )
+    if drive.get("position_target_m") is not None:
+        _finite_vec3(drive.get("position_target_m"), f"{path}/position_target_m", issues)
+    if drive.get("velocity_target_m_s") is not None:
+        _finite_vec3(drive.get("velocity_target_m_s"), f"{path}/velocity_target_m_s", issues)
+    stiffness = (
+        _nonnegative_vec3(drive.get("stiffness_n_m"), f"{path}/stiffness_n_m", issues)
+        if drive.get("stiffness_n_m") is not None
+        else []
+    )
+    damping = (
+        _nonnegative_vec3(drive.get("damping_n_s_m"), f"{path}/damping_n_s_m", issues)
+        if drive.get("damping_n_s_m") is not None
+        else []
+    )
+    if drive.get("max_force_n") is not None:
+        _nonnegative_vec3(drive.get("max_force_n"), f"{path}/max_force_n", issues)
+    if drive.get("acceleration_mode") is not None and not isinstance(drive.get("acceleration_mode"), bool):
+        _issue(issues, f"{path}/acceleration_mode", "invalid_type", "must be boolean")
+    if not any(position_enabled.values()) and not any(velocity_enabled.values()):
+        _issue(issues, path, "constraint_drive_without_enabled_axis", "at least one drive axis must be enabled")
+    for axis_index, axis in enumerate(("x", "y", "z")):
+        if (position_enabled.get(axis) or velocity_enabled.get(axis)) and motion.get(axis) == "locked":
+            _issue(
+                issues,
+                f"{path}/{axis}",
+                "constraint_drive_on_locked_axis",
+                "a drive axis must be free or limited",
+            )
+        if position_enabled.get(axis) and (not stiffness or stiffness[axis_index] <= 0.0):
+            _issue(issues, f"{path}/stiffness_n_m/{axis}", "constraint_position_drive_without_stiffness", "must be positive for an enabled position drive")
+        if velocity_enabled.get(axis) and (not damping or damping[axis_index] <= 0.0):
+            _issue(issues, f"{path}/damping_n_s_m/{axis}", "constraint_velocity_drive_without_damping", "must be positive for an enabled velocity drive")
+
+
+def _validate_angular_constraint_drive(
+    value: Any,
+    motion: Mapping[str, Any],
+    path: str,
+    issues: list[ValidationIssue],
+) -> None:
+    if value is None:
+        return
+    drive = _mapping(value, path, issues)
+    allowed_fields = {
+        "mode",
+        "position_enabled",
+        "velocity_enabled",
+        "orientation_target_deg",
+        "velocity_target_rad_s",
+        "stiffness_n_m_per_rad",
+        "damping_n_m_s_per_rad",
+        "max_torque_n_m",
+        "acceleration_mode",
+    }
+    actual_fields = {str(key) for key in drive}
+    unknown_fields = actual_fields - allowed_fields
+    if unknown_fields:
+        _issue(
+            issues,
+            path,
+            "invalid_angular_drive_fields",
+            f"unsupported fields: {sorted(unknown_fields)}",
+        )
+    mode = drive.get("mode")
+    if mode not in ANGULAR_DRIVE_MODES:
+        _issue(issues, f"{path}/mode", "invalid_angular_drive_mode", f"must be one of {sorted(ANGULAR_DRIVE_MODES)}")
+    position_enabled = (
+        _validate_angular_drive_flags(drive.get("position_enabled"), f"{path}/position_enabled", issues)
+        if drive.get("position_enabled") is not None
+        else {axis: False for axis in ("twist", "swing", "slerp")}
+    )
+    velocity_enabled = (
+        _validate_angular_drive_flags(drive.get("velocity_enabled"), f"{path}/velocity_enabled", issues)
+        if drive.get("velocity_enabled") is not None
+        else {axis: False for axis in ("twist", "swing", "slerp")}
+    )
+    if drive.get("orientation_target_deg") is not None:
+        _finite_vec3(drive.get("orientation_target_deg"), f"{path}/orientation_target_deg", issues)
+    if drive.get("velocity_target_rad_s") is not None:
+        _finite_vec3(drive.get("velocity_target_rad_s"), f"{path}/velocity_target_rad_s", issues)
+    stiffness = (
+        _nonnegative_number(drive.get("stiffness_n_m_per_rad"), f"{path}/stiffness_n_m_per_rad", issues)
+        if drive.get("stiffness_n_m_per_rad") is not None
+        else None
+    )
+    damping = (
+        _nonnegative_number(drive.get("damping_n_m_s_per_rad"), f"{path}/damping_n_m_s_per_rad", issues)
+        if drive.get("damping_n_m_s_per_rad") is not None
+        else None
+    )
+    if drive.get("max_torque_n_m") is not None:
+        _nonnegative_number(drive.get("max_torque_n_m"), f"{path}/max_torque_n_m", issues)
+    if drive.get("acceleration_mode") is not None and not isinstance(drive.get("acceleration_mode"), bool):
+        _issue(issues, f"{path}/acceleration_mode", "invalid_type", "must be boolean")
+    if not any(position_enabled.values()) and not any(velocity_enabled.values()):
+        _issue(issues, path, "constraint_drive_without_enabled_axis", "at least one angular drive must be enabled")
+    else:
+        if mode == "slerp":
+            if any(position_enabled.get(key) or velocity_enabled.get(key) for key in ("twist", "swing")) or not (
+                position_enabled.get("slerp") or velocity_enabled.get("slerp")
+            ):
+                _issue(issues, path, "invalid_slerp_drive_flags", "slerp mode enables only the slerp drive")
+            if any(motion.get(axis) == "locked" for axis in ("x", "y", "z")):
+                _issue(issues, path, "slerp_drive_with_locked_axis", "slerp requires all angular axes to be free or limited")
+        elif mode == "twist_and_swing":
+            if position_enabled.get("slerp") or velocity_enabled.get("slerp"):
+                _issue(issues, path, "invalid_twist_swing_drive_flags", "twist_and_swing mode cannot enable slerp")
+            if (position_enabled.get("twist") or velocity_enabled.get("twist")) and motion.get("x") == "locked":
+                _issue(issues, path, "twist_drive_on_locked_axis", "twist drive requires angular x to be free or limited")
+            if (position_enabled.get("swing") or velocity_enabled.get("swing")) and motion.get("y") == "locked" and motion.get("z") == "locked":
+                _issue(issues, path, "swing_drive_on_locked_axes", "swing drive requires angular y or z to be free or limited")
+        if any(position_enabled.values()) and (stiffness is None or stiffness <= 0.0):
+            _issue(issues, f"{path}/stiffness_n_m_per_rad", "constraint_position_drive_without_stiffness", "must be positive for an enabled position drive")
+        if any(velocity_enabled.values()) and (damping is None or damping <= 0.0):
+            _issue(issues, f"{path}/damping_n_m_s_per_rad", "constraint_velocity_drive_without_damping", "must be positive for an enabled velocity drive")
+
+
+def _validate_constraint_break_thresholds(value: Any, path: str, issues: list[ValidationIssue]) -> None:
+    if value is None:
+        return
+    thresholds = _mapping(value, path, issues)
+    allowed = {"linear_force_n", "angular_torque_n_m"}
+    unknown = {str(key) for key in thresholds} - allowed
+    if unknown:
+        _issue(issues, path, "unknown_constraint_break_fields", f"unsupported fields: {sorted(unknown)}")
+    if not thresholds:
+        _issue(issues, path, "empty_constraint_break_thresholds", "at least one break threshold is required")
+    for field in allowed:
+        if field in thresholds:
+            _positive_number(thresholds.get(field), f"{path}/{field}", issues)
+
+
+def _validate_constraint_axial_visual(
+    value: Any,
+    objects_by_id: Mapping[str, Mapping[str, Any]],
+    path: str,
+    issues: list[ValidationIssue],
+) -> None:
+    if value is None:
+        return
+    visual = _mapping(value, path, issues)
+    if {str(key) for key in visual} != {"object_id", "mesh_forward_axis"}:
+        _issue(
+            issues,
+            path,
+            "invalid_constraint_axial_visual_fields",
+            "must contain exactly object_id and mesh_forward_axis",
+        )
+    object_id = _nonempty_string(visual.get("object_id"), f"{path}/object_id", issues)
+    if object_id and object_id not in objects_by_id:
+        _issue(issues, f"{path}/object_id", "unknown_object_reference", f"unknown object id: {object_id}")
+    elif object_id:
+        visual_object = objects_by_id[object_id]
+        representation = visual_object.get("visual_representation")
+        if not isinstance(representation, Mapping) or representation.get("source") != "asset" or representation.get("visible") is not True:
+            _issue(
+                issues,
+                f"{path}/object_id",
+                "constraint_axial_visual_requires_visible_asset",
+                "must reference an object with visual_representation.source=asset and visible=true",
+            )
+        physics = visual_object.get("physics") if isinstance(visual_object.get("physics"), Mapping) else {}
+        if physics.get("body_type") != "static":
+            _issue(
+                issues,
+                f"{path}/object_id",
+                "constraint_axial_visual_requires_static_object",
+                "must reference a static render-only object",
+            )
+        if physics.get("collision_required") is not False:
+            _issue(
+                issues,
+                f"{path}/object_id",
+                "constraint_axial_visual_requires_collision_disabled",
+                "must reference a render-only object with collision_required=false",
+            )
+    if visual.get("mesh_forward_axis") not in {"x", "y", "z"}:
+        _issue(issues, f"{path}/mesh_forward_axis", "invalid_enum", "must be x, y, or z")
+
+
+def _validate_constraint_axis_flags(value: Any, path: str, issues: list[ValidationIssue]) -> Mapping[str, bool]:
+    flags = _mapping(value, path, issues)
+    if set(str(key) for key in flags) != {"x", "y", "z"}:
+        _issue(issues, path, "invalid_constraint_drive_axes", "must contain exactly x, y, and z")
+    for axis in ("x", "y", "z"):
+        if not isinstance(flags.get(axis), bool):
+            _issue(issues, f"{path}/{axis}", "invalid_type", "must be boolean")
+    return {axis: bool(flags.get(axis)) for axis in ("x", "y", "z")}
+
+
+def _validate_angular_drive_flags(value: Any, path: str, issues: list[ValidationIssue]) -> Mapping[str, bool]:
+    flags = _mapping(value, path, issues)
+    if set(str(key) for key in flags) != {"twist", "swing", "slerp"}:
+        _issue(issues, path, "invalid_angular_drive_axes", "must contain exactly twist, swing, and slerp")
+    for axis in ("twist", "swing", "slerp"):
+        if not isinstance(flags.get(axis), bool):
+            _issue(issues, f"{path}/{axis}", "invalid_type", "must be boolean")
+    return {axis: bool(flags.get(axis)) for axis in ("twist", "swing", "slerp")}
+
+
+def _nonnegative_number(value: Any, path: str, issues: list[ValidationIssue]) -> float | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)) or float(value) < 0.0:
+        _issue(issues, path, "invalid_number", "must be a finite non-negative number")
+        return None
+    return float(value)
+
+
+def _nonnegative_vec3(value: Any, path: str, issues: list[ValidationIssue]) -> list[float]:
+    result = _finite_vec3(value, path, issues)
+    if result and any(component < 0.0 for component in result):
+        _issue(issues, path, "invalid_number", "all components must be non-negative")
+        return []
+    return result
+
+
+def _constraint_object_initial_transform(
+    obj: Mapping[str, Any],
+) -> tuple[list[float], list[float]] | None:
+    initial = obj.get("initial_state") if isinstance(obj.get("initial_state"), Mapping) else {}
+    position = initial.get("position_m", [0.0, 0.0, 0.0])
+    rotation = initial.get("rotation_deg", [0.0, 0.0, 0.0])
+    if not _is_finite_vec3(position) or not _is_finite_vec3(rotation):
+        return None
+    return [float(value) for value in position], [float(value) for value in rotation]
+
+
+def _validate_constraint_initial_frames(
+    constraint: Mapping[str, Any],
+    transform_a: tuple[list[float], list[float]] | None,
+    transform_b: tuple[list[float], list[float]] | None,
+    path: str,
+    issues: list[ValidationIssue],
+) -> None:
+    if transform_a is None or transform_b is None:
+        return
+    frames: list[tuple[list[float], list[list[float]]]] = []
+    for frame_name, transform in (("frame_a", transform_a), ("frame_b", transform_b)):
+        frame = constraint.get(frame_name)
+        if not isinstance(frame, Mapping):
+            return
+        position = frame.get("position_m")
+        primary = frame.get("primary_axis")
+        secondary = frame.get("secondary_axis")
+        if not all(_is_finite_vec3(value) for value in (position, primary, secondary)):
+            return
+        object_position, object_rotation = transform
+        world_position_offset = rotate_local_vector_ue(
+            [float(value) for value in position],
+            object_rotation,
+        )
+        world_position = [
+            object_position[axis] + world_position_offset[axis]
+            for axis in range(3)
+        ]
+        local_axes = [
+            [float(value) for value in primary],
+            [float(value) for value in secondary],
+        ]
+        world_axes = [rotate_local_vector_ue(axis, object_rotation) for axis in local_axes]
+        frames.append((world_position, world_axes))
+    position_gap = math.dist(frames[0][0], frames[1][0])
+    if constraint.get("axial_visual") is not None and position_gap <= CONSTRAINT_FRAME_POSITION_TOLERANCE_M:
+        _issue(
+            issues,
+            path,
+            "constraint_axial_visual_zero_length",
+            "axial_visual requires distinct initial frame origins",
+        )
+    drive = constraint.get("linear_drive") if isinstance(constraint.get("linear_drive"), Mapping) else {}
+    position_enabled = drive.get("position_enabled") if isinstance(drive.get("position_enabled"), Mapping) else {}
+    primary, secondary = frames[0][1]
+    tertiary = [
+        primary[1] * secondary[2] - primary[2] * secondary[1],
+        primary[2] * secondary[0] - primary[0] * secondary[2],
+        primary[0] * secondary[1] - primary[1] * secondary[0],
+    ]
+    delta = [frames[1][0][axis] - frames[0][0][axis] for axis in range(3)]
+    linear_motion = constraint.get("linear_motion") if isinstance(constraint.get("linear_motion"), Mapping) else {}
+    linear_limit = constraint.get("linear_limit_m")
+    for axis_name, world_axis in zip(("x", "y", "z"), (primary, secondary, tertiary), strict=True):
+        if position_enabled.get(axis_name) is True or linear_motion.get(axis_name) == "free":
+            continue
+        offset = abs(sum(delta[index] * world_axis[index] for index in range(3)))
+        allowed = CONSTRAINT_FRAME_POSITION_TOLERANCE_M
+        if (
+            linear_motion.get(axis_name) == "limited"
+            and isinstance(linear_limit, (int, float))
+            and not isinstance(linear_limit, bool)
+            and math.isfinite(float(linear_limit))
+            and float(linear_limit) > 0.0
+        ):
+            allowed += float(linear_limit)
+        if offset > allowed:
+            _issue(
+                issues,
+                path,
+                "constraint_frame_position_mismatch",
+                (
+                    f"initial frame offset on {axis_name} is {offset:.6f} m; "
+                    f"maximum is {allowed:.6f} m"
+                ),
+            )
+    minimum_dot = math.cos(math.radians(CONSTRAINT_FRAME_AXIS_TOLERANCE_DEG))
+    for axis_name, axis_a, axis_b in zip(
+        ("primary_axis", "secondary_axis"),
+        frames[0][1],
+        frames[1][1],
+        strict=True,
+    ):
+        dot = sum(left * right for left, right in zip(axis_a, axis_b, strict=True))
+        if dot < minimum_dot:
+            _issue(
+                issues,
+                path,
+                "constraint_frame_axis_mismatch",
+                (
+                    f"initial world {axis_name} directions differ by more than "
+                    f"{CONSTRAINT_FRAME_AXIS_TOLERANCE_DEG:.3f} degrees (dot={dot:.6f})"
+                ),
+            )
+
+
+def _validate_constraint_motion(
+    value: Any,
+    path: str,
+    allowed: set[str],
+    issues: list[ValidationIssue],
+) -> Mapping[str, Any]:
+    motion = _mapping(value, path, issues)
+    if set(str(key) for key in motion) != {"x", "y", "z"}:
+        _issue(issues, path, "invalid_constraint_motion_axes", "must contain exactly x, y, and z")
+    for axis in ("x", "y", "z"):
+        if motion.get(axis) not in allowed:
+            _issue(issues, f"{path}/{axis}", "invalid_constraint_motion", f"must be one of {sorted(allowed)}")
+    return motion
 
 
 def _ensure_dict(data: dict[str, Any], key: str) -> dict[str, Any]:
@@ -909,13 +3027,69 @@ def _positive_number(value: Any, path: str, issues: list[ValidationIssue]) -> fl
     return float(value)
 
 
+def _finite_number(value: Any, path: str, issues: list[ValidationIssue]) -> float | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)):
+        _issue(issues, path, "invalid_number", "must be a finite number")
+        return None
+    return float(value)
+
+
 def _finite_vec3(value: Any, path: str, issues: list[ValidationIssue]) -> list[float]:
-    if not isinstance(value, list) or len(value) != 3 or any(
-        not isinstance(item, (int, float)) or isinstance(item, bool) or not math.isfinite(float(item)) for item in value
-    ):
+    if not _is_finite_vec3(value):
         _issue(issues, path, "invalid_vector", "must contain three finite numbers")
         return []
     return [float(item) for item in value]
+
+
+def _is_finite_vec3(value: Any) -> bool:
+    return isinstance(value, list) and len(value) == 3 and all(
+        isinstance(item, (int, float))
+        and not isinstance(item, bool)
+        and math.isfinite(float(item))
+        for item in value
+    )
+
+
+def _ue_rotation_matches_solver(solver_xyz_deg: list[float], ue_pyr_deg: list[float]) -> bool:
+    expected = [-solver_xyz_deg[1], -solver_xyz_deg[2], solver_xyz_deg[0]]
+    return all(
+        abs((actual - target + 180.0) % 360.0 - 180.0) <= 1e-6
+        for actual, target in zip(ue_pyr_deg, expected, strict=True)
+    )
+
+
+def _body_local_cylinder_has_clearance(
+    center_m: list[float],
+    euler_xyz_deg: list[float],
+    radius_m: float,
+    height_m: float,
+    profile: list[dict[str, float]],
+    *,
+    clearance_m: float,
+) -> bool:
+    x, y, z = [math.radians(value) for value in euler_xyz_deg]
+    cx, sx, cy, sy, cz, sz = math.cos(x), math.sin(x), math.cos(y), math.sin(y), math.cos(z), math.sin(z)
+    axis = [cz * sy * cx + sz * sx, sz * sy * cx - cz * sx, cy * cx]
+    radial_axis = math.hypot(axis[0], axis[1])
+    half_height = height_m / 2.0
+    radial_extent = math.hypot(center_m[0], center_m[1]) + radius_m + half_height * radial_axis
+    vertical_extent = half_height * abs(axis[2]) + radius_m * radial_axis
+    minimum_z = center_m[2] - vertical_extent
+    maximum_z = center_m[2] + vertical_extent
+    if minimum_z < profile[0]["z_m"] + clearance_m or maximum_z > profile[-1]["z_m"] - clearance_m:
+        return False
+    candidate_z = [minimum_z, maximum_z]
+    candidate_z.extend(point["z_m"] for point in profile if minimum_z < point["z_m"] < maximum_z)
+    minimum_radius = min(_profile_radius_at(profile, candidate) for candidate in candidate_z)
+    return radial_extent <= minimum_radius - clearance_m
+
+
+def _profile_radius_at(profile: list[dict[str, float]], z_m: float) -> float:
+    for lower, upper in zip(profile, profile[1:]):
+        if lower["z_m"] <= z_m <= upper["z_m"]:
+            fraction = (z_m - lower["z_m"]) / (upper["z_m"] - lower["z_m"])
+            return lower["radius_m"] + fraction * (upper["radius_m"] - lower["radius_m"])
+    raise ValueError("z_m lies outside axisymmetric profile")
 
 
 def _positive_vec3(value: Any, path: str, issues: list[ValidationIssue]) -> list[float]:
@@ -924,6 +3098,10 @@ def _positive_vec3(value: Any, path: str, issues: list[ValidationIssue]) -> list
         _issue(issues, path, "invalid_vector", "all components must be positive")
         return []
     return values
+
+
+def _components_equal(values: list[float], *, tolerance: float = 1e-9) -> bool:
+    return all(math.isclose(values[0], value, rel_tol=0.0, abs_tol=tolerance) for value in values[1:])
 
 
 def _validate_initial_kinetic_energy(

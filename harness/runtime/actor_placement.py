@@ -3,22 +3,10 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from harness.core.scene_layout import is_support_role
+from harness.core.scene_layout import is_support_role, rotate_local_vector_ue
 
 
-RUNTIME_ACTOR_PLACEMENT_SCHEMA_VERSION = "harness_runtime_actor_placement_v1"
-FIELD_OR_CONTROLLER_ROLES = {
-    "force_field",
-    "magnetic_source",
-    "magnet_source",
-    "constraint_anchor",
-    "elastic_constraint_anchor",
-    "bungee_anchor",
-    "active_agent",
-    "agent_controller",
-    "pushing_agent",
-    "throwing_agent",
-}
+RUNTIME_ACTOR_PLACEMENT_SCHEMA_VERSION = "harness_runtime_actor_placement_v2"
 
 
 def compile_runtime_actor_placement(
@@ -26,10 +14,26 @@ def compile_runtime_actor_placement(
     scene_layout: dict[str, Any],
     *,
     asset_resolution: dict[str, Any] | None = None,
+    handoff_contract: dict[str, Any] | None = None,
     target_backend: str = "UE",
 ) -> dict[str, Any]:
     object_nodes = [node for node in scene_layout.get("object_nodes", []) if isinstance(node, dict)]
-    actor_bindings = [actor_binding_from_node(node, target_backend=target_backend) for node in object_nodes]
+    actorless_anchor_ids = actorless_world_anchor_object_ids(case_spec)
+    actor_bindings = [
+        actor_binding_from_node(
+            node,
+            target_backend=target_backend,
+            handoff_contract=handoff_contract,
+        )
+        for node in object_nodes
+        if str(node.get("object_id") or "") not in actorless_anchor_ids
+    ]
+    constraint_bindings = constraint_bindings_from_case(
+        case_spec.get("constraints") or [],
+        actor_bindings,
+        case_spec.get("objects") or [],
+        target_backend=target_backend,
+    )
     camera_bindings = camera_bindings_from_layout(scene_layout)
     placement_warnings = placement_warnings_for(actor_bindings, scene_layout)
     return {
@@ -41,6 +45,7 @@ def compile_runtime_actor_placement(
         "target_backend": target_backend,
         "coordinate_system": scene_layout.get("coordinate_system", "z_up"),
         "actor_bindings": actor_bindings,
+        "constraint_bindings": constraint_bindings,
         "camera_bindings": camera_bindings,
         "physics_graph": scene_layout.get("physics_graph") or {"nodes": [], "collision_edges": []},
         "required_runtime_exports": [
@@ -60,56 +65,302 @@ def compile_runtime_actor_placement(
             "physics_critical_count": sum(1 for binding in actor_bindings if binding.get("physics_critical")),
             "simulated_actor_count": sum(1 for binding in actor_bindings if (binding.get("physics") or {}).get("simulate_physics")),
             "camera_count": len(camera_bindings),
+            "constraint_count": len(constraint_bindings),
             "proxy_actor_count": sum(1 for binding in actor_bindings if (binding.get("asset") or {}).get("proxy")),
+            "solver_generated_actor_count": sum(
+                1
+                for binding in actor_bindings
+                if ((binding.get("render_binding") or {}).get("kind") == "solver_generated")
+            ),
         },
         "placement_warnings": placement_warnings,
     }
 
 
-def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dict[str, Any]:
+def constraint_bindings_from_case(
+    constraints: list[Any],
+    actor_bindings: list[dict[str, Any]],
+    objects: list[Any],
+    *,
+    target_backend: str,
+) -> list[dict[str, Any]]:
+    runtime_actor_ids = {
+        str(binding.get("object_id") or ""): str(binding.get("runtime_actor_id") or "")
+        for binding in actor_bindings
+    }
+    objects_by_id = {
+        str(obj.get("id") or ""): obj
+        for obj in objects
+        if isinstance(obj, dict) and obj.get("id")
+    }
+    world_anchor_ids = world_constraint_endpoint_object_ids({"objects": objects, "constraints": constraints})
+    bindings = []
+    for constraint in constraints:
+        if not isinstance(constraint, dict):
+            continue
+        body_a, frame_a = constraint_endpoint_binding(
+            str(constraint["body_a"]),
+            constraint["frame_a"],
+            runtime_actor_ids,
+            objects_by_id,
+            world_anchor_ids,
+        )
+        body_b, frame_b = constraint_endpoint_binding(
+            str(constraint["body_b"]),
+            constraint["frame_b"],
+            runtime_actor_ids,
+            objects_by_id,
+            world_anchor_ids,
+        )
+        bindings.append({
+            "constraint_id": str(constraint["id"]),
+            "body_a": body_a,
+            "body_b": body_b,
+            "frame_a": frame_a,
+            "frame_b": frame_b,
+            "linear_motion": constraint["linear_motion"],
+            **(
+                {"linear_limit_m": constraint["linear_limit_m"]}
+                if constraint.get("linear_limit_m") is not None
+                else {}
+            ),
+            **(
+                {"unilateral_distance_spring": constraint["unilateral_distance_spring"]}
+                if constraint.get("unilateral_distance_spring") is not None
+                else {}
+            ),
+            "angular_motion": constraint["angular_motion"],
+            "angular_limits_deg": constraint["angular_limits_deg"],
+            **(
+                {"linear_drive": constraint["linear_drive"]}
+                if constraint.get("linear_drive") is not None
+                else {}
+            ),
+            **(
+                {"angular_drive": constraint["angular_drive"]}
+                if constraint.get("angular_drive") is not None
+                else {}
+            ),
+            **(
+                {"break_thresholds": constraint["break_thresholds"]}
+                if constraint.get("break_thresholds") is not None
+                else {}
+            ),
+            **(
+                {"axial_visual": constraint["axial_visual"]}
+                if constraint.get("axial_visual") is not None
+                else {}
+            ),
+            "collision_enabled": constraint["collision_enabled"],
+            "target_backend": target_backend,
+        })
+    return bindings
+
+
+def constraint_endpoint_object_ids(case_spec: dict[str, Any]) -> set[str]:
+    return {
+        str(constraint.get(side) or "")
+        for constraint in case_spec.get("constraints") or []
+        if isinstance(constraint, dict)
+        for side in ("body_a", "body_b")
+    }
+
+
+def world_constraint_endpoint_object_ids(case_spec: dict[str, Any]) -> set[str]:
+    endpoint_ids = constraint_endpoint_object_ids(case_spec)
+    return {
+        str(obj.get("id"))
+        for obj in case_spec.get("objects") or []
+        if isinstance(obj, dict)
+        and str(obj.get("id") or "") in endpoint_ids
+        and is_world_constraint_endpoint_object(obj)
+    }
+
+
+def actorless_world_anchor_object_ids(case_spec: dict[str, Any]) -> set[str]:
+    endpoint_ids = world_constraint_endpoint_object_ids(case_spec)
+    return {
+        str(obj.get("id"))
+        for obj in case_spec.get("objects") or []
+        if isinstance(obj, dict)
+        and str(obj.get("id") or "") in endpoint_ids
+        and is_actorless_world_anchor_object(obj)
+    }
+
+
+def is_world_constraint_endpoint_object(obj: dict[str, Any]) -> bool:
+    physics = obj.get("physics") if isinstance(obj.get("physics"), dict) else obj
+    return bool(
+        str(physics.get("body_type") or "").casefold() == "static"
+        and physics.get("collision_required") is False
+        and not isinstance(physics.get("collision_geometry"), dict)
+    )
+
+
+def is_actorless_world_anchor_object(obj: dict[str, Any]) -> bool:
+    visual = obj.get("visual_representation") if isinstance(obj.get("visual_representation"), dict) else {}
+    return bool(
+        is_world_constraint_endpoint_object(obj)
+        and visual.get("source") == "none"
+        and visual.get("visible") is False
+        and not isinstance(obj.get("asset"), dict)
+        and not obj.get("ue5_path")
+    )
+
+
+def constraint_endpoint_binding(
+    object_id: str,
+    frame: dict[str, Any],
+    runtime_actor_ids: dict[str, str],
+    objects_by_id: dict[str, dict[str, Any]],
+    world_anchor_ids: set[str],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if object_id not in world_anchor_ids:
+        return (
+            {
+                "endpoint_type": "rigid_body",
+                "object_id": object_id,
+                "runtime_actor_id": runtime_actor_ids.get(object_id) or None,
+                "frame_space": "body_local",
+            },
+            dict(frame),
+        )
+    return (
+        {
+            "endpoint_type": "world_anchor",
+            "object_id": object_id,
+            "frame_space": "world",
+        },
+        constraint_frame_in_world(objects_by_id[object_id], frame),
+    )
+
+
+def constraint_frame_in_world(obj: dict[str, Any], frame: dict[str, Any]) -> dict[str, Any]:
+    initial = obj.get("initial_state") if isinstance(obj.get("initial_state"), dict) else {}
+    position = initial.get("position_m") or obj.get("initial_position_m") or [0.0, 0.0, 0.0]
+    rotation = initial.get("rotation_deg") or obj.get("initial_rotation_deg") or [0.0, 0.0, 0.0]
+    local_position = frame["position_m"]
+    world_offset = rotate_local_vector_ue(local_position, rotation)
+    return {
+        "position_m": [float(position[index]) + world_offset[index] for index in range(3)],
+        "primary_axis": rotate_local_vector_ue(frame["primary_axis"], rotation),
+        "secondary_axis": rotate_local_vector_ue(frame["secondary_axis"], rotation),
+    }
+
+
+def actor_binding_from_node(
+    node: dict[str, Any],
+    *,
+    target_backend: str,
+    handoff_contract: dict[str, Any] | None,
+) -> dict[str, Any]:
     object_id = str(node.get("object_id") or "")
     role = str(node.get("role") or "")
     physics = node.get("physics") if isinstance(node.get("physics"), dict) else {}
     asset_binding = node.get("asset_binding") if isinstance(node.get("asset_binding"), dict) else {}
+    visual_representation = (
+        node.get("visual_representation")
+        if isinstance(node.get("visual_representation"), dict)
+        else {}
+    )
+    visible = visual_representation.get("visible") is not False
     physics_critical = bool(node.get("physics_critical"))
     is_support = is_support_role(role)
-    is_field = normalized_role(role) in FIELD_OR_CONTROLLER_ROLES or str(node.get("shape") or "").casefold() in {"fixed_point", "constraint"}
+    is_field = str(node.get("shape") or "").casefold() in {"fixed_point", "constraint"}
+    state_kind = str(physics.get("state_kind") or "rigid").casefold()
     body_type = str(physics.get("body_type") or "").casefold()
+    articulated_contract = (
+        node.get("articulated_body_contract")
+        if isinstance(node.get("articulated_body_contract"), dict)
+        else None
+    )
+    articulated_mode = str((articulated_contract or {}).get("mode") or "")
+    is_articulated = articulated_contract is not None
     kinematic = bool(body_type in {"static", "kinematic"} if body_type else physics.get("kinematic") or is_support or is_field)
-    simulate_physics = bool(physics_critical and not kinematic and not is_field)
-    proxy = bool(physics.get("proxy") or asset_binding.get("fallback_reason"))
-    ue_path = asset_binding.get("selected_asset_ue_path")
-    collider = str(physics.get("collider") or node.get("shape") or "box").casefold()
+    simulate_physics = bool(
+        articulated_mode == "ragdoll"
+        or (physics_critical and state_kind == "rigid" and not kinematic and not is_field)
+    )
+    required_asset_unresolved = bool(asset_binding.get("required_asset_unresolved"))
+    ue_path = articulated_contract.get("asset_path") if is_articulated else asset_binding.get("selected_asset_ue_path")
+    collision_geometry = (
+        physics.get("collision_geometry")
+        if isinstance(physics.get("collision_geometry"), dict)
+        else None
+    )
+    collider = str((collision_geometry or {}).get("shape") or physics.get("collider") or node.get("shape") or "box").casefold()
     collision_required = physics.get("collision_required")
-    collision_enabled = bool(physics_critical and not is_field and collision_required is not False)
+    collision_enabled = bool(
+        physics_critical
+        and state_kind == "rigid"
+        and not is_field
+        and collision_required is not False
+    )
     analytic_primitive = (
         "sphere"
         if "sphere" in collider
         else "box"
         if "box" in collider
+        else "cylinder"
+        if "cylinder" in collider
         else None
     )
-    # A declared primitive collider is part of the CaseSpec physics contract.
-    # Never let an arbitrary selected asset's pivot or BodySetup silently replace
-    # that geometry: those properties vary by asset and by target UE platform.
     controlled_analytic_collision = bool(
-        collision_enabled and (not ue_path or analytic_primitive is not None)
+        collision_enabled
+        and collision_geometry is not None
+        and analytic_primitive is not None
     )
+    asset_body_setup_verified = bool(
+        (is_articulated and articulated_mode == "ragdoll")
+        or (
+            collision_enabled
+            and ue_path
+            and asset_binding.get("collision_body_setup_verified") is True
+        )
+    )
+    proxy = bool(controlled_analytic_collision and not ue_path)
     collision_geometry_source = (
         "none"
         if not collision_enabled
-        else f"analytic_{analytic_primitive or collider}"
+        else str((collision_geometry or {}).get("source") or f"analytic_{analytic_primitive or collider}")
         if controlled_analytic_collision
-        else "selected_asset"
+        else "asset_body_setup"
+        if asset_body_setup_verified
+        else "unbound_required_asset"
+        if required_asset_unresolved and not ue_path
+        else "unverified_asset_body_setup"
     )
     runtime_usage = (
-        "visual_proxy"
-        if ue_path and analytic_primitive == "sphere" and simulate_physics
+        "unbound_required_asset"
+        if required_asset_unresolved and not ue_path
+        else "visual_proxy"
+        if visible and ue_path and controlled_analytic_collision
         else "analytic_proxy"
         if controlled_analytic_collision
         else "collision_and_visual"
         if ue_path
         else "analytic_proxy"
+    )
+    collision_profile = physics.get("collision_profile")
+    if controlled_analytic_collision and not collision_profile:
+        collision_profile = "BlockAll" if kinematic else "PhysicsActor"
+    object_transform = node.get("transform") or {}
+    collision_transform = dict(object_transform)
+    if collision_geometry is not None:
+        collision_transform["position_m"] = collision_geometry.get("world_center_m")
+        collision_transform["scale"] = [1.0, 1.0, 1.0]
+    visual_center_offset = (node.get("bounds") or {}).get("local_center_offset_m") or [0.0, 0.0, 0.0]
+    collision_center_offset = (collision_geometry or {}).get("local_center_offset_m") or [0.0, 0.0, 0.0]
+    relative_visual_center_offset = [
+        float(visual_center_offset[index]) - float(collision_center_offset[index])
+        for index in range(3)
+    ]
+    visual_source = str(visual_representation.get("source") or "asset")
+    render_binding = render_binding_for(
+        visual_source,
+        solver_declared=node.get("solver_declared") is True,
+        handoff_contract=handoff_contract,
+        articulated_contract=articulated_contract,
     )
     return {
         "object_id": object_id,
@@ -119,25 +370,44 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
         "physics_critical": physics_critical,
         "physics_graph_member": bool(node.get("physics_graph_member")),
         "ue_class": ue_class_for(node, is_field=is_field),
-        "transform": node.get("transform") or {},
+        "transform": collision_transform,
+        "declared_object_transform": object_transform,
         "bounds": node.get("bounds") or {},
+        "visual_representation": {
+            "source": visual_source,
+            "visible": visible,
+            "local_bounds_center_from_collision_m": relative_visual_center_offset,
+        },
+        "render_binding": render_binding,
         "asset": {
             "selected_asset_id": asset_binding.get("selected_asset_id"),
             "ue_path": ue_path,
-            "asset_kind": asset_binding.get("asset_kind"),
+            "asset_kind": "skeletal_mesh" if is_articulated else asset_binding.get("asset_kind"),
             "proxy": proxy,
-            "binding_source": "ue_asset" if ue_path else "analytic_proxy" if proxy else "unbound",
+            "binding_source": "analytic_proxy" if controlled_analytic_collision and not ue_path else "ue_asset" if ue_path else "unbound",
             "runtime_usage": runtime_usage,
-            "source_kind": asset_binding.get("source_kind"),
+            "source_kind": "engine_builtin" if is_articulated else asset_binding.get("source_kind"),
             "source_uri": asset_binding.get("source_uri"),
             "license": asset_binding.get("license"),
             "sha256": asset_binding.get("sha256"),
-            "preserve_authored_scale": bool(asset_binding.get("preserve_authored_scale")),
-            "authored_size_m": asset_binding.get("authored_size_m"),
+            "preserve_authored_scale": is_articulated or bool(asset_binding.get("preserve_authored_scale")),
+            "catalog_preserve_authored_scale": is_articulated or bool(asset_binding.get("catalog_preserve_authored_scale")),
+            "authored_size_m": articulated_contract.get("authored_size_m") if is_articulated else asset_binding.get("authored_size_m"),
+            "scale_policy": asset_binding.get("scale_policy"),
+            "scale_applied": bool(asset_binding.get("scale_applied")),
+            "instance_scale": asset_binding.get("instance_scale"),
+            "uniform_scale_factor": asset_binding.get("uniform_scale_factor"),
+            "target_size_m": asset_binding.get("target_size_m"),
+            "effective_size_m": articulated_contract.get("authored_size_m") if is_articulated else asset_binding.get("effective_size_m"),
             "quality_gate": asset_binding.get("quality_gate"),
             "fallback_reason": asset_binding.get("fallback_reason"),
+            "required_asset_unresolved": required_asset_unresolved,
+            "collision": asset_binding.get("collision"),
+            "collision_body_setup_verified": asset_body_setup_verified,
+            "geometry_registration": asset_binding.get("geometry_registration"),
         },
         "physics": {
+            "state_kind": state_kind,
             "body_type": body_type or None,
             "collision_required": collision_required,
             "simulate_physics": simulate_physics,
@@ -145,15 +415,18 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
             "collision_enabled": collision_enabled,
             "mass_kg": physics.get("mass_kg"),
             "collider": physics.get("collider"),
+            "collision_geometry": collision_geometry,
             "collision_geometry_source": collision_geometry_source,
             "collision_geometry_verification": (
                 "not_applicable"
                 if not collision_enabled
                 else "runtime_controlled"
                 if controlled_analytic_collision
+                else "body_setup_verified"
+                if asset_body_setup_verified
                 else "declared_unverified"
             ),
-            "collision_profile": "NoCollision" if is_field else physics.get("collision_profile"),
+            "collision_profile": "NoCollision" if is_field else collision_profile,
             "material": physics.get("material"),
             "linear_damping": physics.get("linear_damping"),
             "angular_damping": physics.get("angular_damping"),
@@ -161,9 +434,51 @@ def actor_binding_from_node(node: dict[str, Any], *, target_backend: str) -> dic
             "use_ccd": physics.get("use_ccd"),
             "initial_angular_velocity_rad_s": physics.get("initial_angular_velocity_rad_s"),
         },
+        **({"articulated_body": articulated_contract} if is_articulated else {}),
         "runtime_binding_requirements": asset_binding.get("runtime_binding_requirements") or [],
         "target_backend": target_backend,
     }
+
+
+def render_binding_for(
+    visual_source: str,
+    *,
+    solver_declared: bool,
+    handoff_contract: dict[str, Any] | None,
+    articulated_contract: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if isinstance(articulated_contract, dict):
+        return {
+            "kind": "articulated_body",
+            "model": articulated_contract.get("model"),
+            "mode": articulated_contract.get("mode"),
+            "asset_path": articulated_contract.get("asset_path"),
+            "pose_source_type": ((articulated_contract.get("pose_source") or {}).get("type")),
+            "root_transform_source_type": ((articulated_contract.get("root_transform_source") or {}).get("type")),
+            "runtime_actor_class": (
+                "Character"
+                if ((articulated_contract.get("pose_source") or {}).get("type")) == "animation_sequence"
+                else "Actor"
+            ),
+        }
+    if visual_source == "solver_generated":
+        contract = handoff_contract if isinstance(handoff_contract, dict) else {}
+        return {
+            "kind": "solver_generated",
+            "solver_declared": solver_declared,
+            "cache_contract": {
+                key: contract.get(key)
+                for key in (
+                    "contract_id",
+                    "schema_version",
+                    "producer_backend",
+                    "consumer_backend",
+                    "required_artifacts",
+                    "adapter_contract",
+                )
+            } if contract else None,
+        }
+    return {"kind": visual_source}
 
 
 def camera_bindings_from_layout(scene_layout: dict[str, Any]) -> list[dict[str, Any]]:
@@ -200,6 +515,8 @@ def placement_warnings_for(actor_bindings: list[dict[str, Any]], scene_layout: d
 def ue_class_for(node: dict[str, Any], *, is_field: bool) -> str:
     if is_field:
         return "/Script/Engine.Actor"
+    if isinstance(node.get("articulated_body_contract"), dict):
+        return "/Script/Engine.SkeletalMeshActor"
     asset_binding = node.get("asset_binding") if isinstance(node.get("asset_binding"), dict) else {}
     asset_kind = str(asset_binding.get("asset_kind") or "").casefold()
     asset_path = str(asset_binding.get("selected_asset_ue_path") or "")

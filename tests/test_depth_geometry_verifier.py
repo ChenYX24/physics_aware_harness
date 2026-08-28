@@ -59,7 +59,7 @@ class DepthGeometryVerifierTests(unittest.TestCase):
             self.assertEqual(report["status"], "fail")
             self.assertIn("F_DEPTH_GEOMETRY_METADATA", report["failure_codes"])
 
-    def test_non_billiards_run_is_not_applicable(self) -> None:
+    def test_run_without_explicit_reference_is_not_applicable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
             self.write_json(run_dir / "case_spec.json", {"case_id": "falling_cube", "objects": [{"id": "cube"}]})
@@ -82,6 +82,7 @@ class DepthGeometryVerifierTests(unittest.TestCase):
             run_dir / "case_spec.json",
             {
                 "case_id": "sixteen_ball_reference_break",
+                "depth_geometry_reference": {"object_id": "table"},
                 "objects": [{"id": "cue_ball"}, {"id": "target_ball_01"}, {"id": "table"}],
             },
         )

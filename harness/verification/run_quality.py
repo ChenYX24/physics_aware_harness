@@ -3,14 +3,15 @@ from __future__ import annotations
 import json
 import hashlib
 import math
+import os
 import subprocess
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from harness.core.artifact_schema import write_json
+from harness.core.stage_result import stage_result_from_quality_report, write_stage_result
 from harness.runtime.backend_policy import backend_plan
-from harness.verification.contact_causality_verifier import requires_complete_passive_propagation
 from harness.verification.depth_geometry_verifier import verify_depth_geometry
 from harness.verification.render_sync_checker import depth_pixel_statistics, sequence_evidence_for_view
 
@@ -32,22 +33,62 @@ def evaluate_run(
 
     failures: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
+    quality_contract = quality_contract_for_run(run_dir)
+    ignore_provenance_and_release_gates = quality_contract["ignore_provenance_and_release_gates"]
+    required_modalities = set(quality_contract["required_modalities"])
     report_summaries, raw_reports = summarize_source_reports(run_dir, failures, warnings)
+    if ignore_provenance_and_release_gates:
+        warnings.extend(asset_provenance_warnings(raw_reports.get("asset_resolution")))
 
     view_ids = discover_view_ids(run_dir, raw_reports.get("render_sync"))
-    media = validate_media(run_dir, view_ids, ffprobe, failures, warnings)
-    sensor_sequences = validate_sensor_sequences(run_dir, view_ids, media, failures)
+    media = validate_media(
+        run_dir,
+        view_ids,
+        ffprobe,
+        failures,
+        warnings,
+        required_modalities=required_modalities,
+    )
+    sensor_sequences = validate_sensor_sequences(
+        run_dir,
+        view_ids,
+        media,
+        failures,
+        required_modalities=required_modalities,
+    )
     trajectory, trajectory_frames = validate_trajectory(run_dir, failures)
-    solver_execution = validate_solver_execution(run_dir, trajectory_frames, failures)
+    articulated_execution = validate_articulated_execution(run_dir, trajectory_frames, failures)
+    solver_findings = [] if ignore_provenance_and_release_gates else failures
+    solver_execution = validate_solver_execution(run_dir, trajectory_frames, solver_findings)
+    if ignore_provenance_and_release_gates:
+        warnings.extend(ignored_gate_warning(finding) for finding in solver_findings)
     refresh_ue_readiness_summary(
         report_summaries.get("run_readiness"),
         raw_reports.get("run_readiness"),
         solver_execution,
+        required_modalities=required_modalities,
+        ignore_provenance_and_release_gates=ignore_provenance_and_release_gates,
     )
-    validate_source_gates(report_summaries, failures, warnings)
+    validate_source_gates(
+        report_summaries,
+        failures,
+        warnings,
+        required_modalities=required_modalities,
+        ignore_provenance_and_release_gates=ignore_provenance_and_release_gates,
+    )
     contacts = validate_contacts(run_dir, trajectory_frames, failures)
     camera_motion = validate_camera_motion(run_dir, failures)
-    depth_geometry = verify_depth_geometry(run_dir, write=write)
+    depth_geometry = (
+        verify_depth_geometry(run_dir, write=write)
+        if {"depth", "segmentation"}.issubset(required_modalities)
+        else {
+            "schema_version": "harness_depth_geometry_report_v1",
+            "status": "not_required",
+            "applicable": False,
+            "reason": "execution_profile_does_not_require_depth_and_segmentation",
+            "failure_codes": [],
+        }
+    )
     if depth_geometry.get("status") == "fail":
         failures.append(
             issue(
@@ -71,6 +112,7 @@ def evaluate_run(
         "run_dir": str(run_dir.resolve()),
         "status": "pass" if hard_gate_passed else "fail",
         "hard_gate_passed": hard_gate_passed,
+        "quality_contract": quality_contract,
         "hard_gate": {
             "status": "pass" if hard_gate_passed else "fail",
             "passed": hard_gate_passed,
@@ -82,6 +124,7 @@ def evaluate_run(
         "media": media,
         "sensor_sequences": sensor_sequences,
         "trajectory": trajectory,
+        "articulated_execution": articulated_execution,
         "solver_execution": solver_execution,
         "contacts": contacts,
         "camera_motion": camera_motion,
@@ -90,6 +133,7 @@ def evaluate_run(
     }
     if write:
         write_json(run_dir / "quality_report.json", report)
+        write_stage_result(run_dir, stage_result_from_quality_report(report))
         synchronize_run_readiness(run_dir, report)
     return report
 
@@ -101,11 +145,20 @@ def synchronize_run_readiness(run_dir: Path, quality_report: dict[str, Any]) -> 
         return
     provenance = quality_report.get("solver_execution") if isinstance(quality_report.get("solver_execution"), dict) else {}
     provenance_ready = provenance.get("status") in {"pass", "not_required"}
+    quality_contract = quality_report.get("quality_contract") if isinstance(quality_report.get("quality_contract"), dict) else {}
+    ignore_provenance_and_release_gates = quality_contract.get("ignore_provenance_and_release_gates") is True
+    provenance_gate_satisfied = provenance_ready or ignore_provenance_and_release_gates
     readiness["physics_provenance"] = provenance
-    readiness["physics_ready"] = provenance_ready
-    refresh_ue_readiness_summary(readiness, readiness, provenance)
+    readiness["physics_ready"] = provenance_gate_satisfied
+    readiness["provenance_and_release_gate_override"] = ignore_provenance_and_release_gates
+    refresh_ue_readiness_summary(
+        readiness,
+        readiness,
+        provenance,
+        ignore_provenance_and_release_gates=ignore_provenance_and_release_gates,
+    )
     quality_ready = bool(quality_report.get("hard_gate_passed"))
-    if not provenance_ready or not quality_ready:
+    if not provenance_gate_satisfied or not quality_ready:
         readiness.update(
             {
                 "execution_ready": False,
@@ -114,7 +167,16 @@ def synchronize_run_readiness(run_dir: Path, quality_report: dict[str, Any]) -> 
                 "publication_tier": "rejected",
             }
         )
-    if not provenance_ready:
+    elif ignore_provenance_and_release_gates:
+        readiness.update(
+            {
+                "execution_ready": True,
+                "reference_ready": False,
+                "local_preview_ready": True,
+                "publication_tier": "local_preview",
+            }
+        )
+    if not provenance_gate_satisfied:
         readiness["physics_ready"] = False
     render_sync = ((quality_report.get("source_reports") or {}).get("render_sync") or {})
     if render_sync.get("status") == "fail":
@@ -126,10 +188,18 @@ def synchronize_run_readiness(run_dir: Path, quality_report: dict[str, Any]) -> 
         write_json(output_path, readiness)
 
 
-def refresh_ue_readiness_summary(summary: Any, readiness: Any, provenance: Any) -> None:
+def refresh_ue_readiness_summary(
+    summary: Any,
+    readiness: Any,
+    provenance: Any,
+    *,
+    required_modalities: set[str] | None = None,
+    ignore_provenance_and_release_gates: bool = False,
+) -> None:
     if not isinstance(summary, dict) or not isinstance(readiness, dict) or readiness.get("backend") != "ue":
         return
     provenance_ready = isinstance(provenance, dict) and provenance.get("status") in {"pass", "not_required"}
+    provenance_gate_satisfied = provenance_ready or ignore_provenance_and_release_gates
     detailed_execution_keys = (
         "map_ready",
         "camera_plan_ready",
@@ -142,18 +212,26 @@ def refresh_ue_readiness_summary(summary: Any, readiness: Any, provenance: Any) 
     )
     if not all(key in readiness for key in detailed_execution_keys):
         return
-    execution_ready = provenance_ready and readiness.get("verifier_status") == "pass" and all(
-        readiness.get(key) is True for key in detailed_execution_keys
+    modalities = required_modalities if required_modalities is not None else {"rgb", "depth", "segmentation"}
+    required_execution_keys = [
+        key
+        for key in detailed_execution_keys
+        if key != "depth_ready" or "depth" in modalities
+    ]
+    execution_ready = provenance_gate_satisfied and readiness.get("verifier_status") == "pass" and all(
+        readiness.get(key) is True for key in required_execution_keys
     )
     assets_reference_ready = readiness.get("assets_reference_ready") is True
     local_asset_ready = int(readiness.get("local_preview_asset_count") or 0) > 0 or readiness.get("asset_catalog_reference_ready") is True
-    reference_ready = execution_ready and assets_reference_ready
-    local_preview_ready = execution_ready and not assets_reference_ready and local_asset_ready
+    complete_sensor_contract = {"rgb", "depth", "segmentation"}.issubset(modalities)
+    reference_ready = execution_ready and complete_sensor_contract and assets_reference_ready and not ignore_provenance_and_release_gates
+    local_preview_ready = execution_ready and (local_asset_ready or ignore_provenance_and_release_gates)
     publication_tier = "reference" if reference_ready else "local_preview" if local_preview_ready else "rejected"
     readiness.update(
         {
             "execution_ready": execution_ready,
-            "physics_ready": provenance_ready,
+            "physics_ready": provenance_gate_satisfied,
+            "provenance_and_release_gate_override": ignore_provenance_and_release_gates,
             "reference_ready": reference_ready,
             "local_preview_ready": local_preview_ready,
             "publication_tier": publication_tier,
@@ -186,6 +264,7 @@ def summarize_source_reports(
         ],
         "asset_resolution": [run_dir / "asset_resolution.json"],
         "sensor_state": [run_dir / "sensor_state.json"],
+        "rgb_observability": [run_dir / "rgb_observability_report.json"],
     }
     summaries: dict[str, Any] = {}
     raw: dict[str, Any] = {}
@@ -248,8 +327,32 @@ def summarize_report(name: str, value: Any, path: str) -> dict[str, Any]:
             "render_pass_valid": value.get("render_pass_valid"),
             "failure_count": len(value.get("failures") or []),
         }
+    if name == "rgb_observability":
+        return {
+            "present": True,
+            "path": path,
+            "status": value.get("status"),
+            "enforcement": value.get("enforcement"),
+            "failure_count": len(value.get("failures") or []),
+        }
     if name == "map_report":
         selected = value.get("selected_map") if isinstance(value.get("selected_map"), dict) else {}
+        rgb_capture = value.get("rgb_capture") if isinstance(value.get("rgb_capture"), dict) else None
+        runtime_light_audit = (
+            rgb_capture.get("runtime_light_audit")
+            if isinstance(rgb_capture, dict) and isinstance(rgb_capture.get("runtime_light_audit"), dict)
+            else None
+        )
+        viewport_hygiene = (
+            rgb_capture.get("viewport_hygiene")
+            if isinstance(rgb_capture, dict) and isinstance(rgb_capture.get("viewport_hygiene"), dict)
+            else None
+        )
+        existing_map_lights = (
+            rgb_capture.get("existing_map_lights")
+            if isinstance(rgb_capture, dict) and isinstance(rgb_capture.get("existing_map_lights"), dict)
+            else None
+        )
         opened = selected.get("map_opened")
         if opened is None:
             opened = value.get("opened") if value.get("opened") is not None else value.get("map_opened")
@@ -265,6 +368,36 @@ def summarize_report(name: str, value: Any, path: str) -> dict[str, Any]:
             "map_opened": opened,
             "fallback_map": selected.get("fallback_map") or value.get("fallback_map"),
             "warnings": len(value.get("warnings") or []),
+            "capture_backend": rgb_capture.get("backend") if isinstance(rgb_capture, dict) else None,
+            "rgb_lighting_report_present": bool(
+                isinstance(rgb_capture, dict)
+                and isinstance(runtime_light_audit, dict)
+                and isinstance(viewport_hygiene, dict)
+                and isinstance(existing_map_lights, dict)
+                and isinstance(rgb_capture.get("preview_shadow_safe"), bool)
+            ),
+            "preview_shadow_indicator_disabled": (
+                viewport_hygiene.get("preview_shadow_indicator_disabled")
+                if isinstance(viewport_hygiene, dict)
+                else None
+            ),
+            "game_view_after": viewport_hygiene.get("game_view_after") if isinstance(viewport_hygiene, dict) else None,
+            "runtime_light_failure_count": (
+                len(runtime_light_audit.get("failures") or [])
+                if isinstance(runtime_light_audit, dict)
+                else None
+            ),
+            "remaining_non_movable": (
+                list(runtime_light_audit.get("remaining_non_movable") or [])
+                if isinstance(runtime_light_audit, dict)
+                else None
+            ),
+            "runtime_lights_preview_shadow_safe": (
+                runtime_light_audit.get("preview_shadow_safe")
+                if isinstance(runtime_light_audit, dict)
+                else None
+            ),
+            "preview_shadow_safe": rgb_capture.get("preview_shadow_safe") if isinstance(rgb_capture, dict) else None,
         }
     if name == "sensor_state":
         return {
@@ -293,7 +426,15 @@ def summarize_report(name: str, value: Any, path: str) -> dict[str, Any]:
     }
 
 
-def validate_source_gates(summaries: dict[str, Any], failures: list[dict[str, Any]], warnings: list[dict[str, Any]]) -> None:
+def validate_source_gates(
+    summaries: dict[str, Any],
+    failures: list[dict[str, Any]],
+    warnings: list[dict[str, Any]],
+    *,
+    required_modalities: set[str] | None = None,
+    ignore_provenance_and_release_gates: bool = False,
+) -> None:
+    modalities = required_modalities if required_modalities is not None else {"rgb", "depth", "segmentation"}
     for name in ("run_readiness", "verifier", "render_sync", "map_report", "asset_resolution", "sensor_state"):
         summary = summaries[name]
         if not summary.get("present"):
@@ -305,6 +446,13 @@ def validate_source_gates(summaries: dict[str, Any], failures: list[dict[str, An
     if readiness.get("present") and readiness.get("reference_ready") is not True:
         if readiness.get("local_preview_ready") is True:
             warnings.append(issue("W_LOCAL_PREVIEW_ONLY", "run passed execution gates but asset provenance blocks reference publication"))
+        elif ignore_provenance_and_release_gates:
+            warnings.append(
+                issue(
+                    "W_PROVENANCE_AND_RELEASE_GATE_IGNORED",
+                    "run readiness was rejected only as a non-blocking provenance/release finding",
+                )
+            )
         else:
             failures.append(issue("F_RUN_NOT_READY", "run_readiness declares neither reference_ready nor local_preview_ready"))
     verifier = summaries["verifier"]
@@ -317,16 +465,67 @@ def validate_source_gates(summaries: dict[str, Any], failures: list[dict[str, An
         failures.append(issue("F_RENDER_SYNC_FAILED", "multi-view synchronization is false"))
     if render.get("present") and render.get("render_pass_valid") is False:
         failures.append(issue("F_RENDER_PASS_INVALID", "render pass contract is false"))
+    rgb_observability = summaries["rgb_observability"]
+    if rgb_observability.get("present") and rgb_observability.get("status") == "fail":
+        warnings.append(
+            issue(
+                "W_RGB_OBSERVABILITY_LOW",
+                "distinctive subject color was not observable in enough frames",
+                report_path=rgb_observability.get("path"),
+            )
+        )
     map_report = summaries["map_report"]
     if map_report.get("present") and (map_report.get("status") != "pass" or map_report.get("map_opened") is False or map_report.get("package_match") is False):
         failures.append(issue("F_MAP_GATE_FAILED", "map report did not prove the requested package was opened", selected_map=map_report.get("selected_map"), requested_map=map_report.get("requested_map")))
+    if readiness.get("backend") == "ue" and map_report.get("present"):
+        capture_backend = map_report.get("capture_backend")
+        if not capture_backend:
+            failures.append(issue("F_UE_LIGHTING_REPORT_MISSING", "UE map report does not identify the RGB capture backend"))
+        elif capture_backend == "highres_viewport":
+            if map_report.get("rgb_lighting_report_present") is not True:
+                failures.append(issue("F_UE_LIGHTING_REPORT_MISSING", "highres_viewport RGB lighting report is incomplete"))
+            else:
+                if (
+                    map_report.get("preview_shadow_indicator_disabled") is not True
+                    or map_report.get("game_view_after") is not True
+                ):
+                    failures.append(
+                        issue(
+                            "F_UE_PREVIEW_SHADOW_INDICATOR_ACTIVE",
+                            "highres_viewport did not prove Game View and Preview Shadows Indicator hygiene",
+                            game_view_after=map_report.get("game_view_after"),
+                            preview_shadow_indicator_disabled=map_report.get("preview_shadow_indicator_disabled"),
+                        )
+                    )
+                if (
+                    map_report.get("runtime_lights_preview_shadow_safe") is not True
+                    or int(map_report.get("runtime_light_failure_count") or 0) > 0
+                    or bool(map_report.get("remaining_non_movable"))
+                ):
+                    failures.append(
+                        issue(
+                            "F_UE_RUNTIME_LIGHT_MOBILITY_INVALID",
+                            "enabled runtime RGB lights were not all normalized to Movable",
+                            failure_count=map_report.get("runtime_light_failure_count"),
+                            remaining_non_movable=map_report.get("remaining_non_movable"),
+                        )
+                    )
+                if map_report.get("preview_shadow_safe") is not True and not any(
+                    item.get("code") in {"F_UE_PREVIEW_SHADOW_INDICATOR_ACTIVE", "F_UE_RUNTIME_LIGHT_MOBILITY_INVALID"}
+                    for item in failures
+                ):
+                    failures.append(issue("F_UE_PREVIEW_SHADOW_INDICATOR_ACTIVE", "highres_viewport preview-shadow safety is false"))
     assets = summaries["asset_resolution"]
     if assets.get("present") and int(assets.get("unresolved_count") or 0) > 0:
         failures.append(issue("F_ASSET_UNRESOLVED", "asset resolution contains unresolved objects", count=assets.get("unresolved_count")))
     if assets.get("present") and assets.get("geometry_match") is False:
         failures.append(issue("F_ASSET_GEOMETRY_MISMATCH", "selected render asset does not match the solver container geometry"))
     sensor = summaries["sensor_state"]
-    if sensor.get("present") and (int(sensor.get("frame_count") or 0) <= 0 or int(sensor.get("view_count") or 0) <= 0 or not sensor.get("instance_segmentation")):
+    if sensor.get("present") and (
+        int(sensor.get("frame_count") or 0) <= 0
+        or int(sensor.get("view_count") or 0) <= 0
+        or ("segmentation" in modalities and not sensor.get("instance_segmentation"))
+    ):
         failures.append(issue("F_SENSOR_STATE_INVALID", "sensor_state lacks frames, views, or instance segmentation"))
 
 
@@ -351,7 +550,10 @@ def validate_media(
     ffprobe: str,
     failures: list[dict[str, Any]],
     warnings: list[dict[str, Any]],
+    *,
+    required_modalities: set[str] | None = None,
 ) -> dict[str, Any]:
+    modalities = required_modalities if required_modalities is not None else {"rgb", "depth", "segmentation"}
     if not view_ids:
         failures.append(issue("F_VIEW_MISSING", "no canonical views were found"))
     views: dict[str, Any] = {}
@@ -359,19 +561,33 @@ def validate_media(
     for camera_id in view_ids:
         view_dir = run_dir / "views" / camera_id
         video = validate_video(view_dir / "rgb.mp4", run_dir, ffprobe, failures, warnings)
-        depth = validate_exr(view_dir / "depth.exr", run_dir, "depth", failures)
-        depth_pixel_check = validate_depth_pixels(view_dir, run_dir, failures)
-        depth["pixel_check"] = depth_pixel_check
-        if depth_pixel_check["status"] == "fail":
-            depth["status"] = "fail"
-        segmentation = validate_segmentation(view_dir, run_dir, failures)
-        pixel_check = validate_segmentation_pixels(view_dir, run_dir, failures)
-        segmentation["pixel_check"] = pixel_check
-        if pixel_check["status"] == "fail":
-            segmentation["status"] = "fail"
+        if "depth" in modalities:
+            depth = validate_exr(view_dir / "depth.exr", run_dir, "depth", failures)
+            depth_pixel_check = validate_depth_pixels(view_dir, run_dir, failures)
+            depth["pixel_check"] = depth_pixel_check
+            if depth_pixel_check["status"] == "fail":
+                depth["status"] = "fail"
+        else:
+            depth = {"status": "not_required", "reason": "execution_profile_does_not_require_depth"}
+        if "segmentation" in modalities:
+            segmentation = validate_segmentation(view_dir, run_dir, failures)
+            pixel_check = validate_segmentation_pixels(view_dir, run_dir, failures)
+            segmentation["pixel_check"] = pixel_check
+            if pixel_check["status"] == "fail":
+                segmentation["status"] = "fail"
+        else:
+            segmentation = {
+                "status": "not_required",
+                "reason": "execution_profile_does_not_require_segmentation",
+            }
         videos.append(video)
+        required_statuses = [video["status"]]
+        if "depth" in modalities:
+            required_statuses.append(depth["status"])
+        if "segmentation" in modalities:
+            required_statuses.append(segmentation["status"])
         views[camera_id] = {
-            "status": "pass" if video["status"] == depth["status"] == segmentation["status"] == "pass" else "fail",
+            "status": "pass" if all(status == "pass" for status in required_statuses) else "fail",
             "rgb": video,
             "depth": depth,
             "segmentation": segmentation,
@@ -479,7 +695,10 @@ def validate_sensor_sequences(
     view_ids: list[str],
     media: dict[str, Any],
     failures: list[dict[str, Any]],
+    *,
+    required_modalities: set[str] | None = None,
 ) -> dict[str, Any]:
+    modalities = required_modalities if required_modalities is not None else {"rgb", "depth", "segmentation"}
     views: dict[str, Any] = {}
     for camera_id in view_ids:
         meta = read_optional_json(run_dir / "views" / camera_id / "meta.json")
@@ -487,6 +706,8 @@ def validate_sensor_sequences(
         rgb_count = int((((media.get("views") or {}).get(camera_id) or {}).get("rgb") or {}).get("frame_count") or 0)
         view_status = "pass"
         for modality in ("depth", "segmentation"):
+            if modality not in modalities:
+                continue
             count = int((evidence.get(modality) or {}).get("frame_count") or 0)
             if count <= 0:
                 failures.append(
@@ -511,6 +732,61 @@ def validate_sensor_sequences(
                 view_status = "fail"
         views[camera_id] = {"status": view_status, "rgb_frame_count": rgb_count, "evidence": evidence}
     return {"status": "pass" if views and all(row["status"] == "pass" for row in views.values()) else "fail", "views": views}
+
+
+def quality_contract_for_run(run_dir: Path) -> dict[str, Any]:
+    profile = read_optional_json(run_dir / "execution_profile.json")
+    render_config = read_optional_json(run_dir / "inputs" / "render_config.json")
+    profile_name = str(profile.get("name") or "")
+    quality_policy = read_optional_json(run_dir / "quality_policy.json")
+    ignore_provenance_and_release_gates = (
+        quality_policy.get("ignore_provenance_and_release_gates") is True
+        or os.environ.get("SIM_HARNESS_IGNORE_PROVENANCE_AND_RELEASE_GATES", "").casefold()
+        in {"1", "true", "yes"}
+    )
+    actual_modalities = render_config.get("passes") if isinstance(render_config.get("passes"), list) else []
+    raw_modalities = list(actual_modalities)
+    source = "inputs/render_config.json"
+    modalities = []
+    for value in raw_modalities:
+        modality = str(value).strip().casefold()
+        if modality and modality not in modalities:
+            modalities.append(modality)
+    return {
+        "execution_profile": profile_name or "legacy",
+        "required_modalities": modalities,
+        "complete_sensor_contract": {"rgb", "depth", "segmentation"}.issubset(modalities),
+        "ignore_provenance_and_release_gates": ignore_provenance_and_release_gates,
+        "source": source,
+    }
+
+
+def ignored_gate_warning(finding: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "code": "W_PROVENANCE_AND_RELEASE_GATE_IGNORED",
+        "message": str(finding.get("message") or "provenance/release finding was ignored"),
+        "original_code": finding.get("code"),
+        "ignored_finding": dict(finding),
+    }
+
+
+def asset_provenance_warnings(asset_resolution: Any) -> list[dict[str, Any]]:
+    if not isinstance(asset_resolution, dict):
+        return []
+    warnings = []
+    for row in asset_resolution.get("assets") or []:
+        selected = row.get("selected_asset") if isinstance(row, dict) else None
+        gate = selected.get("quality_gate") if isinstance(selected, dict) else None
+        for code in (gate or {}).get("ignored_provenance_and_release_codes") or []:
+            warnings.append(
+                {
+                    "code": "W_PROVENANCE_AND_RELEASE_GATE_IGNORED",
+                    "message": "asset provenance/release finding was ignored",
+                    "original_code": str(code),
+                    "object_id": ((row.get("intent") or {}).get("object_id")) if isinstance(row, dict) else None,
+                }
+            )
+    return warnings
 
 
 def validate_exr(path: Path, run_dir: Path, modality: str, failures: list[dict[str, Any]]) -> dict[str, Any]:
@@ -804,6 +1080,271 @@ def validate_trajectory(run_dir: Path, failures: list[dict[str, Any]]) -> tuple[
     }, [item for item in frames if isinstance(item, dict)]
 
 
+def validate_articulated_execution(
+    run_dir: Path,
+    trajectory_frames: list[dict[str, Any]],
+    failures: list[dict[str, Any]],
+) -> dict[str, Any]:
+    case = read_case_spec(run_dir)
+    articulated = [
+        obj
+        for obj in case.get("objects") or []
+        if isinstance(obj, dict)
+        and isinstance(obj.get("solver"), dict)
+        and obj["solver"].get("type") == "articulated_body"
+    ]
+    if not articulated:
+        return {"status": "not_required", "applicable": False, "objects": {}}
+    results: dict[str, Any] = {}
+    failed = False
+    for obj in articulated:
+        object_id = str(obj.get("id") or "")
+        contract = obj["solver"]
+        pose_type = str((contract.get("pose_source") or {}).get("type") or "")
+        root_type = str((contract.get("root_transform_source") or {}).get("type") or "")
+        control_layers_required = bool(
+            contract.get("pose_overlay") or contract.get("ik_targets") or contract.get("head_look_target")
+        )
+        samples = []
+        for frame in trajectory_frames:
+            objects = frame.get("objects") if isinstance(frame.get("objects"), dict) else {}
+            state = objects.get(object_id) if isinstance(objects.get(object_id), dict) else {}
+            observed = state.get("articulated_observed") if isinstance(state.get("articulated_observed"), dict) else None
+            if observed is not None:
+                samples.append((frame, observed))
+        object_failures: list[dict[str, Any]] = []
+        if not samples:
+            object_failures.append({"metric": "post_tick_observation_missing"})
+        for frame, observed in samples:
+            frame_index = frame.get("frame")
+            if observed.get("sample_phase") != "post_tick":
+                object_failures.append({"metric": "invalid_observation_phase", "frame": frame_index})
+            frame_time = float(frame.get("time") or frame.get("time_s") or 0.0)
+            if not isinstance(observed.get("sample_time_s"), (int, float)) or abs(float(observed["sample_time_s"]) - frame_time) > 1e-6:
+                object_failures.append({"metric": "articulated_sample_time_mismatch", "frame": frame_index})
+            if frame_index == 0 and observed.get("frame_zero_evaluated") is not True:
+                object_failures.append({"metric": "frame_zero_not_evaluated", "frame": frame_index})
+            if observed.get("pose_source_type") != pose_type or observed.get("root_transform_source_type") != root_type:
+                object_failures.append({"metric": "motion_source_mismatch", "frame": frame_index})
+            if observed.get("errors"):
+                object_failures.append({"metric": "observation_errors", "frame": frame_index, "value": observed.get("errors")})
+            if not isinstance(observed.get("actor_transform"), dict) or not isinstance(observed.get("bones"), dict):
+                object_failures.append({"metric": "articulated_transform_observation_missing", "frame": frame_index})
+            if root_type == "character_movement" and (
+                not observed.get("movement_mode") or not isinstance(observed.get("velocity_m_s"), list)
+            ):
+                object_failures.append({"metric": "character_movement_observation_missing", "frame": frame_index})
+            if control_layers_required:
+                rig = observed.get("control_rig") if isinstance(observed.get("control_rig"), dict) else {}
+                if (
+                    rig.get("registered") is not True
+                    or rig.get("evaluation_phase") != "post_forwards_solve"
+                    or not isinstance(rig.get("evaluation_time_s"), (int, float))
+                    or abs(float(rig["evaluation_time_s"]) - frame_time) > 1e-6
+                    or rig.get("pre_initialize_executed") is not True
+                    or rig.get("backwards_solve_executed") is not True
+                    or rig.get("pre_forwards_solve_executed") is not True
+                    or rig.get("forwards_solve_executed") is not True
+                    or rig.get("post_forwards_solve_executed") is not True
+                    or rig.get("coordinate_space") != "control_rig_component_lifecycle"
+                ):
+                    object_failures.append({"metric": "control_rig_lifecycle_evidence_missing", "frame": frame_index})
+                if rig.get("control_write_verified") is not True:
+                    object_failures.append({"metric": "control_rig_command_write_failed", "frame": frame_index})
+                if rig.get("mesh_output_sampled") is not True:
+                    object_failures.append({"metric": "control_rig_mesh_output_missing", "frame": frame_index})
+            overlay = observed.get("pose_overlay") if isinstance(observed.get("pose_overlay"), dict) else {}
+            for result in overlay.get("results") or []:
+                expected = result.get("commanded_rotation_deg") or []
+                output_delta = result.get("output_rotation_delta_deg") or []
+                if any(abs(float(value)) > 1e-4 for value in expected) and (
+                    len(output_delta) != 3 or max(abs(float(value)) for value in output_delta) <= 1e-4
+                ):
+                    object_failures.append({
+                        "metric": "pose_overlay_not_applied",
+                        "frame": frame_index,
+                        "bone": result.get("bone"),
+                        "value": output_delta,
+                    })
+            for goal, ik in (observed.get("ik") or {}).items():
+                weight = float(ik.get("weight") or 0.0)
+                switch_value = ik.get("switch_value")
+                expected_switch = 1.0 if weight > 0.0 else 0.0
+                if not isinstance(switch_value, (int, float)) or abs(float(switch_value) - expected_switch) > 1e-4:
+                    object_failures.append({
+                        "metric": "ik_switch_weight_mismatch",
+                        "frame": frame_index,
+                        "goal": goal,
+                        "value": switch_value,
+                        "expected": expected_switch,
+                    })
+                commanded_target = ((ik.get("commanded_target_transform") or {}).get("position_m") or [])
+                observed_target = ((ik.get("target_control") or {}).get("observed_position_m") or [])
+                if (
+                    len(commanded_target) != 3
+                    or len(observed_target) != 3
+                    or math.sqrt(sum(
+                        (float(observed_target[index]) - float(commanded_target[index])) ** 2
+                        for index in range(3)
+                    )) > 1e-4
+                ):
+                    object_failures.append({
+                        "metric": "ik_target_control_mismatch",
+                        "frame": frame_index,
+                        "goal": goal,
+                        "value": observed_target,
+                        "expected": commanded_target,
+                    })
+                effector_position = ((ik.get("effector_transform") or {}).get("position_m") or [])
+                error = math.sqrt(sum(
+                    (float(effector_position[index]) - float(commanded_target[index])) ** 2
+                    for index in range(3)
+                )) if len(effector_position) == 3 and len(commanded_target) == 3 else None
+                tolerance = ik.get("tolerance_m")
+                if weight >= 1.0 - 1e-4 and (
+                    not isinstance(error, (int, float))
+                    or not isinstance(tolerance, (int, float))
+                    or float(error) > float(tolerance)
+                ):
+                    object_failures.append({
+                        "metric": "ik_effector_error_m",
+                        "frame": frame_index,
+                        "goal": goal,
+                        "value": error,
+                        "allowed": tolerance,
+                    })
+                pole = ik.get("pole") if isinstance(ik.get("pole"), dict) else None
+                if pole:
+                    pole_target = pole.get("target_position_m") or []
+                    observed_pole = pole.get("observed_position_m") or []
+                    if len(observed_pole) != 3:
+                        object_failures.append({"metric": "ik_pole_observation_missing", "frame": frame_index, "goal": goal})
+                    elif len(pole_target) != 3 or math.sqrt(sum(
+                        (float(observed_pole[index]) - float(pole_target[index])) ** 2
+                        for index in range(3)
+                    )) > 1e-4:
+                        object_failures.append({
+                            "metric": "ik_pole_control_mismatch",
+                            "frame": frame_index,
+                            "goal": goal,
+                            "value": observed_pole,
+                            "expected": pole_target,
+                        })
+            head_look = observed.get("head_look") if isinstance(observed.get("head_look"), dict) else None
+            if head_look and float(head_look.get("weight") or 0.0) >= 1.0 - 1e-4:
+                target = head_look.get("target_position_m") or []
+                head = (observed.get("bones") or {}).get("head") or {}
+                head_position = head.get("position_m") or []
+                head_rotation = head.get("rotation_deg") or []
+                error = None
+                if len(target) == 3 and len(head_position) == 3 and len(head_rotation) == 3:
+                    pitch = math.radians(float(head_rotation[0]))
+                    yaw = math.radians(float(head_rotation[1]))
+                    forward = (math.cos(pitch) * math.cos(yaw), math.cos(pitch) * math.sin(yaw), math.sin(pitch))
+                    delta = tuple(float(target[index]) - float(head_position[index]) for index in range(3))
+                    length = math.sqrt(sum(value * value for value in delta))
+                    if length > 1e-9:
+                        dot = max(-1.0, min(1.0, sum(forward[index] * delta[index] for index in range(3)) / length))
+                        error = math.degrees(math.acos(dot))
+                tolerance = head_look.get("tolerance_deg")
+                if not isinstance(error, (int, float)) or not isinstance(tolerance, (int, float)) or float(error) > float(tolerance):
+                    object_failures.append({
+                        "metric": "head_look_angular_error_deg",
+                        "frame": frame_index,
+                        "value": error,
+                        "allowed": tolerance,
+                    })
+            grounding = observed.get("grounding") if isinstance(observed.get("grounding"), dict) else None
+            if frame_index == 0 and grounding and grounding.get("status") == "applied":
+                gap = grounding.get("support_gap_m")
+                if not isinstance(gap, (int, float)) or abs(float(gap)) > 0.02:
+                    object_failures.append({
+                        "metric": "articulated_support_gap_m",
+                        "frame": frame_index,
+                        "value": gap,
+                        "allowed_abs": 0.02,
+                    })
+        if pose_type == "animation_sequence" and samples:
+            active = [
+                observed
+                for _, observed in samples
+                if observed.get("animation_asset_path")
+            ]
+            times = [
+                float(observed["animation_time_s"])
+                for observed in active
+                if isinstance(observed.get("animation_time_s"), (int, float))
+            ]
+            if not active or any(observed.get("animation_playing") is not True for observed in active):
+                object_failures.append({"metric": "animation_not_playing"})
+            if len(times) < 2 or max(times) - min(times) <= 1e-4:
+                object_failures.append({"metric": "animation_time_not_advancing", "value": times[:8]})
+        if control_layers_required and len(samples) >= 2:
+            first_frame, first = samples[0]
+            second_frame, second = samples[1]
+            dt = max(0.0, float(second_frame.get("time") or 0.0) - float(first_frame.get("time") or 0.0))
+            max_speed = float(((contract.get("root_transform_source") or {}).get("max_speed_m_s") or 0.0))
+            allowed = max_speed * dt + 0.05
+            initialization_transforms = {
+                "capsule": (
+                    (first.get("capsule_transform") or first.get("actor_transform") or {}).get("position_m") or [],
+                    (second.get("capsule_transform") or second.get("actor_transform") or {}).get("position_m") or [],
+                ),
+                "mesh_root": (
+                    (((first.get("bones") or {}).get("root") or {}).get("position_m") or []),
+                    (((second.get("bones") or {}).get("root") or {}).get("position_m") or []),
+                ),
+            }
+            for source, (first_position, second_position) in initialization_transforms.items():
+                if len(first_position) != 3 or len(second_position) != 3:
+                    continue
+                jump = math.sqrt(sum(
+                    (float(second_position[index]) - float(first_position[index])) ** 2
+                    for index in range(3)
+                ))
+                if jump > allowed:
+                    object_failures.append({
+                        "metric": "frame_zero_initialization_jump_m",
+                        "value": round(jump, 6),
+                        "allowed": round(allowed, 6),
+                        "source": source,
+                    })
+        if root_type == "animation_root_motion" and samples:
+            translation = sum(
+                abs(float(value))
+                for _, observed in samples
+                for value in ((observed.get("root_motion_delta") or {}).get("translation_m") or [])
+            )
+            rotation = sum(
+                abs(float(value))
+                for _, observed in samples
+                for value in ((observed.get("root_motion_delta") or {}).get("rotation_deg") or [])
+            )
+            if translation <= 1e-5 and rotation <= 1e-4:
+                object_failures.append({"metric": "root_motion_delta_missing"})
+        if contract.get("mode") == "ragdoll" and samples:
+            start = float(contract.get("ragdoll_start_time_s") or 0.0)
+            post = [observed for frame, observed in samples if float(frame.get("time") or frame.get("time_s") or 0.0) >= start]
+            if not post or any(observed.get("ragdoll_active") is not True for observed in post):
+                object_failures.append({"metric": "ragdoll_observation_missing"})
+        if object_failures:
+            failed = True
+            failures.append(issue(
+                "F_ARTICULATED_EXECUTION_FAILED",
+                "UE post-tick articulated execution did not satisfy the declared contract",
+                object_id=object_id,
+                findings=object_failures[:20],
+            ))
+        results[object_id] = {
+            "status": "fail" if object_failures else "pass",
+            "sample_count": len(samples),
+            "pose_source_type": pose_type,
+            "root_transform_source_type": root_type,
+            "findings": object_failures,
+        }
+    return {"status": "fail" if failed else "pass", "applicable": True, "objects": results}
+
+
 def find_nonfinite(value: Any, path: str = "$", found: list[str] | None = None) -> list[str]:
     found = found if found is not None else []
     if isinstance(value, float) and not math.isfinite(value):
@@ -829,14 +1370,60 @@ def validate_solver_execution(
     case = read_case_spec(run_dir)
     expected = case.get("expected_physics") if isinstance(case.get("expected_physics"), dict) else {}
     explicit_contract = expected.get("simulation_contract") if isinstance(expected.get("simulation_contract"), dict) else {}
+    articulated_objects = [
+        obj
+        for obj in case.get("objects") or []
+        if isinstance(obj, dict)
+        and isinstance(obj.get("solver"), dict)
+        and obj["solver"].get("type") == "articulated_body"
+    ]
+    simulated_rigid_objects = [
+        obj
+        for obj in case.get("objects") or []
+        if isinstance(obj, dict)
+        and str((obj.get("physics") or {}).get("body_type") or "").casefold() == "dynamic"
+        and not (isinstance(obj.get("solver"), dict) and obj["solver"].get("type") == "articulated_body")
+    ]
+    if articulated_objects and not simulated_rigid_objects and not explicit_contract:
+        runtime_path = next((path for path in (
+            run_dir / "studio_runtime_scene.json",
+            run_dir / "logs" / "studio_runtime_scene_combined.json",
+            run_dir / "logs" / "studio_runtime_scene_rgb.json",
+            run_dir / "logs" / "studio_runtime_scene_data.json",
+        ) if path.is_file()), None)
+        summary_path = next((path for path in (
+            run_dir / "logs" / "native_combined" / "summary.json",
+            run_dir / "logs" / "native_rgb" / "summary.json",
+            run_dir / "logs" / "native_data" / "summary.json",
+            run_dir / "ue_output" / "summary.json",
+        ) if path.is_file()), None)
+        binding = validate_runtime_binding_snapshot(
+            read_optional_json(runtime_path) if runtime_path else {},
+            read_optional_json(summary_path) if summary_path else {},
+        )
+        if binding["status"] != "pass":
+            failures.append(issue(
+                "F_RUNTIME_BINDING_MISMATCH",
+                "compiled articulated bindings do not match the pre-simulation UE component snapshot",
+                mismatches=binding["mismatches"],
+            ))
+        return {
+            "required": False,
+            "status": "not_required" if binding["status"] == "pass" else "fail",
+            "contract": {},
+            "contract_source": "articulated_post_tick_quality_gate",
+            "runtime_bindings": binding,
+        }
     readiness = read_optional_json(run_dir / "run_readiness.json")
     run_backend = backend or (readiness.get("backend") if isinstance(readiness, dict) else None)
     if run_backend is None and (run_dir / "ue_backend_report.json").is_file():
         run_backend = "ue"
-    policy_plan = backend_plan(str(case.get("capability_id") or ""))
+    from harness.core.physics_contract import execution_capability_id
+
+    policy_plan = backend_plan(execution_capability_id(case))
     policy_requires_chaos = (
         run_backend == "ue"
-        and policy_plan.get("preferred_backend") == "ue_chaos_initial_state"
+        and policy_plan.get("preferred_backend") == "ue"
     )
     explicit_requires_chaos = explicit_contract.get("input_mode") == "initial_state_only"
     if not policy_requires_chaos and not explicit_requires_chaos:
@@ -910,6 +1497,15 @@ def validate_solver_execution(
 
     if not runtime_path or not isinstance(runtime, dict):
         violations.append("runtime_scene_missing")
+    runtime_bindings = validate_runtime_binding_snapshot(runtime, summary)
+    if runtime_bindings["status"] != "pass":
+        failures.append(
+            issue(
+                "F_RUNTIME_BINDING_MISMATCH",
+                "compiled actor bindings do not match the pre-simulation UE component snapshot",
+                mismatches=runtime_bindings["mismatches"],
+            )
+        )
     controls = runtime.get("physics_controls") if isinstance(runtime.get("physics_controls"), dict) else {}
     precomputed = runtime.get("precomputed_trajectory")
     if precomputed:
@@ -928,7 +1524,9 @@ def validate_solver_execution(
     dynamic_ids = {
         str(item.get("id"))
         for item in dynamic_objects
-        if isinstance(item, dict) and item.get("id")
+        if isinstance(item, dict)
+        and item.get("id")
+        and str(item.get("behavior") or "") not in {"third_person_runner", "articulated_character"}
     }
     if not dynamic_ids:
         violations.append("dynamic_objects_missing")
@@ -961,11 +1559,19 @@ def validate_solver_execution(
         for item in chaos_runtime.get("actors") or []
         if isinstance(item, dict) and item.get("id") and item.get("role") == "dynamic"
     }
-    for object_id in sorted(dynamic_ids):
+    live_chaos_ids = {
+        str(item["id"])
+        for item in dynamic_objects
+        if isinstance(item, dict)
+        and item.get("id")
+        and isinstance(item.get("physics_properties"), dict)
+        and item["physics_properties"].get("simulate_physics") is True
+    }
+    for object_id in sorted(live_chaos_ids):
         actor = actor_status.get(object_id)
         if not actor:
             violations.append(f"dynamic_actor_missing:{object_id}")
-        elif actor.get("simulate_physics") is not True or actor.get("collision_enabled") is not True or actor.get("errors"):
+        elif actor.get("simulate_physics") is not True or actor.get("errors"):
             violations.append(f"dynamic_actor_not_live:{object_id}")
 
     if not capture_path or not isinstance(raw_capture, dict):
@@ -1098,7 +1704,7 @@ def validate_solver_execution(
     canonical_contact_events = canonical_contact_payload.get("events") if isinstance(canonical_contact_payload, dict) else canonical_contact_payload
     canonical_contact_events = canonical_contact_events if isinstance(canonical_contact_events, list) else []
     contact_method_mapping = {
-        "adp_cpp_runtime_bounds_overlap_or_near_contact": "ue_postsolve_bounds_inference",
+        "adp_cpp_runtime_oriented_box_sat": "ue_postsolve_bounds_inference",
         "ue_on_component_hit": "ue_native_component_hit",
     }
     raw_contact_signatures: Counter[tuple[int, tuple[str, str]]] = Counter()
@@ -1187,7 +1793,236 @@ def validate_solver_execution(
             else None
         ),
         "violations": violations,
+        "runtime_bindings": runtime_bindings,
     }
+
+
+def validate_runtime_binding_snapshot(runtime: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any]:
+    expected_objects = [
+        item
+        for item in [
+            *(runtime.get("static_objects") or []),
+            *(runtime.get("dynamic_objects") or []),
+        ]
+        if isinstance(item, dict) and item.get("id")
+    ]
+    snapshot = summary.get("runtime_binding_snapshot") if isinstance(summary.get("runtime_binding_snapshot"), dict) else {}
+    actual_by_id = {
+        str(item.get("object_id")): item
+        for item in snapshot.get("objects") or []
+        if isinstance(item, dict) and item.get("object_id")
+    }
+    expected_constraints = [
+        item for item in runtime.get("constraints") or []
+        if isinstance(item, dict) and item.get("constraint_id")
+    ]
+    actual_constraints_by_id = {
+        str(item.get("constraint_id")): item
+        for item in snapshot.get("constraints") or []
+        if isinstance(item, dict) and item.get("constraint_id")
+    }
+    mismatches: list[dict[str, Any]] = []
+    residuals: dict[str, dict[str, Any]] = {}
+    if snapshot.get("capture_phase") != "pre_simulation":
+        mismatches.append({"object_id": None, "field": "capture_phase", "expected": "pre_simulation", "actual": snapshot.get("capture_phase")})
+    expected_ids = {str(item["id"]) for item in expected_objects}
+    actual_ids = set(actual_by_id)
+    for missing_id in sorted(expected_ids - actual_ids):
+        mismatches.append({"object_id": missing_id, "field": "snapshot", "expected": "present", "actual": "missing"})
+    for unexpected_id in sorted(actual_ids - expected_ids):
+        mismatches.append({"object_id": unexpected_id, "field": "snapshot", "expected": "absent", "actual": "present"})
+    for expected in expected_objects:
+        object_id = str(expected["id"])
+        actual = actual_by_id.get(object_id)
+        if not actual:
+            continue
+        params = expected.get("params") if isinstance(expected.get("params"), dict) else {}
+        physics = expected.get("physics_properties") if isinstance(expected.get("physics_properties"), dict) else {}
+        expected_geometry = physics.get("collision_geometry") if isinstance(physics.get("collision_geometry"), dict) else None
+        actual_geometry = actual.get("collision_geometry") if isinstance(actual.get("collision_geometry"), dict) else None
+        object_residuals: dict[str, Any] = {}
+        compare_binding_value(mismatches, object_id, "asset.render_mesh_path", params.get("expected_render_mesh_path"), ((actual.get("asset") or {}).get("render_mesh_path")))
+        compare_binding_value(mismatches, object_id, "asset.collision_mesh_path", params.get("expected_collision_mesh_path"), ((actual.get("asset") or {}).get("collision_mesh_path")))
+        compare_binding_value(mismatches, object_id, "asset.asset_id", params.get("expected_asset_id"), ((actual.get("asset") or {}).get("asset_id")))
+        compare_binding_value(mismatches, object_id, "asset.sha256", params.get("expected_asset_sha256"), ((actual.get("asset") or {}).get("sha256")))
+        compare_binding_value(mismatches, object_id, "asset.binding_metadata_registered", True, ((actual.get("asset") or {}).get("binding_metadata_registered")))
+        expected_visible = params.get("visible") is not False
+        compare_binding_value(mismatches, object_id, "visible", expected_visible, actual.get("visible"))
+        compare_binding_value(mismatches, object_id, "mesh_component.registered", True, ((actual.get("mesh_component") or {}).get("registered")))
+        compare_binding_value(mismatches, object_id, "mesh_component.visible", expected_visible, ((actual.get("mesh_component") or {}).get("visible")))
+        compare_binding_value(mismatches, object_id, "mesh_component.participates_in_rendering", expected_visible, ((actual.get("mesh_component") or {}).get("participates_in_rendering")))
+        if str(expected.get("behavior") or "") == "articulated_character":
+            mesh_component = actual.get("mesh_component") if isinstance(actual.get("mesh_component"), dict) else {}
+            articulated_components = actual.get("articulated_components") if isinstance(actual.get("articulated_components"), dict) else {}
+            compare_binding_value(mismatches, object_id, "mesh_component.actor_class", "Character", mesh_component.get("actor_class"))
+            compare_binding_value(
+                mismatches,
+                object_id,
+                "mesh_component.component_class",
+                "SkeletalMeshComponent",
+                mesh_component.get("component_class"),
+            )
+            compare_binding_value(mismatches, object_id, "articulated_components.capsule_registered", True, articulated_components.get("capsule_registered"))
+            compare_binding_value(
+                mismatches,
+                object_id,
+                "articulated_components.character_movement_registered",
+                True,
+                articulated_components.get("character_movement_registered"),
+            )
+            articulated_contract = params.get("articulated_body") or {}
+            control_rig_required = bool(
+                articulated_contract.get("pose_overlay")
+                or articulated_contract.get("ik_targets")
+                or articulated_contract.get("head_look_target")
+            )
+            compare_binding_value(
+                mismatches,
+                object_id,
+                "articulated_components.control_rig_registered",
+                control_rig_required,
+                articulated_components.get("control_rig_registered"),
+            )
+            compare_binding_value(
+                mismatches,
+                object_id,
+                "articulated_components.control_rig_path",
+                articulated_contract.get("control_rig_path") if control_rig_required else None,
+                articulated_components.get("control_rig_path") if articulated_components.get("control_rig_registered") else None,
+            )
+        compare_binding_value(mismatches, object_id, "collision_enabled", bool(physics.get("collision_enabled")), actual.get("collision_enabled"))
+        compare_binding_value(mismatches, object_id, "simulate_physics", bool(physics.get("simulate_physics")), actual.get("simulate_physics"))
+        expected_position = list(expected.get("initial_position_m") or [0.0, 0.0, 0.0])
+        grounding = ((summary.get("articulated_grounding") or {}).get(object_id) or {})
+        if grounding.get("status") == "applied" and isinstance(grounding.get("vertical_offset_m"), (int, float)):
+            expected_position[2] = float(expected_position[2]) + float(grounding["vertical_offset_m"])
+        object_residuals["position_m"] = compare_binding_vector(
+            mismatches,
+            object_id,
+            "world_transform.position_m",
+            expected_position,
+            ((actual.get("world_transform") or {}).get("position_m")),
+            tolerance=1e-4,
+        )
+        expected_rotation = expected.get("rotation_degrees") or [0.0, 0.0, 0.0]
+        base_rotation = params.get("base_rotation_degrees")
+        if (
+            isinstance(expected_rotation, (list, tuple))
+            and len(expected_rotation) >= 3
+            and isinstance(base_rotation, (list, tuple))
+            and len(base_rotation) >= 3
+        ):
+            expected_rotation = [
+                float(base_rotation[index]) + float(expected_rotation[index])
+                for index in range(3)
+            ]
+        object_residuals["rotation_deg"] = compare_binding_vector(
+            mismatches,
+            object_id,
+            "world_transform.rotation_deg",
+            expected_rotation,
+            ((actual.get("world_transform") or {}).get("rotation_deg")),
+            tolerance=1e-3,
+        )
+        if expected_geometry is None:
+            compare_binding_value(mismatches, object_id, "collision_geometry", None, actual_geometry)
+        else:
+            if actual_geometry is None:
+                mismatches.append({"object_id": object_id, "field": "collision_geometry", "expected": expected_geometry, "actual": None})
+            else:
+                compare_binding_value(mismatches, object_id, "collision_geometry.shape", expected_geometry.get("shape"), actual_geometry.get("shape"))
+                object_residuals["collision_size_m"] = compare_binding_vector(
+                    mismatches, object_id, "collision_geometry.size_m", expected_geometry.get("size_m"), actual_geometry.get("size_m"), tolerance=1e-4
+                )
+                object_residuals["collision_local_center_offset_m"] = compare_binding_vector(
+                    mismatches, object_id, "collision_geometry.local_center_offset_m", expected_geometry.get("local_center_offset_m"), actual_geometry.get("local_center_offset_m"), tolerance=1e-6
+                )
+                object_residuals["collision_world_center_m"] = compare_binding_vector(
+                    mismatches, object_id, "collision_geometry.world_center_m", expected_geometry.get("world_center_m"), actual_geometry.get("world_center_m"), tolerance=1e-4
+                )
+        residuals[object_id] = object_residuals
+    expected_constraint_ids = {str(item["constraint_id"]) for item in expected_constraints}
+    actual_constraint_ids = set(actual_constraints_by_id)
+    for missing_id in sorted(expected_constraint_ids - actual_constraint_ids):
+        mismatches.append({"constraint_id": missing_id, "field": "snapshot", "expected": "present", "actual": "missing"})
+    for unexpected_id in sorted(actual_constraint_ids - expected_constraint_ids):
+        mismatches.append({"constraint_id": unexpected_id, "field": "snapshot", "expected": "absent", "actual": "present"})
+    for expected in expected_constraints:
+        constraint_id = str(expected["constraint_id"])
+        actual = actual_constraints_by_id.get(constraint_id)
+        if not actual:
+            continue
+        for field in (
+            "body_a",
+            "body_b",
+            "frame_a",
+            "frame_b",
+            "linear_motion",
+            "unilateral_distance_spring",
+            "angular_motion",
+            "angular_limits_deg",
+            "linear_drive",
+            "angular_drive",
+            "break_thresholds",
+            "axial_visual",
+            "collision_enabled",
+        ):
+            compare_binding_value(mismatches, constraint_id, f"constraint.{field}", expected.get(field), actual.get(field))
+        compare_binding_value(mismatches, constraint_id, "constraint.linear_limit_m", expected.get("linear_limit_m"), actual.get("linear_limit_m"))
+        compare_binding_value(mismatches, constraint_id, "constraint.component_registered", True, actual.get("component_registered"))
+        compare_binding_value(mismatches, constraint_id, "constraint.body_bindings_verified", True, actual.get("body_bindings_verified"))
+        compare_binding_value(mismatches, constraint_id, "constraint.configuration_applied", True, actual.get("configuration_applied"))
+        compare_binding_value(mismatches, constraint_id, "constraint.broken", False, actual.get("broken"))
+    return {
+        "schema_version": "harness_runtime_binding_quality_v1",
+        "status": "fail" if mismatches else "pass",
+        "expected_object_count": len(expected_objects),
+        "actual_object_count": len(actual_by_id),
+        "expected_constraint_count": len(expected_constraints),
+        "actual_constraint_count": len(actual_constraints_by_id),
+        "residuals": residuals,
+        "mismatches": mismatches,
+    }
+
+
+def compare_binding_value(
+    mismatches: list[dict[str, Any]],
+    object_id: str,
+    field: str,
+    expected: Any,
+    actual: Any,
+) -> None:
+    if expected != actual:
+        mismatches.append({"object_id": object_id, "field": field, "expected": expected, "actual": actual})
+
+
+def compare_binding_vector(
+    mismatches: list[dict[str, Any]],
+    object_id: str,
+    field: str,
+    expected: Any,
+    actual: Any,
+    *,
+    tolerance: float,
+) -> float | None:
+    if not isinstance(expected, (list, tuple)) or not isinstance(actual, (list, tuple)) or len(expected) < 3 or len(actual) < 3:
+        mismatches.append({"object_id": object_id, "field": field, "expected": expected, "actual": actual})
+        return None
+    try:
+        residual = max(abs(float(expected[index]) - float(actual[index])) for index in range(3))
+    except (TypeError, ValueError):
+        mismatches.append({"object_id": object_id, "field": field, "expected": expected, "actual": actual})
+        return None
+    if residual > tolerance:
+        mismatches.append({
+            "object_id": object_id,
+            "field": field,
+            "expected": list(expected[:3]),
+            "actual": list(actual[:3]),
+            "residual": residual,
+            "tolerance": tolerance,
+        })
+    return residual
 
 
 def vectors_close(left: Any, right: Any, *, tolerance: float = 1e-5) -> bool:
@@ -1237,6 +2072,7 @@ def validate_contacts(run_dir: Path, trajectory: list[dict[str, Any]], failures:
 
     graph = collision_graph(case)
     positive = positive_collision_case(case, graph)
+    evidence_authority = solve_stage_contact_evidence(run_dir)
     first_by_edge: dict[tuple[str, str], int] = {}
     for event in events:
         objects = event.get("objects")
@@ -1249,7 +2085,16 @@ def validate_contacts(run_dir: Path, trajectory: list[dict[str, Any]], failures:
 
     expected: list[dict[str, Any]] = []
     checked_frames: list[int] = []
-    if positive and graph:
+    if positive and evidence_authority == "declared_measurements":
+        expected = [{"objects": list(pair), "first_frame": None} for pair in graph]
+    elif positive and evidence_authority is None:
+        failures.append(
+            issue(
+                "F_CONTACT_EVIDENCE_CONTRACT_MISSING",
+                "solve stage declares no unique contact evidence output",
+            )
+        )
+    elif positive and graph:
         for pair in graph:
             frame = first_by_edge.get(pair)
             expected.append({"objects": list(pair), "first_frame": frame})
@@ -1267,59 +2112,42 @@ def validate_contacts(run_dir: Path, trajectory: list[dict[str, Any]], failures:
         elif min(checked_frames) == 0:
             failures.append(issue("F_CONTACT_AT_INITIAL_FRAME", "positive collision evidence starts at frame 0", frame=0))
 
-    expected_spread = str((case.get("expected_physics") or {}).get("expected_spread") or "")
-    complete_propagation = requires_complete_passive_propagation(case)
-    complete_propagation_summary: dict[str, Any] | None = None
-    if complete_propagation:
-        passive_ids = [str(item) for item in case.get("passive_objects") or []]
-        support_ids = {
-            str(item.get("id"))
-            for item in case.get("objects") or []
-            if isinstance(item, dict) and str(item.get("role") or "") == "support"
-        }
-        contacted = set()
-        for event in events:
-            objects = [str(item) for item in event.get("objects") or []]
-            if integer(event.get("frame"), default=-1) <= 0 or len(objects) < 2 or set(objects) & support_ids:
-                continue
-            contacted.update(set(objects) & set(passive_ids))
-        initial_objects = (trajectory[0].get("objects") or {}) if trajectory else {}
-        displacement_by_id: dict[str, float] = {}
-        for object_id in passive_ids:
-            initial = state_position(initial_objects.get(object_id) or {})
-            displacement_by_id[object_id] = max(
-                (
-                    math.dist(initial, state_position((frame.get("objects") or {}).get(object_id) or {}))
-                    for frame in trajectory
-                ),
-                default=0.0,
-            )
-        missing_contacts = sorted(set(passive_ids) - contacted)
-        insufficient_motion = sorted(object_id for object_id, value in displacement_by_id.items() if value + 1e-9 < 0.01)
-        if missing_contacts:
-            failures.append(issue("F_FULL_RACK_CONTACT_INCOMPLETE", "full-rack break did not positively contact every passive target", object_ids=missing_contacts))
-        if insufficient_motion:
-            failures.append(issue("F_FULL_RACK_MOTION_INCOMPLETE", "full-rack break left passive targets below 1 cm displacement", object_ids=insufficient_motion))
-        complete_propagation_summary = {
-            "expected_spread": expected_spread,
-            "required_passive_count": len(passive_ids),
-            "positively_contacted_count": len(contacted),
-            "moved_at_least_1cm_count": sum(value + 1e-9 >= 0.01 for value in displacement_by_id.values()),
-            "missing_contacts": missing_contacts,
-            "insufficient_motion": insufficient_motion,
-        }
-
-    initial_expected_contact_free = not positive or bool(checked_frames and min(checked_frames) > 0)
+    initial_expected_contact_free = (
+        None
+        if positive and evidence_authority == "declared_measurements"
+        else not positive or bool(checked_frames and min(checked_frames) > 0)
+    )
     return {
         "event_count": len(events),
+        "evidence_authority": evidence_authority,
         "positive_collision_case": positive,
         "expected_edges": expected,
         "first_positive_contact_frame": min(checked_frames) if checked_frames else None,
         "initial_expected_contact_free": initial_expected_contact_free,
-        "initial_contact_scope": "expected_collision_graph" if graph else "non_support_contacts",
-        "complete_passive_propagation": complete_propagation_summary,
-        "full_rack_break": complete_propagation_summary if expected_spread == "full_rack_break" else None,
+        "initial_contact_scope": (
+            "solver_declared_measurements"
+            if evidence_authority == "declared_measurements"
+            else "expected_collision_graph"
+            if graph
+            else "non_support_contacts"
+        ),
     }
+
+
+def solve_stage_contact_evidence(run_dir: Path) -> str | None:
+    runtime_plan = read_optional_json(run_dir / "runtime_plan.json")
+    stages = runtime_plan.get("stages") if isinstance(runtime_plan, dict) else None
+    solve_stage = next(
+        (
+            stage
+            for stage in stages or []
+            if isinstance(stage, dict) and stage.get("kind") in {"solve", "solve_render"}
+        ),
+        None,
+    )
+    outputs = set(solve_stage.get("outputs") or []) if isinstance(solve_stage, dict) else set()
+    declared = outputs.intersection({"contact_events", "declared_measurements"})
+    return next(iter(declared)) if len(declared) == 1 else None
 
 
 def state_position(state: dict[str, Any]) -> list[float]:
@@ -1383,8 +2211,7 @@ def positive_collision_case(case: dict[str, Any], graph: list[tuple[str, str]]) 
     expected = case.get("verifier_expectation")
     if isinstance(expected, dict) and expected.get("status") == "fail":
         return False
-    identifiers = " ".join(str(case.get(key) or "") for key in ("capability_id", "task_type"))
-    return bool(graph) or "collision" in identifiers or "contact" in identifiers
+    return bool(graph)
 
 
 def build_ranking_score(

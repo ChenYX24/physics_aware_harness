@@ -1,0 +1,1367 @@
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import mimetypes
+import os
+import re
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Mapping, Protocol
+
+from harness.assets.providers.contracts import stable_digest
+from harness.core.artifact_schema import write_json
+
+
+MESHY_API_KEY_ENV = "SIM_HARNESS_MESHY_API_KEY"
+MESHY_API_ROOT = "https://api.meshy.ai/openapi/v1"
+POLY_HAVEN_API_ROOT = "https://api.polyhaven.com"
+POLY_HAVEN_USER_AGENT = "PhysicsAwareHarness/0.1 (asset-provider; https://polyhaven.com)"
+MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
+REMOTE_RETRY_ATTEMPTS = 3
+REMOTE_RETRY_BASE_DELAY_S = 0.25
+
+
+class RemoteProviderError(RuntimeError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        status: str = "failed",
+        retriable: bool = False,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.status = status
+        self.retriable = retriable
+        self.details = dict(details or {})
+
+
+class RemoteTransport(Protocol):
+    def request_json(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        payload: Mapping[str, Any] | None = None,
+        timeout_s: float = 30.0,
+    ) -> dict[str, Any]: ...
+
+    def download(
+        self,
+        url: str,
+        destination: Path,
+        *,
+        headers: Mapping[str, str],
+        expected_md5: str | None = None,
+        timeout_s: float = 120.0,
+    ) -> dict[str, Any]: ...
+
+
+class UrllibRemoteTransport:
+    def request_json(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        payload: Mapping[str, Any] | None = None,
+        timeout_s: float = 30.0,
+    ) -> dict[str, Any]:
+        body = None if payload is None else json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        request_headers = {**headers, "Accept": "application/json"}
+        if body is not None:
+            request_headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(url, data=body, headers=request_headers, method=method.upper())
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_s) as response:
+                raw = response.read()
+        except urllib.error.HTTPError as exc:
+            detail = _safe_http_error(exc)
+            raise RemoteProviderError(
+                "provider_http_error",
+                f"remote provider returned HTTP {exc.code}: {detail}",
+                status="blocked" if exc.code in {401, 402, 403} else "failed",
+                retriable=exc.code in {408, 409, 425, 429} or exc.code >= 500,
+            ) from exc
+        except (TimeoutError, urllib.error.URLError, OSError) as exc:
+            raise RemoteProviderError("provider_network_error", str(exc), retriable=True) from exc
+        try:
+            value = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RemoteProviderError("provider_response_invalid", "remote provider returned invalid JSON") from exc
+        if not isinstance(value, Mapping):
+            raise RemoteProviderError("provider_response_invalid", "remote provider JSON root must be an object")
+        return dict(value)
+
+    def download(
+        self,
+        url: str,
+        destination: Path,
+        *,
+        headers: Mapping[str, str],
+        expected_md5: str | None = None,
+        timeout_s: float = 120.0,
+    ) -> dict[str, Any]:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise RemoteProviderError("download_url_invalid", "provider download URL must use HTTPS")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if expected_md5 and destination.is_file():
+            actual_md5 = _md5_file(destination)
+            if actual_md5.casefold() == expected_md5.casefold():
+                return {
+                    "path": destination,
+                    "sha256": _sha256_file(destination),
+                    "md5": actual_md5,
+                    "byte_size": destination.stat().st_size,
+                    "cache_hit": True,
+                }
+        partial = destination.with_name(f"{destination.name}.part")
+        request = urllib.request.Request(url, headers={**headers, "Accept": "*/*"})
+        sha256 = hashlib.sha256()
+        md5 = hashlib.md5(usedforsecurity=False)
+        byte_size = 0
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_s) as response, partial.open("wb") as stream:
+                declared = response.headers.get("Content-Length")
+                if declared and int(declared) > MAX_DOWNLOAD_BYTES:
+                    raise RemoteProviderError("download_too_large", f"download exceeds {MAX_DOWNLOAD_BYTES} bytes")
+                while chunk := response.read(1024 * 1024):
+                    byte_size += len(chunk)
+                    if byte_size > MAX_DOWNLOAD_BYTES:
+                        raise RemoteProviderError("download_too_large", f"download exceeds {MAX_DOWNLOAD_BYTES} bytes")
+                    sha256.update(chunk)
+                    md5.update(chunk)
+                    stream.write(chunk)
+        except RemoteProviderError:
+            partial.unlink(missing_ok=True)
+            raise
+        except urllib.error.HTTPError as exc:
+            partial.unlink(missing_ok=True)
+            raise RemoteProviderError(
+                "provider_download_failed",
+                f"provider download returned HTTP {exc.code}",
+                retriable=exc.code in {408, 425, 429} or exc.code >= 500,
+            ) from exc
+        except (TimeoutError, urllib.error.URLError, OSError) as exc:
+            partial.unlink(missing_ok=True)
+            raise RemoteProviderError("provider_download_failed", str(exc), retriable=True) from exc
+        actual_md5 = md5.hexdigest()
+        if expected_md5 and actual_md5.casefold() != expected_md5.casefold():
+            partial.unlink(missing_ok=True)
+            raise RemoteProviderError("download_hash_mismatch", f"MD5 mismatch for {destination.name}")
+        os.replace(partial, destination)
+        return {
+            "path": destination,
+            "sha256": sha256.hexdigest(),
+            "md5": actual_md5,
+            "byte_size": byte_size,
+        }
+
+
+@dataclass(frozen=True)
+class RemoteAcquisition:
+    provider_id: str
+    provider_version: str
+    source_kind: str
+    source_uri: str
+    source_asset_id: str
+    asset_id: str
+    name: str
+    description: str
+    author: str
+    license: str
+    license_tier: str
+    request_parameters: dict[str, Any]
+    input_identities: tuple[dict[str, str], ...]
+    files: tuple[dict[str, Any], ...]
+    import_file: Path
+    canonical_file: Path
+    expected_size_m: tuple[float, float, float] | None
+    metadata: dict[str, Any]
+
+
+class RemoteProviderAdapter(Protocol):
+    provider_id: str
+    provider_version: str
+    source_kind: str
+
+    def acquire(
+        self,
+        request: Mapping[str, Any],
+        *,
+        destination: Path,
+        workspace: Path,
+    ) -> RemoteAcquisition: ...
+
+
+class MeshyModelGenerationAdapter:
+    provider_id = "meshy_model_generation_v1"
+    provider_version = "2026-08-06"
+    source_kind = "model_generation"
+
+    def __init__(
+        self,
+        *,
+        transport: RemoteTransport | None = None,
+        api_key: str | None = None,
+        poll_interval_s: float = 5.0,
+        timeout_s: float = 1800.0,
+        sleep: Callable[[float], None] = time.sleep,
+        resume_request: Mapping[str, Any] | None = None,
+    ) -> None:
+        self.transport = transport or UrllibRemoteTransport()
+        self.api_key = api_key
+        self.poll_interval_s = float(poll_interval_s)
+        self.timeout_s = float(timeout_s)
+        self.sleep = sleep
+        self.resume_request = dict(resume_request) if resume_request is not None else None
+
+    def acquire(
+        self,
+        request: Mapping[str, Any],
+        *,
+        destination: Path,
+        workspace: Path,
+    ) -> RemoteAcquisition:
+        if self.resume_request is not None and dict(request) != self.resume_request:
+            raise RemoteProviderError(
+                "provider_resume_request_mismatch",
+                "the compiled Provider request does not exactly match the saved Meshy request",
+                status="blocked",
+            )
+        hint = str(request.get("provider_hint") or "").strip().casefold()
+        if hint and hint not in {"meshy", "meshy_v1", self.provider_id}:
+            raise RemoteProviderError("unsupported_provider_hint", f"model_generation provider is not supported: {hint}", status="blocked")
+        cached = _load_cached_acquisition(
+            destination,
+            provider_id=self.provider_id,
+            provider_version=self.provider_version,
+            request=request,
+        )
+        if cached is not None:
+            return cached
+        api_key = (os.environ.get(MESHY_API_KEY_ENV, "") if self.api_key is None else self.api_key).strip()
+        if not api_key:
+            raise RemoteProviderError(
+                "provider_credentials_missing",
+                f"Meshy API key is not configured in {MESHY_API_KEY_ENV}",
+                status="blocked",
+            )
+        references, identities = _meshy_references(request.get("reference_inputs"), workspace=workspace)
+        size = _optional_size(request.get("generation_spec"))
+        payload = {
+            "image_urls": references,
+            "ai_model": "latest",
+            "should_texture": True,
+            "enable_pbr": True,
+            "texture_resolution": "2k",
+            "should_remesh": True,
+            "topology": "triangle",
+            "target_polycount": 30000,
+            "image_enhancement": False,
+            "remove_lighting": True,
+            "target_formats": ["glb", "obj"],
+            "auto_size": size is None,
+        }
+        texture_prompt = request.get("texture_prompt")
+        if texture_prompt is not None:
+            if not isinstance(texture_prompt, str):
+                raise RemoteProviderError("texture_prompt_invalid", "Meshy texture_prompt must be a string", status="blocked")
+            if len(texture_prompt) > 600:
+                raise RemoteProviderError(
+                    "texture_prompt_too_long",
+                    "Meshy texture_prompt must contain at most 600 characters",
+                    status="blocked",
+                )
+            if texture_prompt:
+                payload["texture_prompt"] = texture_prompt
+        headers = {"Authorization": f"Bearer {api_key}"}
+        destination.mkdir(parents=True, exist_ok=True)
+        checkpoint = _load_meshy_checkpoint(destination, request=request, provider_id=self.provider_id)
+        if checkpoint is None:
+            submission = _load_meshy_submission_state(destination, request=request, provider_id=self.provider_id)
+            if submission is not None and submission.get("state") in {"attempting", "unknown", "acknowledged"}:
+                raise RemoteProviderError(
+                    "provider_submission_state_unknown",
+                    "a prior Meshy POST may have created a paid task without returning its ID; refusing to submit again",
+                    status="blocked",
+                    details={"submission_state": str(submission.get("state"))},
+                )
+            if self.resume_request is not None:
+                raise RemoteProviderError(
+                    "provider_resume_checkpoint_missing",
+                    "saved Meshy request has no matching task checkpoint; resume mode will not submit a new paid task",
+                    status="blocked",
+                )
+            _write_meshy_submission_state(
+                destination,
+                request=request,
+                provider_id=self.provider_id,
+                state="attempting",
+            )
+            try:
+                submitted = self.transport.request_json(
+                    "POST",
+                    f"{MESHY_API_ROOT}/multi-image-to-3d",
+                    headers=headers,
+                    payload=payload,
+                    timeout_s=30.0,
+                )
+            except RemoteProviderError as exc:
+                state = "unknown" if exc.retriable else "rejected"
+                _write_meshy_submission_state(
+                    destination,
+                    request=request,
+                    provider_id=self.provider_id,
+                    state=state,
+                    failure_code=exc.code,
+                )
+                if state == "unknown":
+                    raise RemoteProviderError(
+                        "provider_submission_state_unknown",
+                        "Meshy POST failed before a task ID was received; refusing automatic resubmission",
+                        status="blocked",
+                        details={"underlying_failure_code": exc.code},
+                    ) from exc
+                raise
+            write_json(destination / "submit_response.json", _redact_signed_urls(submitted))
+            task_id = str(submitted.get("result") or "").strip()
+            if not task_id:
+                _write_meshy_submission_state(
+                    destination,
+                    request=request,
+                    provider_id=self.provider_id,
+                    state="unknown",
+                    failure_code="provider_response_invalid",
+                )
+                raise RemoteProviderError(
+                    "provider_submission_state_unknown",
+                    "Meshy create response did not contain a task ID; refusing automatic resubmission",
+                    status="blocked",
+                )
+            checkpoint = _write_meshy_checkpoint(
+                destination,
+                request=request,
+                provider_id=self.provider_id,
+                task_id=task_id,
+                task={"status": "SUBMITTED"},
+            )
+            _write_meshy_submission_state(
+                destination,
+                request=request,
+                provider_id=self.provider_id,
+                state="acknowledged",
+                task_id=task_id,
+            )
+        else:
+            task_id = str(checkpoint["task_id"])
+        deadline = time.monotonic() + self.timeout_s
+        task: dict[str, Any] = {}
+        try:
+            while True:
+                task, _ = _retry_remote_operation(
+                    lambda: self.transport.request_json(
+                        "GET",
+                        f"{MESHY_API_ROOT}/multi-image-to-3d/{urllib.parse.quote(task_id, safe='')}",
+                        headers=headers,
+                        timeout_s=30.0,
+                    ),
+                    sleep=self.sleep,
+                )
+                write_json(destination / "task_response_latest.json", _redact_signed_urls(task))
+                _write_meshy_checkpoint(
+                    destination,
+                    request=request,
+                    provider_id=self.provider_id,
+                    task_id=task_id,
+                    task=task,
+                )
+                status = str(task.get("status") or "").upper()
+                if status == "SUCCEEDED":
+                    break
+                if status in {"FAILED", "CANCELED"}:
+                    raise RemoteProviderError(
+                        "provider_task_failed" if status == "FAILED" else "provider_task_canceled",
+                        str(task.get("task_error") or task.get("message") or f"Meshy task {status.casefold()}"),
+                    )
+                if status not in {"PENDING", "IN_PROGRESS"}:
+                    raise RemoteProviderError("provider_response_invalid", f"unknown Meshy task status: {status or '<missing>'}")
+                if time.monotonic() >= deadline:
+                    raise RemoteProviderError("provider_task_timeout", f"Meshy task exceeded {self.timeout_s:g}s", retriable=True)
+                self.sleep(min(self.poll_interval_s, max(0.0, deadline - time.monotonic())))
+            model_urls = task.get("model_urls") if isinstance(task.get("model_urls"), Mapping) else {}
+            glb_url = str(model_urls.get("glb") or task.get("model_url") or "").strip()
+            obj_url = str(model_urls.get("obj") or "").strip()
+            if not glb_url or not obj_url:
+                raise RemoteProviderError("provider_output_missing", "Meshy task did not return both GLB and OBJ outputs")
+            files: list[dict[str, Any]] = []
+            for role, file_format, url in (("canonical", "glb", glb_url), ("import_source", "obj", obj_url)):
+                downloaded, _ = _retry_remote_operation(
+                    lambda url=url, file_format=file_format: self.transport.download(
+                        url,
+                        destination / f"model.{file_format}",
+                        headers={},
+                    ),
+                    sleep=self.sleep,
+                )
+                files.append(_download_record(downloaded, role=role, file_format=file_format))
+            for optional_format in ("mtl",):
+                url = str(model_urls.get(optional_format) or "").strip()
+                if url:
+                    downloaded, _ = _retry_remote_operation(
+                        lambda url=url, optional_format=optional_format: self.transport.download(
+                            url,
+                            destination / f"model.{optional_format}",
+                            headers={},
+                        ),
+                        sleep=self.sleep,
+                    )
+                    files.append(_download_record(downloaded, role="material_dependency", file_format=optional_format))
+            downloaded_names = {Path(str(row["path"])).name for row in files}
+            for texture_index, texture_set in enumerate(task.get("texture_urls") or []):
+                if not isinstance(texture_set, Mapping):
+                    raise RemoteProviderError("provider_response_invalid", "Meshy texture output must be an object")
+                for texture_role, raw_url in sorted(texture_set.items()):
+                    url = str(raw_url or "").strip()
+                    if not url:
+                        continue
+                    name = urllib.parse.unquote(Path(urllib.parse.urlsplit(url).path).name)
+                    if not name or name in downloaded_names or Path(name).name != name:
+                        name = f"texture_{texture_index}_{_safe_id(str(texture_role))}.png"
+                    downloaded_names.add(name)
+                    downloaded, _ = _retry_remote_operation(
+                        lambda url=url, name=name: self.transport.download(url, destination / name, headers={}),
+                        sleep=self.sleep,
+                    )
+                    files.append(
+                        _download_record(
+                            downloaded,
+                            role=f"texture_{texture_role}",
+                            file_format=Path(name).suffix.lstrip(".") or "png",
+                        )
+                    )
+        except RemoteProviderError as exc:
+            exc.details.update(
+                {
+                    "task_id": task_id,
+                    "task_status": str(task.get("status") or checkpoint.get("task_status") or "UNKNOWN").upper(),
+                    "progress": task.get("progress", checkpoint.get("progress")),
+                    "consumed_credits": task.get("consumed_credits", checkpoint.get("consumed_credits")),
+                }
+            )
+            raise
+        output_digest = stable_digest({"task_id": task_id, "files": [{"format": row["format"], "sha256": row["sha256"]} for row in files]})
+        acquisition = RemoteAcquisition(
+            provider_id=self.provider_id,
+            provider_version=self.provider_version,
+            source_kind="model_generation",
+            source_uri=f"meshy://multi-image-to-3d/{task_id}",
+            source_asset_id=task_id,
+            asset_id=f"generated.meshy.{output_digest[:24]}",
+            name=f"Meshy generated asset {task_id[:12]}",
+            description=str((request.get("search_intent") or {}).get("raw_query") or "Meshy multi-image generated mesh"),
+            author="Meshy",
+            license="All Rights Reserved",
+            license_tier="local_preview",
+            request_parameters={**payload, "image_urls": [f"input:{row['input_id']}" for row in identities]},
+            input_identities=tuple(identities),
+            files=tuple(files),
+            import_file=destination / "model.obj",
+            canonical_file=destination / "model.glb",
+            expected_size_m=size,
+            metadata={
+                "task_id": task_id,
+                "status": "SUCCEEDED",
+                "consumed_credits": task.get("consumed_credits"),
+                "progress": task.get("progress"),
+            },
+        )
+        _write_cached_acquisition(destination, request=request, acquisition=acquisition)
+        return acquisition
+
+
+class PolyHavenExternalSiteAdapter:
+    provider_id = "poly_haven_external_site_v1"
+    provider_version = "2026-08-08.3"
+    source_kind = "external_site"
+
+    def __init__(self, *, transport: RemoteTransport | None = None, resolution: str = "1k") -> None:
+        self.transport = transport or UrllibRemoteTransport()
+        self.resolution = resolution
+
+    def acquire(
+        self,
+        request: Mapping[str, Any],
+        *,
+        destination: Path,
+        workspace: Path,
+    ) -> RemoteAcquisition:
+        del workspace
+        hint = str(request.get("provider_hint") or "").strip().casefold()
+        if not _is_poly_haven_provider_hint(hint, provider_id=self.provider_id):
+            raise RemoteProviderError("unsupported_provider_hint", f"external_site provider is not supported: {hint}", status="blocked")
+        cached = _load_cached_acquisition(
+            destination,
+            provider_id=self.provider_id,
+            provider_version=self.provider_version,
+            request=request,
+        )
+        if cached is not None:
+            return cached
+        headers = {"User-Agent": POLY_HAVEN_USER_AGENT}
+        assets, assets_attempts = _retry_remote_operation(
+            lambda: self.transport.request_json("GET", f"{POLY_HAVEN_API_ROOT}/assets", headers=headers)
+        )
+        asset_id, metadata, discovery = _select_poly_haven_asset(request, assets)
+        files_response, files_attempts = _retry_remote_operation(
+            lambda: self.transport.request_json(
+                "GET",
+                f"{POLY_HAVEN_API_ROOT}/files/{urllib.parse.quote(asset_id, safe='')}",
+                headers=headers,
+            )
+        )
+        destination.mkdir(parents=True, exist_ok=True)
+        write_json(destination / "discovery.json", discovery)
+        write_json(destination / "asset_metadata.json", {"asset_id": asset_id, **metadata})
+        write_json(destination / "files_response.json", files_response)
+        selected = _poly_haven_fbx(files_response, resolution=self.resolution)
+        source, source_attempts = _retry_remote_operation(
+            lambda: self.transport.download(
+                str(selected["url"]),
+                destination / f"{asset_id}.fbx",
+                headers=headers,
+                expected_md5=str(selected.get("md5") or "") or None,
+            )
+        )
+        files = [_download_record(source, role="import_source", file_format="fbx")]
+        download_attempts = {f"{asset_id}.fbx": source_attempts}
+        includes = selected.get("include") if isinstance(selected.get("include"), Mapping) else {}
+        for relative_name, record in sorted(includes.items()):
+            if not isinstance(record, Mapping):
+                raise RemoteProviderError("provider_response_invalid", "Poly Haven dependency record is invalid")
+            relative = _safe_relative_path(str(relative_name))
+            downloaded, attempt_count = _retry_remote_operation(
+                lambda record=record, relative=relative: self.transport.download(
+                    str(record.get("url") or ""),
+                    destination / relative,
+                    headers=headers,
+                    expected_md5=str(record.get("md5") or "") or None,
+                )
+            )
+            files.append(_download_record(downloaded, role="source_dependency", file_format=relative.suffix.lstrip(".")))
+            download_attempts[relative.as_posix()] = attempt_count
+        source_version = str(metadata.get("files_hash") or stable_digest(files_response))
+        canonical = destination / f"{asset_id}.fbx"
+        acquisition = RemoteAcquisition(
+            provider_id=self.provider_id,
+            provider_version=self.provider_version,
+            source_kind="external_site",
+            source_uri=f"https://polyhaven.com/a/{asset_id}",
+            source_asset_id=asset_id,
+            asset_id=f"external.polyhaven.{_safe_id(asset_id)}.{source_version[:12]}",
+            name=str(metadata.get("name") or asset_id),
+            description=str(metadata.get("description") or "Poly Haven CC0 asset"),
+            author=", ".join(sorted(str(value) for value in (metadata.get("authors") or {}).keys())) or "Poly Haven",
+            license="CC0-1.0",
+            license_tier="reference",
+            request_parameters={
+                "asset_id": asset_id,
+                "resolution": self.resolution,
+                "format": "fbx",
+                "selection_policy": discovery["selection_policy"],
+            },
+            input_identities=(),
+            files=tuple(files),
+            import_file=canonical,
+            canonical_file=canonical,
+            expected_size_m=_poly_haven_size(metadata) or _optional_size(request.get("generation_spec")),
+            metadata={
+                "asset_id": asset_id,
+                "files_hash": metadata.get("files_hash"),
+                "category": metadata.get("category"),
+                "tags": list(metadata.get("tags") or []),
+                "authors": dict(metadata.get("authors") or {}),
+                "api_attribution": "Poly Haven",
+                "remote_attempts": {
+                    "assets_metadata": assets_attempts,
+                    "files_metadata": files_attempts,
+                    "downloads": download_attempts,
+                },
+                "discovery": discovery,
+            },
+        )
+        _write_cached_acquisition(destination, request=request, acquisition=acquisition)
+        return acquisition
+
+
+def _write_cached_acquisition(
+    destination: Path,
+    *,
+    request: Mapping[str, Any],
+    acquisition: RemoteAcquisition,
+) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    files = []
+    for row in acquisition.files:
+        path = Path(str(row["path"])).resolve()
+        relative = path.relative_to(destination.resolve())
+        files.append(
+            {
+                "role": str(row["role"]),
+                "path": relative.as_posix(),
+                "format": str(row["format"]),
+                "sha256": str(row["sha256"]),
+                "md5": str(row.get("md5") or ""),
+                "byte_size": int(row["byte_size"]),
+            }
+        )
+    payload = {
+        "schema_version": "harness_remote_acquisition_v1",
+        "request_identity": _request_identity(request),
+        "provider_id": acquisition.provider_id,
+        "provider_version": acquisition.provider_version,
+        "source_kind": acquisition.source_kind,
+        "source_uri": acquisition.source_uri,
+        "source_asset_id": acquisition.source_asset_id,
+        "asset_id": acquisition.asset_id,
+        "name": acquisition.name,
+        "description": acquisition.description,
+        "author": acquisition.author,
+        "license": acquisition.license,
+        "license_tier": acquisition.license_tier,
+        "request_parameters": acquisition.request_parameters,
+        "input_identities": list(acquisition.input_identities),
+        "files": files,
+        "import_file": acquisition.import_file.resolve().relative_to(destination.resolve()).as_posix(),
+        "canonical_file": acquisition.canonical_file.resolve().relative_to(destination.resolve()).as_posix(),
+        "expected_size_m": list(acquisition.expected_size_m) if acquisition.expected_size_m is not None else None,
+        "metadata": acquisition.metadata,
+    }
+    write_json(destination / "acquisition.json", payload)
+
+
+def _load_cached_acquisition(
+    destination: Path,
+    *,
+    provider_id: str,
+    provider_version: str,
+    request: Mapping[str, Any],
+) -> RemoteAcquisition | None:
+    manifest = destination / "acquisition.json"
+    try:
+        value = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(value, Mapping)
+        or value.get("schema_version") != "harness_remote_acquisition_v1"
+        or value.get("provider_id") != provider_id
+        or value.get("provider_version") != provider_version
+        or value.get("request_identity") != _request_identity(request)
+    ):
+        return None
+    files: list[dict[str, Any]] = []
+    for raw in value.get("files") or []:
+        if not isinstance(raw, Mapping):
+            return None
+        try:
+            relative = _safe_relative_path(str(raw.get("path") or ""))
+        except RemoteProviderError:
+            return None
+        path = (destination / relative).resolve()
+        try:
+            path.relative_to(destination.resolve())
+        except ValueError:
+            return None
+        if not path.is_file() or path.stat().st_size != int(raw.get("byte_size") or -1):
+            return None
+        if _sha256_file(path) != str(raw.get("sha256") or ""):
+            return None
+        files.append({**dict(raw), "path": path})
+    if not files:
+        return None
+    try:
+        import_file = (destination / _safe_relative_path(str(value["import_file"]))).resolve()
+        canonical_file = (destination / _safe_relative_path(str(value["canonical_file"]))).resolve()
+        expected = value.get("expected_size_m")
+        expected_size = tuple(float(item) for item in expected) if isinstance(expected, list) else None
+        if expected_size is not None and len(expected_size) != 3:
+            return None
+        return RemoteAcquisition(
+            provider_id=str(value["provider_id"]),
+            provider_version=str(value["provider_version"]),
+            source_kind=str(value["source_kind"]),
+            source_uri=str(value["source_uri"]),
+            source_asset_id=str(value["source_asset_id"]),
+            asset_id=str(value["asset_id"]),
+            name=str(value["name"]),
+            description=str(value["description"]),
+            author=str(value["author"]),
+            license=str(value["license"]),
+            license_tier=str(value["license_tier"]),
+            request_parameters=dict(value.get("request_parameters") or {}),
+            input_identities=tuple(dict(row) for row in value.get("input_identities") or []),
+            files=tuple(files),
+            import_file=import_file,
+            canonical_file=canonical_file,
+            expected_size_m=expected_size,
+            metadata=dict(value.get("metadata") or {}),
+        )
+    except (KeyError, TypeError, ValueError, RemoteProviderError):
+        return None
+
+
+def _request_identity(request: Mapping[str, Any]) -> str:
+    digest = str(request.get("request_digest") or "")
+    return digest if re.fullmatch(r"[0-9a-f]{64}", digest.casefold()) else stable_digest(request)
+
+
+def _load_meshy_submission_state(
+    destination: Path,
+    *,
+    request: Mapping[str, Any],
+    provider_id: str,
+) -> dict[str, Any] | None:
+    path = destination / "submission_attempt.json"
+    if not path.exists():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RemoteProviderError(
+            "provider_submission_state_invalid",
+            "Meshy submission state cannot be read; refusing to submit a duplicate paid task",
+            status="blocked",
+        ) from exc
+    if (
+        not isinstance(value, Mapping)
+        or value.get("schema_version") != "harness_meshy_submission_attempt_v1"
+        or value.get("provider_id") != provider_id
+        or value.get("request_identity") != _request_identity(request)
+        or value.get("state") not in {"attempting", "unknown", "rejected", "acknowledged"}
+    ):
+        raise RemoteProviderError(
+            "provider_submission_state_invalid",
+            "Meshy submission state does not match this request; refusing to submit a duplicate paid task",
+            status="blocked",
+        )
+    return dict(value)
+
+
+def _write_meshy_submission_state(
+    destination: Path,
+    *,
+    request: Mapping[str, Any],
+    provider_id: str,
+    state: str,
+    task_id: str | None = None,
+    failure_code: str | None = None,
+) -> dict[str, Any]:
+    value = {
+        "schema_version": "harness_meshy_submission_attempt_v1",
+        "provider_id": provider_id,
+        "request_identity": _request_identity(request),
+        "state": state,
+    }
+    if task_id:
+        value["task_id"] = task_id
+    if failure_code:
+        value["failure_code"] = failure_code
+    write_json(destination / "submission_attempt.json", value)
+    return value
+
+
+def _load_meshy_checkpoint(
+    destination: Path,
+    *,
+    request: Mapping[str, Any],
+    provider_id: str,
+) -> dict[str, Any] | None:
+    path = destination / "task_checkpoint.json"
+    if not path.exists():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RemoteProviderError(
+            "provider_task_checkpoint_invalid",
+            "Meshy task checkpoint exists but cannot be read; refusing to submit a duplicate paid task",
+            status="blocked",
+        ) from exc
+    if (
+        not isinstance(value, Mapping)
+        or value.get("schema_version") != "harness_meshy_task_checkpoint_v1"
+        or value.get("provider_id") != provider_id
+        or value.get("request_identity") != _request_identity(request)
+        or not str(value.get("task_id") or "").strip()
+    ):
+        raise RemoteProviderError(
+            "provider_task_checkpoint_invalid",
+            "Meshy task checkpoint does not match this request; refusing to submit a duplicate paid task",
+            status="blocked",
+        )
+    return dict(value)
+
+
+def _write_meshy_checkpoint(
+    destination: Path,
+    *,
+    request: Mapping[str, Any],
+    provider_id: str,
+    task_id: str,
+    task: Mapping[str, Any],
+) -> dict[str, Any]:
+    checkpoint = {
+        "schema_version": "harness_meshy_task_checkpoint_v1",
+        "provider_id": provider_id,
+        "request_identity": _request_identity(request),
+        "task_id": task_id,
+        "task_status": str(task.get("status") or "UNKNOWN").upper(),
+        "progress": task.get("progress"),
+        "consumed_credits": task.get("consumed_credits"),
+    }
+    write_json(destination / "task_checkpoint.json", checkpoint)
+    return checkpoint
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _md5_file(path: Path) -> str:
+    digest = hashlib.md5(usedforsecurity=False)
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _retry_remote_operation(
+    operation: Callable[[], Any],
+    *,
+    sleep: Callable[[float], None] | None = None,
+) -> tuple[Any, int]:
+    for attempt in range(1, REMOTE_RETRY_ATTEMPTS + 1):
+        try:
+            return operation(), attempt
+        except RemoteProviderError as exc:
+            if not exc.retriable or attempt >= REMOTE_RETRY_ATTEMPTS:
+                exc.details["attempt_count"] = attempt
+                exc.details["maximum_attempts"] = REMOTE_RETRY_ATTEMPTS
+                raise
+            (sleep or time.sleep)(REMOTE_RETRY_BASE_DELAY_S * attempt)
+    raise AssertionError("remote retry loop exhausted without returning or raising")
+
+
+def _is_poly_haven_provider_hint(value: Any, *, provider_id: str) -> bool:
+    hint = str(value or "").strip().casefold()
+    if not hint or hint in {"polyhaven", "poly_haven", "poly_haven_v1", provider_id}:
+        return True
+    if hint.startswith("polyhaven:"):
+        return True
+    parsed = urllib.parse.urlparse(hint if "://" in hint else f"https://{hint}")
+    return parsed.hostname in {"polyhaven.com", "www.polyhaven.com"} and parsed.path in {"", "/"}
+
+
+def _meshy_references(value: Any, *, workspace: Path) -> tuple[list[str], list[dict[str, str]]]:
+    if not isinstance(value, list) or not 1 <= len(value) <= 4:
+        raise RemoteProviderError("reference_inputs_required", "Meshy multi-image generation requires 1 to 4 reference inputs", status="blocked")
+    references: list[str] = []
+    identities: list[dict[str, str]] = []
+    for row in value:
+        if not isinstance(row, Mapping):
+            raise RemoteProviderError("reference_input_invalid", "Meshy reference input must be an object", status="blocked")
+        input_id = str(row.get("input_id") or "").strip()
+        expected_sha = str(row.get("sha256") or "").casefold()
+        if not input_id or not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+            raise RemoteProviderError("input_hash_missing", f"Meshy reference input lacks a verified SHA-256: {input_id}", status="blocked")
+        if row.get("upload_authorized") is not True:
+            raise RemoteProviderError("upload_not_authorized", f"Meshy upload is not authorized for input: {input_id}", status="blocked")
+        local_value = row.get("local_path")
+        if not local_value:
+            raise RemoteProviderError(
+                "remote_reference_url_unsupported",
+                f"Meshy MVP accepts only workspace-local image files: {input_id}",
+                status="blocked",
+            )
+        path = Path(str(local_value)).expanduser().resolve()
+        try:
+            path.relative_to(workspace.resolve())
+        except (OSError, ValueError) as exc:
+            raise RemoteProviderError("input_outside_workspace", f"Meshy input must be stored in the external workspace: {input_id}", status="blocked") from exc
+        if path.suffix.casefold() not in {".jpg", ".jpeg", ".png"} or not path.is_file():
+            raise RemoteProviderError("reference_input_invalid", f"Meshy input is not a materialized JPG/PNG: {input_id}", status="blocked")
+        payload = path.read_bytes()
+        actual_sha = hashlib.sha256(payload).hexdigest()
+        if actual_sha != expected_sha:
+            raise RemoteProviderError("input_hash_mismatch", f"Meshy input hash mismatch: {input_id}", status="blocked")
+        mime = mimetypes.guess_type(path.name)[0] or "image/png"
+        uri = f"data:{mime};base64,{base64.b64encode(payload).decode('ascii')}"
+        references.append(uri)
+        identities.append({"input_id": input_id, "sha256": expected_sha})
+    return references, identities
+
+
+def _select_poly_haven_asset(
+    request: Mapping[str, Any],
+    assets: Mapping[str, Any],
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    _reject_contradictory_poly_haven_constraints(request)
+    models = {str(key): dict(value) for key, value in assets.items() if isinstance(value, Mapping) and value.get("type") == 2}
+    explicit = _poly_haven_explicit_id(request)
+    if explicit:
+        if explicit not in models:
+            raise RemoteProviderError("external_asset_not_found", f"Poly Haven model does not exist: {explicit}", status="blocked")
+        return explicit, models[explicit], {
+            "schema_version": "harness_poly_haven_discovery_v1",
+            "selection_policy": "explicit_source_identity_v1",
+            "selected_asset_id": explicit,
+            "selection_reason": "explicit_source_identity",
+            "candidate_count": 1,
+            "tie_count": 1,
+            "ranked_candidates": [_poly_haven_candidate_summary(explicit, models[explicit])],
+        }
+    search = request.get("search_intent") if isinstance(request.get("search_intent"), Mapping) else {}
+    query = str(search.get("raw_query") or search.get("semantic_text") or "").strip()
+    tokens = _poly_haven_semantic_tokens(query)
+    if not tokens:
+        raise RemoteProviderError("external_search_query_missing", "Poly Haven discovery requires a search query", status="blocked")
+    taxonomy = search.get("taxonomy") if isinstance(search.get("taxonomy"), Mapping) else {}
+    context_tokens = _poly_haven_semantic_tokens(" ".join(str(value) for value in taxonomy.values()))
+    requested_geometry_type = _poly_haven_requested_geometry_type(search)
+    identity_value = _poly_haven_identity_value(taxonomy)
+    if not identity_value:
+        identity_value = requested_geometry_type
+    identity_tokens = _poly_haven_semantic_tokens(identity_value)
+    must_not = search.get("must_not") if isinstance(search.get("must_not"), Mapping) else {}
+    excluded_category_tokens = _poly_haven_exclusion_tokens(" ".join(_string_values(must_not.get("category"))))
+    enforce_authored_size = _poly_haven_enforce_authored_size(request)
+    requested_size = _poly_haven_requested_size(request, search)
+    ranked: list[tuple[float, str, dict[str, Any], dict[str, float]]] = []
+    size_rejected_count = 0
+    geometry_rejected_count = 0
+    identity_rejected_count = 0
+    exclusion_rejected_count = 0
+    for asset_id, metadata in models.items():
+        candidate_tokens = _poly_haven_candidate_tokens(asset_id, metadata)
+        if excluded_category_tokens and excluded_category_tokens & candidate_tokens:
+            exclusion_rejected_count += 1
+            continue
+        if identity_tokens and not identity_tokens & candidate_tokens:
+            identity_rejected_count += 1
+            continue
+        if requested_geometry_type and not _poly_haven_candidate_matches_geometry(requested_geometry_type, metadata):
+            geometry_rejected_count += 1
+            continue
+        actual_size = _poly_haven_size(metadata)
+        components = _score_poly_haven_candidate(
+            query=query,
+            query_tokens=tokens,
+            context_tokens=context_tokens,
+            identity_tokens=identity_tokens,
+            requested_size=requested_size,
+            asset_id=asset_id,
+            metadata=metadata,
+        )
+        lexical_score = sum(value for key, value in components.items() if key != "size_similarity")
+        if lexical_score <= 0:
+            continue
+        if (
+            enforce_authored_size
+            and requested_size is not None
+            and actual_size is not None
+            and not _poly_haven_size_matches(requested_size, actual_size)
+        ):
+            size_rejected_count += 1
+            continue
+        ranked.append((round(sum(components.values()), 6), asset_id, metadata, components))
+    ranked.sort(key=lambda row: (-row[0], row[1]))
+    if not ranked:
+        raise RemoteProviderError("no_relevant_external_asset", f"Poly Haven has no relevant model for: {query}", status="blocked")
+    winning_score = ranked[0][0]
+    tie_count = sum(1 for score, *_ in ranked if score == winning_score)
+    discovery = {
+        "schema_version": "harness_poly_haven_discovery_v1",
+        "selection_policy": "specific_identity_geometry_exclusion_then_relevance_v4",
+        "query": query,
+        "query_tokens": sorted(tokens),
+        "context_tokens": sorted(context_tokens),
+        "identity_tokens": sorted(identity_tokens),
+        "excluded_category_tokens": sorted(excluded_category_tokens),
+        "requested_geometry_type": requested_geometry_type or None,
+        "enforce_authored_size": enforce_authored_size,
+        "requested_size_m": list(requested_size) if requested_size is not None else None,
+        "selected_asset_id": ranked[0][1],
+        "selected_score": winning_score,
+        "selection_reason": "stable_asset_id_tiebreak" if tie_count > 1 else "highest_relevance_score",
+        "candidate_count": len(ranked),
+        "size_rejected_count": size_rejected_count,
+        "geometry_rejected_count": geometry_rejected_count,
+        "identity_rejected_count": identity_rejected_count,
+        "exclusion_rejected_count": exclusion_rejected_count,
+        "tie_count": tie_count,
+        "ranked_candidates": [
+            {
+                **_poly_haven_candidate_summary(asset_id, metadata),
+                "rank": index,
+                "score": score,
+                "score_components": components,
+            }
+            for index, (score, asset_id, metadata, components) in enumerate(ranked[:20], start=1)
+        ],
+    }
+    return ranked[0][1], ranked[0][2], discovery
+
+
+def _score_poly_haven_candidate(
+    *,
+    query: str,
+    query_tokens: set[str],
+    context_tokens: set[str],
+    identity_tokens: set[str],
+    requested_size: tuple[float, float, float] | None,
+    asset_id: str,
+    metadata: Mapping[str, Any],
+) -> dict[str, float]:
+    name = str(metadata.get("name") or "")
+    name_tokens = set(_search_tokens(f"{asset_id} {name}"))
+    tag_tokens = set(_search_tokens(" ".join(str(tag) for tag in metadata.get("tags") or [])))
+    category_tokens = set(_search_tokens(str(metadata.get("category") or "")))
+    description_tokens = set(_search_tokens(str(metadata.get("description") or "")))
+    normalized_query = _safe_id(query)
+    normalized_ids = {_safe_id(asset_id), _safe_id(name)} - {""}
+    exact_identity = 100.0 if normalized_query in normalized_ids else 0.0
+    identity_phrase = 30.0 if any(identity and identity in normalized_query for identity in normalized_ids) else 0.0
+    name_overlap = 8.0 * len(query_tokens & name_tokens)
+    name_coverage = 12.0 * len(query_tokens & name_tokens) / max(1, len(name_tokens))
+    tag_overlap = 4.0 * len(query_tokens & tag_tokens)
+    category_overlap = 2.0 * len((query_tokens | context_tokens) & category_tokens)
+    description_overlap = 1.0 * len(query_tokens & description_tokens)
+    context_overlap = 1.5 * len(context_tokens & (name_tokens | tag_tokens | category_tokens))
+    identity_name_overlap = 20.0 * len(identity_tokens & name_tokens)
+    identity_tag_overlap = 6.0 * len(identity_tokens & tag_tokens)
+    identity_category_overlap = 4.0 * len(identity_tokens & category_tokens)
+    actual_size = _poly_haven_size(metadata)
+    size_similarity = _poly_haven_size_similarity(requested_size, actual_size)
+    return {
+        "exact_identity": exact_identity,
+        "identity_phrase": identity_phrase,
+        "name_overlap": name_overlap,
+        "name_coverage": round(name_coverage, 6),
+        "tag_overlap": tag_overlap,
+        "category_overlap": category_overlap,
+        "description_overlap": description_overlap,
+        "context_overlap": context_overlap,
+        "identity_name_overlap": identity_name_overlap,
+        "identity_tag_overlap": identity_tag_overlap,
+        "identity_category_overlap": identity_category_overlap,
+        "size_similarity": size_similarity,
+    }
+
+
+def _poly_haven_semantic_tokens(text: str) -> set[str]:
+    """Expand a small set of high-confidence object-name aliases for discovery."""
+    return _poly_haven_expanded_tokens(text, include_cylinder_aliases=True)
+
+
+def _poly_haven_exclusion_tokens(text: str) -> set[str]:
+    """Expand exclusions down a generic hierarchy, never sideways to siblings."""
+    return _poly_haven_expanded_tokens(text, include_cylinder_aliases=False)
+
+
+def _poly_haven_expanded_tokens(text: str, *, include_cylinder_aliases: bool) -> set[str]:
+    tokens = set(_search_tokens(text))
+    original_tokens = set(tokens)
+    barrel_aliases = {"barrel", "drum", "drums"}
+    if include_cylinder_aliases:
+        barrel_aliases.update({"cylinder", "cylindrical"})
+    for group in (
+        barrel_aliases,
+        {"box", "carton"},
+        {"crate", "basket"},
+        {"sphere", "spherical", "ball", "round", "football", "soccer"},
+    ):
+        if original_tokens & group:
+            tokens.update(group)
+    if original_tokens & {"container", "containers", "storage", "vessel"}:
+        tokens.update(
+            {
+                "container",
+                "containers",
+                "storage",
+                "vessel",
+                "vase",
+                "jug",
+                "pitcher",
+                "pot",
+                "bucket",
+                "barrel",
+                "drum",
+                "bottle",
+                "can",
+                "tin",
+            }
+        )
+    return tokens
+
+
+def _reject_contradictory_poly_haven_constraints(request: Mapping[str, Any]) -> None:
+    search = request.get("search_intent") if isinstance(request.get("search_intent"), Mapping) else {}
+    taxonomy = search.get("taxonomy") if isinstance(search.get("taxonomy"), Mapping) else {}
+    identity_value = _poly_haven_identity_value(taxonomy)
+    must_not = search.get("must_not") if isinstance(search.get("must_not"), Mapping) else {}
+    excluded_values = _string_values(must_not.get("category"))
+    if not identity_value or not excluded_values:
+        return
+    positive_raw = sorted(set(_search_tokens(identity_value)))
+    excluded_raw = sorted(set(_search_tokens(" ".join(excluded_values))))
+    for positive_token in positive_raw:
+        positive_tokens = _poly_haven_exclusion_tokens(positive_token)
+        for excluded_token in excluded_raw:
+            overlap = sorted(positive_tokens & _poly_haven_exclusion_tokens(excluded_token))
+            if not overlap:
+                continue
+            request_id = str(request.get("request_id") or "<unknown_request>")
+            object_id = str(request.get("object_id") or "<unknown_object>")
+            raise RemoteProviderError(
+                "contradictory_asset_constraints",
+                (
+                    f"asset request {request_id} for object {object_id} requires identity token "
+                    f"{positive_token!r} but excludes {excluded_token!r}"
+                ),
+                status="blocked",
+                details={
+                    "request_id": request_id,
+                    "object_id": object_id,
+                    "positive_token": positive_token,
+                    "excluded_token": excluded_token,
+                    "conflicting_tokens": overlap,
+                },
+            )
+
+
+def _poly_haven_identity_value(taxonomy: Mapping[str, Any]) -> str:
+    """Use the most specific meaningful taxonomy layer as hard identity."""
+    generic = {"container", "containers", "obstacle", "object", "objects", "prop", "props", "general"}
+    internal = {"physics", "critical"}
+    fallback = ""
+    for key in ("subcategory", "object_type", "category"):
+        value = str(taxonomy.get(key) or "").strip()
+        if not value:
+            continue
+        tokens = set(_search_tokens(value))
+        if tokens and tokens <= internal:
+            continue
+        fallback = fallback or value
+        if tokens - generic:
+            return value
+    return fallback
+
+
+def _poly_haven_requested_geometry_type(search: Mapping[str, Any]) -> str:
+    must = search.get("must") if isinstance(search.get("must"), Mapping) else {}
+    return str(must.get("geometry_type") or "").strip().casefold()
+
+
+def _poly_haven_candidate_matches_geometry(
+    requested_geometry_type: str,
+    metadata: Mapping[str, Any],
+) -> bool:
+    geometry_type = requested_geometry_type.replace("-", "_").replace(" ", "_")
+    if geometry_type not in {"sphere", "spherical", "ball"}:
+        return True
+    size = _poly_haven_size(metadata)
+    if size is None:
+        return False
+    return max(size) / min(size) <= 1.15
+
+
+def _poly_haven_enforce_authored_size(request: Mapping[str, Any]) -> bool:
+    generation_spec = request.get("generation_spec") if isinstance(request.get("generation_spec"), Mapping) else {}
+    return str(generation_spec.get("scale_policy") or "preserve_authored") != "fit_uniform_to_approx_size"
+
+
+def _poly_haven_candidate_tokens(asset_id: str, metadata: Mapping[str, Any]) -> set[str]:
+    return set(
+        _search_tokens(
+            " ".join(
+                [
+                    asset_id,
+                    str(metadata.get("name") or ""),
+                    str(metadata.get("category") or ""),
+                    str(metadata.get("description") or ""),
+                    *(str(tag) for tag in metadata.get("tags") or []),
+                ]
+            )
+        )
+    )
+
+
+def _string_values(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if str(item).strip()]
+    return [str(value)] if str(value).strip() else []
+
+
+def _poly_haven_requested_size(
+    request: Mapping[str, Any],
+    search: Mapping[str, Any],
+) -> tuple[float, float, float] | None:
+    must = search.get("must") if isinstance(search.get("must"), Mapping) else {}
+    values = must.get("approx_size_m")
+    if not isinstance(values, list):
+        return _optional_size(request.get("generation_spec"))
+    try:
+        size = tuple(float(value) for value in values)
+    except (TypeError, ValueError):
+        return None
+    return size if len(size) == 3 and all(value > 0 for value in size) else None
+
+
+def _poly_haven_size_similarity(
+    requested: tuple[float, float, float] | None,
+    actual: tuple[float, float, float] | None,
+) -> float:
+    if requested is None or actual is None:
+        return 0.0
+    requested_sorted = sorted(requested)
+    actual_sorted = sorted(actual)
+    relative_error = sum(
+        abs(actual_value - requested_value) / max(actual_value, requested_value)
+        for actual_value, requested_value in zip(actual_sorted, requested_sorted)
+    ) / 3.0
+    return round(max(0.0, 8.0 * (1.0 - relative_error)), 6)
+
+
+def _poly_haven_size_matches(
+    requested: tuple[float, float, float],
+    actual: tuple[float, float, float],
+) -> bool:
+    return all(
+        abs(actual_value - requested_value) <= max(requested_value * 0.5, 0.05)
+        for actual_value, requested_value in zip(sorted(actual), sorted(requested))
+    )
+
+
+def _poly_haven_candidate_summary(asset_id: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "asset_id": asset_id,
+        "name": str(metadata.get("name") or asset_id),
+        "category": metadata.get("category"),
+        "tags": [str(tag) for tag in metadata.get("tags") or []],
+        "dimensions_m": list(size) if (size := _poly_haven_size(metadata)) is not None else None,
+    }
+
+
+def _poly_haven_explicit_id(request: Mapping[str, Any]) -> str | None:
+    values = [str(request.get("source_uri_hint") or ""), str(request.get("provider_hint") or "")]
+    for value in values:
+        text = value.strip()
+        if text.casefold().startswith("polyhaven:"):
+            return text.split(":", 1)[1].strip().strip("/")
+        parsed = urllib.parse.urlparse(text)
+        if parsed.netloc.casefold() in {"polyhaven.com", "www.polyhaven.com"} and "/a/" in parsed.path:
+            return parsed.path.split("/a/", 1)[1].strip("/").split("/", 1)[0]
+    return None
+
+
+def _poly_haven_fbx(files: Mapping[str, Any], *, resolution: str) -> dict[str, Any]:
+    formats = files.get("fbx") if isinstance(files.get("fbx"), Mapping) else {}
+    available = [resolution, "1k", "2k", "4k", "8k"]
+    for candidate in dict.fromkeys(available):
+        level = formats.get(candidate) if isinstance(formats.get(candidate), Mapping) else {}
+        record = level.get("fbx") if isinstance(level.get("fbx"), Mapping) else None
+        if record and record.get("url"):
+            return dict(record)
+    raise RemoteProviderError("provider_output_missing", "Poly Haven model has no FBX download", status="blocked")
+
+
+def _poly_haven_size(metadata: Mapping[str, Any]) -> tuple[float, float, float] | None:
+    values = metadata.get("dimensions")
+    if not isinstance(values, list) or len(values) != 3:
+        return None
+    try:
+        size = tuple(float(value) / 1000.0 for value in values)
+    except (TypeError, ValueError):
+        return None
+    return size if all(value > 0 for value in size) else None
+
+
+def _optional_size(generation_spec: Any) -> tuple[float, float, float] | None:
+    values = generation_spec.get("size_m") if isinstance(generation_spec, Mapping) else None
+    if not isinstance(values, list) or len(values) != 3:
+        return None
+    try:
+        size = tuple(float(value) for value in values)
+    except (TypeError, ValueError):
+        return None
+    return size if all(value > 0 for value in size) else None
+
+
+def _download_record(downloaded: Mapping[str, Any], *, role: str, file_format: str) -> dict[str, Any]:
+    return {
+        "role": role,
+        "path": Path(str(downloaded["path"])),
+        "format": file_format,
+        "sha256": str(downloaded["sha256"]),
+        "md5": str(downloaded.get("md5") or ""),
+        "byte_size": int(downloaded["byte_size"]),
+    }
+
+
+def _safe_relative_path(value: str) -> Path:
+    path = Path(value)
+    if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
+        raise RemoteProviderError("provider_dependency_path_invalid", f"unsafe provider dependency path: {value}")
+    return path
+
+
+def _safe_id(value: str) -> str:
+    return "_".join(token for token in re.split(r"[^a-z0-9]+", str(value).casefold()) if token)
+
+
+def _search_tokens(value: str) -> list[str]:
+    stop = {"a", "an", "the", "asset", "mesh", "model", "3d", "for", "of", "with", "generated"}
+    return [token for token in re.split(r"[^a-z0-9]+", str(value).casefold()) if token and token not in stop]
+
+
+def _redact_signed_urls(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _redact_signed_urls(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_signed_urls(item) for item in value]
+    if isinstance(value, str) and value.startswith("https://") and urllib.parse.urlparse(value).query:
+        parsed = urllib.parse.urlsplit(value)
+        return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "<redacted>", ""))
+    return value
+
+
+def _safe_http_error(exc: urllib.error.HTTPError) -> str:
+    try:
+        raw = exc.read(4096).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw[:500]
+    if isinstance(value, Mapping):
+        return str(value.get("message") or value.get("error") or value)[:500]
+    return str(value)[:500]

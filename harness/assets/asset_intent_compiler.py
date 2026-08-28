@@ -10,7 +10,7 @@ from harness.assets.search_intent import (
     analytic_search_intent_from_asset_intent,
     search_intent_from_asset_intent,
 )
-from harness.core.case_spec_v2 import CaseSpecV2, asset_requests
+from harness.core.case_spec_v2 import CaseSpecV2, asset_requests, visual_representation_source
 
 
 RESOURCE_KIND_TO_ASSET_TYPE = {
@@ -27,6 +27,18 @@ SOURCE_KIND_ALIASES = {
     "procedural": "procedural_generation",
     "local_procedural": "procedural_generation",
     "generated_procedural": "procedural_generation",
+}
+GEOMETRY_TYPE_ALIASES = {
+    "ball": "sphere",
+    "cube": "box",
+    "cuboid": "box",
+    "disc": "cylinder",
+    "disk": "cylinder",
+    "plate": "box",
+    "rod": "cylinder",
+    "pole": "cylinder",
+    "column": "cylinder",
+    "wall": "box",
 }
 
 
@@ -64,6 +76,8 @@ def compile_v2_asset_intents(
     policy = case_spec.data.get("asset_policy") if isinstance(case_spec.data.get("asset_policy"), dict) else {}
     compiled: list[CompiledAssetIntent] = []
     for obj in case_spec.objects:
+        if visual_representation_source(obj) != "asset":
+            continue
         object_id = str(obj.get("id") or "")
         legacy_object = legacy_by_id.get(object_id, {"id": object_id, "role": obj.get("role")})
         legacy_intent = intent_from_object(legacy_object)
@@ -99,7 +113,7 @@ def compile_v2_asset_intents(
 
 def normalized_acquisition(value: Any) -> dict[str, Any]:
     acquisition = dict(value) if isinstance(value, Mapping) else {}
-    return {
+    normalized = {
         "route": str(acquisition.get("route") or "default"),
         "requirement": str(acquisition.get("requirement") or "preferred"),
         "origin": str(acquisition.get("origin") or "system_default"),
@@ -108,6 +122,9 @@ def normalized_acquisition(value: Any) -> dict[str, Any]:
         "reference_inputs": [dict(item) for item in acquisition.get("reference_inputs") or [] if isinstance(item, Mapping)],
         "fallback_order": [str(item) for item in acquisition.get("fallback_order") or []],
     }
+    if "texture_prompt" in acquisition:
+        normalized["texture_prompt"] = acquisition.get("texture_prompt")
+    return normalized
 
 
 def local_catalog_allowed(acquisition: Mapping[str, Any], *, allow_local: bool = True) -> bool:
@@ -138,10 +155,26 @@ def _compile_search_intent(
     if not request:
         return search_intent_from_asset_intent(legacy_intent, backend=target_backend)
     description = str(request.get("description") or legacy_intent.query).strip()
+    acquisition = request.get("acquisition") if isinstance(request.get("acquisition"), Mapping) else {}
     raw_must = request.get("must") if isinstance(request.get("must"), Mapping) else {}
     must = dict(raw_must)
+    semantic_hard_preferences = {
+        field: must.pop(field)
+        for field in ("category", "physics_role")
+        if field in must
+    }
     if must.get("source_kind") is not None:
-        must["source_kind"] = _canonical_source_kind(must["source_kind"])
+        must["source_kind"] = _canonical_source_kind(
+            must["source_kind"],
+            acquisition_route=str(acquisition.get("route") or ""),
+        )
+    raw_must_not = request.get("must_not") if isinstance(request.get("must_not"), Mapping) else {}
+    must_not = dict(raw_must_not)
+    if must_not.get("source_kind") is not None:
+        must_not["source_kind"] = _canonical_source_kind(
+            must_not["source_kind"],
+            acquisition_route=str(acquisition.get("route") or ""),
+        )
     must.setdefault("backend", target_backend)
     resource_kind = str(request.get("resource_kind") or "").strip()
     if resource_kind in RESOURCE_KIND_TO_ASSET_TYPE:
@@ -151,12 +184,20 @@ def _compile_search_intent(
         must.setdefault("collision", True)
         must.setdefault("real_3d_geometry", True)
     geometry = obj.get("geometry") if isinstance(obj.get("geometry"), Mapping) else {}
+    raw_shape_hint = str(geometry.get("shape_hint") or "").strip().casefold()
+    shape_hint = GEOMETRY_TYPE_ALIASES.get(raw_shape_hint, raw_shape_hint)
+    if shape_hint and acquisition.get("route") == "external_site":
+        must.setdefault("geometry_type", shape_hint)
     if isinstance(geometry.get("approx_size_m"), list):
         must.setdefault("approx_size_m", list(geometry["approx_size_m"]))
     if required_license_tier == "reference":
         must.setdefault("license_tier", "reference")
     preferences = request.get("preferences") if isinstance(request.get("preferences"), Mapping) else {}
     should = [SearchPreference(field="physics_role", value=legacy_intent.role)]
+    should.extend(
+        SearchPreference(field=field, value=value)
+        for field, value in semantic_hard_preferences.items()
+    )
     for field, raw_value in preferences.items():
         if isinstance(raw_value, Mapping) and "value" in raw_value:
             should.append(
@@ -169,18 +210,24 @@ def _compile_search_intent(
             )
         else:
             should.append(SearchPreference(field=str(field), value=raw_value))
-    taxonomy = request.get("taxonomy") if isinstance(request.get("taxonomy"), Mapping) else {}
+    taxonomy = dict(request.get("taxonomy")) if isinstance(request.get("taxonomy"), Mapping) else {}
+    if semantic_hard_preferences.get("category") is not None:
+        taxonomy.setdefault("category", str(semantic_hard_preferences["category"]))
+    relaxation_policy = dict(request.get("relaxation_policy") or {})
+    relaxation_policy.setdefault("allow_parent_category", True)
+    relaxation_policy.setdefault("allow_format_conversion", False)
+    if str(geometry.get("scale_policy") or "") == "fit_uniform_to_approx_size":
+        relaxation_policy["allow_uniform_scale_to_approx_size"] = True
     return SearchIntent.from_dict(
         {
             "raw_query": description,
             "taxonomy": dict(taxonomy) or {"category": legacy_intent.category},
             "must": must,
             "should": [item.to_dict() for item in should],
-            "must_not": request.get("must_not") or {},
+            "must_not": must_not,
             "semantic_text": str(request.get("semantic_text") or description),
             "reference_image": _similarity_reference(request),
-            "relaxation_policy": request.get("relaxation_policy")
-            or {"allow_parent_category": True, "allow_format_conversion": False},
+            "relaxation_policy": relaxation_policy,
         }
     )
 
@@ -196,8 +243,10 @@ def _similarity_reference(request: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _canonical_source_kind(value: Any) -> Any:
+def _canonical_source_kind(value: Any, *, acquisition_route: str = "") -> Any:
     if isinstance(value, list):
-        return [_canonical_source_kind(item) for item in value]
+        return [_canonical_source_kind(item, acquisition_route=acquisition_route) for item in value]
     normalized = str(value).strip().casefold()
+    if normalized == "external" and acquisition_route in {"external_site", "model_generation"}:
+        return acquisition_route
     return SOURCE_KIND_ALIASES.get(normalized, value)

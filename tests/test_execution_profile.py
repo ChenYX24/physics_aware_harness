@@ -5,31 +5,53 @@ import unittest
 from pathlib import Path
 
 from harness.core.artifact_schema import read_json, write_json
-from harness.runtime.execution_profile import execution_profile, verified_run_status, write_execution_reports
-from harness.runtime.render_pass_contract import enforce_ue_render_passes, normalize_passes
+from harness.runtime.execution_profile import (
+    execution_profile,
+    execution_profile_names,
+    verified_run_status,
+    write_execution_reports,
+)
 
 
 class ExecutionProfileTests(unittest.TestCase):
+    def test_registered_profiles_do_not_define_camera_roles(self) -> None:
+        self.assertEqual(
+            execution_profile_names(),
+            ("smoke", "candidate", "local_preview", "publish"),
+        )
+        for name in execution_profile_names():
+            self.assertFalse(hasattr(execution_profile(name), "views"))
+            self.assertFalse(hasattr(execution_profile(name), "render_passes"))
+            self.assertFalse(hasattr(execution_profile(name), "render_mode"))
+
     def test_profiles_make_capture_cost_and_delivery_eligibility_explicit(self) -> None:
         smoke = execution_profile("smoke")
+        local_preview = execution_profile("local_preview")
         candidate = execution_profile("candidate")
         publish = execution_profile("publish")
 
-        self.assertEqual(smoke.views, ("event_closeup",))
-        self.assertEqual(smoke.render_passes, ("rgb",))
         self.assertEqual(smoke.render_fps, 24)
-        self.assertEqual((smoke.width, smoke.height), (1280, 720))
+        self.assertEqual((smoke.width, smoke.height), (640, 360))
         self.assertEqual((candidate.width, candidate.height), (1920, 1080))
         self.assertEqual((publish.width, publish.height), (3840, 2160))
         self.assertEqual(smoke.physics_hz, 120)
         self.assertEqual(candidate.physics_hz, smoke.physics_hz)
         self.assertEqual(publish.physics_hz, smoke.physics_hz)
-        self.assertFalse(smoke.complete_sensor_contract)
-        self.assertTrue(candidate.complete_sensor_contract)
-        self.assertEqual(len(candidate.views), 5)
+        self.assertEqual((local_preview.width, local_preview.height), (1280, 720))
         self.assertLess(candidate.width, publish.width)
-        self.assertEqual(normalize_passes(smoke.render_passes), ["rgb"])
-        self.assertEqual(enforce_ue_render_passes(smoke.render_passes), ["rgb", "depth", "segmentation"])
+
+    def test_local_preview_is_a_terminal_rgb_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report = write_execution_reports(
+                Path(tmp),
+                execution_profile("local_preview"),
+                wall_seconds=1.0,
+                status="pass",
+            )
+
+            self.assertEqual(report["artifact_eligibility"], "local_preview")
+            self.assertEqual(report["promotion"]["reason"], "terminal_local_preview")
+            self.assertIsNone(report["promotion"]["next_profile"])
 
     def test_efficiency_report_uses_native_timing_and_promotes_smoke_only_after_pass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -58,6 +80,29 @@ class ExecutionProfileTests(unittest.TestCase):
             self.assertEqual(report["promotion"]["next_profile"], "candidate")
             self.assertEqual(read_json(run_dir / "execution_profile.json")["artifact_eligibility"], "diagnostic_only")
 
+    def test_efficiency_report_falls_back_to_compiled_observation_views(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            write_json(
+                run_dir / "observation_plan.json",
+                {
+                    "cameras": [
+                        {"camera_id": "overview", "role": "overview"},
+                        {"camera_id": "side_static", "role": "side_static"},
+                    ]
+                },
+            )
+
+            report = write_execution_reports(
+                run_dir,
+                execution_profile("local_preview"),
+                wall_seconds=1.0,
+                status="pass",
+            )
+
+        self.assertEqual(report["view_count"], 2)
+        self.assertEqual(report["camera_modality_frames"], 0)
+
     def test_promotion_status_requires_physics_and_render_verification(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
@@ -66,6 +111,8 @@ class ExecutionProfileTests(unittest.TestCase):
             self.assertEqual(verified_run_status(run_dir), "fail")
             write_json(run_dir / "harness_verifier.json", {"status": "pass"})
             self.assertEqual(verified_run_status(run_dir), "pass")
+            (run_dir / "render_sync_report.json").unlink()
+            self.assertEqual(verified_run_status(run_dir), "fail")
 
     def test_hybrid_genesis_ue_replay_does_not_claim_another_solver_pass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

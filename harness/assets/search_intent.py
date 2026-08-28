@@ -38,6 +38,26 @@ PHYSICS_ROLE_ALIASES = {
 }
 
 
+def acceptable_license_tiers(required: Any) -> set[str]:
+    """Return tiers that satisfy a minimum publication/use clearance."""
+    raw_values = required if isinstance(required, list) else [required]
+    accepted: set[str] = set()
+    for raw_value in raw_values:
+        value = str(raw_value).strip().casefold()
+        if not value:
+            continue
+        accepted.add(value)
+        if value == "local_preview":
+            accepted.add("reference")
+    return accepted
+
+
+def license_tier_satisfies(actual: Any, required: Any) -> bool:
+    if required is None:
+        return True
+    return str(actual or "").strip().casefold() in acceptable_license_tiers(required)
+
+
 @dataclass(frozen=True)
 class SearchPreference:
     field: str
@@ -210,14 +230,16 @@ def search_intent_from_v2_asset_intent(data: Mapping[str, Any]) -> SearchIntent:
     elif "approx_size_cm" in constraints:
         size_cm = _validate_size_vector(constraints["approx_size_cm"], "constraints.approx_size_cm")
         must["approx_size_m"] = [float(component) / 100.0 for component in size_cm]
+    should: list[dict[str, Any]] = []
     if data.get("physics_role"):
-        must["physics_role"] = data["physics_role"]
+        should.append({"field": "physics_role", "value": data["physics_role"]})
     taxonomy = data.get("taxonomy") if isinstance(data.get("taxonomy"), Mapping) else {}
     return SearchIntent.from_dict(
         {
             "raw_query": data.get("query") or data.get("asset_query") or data.get("intent_id"),
             "taxonomy": taxonomy,
             "must": must,
+            "should": should,
             "semantic_text": data.get("semantic_text") or data.get("query") or data.get("asset_query"),
             "relaxation_policy": data.get("relaxation_policy") or {},
         }
@@ -243,6 +265,8 @@ def taxonomy_relaxation_values(intent: SearchIntent) -> list[str | None]:
 def asset_matches_approx_size(asset: Mapping[str, Any], intent: SearchIntent) -> bool:
     target = intent.must.get("approx_size_m")
     if target is None:
+        return True
+    if intent.relaxation_policy.get("allow_uniform_scale_to_approx_size"):
         return True
     actual = asset.get("bbox_size_m") or asset.get("authored_size_m")
     if not isinstance(target, list) or len(target) != 3 or not isinstance(actual, list) or len(actual) != 3:

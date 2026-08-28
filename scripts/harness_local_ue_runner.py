@@ -15,12 +15,11 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_UE_PROJECT = ROOT / "ue_template" / "SimulatorStudioTemplate.uproject"
 DEFAULT_UE_EXECUTABLE = Path("/Users/Shared/Epic Games/UE_5.7/Engine/Binaries/Mac/UnrealEditor-Cmd")
-DEFAULT_UE_SCRIPT = ROOT / "scripts" / "native_ue_physics_phenomena_scene.py"
+DEFAULT_UE_SCRIPT = ROOT / "scripts" / "native_ue_scene.py"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from harness.core.artifact_manager import ArtifactManager, link_or_copy
-from harness.core.capability import canonical_capability_id
 from harness.core.timebase import build_timebase
 from harness.runtime.artifact_collector import extract_action_trace
 from harness.runtime.mujoco_rigid import simulate_rigid_case
@@ -56,6 +55,9 @@ def main() -> int:
     actor_placement = read_optional_json(Path(args.actor_placement)) if args.actor_placement else {}
     if args.actor_placement and not actor_placement.get("actor_bindings"):
         write_json(run_dir / "local_ue_runner_report.json", fail_report("F_RUNTIME_ACTOR_PLACEMENT_MISSING", f"Actor placement is missing or invalid: {args.actor_placement}"))
+        return 2
+    if case_spec.get("constraints") and not actor_placement.get("constraint_bindings"):
+        write_json(run_dir / "local_ue_runner_report.json", fail_report("F_RUNTIME_CONSTRAINT_BINDING_MISSING", "Declared rigid constraints have no compiled runtime bindings."))
         return 2
     duration_s = duration_for_case(case_spec)
     try:
@@ -136,7 +138,7 @@ def main() -> int:
         pass_results[pass_mode] = proc_result
         append_runner_log(run_dir, pass_mode, proc_result)
         if proc_result["status"] == "timeout":
-            write_json(run_dir / "local_ue_runner_report.json", fail_report("F6_RUNTIME_OR_RENDER_FAILURE", f"UE {pass_mode} pass timed out after {proc_result['timeout']}s", pass_results=pass_results))
+            write_json(run_dir / "local_ue_runner_report.json", fail_report("F6_RUNTIME_OR_RENDER_FAILURE", f"UE {pass_mode} pass timed out after {proc_result['timeout']}s", native_ue_invoked=True, pass_results=pass_results))
             return 2
         if proc_result["status"] == "failed":
             classified = classify_native_pass_failure(native_output, pass_mode)
@@ -145,6 +147,7 @@ def main() -> int:
                 fail_report(
                     classified["failure_code"],
                     classified["failure_message"] or f"UE {pass_mode} pass exited with {proc_result['returncode']}",
+                    native_ue_invoked=True,
                     command=command,
                     pass_results=pass_results,
                     pass_mode=pass_mode,
@@ -167,13 +170,19 @@ def main() -> int:
                     if live_fracture_ids:
                         shutil.copyfile(sampling_source, run_dir / "rgb_sampling_map.json")
         if pass_mode in {"data", "combined"}:
+            required_visible_ids = required_visible_segmentation_object_ids(
+                camera_plan,
+                actor_placement,
+                live_fracture_ids=live_fracture_ids,
+            )
+            data_width, data_height = data_render_dimensions(pass_mode, args.passes)
             quantization = quantize_native_instance_segmentation(
                 native_output,
-                width=int(render_config.get("width") or 0),
-                height=int(render_config.get("height") or 0),
+                width=data_width,
+                height=data_height,
                 fps=int(render_config.get("fps") or 0),
                 required="segmentation" in {item.strip() for item in args.passes.split(",")},
-                required_object_ids=live_fracture_ids,
+                required_object_ids_by_view=required_visible_ids,
             )
             proc_result["segmentation_quantization"] = quantization
             if quantization.get("status") == "fail":
@@ -182,6 +191,7 @@ def main() -> int:
                     fail_report(
                         "F_SEGMENTATION_QUANTIZATION_FAILED",
                         str(quantization.get("error") or "Instance segmentation palette quantization failed."),
+                        native_ue_invoked=True,
                         pass_results=pass_results,
                     ),
                 )
@@ -316,6 +326,7 @@ def fracture_state_hashes(events: list[dict[str, Any]], fracture_ids: set[str]) 
 
 def build_studio_scene_spec(case_spec: dict[str, Any], args: argparse.Namespace, *, actor_placement: dict[str, Any] | None = None) -> dict[str, Any]:
     timebase = timebase_for_case(case_spec)
+    stage_map = runtime_stage_map(case_spec)
     return {
         "draft_id": str(case_spec.get("case_id") or "harness_case"),
         "prompt": case_spec.get("prompt", ""),
@@ -334,8 +345,13 @@ def build_studio_scene_spec(case_spec: dict[str, Any], args: argparse.Namespace,
         "camera_plan": {},
         "map_lighting_controls": default_lighting_controls("data", case_spec),
         "assets": [],
-        "background": {"ue5_path": args.map or "/Game/Maps/MarketEnvironment/Maps/Day.Day"},
+        "background": {"ue5_path": stage_map},
     }
+
+
+def runtime_stage_map(case_spec: dict[str, Any]) -> str:
+    scene = case_spec.get("scene") if isinstance(case_spec.get("scene"), dict) else {}
+    return str(scene.get("map_preference") or scene.get("map_package") or "studio_runtime")
 
 
 def build_runtime_scene(case_spec: dict[str, Any], camera_plan: dict[str, Any], args: argparse.Namespace, *, pass_mode: str, actor_placement: dict[str, Any] | None = None, simulation_trajectory: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -355,6 +371,16 @@ def build_runtime_scene(case_spec: dict[str, Any], camera_plan: dict[str, Any], 
             }
         )
     lighting_controls = default_lighting_controls("rgb" if pass_mode == "combined" else pass_mode, case_spec)
+    if runtime_stage_map(case_spec) == "studio_runtime":
+        lighting_controls.update(
+            {
+                "use_existing_map_lights": False,
+                "spawn_directional_sun": True,
+                "spawn_fill_light": True,
+                "spawn_sky_light": True,
+                "fixed_auto_exposure": True,
+            }
+        )
     live_geometry_collection_data = pass_mode in {"data", "combined"} and bool(fracture_object_ids(case_spec))
     if physics_controls.get("simulate_physics") and (pass_mode == "rgb" or live_geometry_collection_data):
         lighting_controls["capture_backend"] = "highres_viewport"
@@ -362,7 +388,7 @@ def build_runtime_scene(case_spec: dict[str, Any], camera_plan: dict[str, Any], 
         "schema_version": "studio_runtime_v1",
         "draft_id": str(case_spec.get("case_id") or "harness_case"),
         "case_type": native_case_type(case_spec),
-        "background_map": {"ue5_path": args.map or "/Game/Maps/MarketEnvironment/Maps/Day.Day"},
+        "background_map": {"ue5_path": runtime_stage_map(case_spec)},
         "prompt": case_spec.get("prompt", ""),
         "expanded_prompt": case_spec.get("prompt", ""),
         "simulation": {
@@ -386,6 +412,9 @@ def build_runtime_scene(case_spec: dict[str, Any], camera_plan: dict[str, Any], 
         "map_lighting_controls": lighting_controls,
         "dynamic_objects": dynamic_objects,
         "static_objects": static_objects,
+        "constraints": list((actor_placement or {}).get("constraint_bindings") or []),
+        "compliant_contacts": list(case_spec.get("compliant_contacts") or []),
+        "forces": list(case_spec.get("forces") or []),
         "action_trace": list((case_spec.get("expected_physics") or {}).get("action_trace") or []),
         "validation_targets": [],
         "precomputed_trajectory": simulation_trajectory or [],
@@ -394,20 +423,8 @@ def build_runtime_scene(case_spec: dict[str, Any], camera_plan: dict[str, Any], 
 
 
 def runtime_objects_for_case(case_spec: dict[str, Any], actor_placement: dict[str, Any] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    capability = canonical_capability_id(str(case_spec.get("capability_id") or ""))
-    coupling_type = str((case_spec.get("expected_physics") or {}).get("coupling_type") or "")
-    if capability == "agent_rigidbody_action_coupling" and coupling_type in {"pick", "pick_place"}:
-        return pick_place_objects(case_spec)
-    if capability == "agent_rigidbody_action_coupling" and coupling_type == "throw" and (case_spec.get("expected_physics") or {}).get("object_effect"):
-        return throw_into_bin_objects(case_spec)
     if actor_placement and actor_placement.get("actor_bindings"):
         return runtime_objects_from_actor_placement(actor_placement, case_spec)
-    if capability == "rigid_body_contact_causality":
-        return billiards_objects(case_spec)
-    if capability == "sequential_contact_propagation":
-        return domino_objects(case_spec)
-    if capability == "rigid_body_gravity_collision":
-        return falling_objects(case_spec)
     return generic_objects(case_spec)
 
 
@@ -417,9 +434,24 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
         for obj in case_spec.get("objects", [])
         if isinstance(obj, dict) and (obj.get("id") or obj.get("object_id"))
     }
+    attachment_target_ids = {
+        str(attachment.get("object_id") or "")
+        for binding in actor_placement.get("actor_bindings") or []
+        if isinstance(binding, dict) and isinstance(binding.get("articulated_body"), dict)
+        for attachment in binding["articulated_body"].get("attachments") or []
+        if isinstance(attachment, dict) and attachment.get("object_id")
+    }
+    support_candidates: dict[str, list[str]] = {}
+    for source, target in ((case_spec.get("expected_physics") or {}).get("support") or {}).items():
+        support_candidates.setdefault(str(source), []).append(str(target))
+    for relation in case_spec.get("relations") or []:
+        if not isinstance(relation, dict):
+            continue
+        relation_type = str(relation.get("type") or "").strip().casefold().replace("-", "_").replace(" ", "_")
+        if relation_type == "supported_by" and relation.get("source") and relation.get("target"):
+            support_candidates.setdefault(str(relation["source"]), []).append(str(relation["target"]))
     dynamic: list[dict[str, Any]] = []
     static: list[dict[str, Any]] = []
-    case_parameters = case_spec.get("physical_parameters") if isinstance(case_spec.get("physical_parameters"), dict) else {}
     for index, binding in enumerate(actor_placement.get("actor_bindings") or []):
         if not isinstance(binding, dict):
             continue
@@ -428,20 +460,22 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
         physics = binding.get("physics") if isinstance(binding.get("physics"), dict) else {}
         material = physics.get("material") if isinstance(physics.get("material"), dict) else {}
         collider = str(physics.get("collider") or "").casefold()
-        is_dynamic_sphere = bool(physics.get("simulate_physics")) and "sphere" in collider
         linear_damping = case_object.get("linear_damping")
         if linear_damping is None:
             linear_damping = physics.get("linear_damping")
-        if linear_damping is None and is_dynamic_sphere:
-            linear_damping = case_parameters.get("ball_linear_damping")
         angular_damping = case_object.get("angular_damping")
         if angular_damping is None:
             angular_damping = physics.get("angular_damping")
-        if angular_damping is None and is_dynamic_sphere:
-            angular_damping = case_parameters.get("ball_angular_damping")
         transform = binding.get("transform") if isinstance(binding.get("transform"), dict) else {}
         bounds = binding.get("bounds") if isinstance(binding.get("bounds"), dict) else {}
         asset = binding.get("asset") if isinstance(binding.get("asset"), dict) else {}
+        visual_representation = (
+            binding.get("visual_representation")
+            if isinstance(binding.get("visual_representation"), dict)
+            else {}
+        )
+        visible = visual_representation.get("visible") is not False
+        fit_dynamic_plan = case_object.get("fit_dynamic_plan")
         params = {
             "runtime_actor_id": binding.get("runtime_actor_id"),
             "binding_source": asset.get("binding_source"),
@@ -451,35 +485,71 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
             "collision_profile": physics.get("collision_profile"),
             "collider": physics.get("collider"),
             "desired_extent_cm": desired_extent_cm_for_binding(binding),
-            "fit_dynamic_plan": case_object.get("fit_dynamic_plan"),
+            # Actor Placement is the compiled transform truth. The native UE
+            # scene may only refit objects when the case explicitly opts in.
+            "fit_dynamic_plan": False if fit_dynamic_plan is None else bool(fit_dynamic_plan),
             "fracture_response": case_object.get("fracture_response"),
             "visual_material_path": case_object.get("visual_material_path"),
             "intact_visual_material_path": case_object.get("intact_visual_material_path"),
             "intact_visual_scale": case_object.get("intact_visual_scale"),
+            "visible": visible,
+            "visual_local_bounds_center_from_collision_m": visual_representation.get(
+                "local_bounds_center_from_collision_m"
+            ) or [0.0, 0.0, 0.0],
+            "expected_asset_id": asset.get("selected_asset_id"),
+            "expected_asset_sha256": asset.get("sha256"),
+            "expected_visual_mesh_path": asset.get("ue_path") if visible else None,
+            "declared_object_position_m": list(
+                ((binding.get("declared_object_transform") or {}).get("position_m"))
+                or transform.get("position_m")
+                or [0.0, 0.0, 0.0]
+            ),
+            "compiled_collision_geometry": isinstance(physics.get("collision_geometry"), dict),
         }
-        preserve_authored_scale = asset.get("preserve_authored_scale") is True
-        runtime_usage = str(asset.get("runtime_usage") or "")
-        if preserve_authored_scale and runtime_usage == "collision_and_visual":
+        articulated = binding.get("articulated_body") if isinstance(binding.get("articulated_body"), dict) else None
+        if articulated is not None:
+            params["articulated_body"] = articulated
             params["preserve_authored_scale"] = True
+            params["pose_anchor"] = "actor_origin"
+            declared_support = articulated.get("support_object_id")
+            candidates = list(dict.fromkeys(support_candidates.get(object_id) or []))
+            if not declared_support and len(candidates) > 1:
+                raise RuntimeError(
+                    f"articulated object {object_id} has multiple supported_by targets; declare solver.support_object_id"
+                )
+            support_object_id = str(declared_support) if declared_support else candidates[0] if len(candidates) == 1 else None
+            if support_object_id:
+                params["support_object_id"] = support_object_id
+                params["support_binding_source"] = (
+                    "solver.support_object_id" if declared_support else "unique_supported_by_relation"
+                )
+        preserve_authored_scale = asset.get("preserve_authored_scale") is True
+        instance_scale = asset.get("instance_scale")
+        has_instance_scale = bool(
+            positive_scale3(instance_scale)
+            and asset.get("scale_policy") == "fit_uniform_to_approx_size"
+            and asset.get("scale_applied") is True
+        )
+        runtime_usage = str(asset.get("runtime_usage") or "")
+        if articulated is None and runtime_usage == "collision_and_visual" and is_runtime_mesh_path(str(asset.get("ue_path") or "")):
+            # Actor Placement positions are body/geometry-center poses. Preserve
+            # that contract even when a selected FBX retains an arbitrary
+            # modelling pivot.
+            params["pose_anchor"] = "bounds_center"
+        if has_instance_scale and runtime_usage == "collision_and_visual":
+            params["preserve_authored_scale"] = True
+        elif preserve_authored_scale and runtime_usage == "collision_and_visual":
+            params["preserve_authored_scale"] = True
+        if has_instance_scale and runtime_usage == "visual_proxy":
+            params["visual_instance_scale"] = [float(value) for value in instance_scale[:3]]
+            params["preserve_visual_authored_scale"] = True
         elif preserve_authored_scale and runtime_usage == "visual_proxy":
             params["preserve_visual_authored_scale"] = True
-        role = str(binding.get("role") or "").casefold()
         runtime_scale = scale_for_binding(binding)
-        if (
-            canonical_capability_id(str(case_spec.get("capability_id") or "")) == "constraint_momentum_transfer"
-            and role in {"active_chain_driver", "constrained_chain_body"}
-        ):
-            # A Newton-cradle body is suspended by its declared constraint. It
-            # must never be auto-snapped to the nearest horizontal support.
+        if case_object.get("constraint_anchor_id"):
+            # A body with an explicit constraint anchor must not be moved by
+            # generic support fitting.
             params["fit_dynamic_plan"] = False
-        if role == "elastic_constraint_anchor":
-            # UE BasicShapes/Cube is one metre wide. Binding bounds store half extents,
-            # so use twice the metre value and bypass generic asset normalization.
-            runtime_scale = [max(0.02, float(value) * 2.0) for value in runtime_scale]
-            params["preserve_authored_scale"] = True
-            params["fit_dynamic_plan"] = False
-        if any(token in role for token in ("support", "floor", "ground", "table", "surface")):
-            params["support_top_m"] = bounds.get("top_z")
         for key in (
             "release_time_s",
             "release_position_m",
@@ -502,8 +572,9 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
         if intact_visual_path:
             params["visual_ue5_path"] = intact_visual_path
             params["visual_asset_kind"] = str(case_object.get("intact_visual_asset_kind") or "static_mesh")
-        if physics.get("simulate_physics") and "sphere" in collider and is_runtime_mesh_path(visual_path):
+        if visible and not intact_visual_path and runtime_usage == "visual_proxy" and is_runtime_mesh_path(visual_path):
             params["visual_ue5_path"] = visual_path
+            params["visual_asset_kind"] = runtime_asset_kind(asset.get("asset_kind"))
             params["visual_collision_profile"] = "NoCollision"
             params["visual_simulate_physics"] = False
         runtime_physics = {
@@ -514,85 +585,80 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
             "angular_damping": angular_damping,
             "enable_gravity": case_object.get("enable_gravity", physics.get("enable_gravity")),
             "use_ccd": case_object.get("use_ccd", physics.get("use_ccd")),
+            "collision_enabled": bool(physics.get("collision_enabled", True)),
             "collision_profile": physics.get("collision_profile"),
             "collider": physics.get("collider"),
             "collision_geometry_source": physics.get("collision_geometry_source"),
             "collision_geometry_verification": physics.get("collision_geometry_verification"),
+            "collision_geometry": physics.get("collision_geometry"),
             "material": physics.get("material"),
             "static_friction": material.get("static_friction"),
             "dynamic_friction": material.get("dynamic_friction"),
             "restitution": material.get("restitution"),
-            "simulate_physics": bool(physics.get("simulate_physics")),
+            "simulate_physics": (
+                "force_off_until_release"
+                if articulated is not None and articulated.get("mode") == "ragdoll"
+                else bool(physics.get("simulate_physics"))
+            ),
             "kinematic": bool(physics.get("kinematic")),
         }
         runtime_path = ue_path_for_binding(binding)
-        runtime_kind = "static_mesh" if runtime_path.startswith("/Engine/BasicShapes/") else runtime_asset_kind(asset.get("asset_kind"))
+        params["expected_render_mesh_path"] = (
+            str(params.get("visual_ue5_path") or runtime_path)
+            if visible
+            else None
+        )
+        params["expected_collision_mesh_path"] = runtime_path if physics.get("collision_enabled") else None
+        uses_character = (
+            articulated is not None
+            and isinstance(articulated.get("pose_source"), dict)
+            and articulated["pose_source"].get("type") == "animation_sequence"
+        )
+        runtime_kind = (
+            "articulated_character"
+            if uses_character
+            else f"articulated_{articulated['mode']}"
+            if articulated is not None
+            else "static_mesh" if runtime_path.startswith("/Engine/BasicShapes/") else runtime_asset_kind(asset.get("asset_kind"))
+        )
+        behavior = (
+            "articulated_character"
+            if uses_character
+            else f"articulated_{articulated['mode']}"
+            if articulated is not None
+            else "llm_rigid_body" if physics.get("simulate_physics") else "llm_static_body"
+        )
+        initial_position_m = list(
+            transform.get("position_m")
+            or case_object.get("initial_position_m")
+            or case_object.get("position_m")
+            or [0.0, 0.0, 0.0]
+        )
+        if uses_character:
+            capsule_half_height_m = 0.96
+            params["capsule_half_height_m"] = capsule_half_height_m
+            params["capsule_radius_m"] = 0.29
+            params["skeletal_root_offset_m"] = [0.0, 0.0, -capsule_half_height_m]
         actor = runtime_object(
             object_id,
             runtime_path,
-            "llm_rigid_body" if physics.get("simulate_physics") else "llm_static_body",
-            list(transform.get("position_m") or case_object.get("initial_position_m") or case_object.get("position_m") or [0.0, 0.0, 0.0]),
+            behavior,
+            initial_position_m,
             runtime_scale,
             runtime_physics,
             params,
             asset_kind=runtime_kind,
         )
-        actor["rotation_degrees"] = list(transform.get("rotation_deg") or [0.0, 0.0, 0.0])
-        if physics.get("simulate_physics"):
+        declared_rotation = list(transform.get("rotation_deg") or [0.0, 0.0, 0.0])
+        if articulated is not None:
+            actor["params"]["base_rotation_degrees"] = declared_rotation
+            actor["rotation_degrees"] = [0.0, 0.0, 0.0]
+        else:
+            actor["rotation_degrees"] = declared_rotation
+        if physics.get("simulate_physics") or articulated is not None or object_id in attachment_target_ids:
             dynamic.append(actor)
         else:
             static.append(actor)
-    if canonical_capability_id(str(case_spec.get("capability_id") or "")) == "elastic_constraint_rebound":
-        expected = case_spec.get("expected_physics") if isinstance(case_spec.get("expected_physics"), dict) else {}
-        anchor_id = str(expected.get("anchor_object_id") or "anchor")
-        body_id = str(expected.get("constrained_object_id") or "payload")
-        anchor_position = list((by_case_object.get(anchor_id) or {}).get("initial_position_m") or [0.0, 0.0, 2.0])
-        body_position = list((by_case_object.get(body_id) or {}).get("initial_position_m") or [0.0, 0.0, 1.0])
-        midpoint = [(float(anchor_position[index]) + float(body_position[index])) / 2.0 for index in range(3)]
-        distance = sum((float(anchor_position[index]) - float(body_position[index])) ** 2 for index in range(3)) ** 0.5
-        static.append(
-            runtime_object(
-                "elastic_tether_visual",
-                "/Engine/BasicShapes/Cube.Cube",
-                "elastic_tether_visual",
-                midpoint,
-                [0.025, 0.025, max(distance, 0.05)],
-                {"simulate_physics": "force_off", "collision_profile": "NoCollision"},
-                {
-                    "anchor_id": anchor_id,
-                    "body_id": body_id,
-                    "desired_extent_cm": max(distance * 100.0, 5.0),
-                    "color_rgb": [0.92, 0.58, 0.08],
-                    "material": "elastic tether",
-                },
-            )
-        )
-    elif canonical_capability_id(str(case_spec.get("capability_id") or "")) == "constraint_momentum_transfer":
-        expected = case_spec.get("expected_physics") if isinstance(case_spec.get("expected_physics"), dict) else {}
-        for index, body_id in enumerate(expected.get("chain_objects") or []):
-            body_id = str(body_id)
-            anchor_id = str((by_case_object.get(body_id) or {}).get("constraint_anchor_id") or f"anchor_{index}")
-            anchor_position = list((by_case_object.get(anchor_id) or {}).get("initial_position_m") or [index * 0.161, 0.0, 1.25])
-            body_position = list((by_case_object.get(body_id) or {}).get("initial_position_m") or [index * 0.161, 0.0, 0.65])
-            midpoint = [(float(anchor_position[axis]) + float(body_position[axis])) / 2.0 for axis in range(3)]
-            distance = sum((float(anchor_position[axis]) - float(body_position[axis])) ** 2 for axis in range(3)) ** 0.5
-            static.append(
-                runtime_object(
-                    f"elastic_tether_visual_{body_id}",
-                    "/Engine/BasicShapes/Cube.Cube",
-                    "elastic_tether_visual",
-                    midpoint,
-                    [0.012, 0.012, max(distance, 0.05)],
-                    {"simulate_physics": "force_off", "collision_profile": "NoCollision"},
-                    {
-                        "anchor_id": anchor_id,
-                        "body_id": body_id,
-                        "desired_extent_cm": max(distance * 100.0, 5.0),
-                        "color_rgb": [0.12, 0.12, 0.14],
-                        "material": "Newton cradle tether",
-                    },
-                )
-            )
     return dynamic, static
 
 
@@ -601,23 +667,22 @@ def ue_path_for_binding(binding: dict[str, Any]) -> str:
     ue_path = str(asset.get("ue_path") or "")
     physics = binding.get("physics") if isinstance(binding.get("physics"), dict) else {}
     collider = str(physics.get("collider") or "").casefold()
+    collision_geometry = physics.get("collision_geometry") if isinstance(physics.get("collision_geometry"), dict) else {}
+    collision_shape = str(collision_geometry.get("shape") or "").casefold()
     collision_geometry_source = str(physics.get("collision_geometry_source") or "").casefold()
-    role = str(binding.get("role") or "").casefold()
-    if collision_geometry_source == "analytic_sphere":
+    if collision_shape == "sphere" or collision_geometry_source == "analytic_sphere":
         return "/Engine/BasicShapes/Sphere.Sphere"
-    if collision_geometry_source == "analytic_box":
+    if collision_shape == "box" or collision_geometry_source == "analytic_box":
         return "/Engine/BasicShapes/Cube.Cube"
-    if role == "elastic_constrained_body":
-        return "/Engine/BasicShapes/Sphere.Sphere"
-    if role == "elastic_constraint_anchor":
-        return "/Engine/BasicShapes/Cube.Cube"
+    if collision_shape == "cylinder" or collision_geometry_source == "analytic_cylinder":
+        return "/Engine/BasicShapes/Cylinder.Cylinder"
     if is_runtime_mesh_path(ue_path):
         return ue_path
-    if "sphere" in collider or "ball" in role:
+    if "sphere" in collider:
         return "/Engine/BasicShapes/Sphere.Sphere"
-    if "cylinder" in collider or "pin" in role:
+    if "cylinder" in collider:
         return "/Engine/BasicShapes/Cylinder.Cylinder"
-    if "capsule" in collider or "domino" in role:
+    if "capsule" in collider:
         return "/Engine/BasicShapes/Cube.Cube"
     return "/Engine/BasicShapes/Cube.Cube"
 
@@ -633,7 +698,23 @@ def is_runtime_mesh_path(ue_path: str) -> bool:
 
 
 def scale_for_binding(binding: dict[str, Any]) -> list[float]:
+    physics = binding.get("physics") if isinstance(binding.get("physics"), dict) else {}
+    collision_geometry = physics.get("collision_geometry") if isinstance(physics.get("collision_geometry"), dict) else {}
+    collision_size = collision_geometry.get("size_m")
+    if isinstance(collision_size, list) and len(collision_size) >= 3:
+        # UE basic primitives are one meter across at scale 1.0, so the
+        # declared full dimensions are the exact component scale.
+        return [float(value) for value in collision_size[:3]]
     asset = binding.get("asset") if isinstance(binding.get("asset"), dict) else {}
+    instance_scale = asset.get("instance_scale")
+    if (
+        asset.get("scale_policy") == "fit_uniform_to_approx_size"
+        and asset.get("scale_applied") is True
+        and asset.get("runtime_usage") == "collision_and_visual"
+        and isinstance(instance_scale, list)
+        and len(instance_scale) >= 3
+    ):
+        return [float(value) for value in instance_scale[:3]]
     if asset.get("preserve_authored_scale") and asset.get("runtime_usage") == "collision_and_visual":
         return [1.0, 1.0, 1.0]
     bounds = binding.get("bounds") if isinstance(binding.get("bounds"), dict) else {}
@@ -643,7 +724,21 @@ def scale_for_binding(binding: dict[str, Any]) -> list[float]:
     return [0.25, 0.25, 0.25]
 
 
+def positive_scale3(value: Any) -> bool:
+    if not isinstance(value, list) or len(value) < 3:
+        return False
+    try:
+        return all(math.isfinite(float(item)) and float(item) > 0.0 for item in value[:3])
+    except (TypeError, ValueError):
+        return False
+
+
 def desired_extent_cm_for_binding(binding: dict[str, Any]) -> float | None:
+    physics = binding.get("physics") if isinstance(binding.get("physics"), dict) else {}
+    collision_geometry = physics.get("collision_geometry") if isinstance(physics.get("collision_geometry"), dict) else {}
+    collision_size = collision_geometry.get("size_m")
+    if isinstance(collision_size, list) and len(collision_size) >= 3:
+        return max(float(value) for value in collision_size[:3]) * 50.0
     bounds = binding.get("bounds") if isinstance(binding.get("bounds"), dict) else {}
     extents = bounds.get("extents_m")
     if isinstance(extents, list) and len(extents) >= 3:
@@ -662,428 +757,54 @@ def summarize_actor_placement(actor_placement: dict[str, Any] | None) -> dict[st
         "physics_critical_count": summary.get("physics_critical_count"),
         "simulated_actor_count": summary.get("simulated_actor_count"),
         "camera_count": summary.get("camera_count"),
+        "constraint_count": summary.get("constraint_count", len(actor_placement.get("constraint_bindings") or [])),
     }
-
-
-def billiards_objects(case_spec: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    dynamic = []
-    objects = case_spec.get("objects") or []
-    if not objects:
-        objects = [
-            {"object_id": "cue_ball", "role": "active", "initial_position": [-1.0, 0.0, 0.42], "initial_velocity": [1.2, 0.0, 0.0]},
-            {"object_id": "target_ball_01", "role": "passive", "initial_position": [0.0, 0.0, 0.42], "initial_velocity": [0.0, 0.0, 0.0]},
-        ]
-    for index, obj in enumerate(objects):
-        oid = str(obj.get("object_id") or obj.get("id") or f"ball_{index:02d}")
-        pos = list(obj.get("initial_position_m") or obj.get("initial_position") or obj.get("position") or [index * 0.22, 0.0, 0.42])
-        vel = list(obj.get("initial_velocity_m_s") or obj.get("initial_velocity") or [0.0, 0.0, 0.0])
-        dynamic.append(
-            runtime_object(
-                oid,
-                "/Engine/BasicShapes/Sphere.Sphere",
-                "llm_rigid_body",
-                pos,
-                [0.09, 0.09, 0.09],
-                {
-                    "mass_kg": 0.17,
-                    "radius_m": 0.09,
-                    "initial_velocity_m_s": vel,
-                    "linear_damping": 0.08,
-                    "angular_damping": 0.12,
-                    "restitution": 0.86,
-                    "simulate_physics": True,
-                },
-                {"material": "white" if "cue" in oid else "colored billiard ball"},
-            )
-        )
-    static = [] if is_place else [
-        runtime_object(
-            "billiards_tabletop",
-            "/Engine/BasicShapes/Cube.Cube",
-            "llm_static_body",
-            [0.0, 0.0, 0.32],
-            [2.8, 1.45, 0.08],
-            {"mass_kg": 100.0, "friction": 0.055, "restitution": 0.15, "simulate_physics": "force_off"},
-            {"material": "green felt", "color_rgb": [0.03, 0.32, 0.18]},
-        )
-    ]
-    return dynamic, static
-
-
-def domino_objects(case_spec: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    dynamic = []
-    objects = case_spec.get("objects") or []
-    if not objects:
-        objects = [{"object_id": f"domino_{idx:02d}", "initial_position": [idx * 0.22, 0.0, 0.45]} for idx in range(5)]
-    for index, obj in enumerate(objects):
-        oid = str(obj.get("object_id") or obj.get("id") or f"domino_{index:02d}")
-        vel = [0.75, 0.0, 0.0] if index == 0 else [0.0, 0.0, 0.0]
-        dynamic.append(
-            runtime_object(
-                oid,
-                "/Engine/BasicShapes/Cube.Cube",
-                "llm_rigid_body",
-                list(obj.get("initial_position_m") or obj.get("initial_position") or [index * 0.22, 0.0, 0.45]),
-                [0.045, 0.16, 0.42],
-                {
-                    "mass_kg": 0.08,
-                    "initial_velocity_m_s": list(obj.get("initial_velocity_m_s") or obj.get("initial_velocity") or vel),
-                    "linear_damping": 0.03,
-                    "angular_damping": 0.02,
-                    "restitution": 0.35,
-                    "simulate_physics": True,
-                },
-                {"material": "domino"},
-            )
-        )
-    static = [
-        runtime_object("domino_floor", "/Engine/BasicShapes/Cube.Cube", "llm_static_body", [0.45, 0.0, 0.03], [2.2, 0.8, 0.05], {"simulate_physics": "force_off"}, {"material": "matte floor"})
-    ]
-    return dynamic, static
-
-
-def falling_objects(case_spec: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    dynamic = []
-    objects = case_spec.get("objects") or []
-    static_roles = {"static", "support", "floor", "ground", "landing_surface"}
-    dynamic_specs = [obj for obj in objects if str(obj.get("role") or "").lower() not in static_roles]
-    if not dynamic_specs:
-        dynamic_specs = [{"object_id": "falling_block", "initial_position": [0.0, 0.0, 1.25], "initial_velocity": [0.0, 0.0, 0.0]}]
-    for index, obj in enumerate(dynamic_specs):
-        dynamic.append(
-            runtime_object(
-                str(obj.get("object_id") or obj.get("id") or f"falling_block_{index}"),
-                "/Engine/BasicShapes/Cube.Cube",
-                "falling_collision",
-                list(obj.get("initial_position_m") or obj.get("initial_position") or [0.0, 0.0, 1.25 + index * 0.25]),
-                [0.28, 0.28, 0.28],
-                {
-                    "mass_kg": 1.0,
-                    "initial_velocity_m_s": list(obj.get("initial_velocity_m_s") or obj.get("initial_velocity") or [0.0, 0.0, 0.0]),
-                    "desired_extent_cm": 28.0,
-                    "linear_damping": 0.05,
-                    "angular_damping": 0.08,
-                    "restitution": 0.25,
-                    "simulate_physics": True,
-                },
-                {"material": "falling cube"},
-            )
-        )
-    static = [
-        runtime_object("landing_pad", "/Engine/BasicShapes/Cube.Cube", "landing_surface", [0.0, 0.0, 0.03], [1.6, 1.2, 0.05], {"simulate_physics": "force_off"}, {"material": "matte floor"})
-    ]
-    return dynamic, static
 
 
 def generic_objects(case_spec: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    return falling_objects(case_spec)
-
-
-def humanoid_runtime_adapter(asset_path: str, asset_kind: str, params: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
-    adapter = os.environ.get("SIM_HUMANOID_ADAPTER", "").strip().casefold()
-    if adapter not in {"gasp", "ddv"}:
-        return asset_path, asset_kind, params
-    if adapter == "ddv":
-        return (
-            "/Game/DD_Vehicles_Advanced/Blueprints/Passenger/BP_DCAdv_ThirdPChar.BP_DCAdv_ThirdPChar_C",
-            "blueprint",
-            {
-                **params,
-                "preserve_authored_scale": True,
-                "humanoid_adapter": "ddv",
-                "movement_input_action": "/Game/DD_Vehicles_Advanced/Blueprints/Passenger/Input/Actions/IA_Move.IA_Move",
-            },
+    dynamic: list[dict[str, Any]] = []
+    static: list[dict[str, Any]] = []
+    for index, obj in enumerate(case_spec.get("objects") or []):
+        if not isinstance(obj, dict):
+            continue
+        object_id = str(obj.get("id") or obj.get("object_id") or f"object_{index}")
+        shape = str(obj.get("shape") or "box").casefold()
+        asset_path = (
+            "/Engine/BasicShapes/Sphere.Sphere"
+            if "sphere" in shape or "ball" in shape
+            else "/Engine/BasicShapes/Cylinder.Cylinder"
+            if "cylinder" in shape
+            else "/Engine/BasicShapes/Cube.Cube"
         )
-    return (
-        "/Game/Blueprints/SandboxCharacter_CMC.SandboxCharacter_CMC",
-        "blueprint",
-        {
-            **params,
-            "preserve_authored_scale": True,
-            "humanoid_adapter": "gasp",
-            "movement_input_action": "/Game/Input/IA_Move.IA_Move",
-        },
-    )
-
-
-def pick_place_objects(case_spec: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    expected = case_spec.get("expected_physics") or {}
-    is_place = str(expected.get("coupling_type") or "") == "pick_place"
-    objects = {str(obj.get("id") or obj.get("object_id")): obj for obj in case_spec.get("objects") or [] if isinstance(obj, dict)}
-    actor_id = str(expected.get("action_actor_id") or "agent")
-    target_id = str(expected.get("target_object_id") or "package")
-    actor = objects.get(actor_id) or {}
-    target = objects.get(target_id) or {}
-    actions = [item for item in expected.get("action_trace") or [] if isinstance(item, dict)]
-    grasp_time = next((float(item.get("time_s") or 0.5) for item in actions if item.get("action_type") == "grasp"), 0.5)
-    release_time = next((float(item.get("time_s") or 2.0) for item in actions if item.get("action_type") == "release"), 20.0)
-    goal = ((expected.get("object_effect") or {}).get("final_goal_region") or {})
-    goal_center = list(goal.get("center_m") or [0.8, 0.0, 0.85])
-    actor_position = list(actor.get("initial_position_m") or [-0.35, 0.0, 0.0])
-    if is_place and str(actor.get("shape") or "").strip().casefold() == "capsule":
-        actor_position[2] = float(actor_position[2]) - float(actor.get("height_m") or 1.85) / 2.0
-    target_position = list(target.get("initial_position_m") or [0.0, 0.0, 0.25])
-    target_dx = float(target_position[0]) - float(actor_position[0])
-    target_dy = float(target_position[1]) - float(actor_position[1])
-    interaction_yaw = math.degrees(math.atan2(-target_dx, target_dy)) if is_place else 0.0
-    if is_place and os.environ.get("SIM_HUMANOID_ADAPTER", "").strip().casefold() == "gasp":
-        # ponytail: measured UEFN-retarget stance calibration; replace when the interaction clip provides authored warp data.
-        actor_position[0] += 0.05
-        actor_position[1] -= 0.05
-    hold_offset = [0.8 if is_place else float(target_position[0]) - float(actor_position[0]), 0.0, 1.05]
-    run_speed = max(0.55, (float(goal_center[0]) - float(target_position[0])) / 2.56) if is_place else 0.0001
-    agent_path = str(actor.get("ue5_path") or "/Game/Characters/BoyAdventurer/Assets/Meshes/Adventurer/SK_Adventurer.SK_Adventurer")
-    agent_params: dict[str, Any] = {
-        "force_material_library_mesh": True,
-        "desired_extent_cm": 92.5,
-        "run_speed_m_s": run_speed,
-        "move_until_s": release_time,
-        "animation_ref": actor.get("animation_ref") or "/Game/Characters/BoyAdventurer/Animations/MM_Walk_Fwd.MM_Walk_Fwd",
-    }
-    if is_place:
-        grab_start = max(0.0, grasp_time - 1.05)
-        grab_end = grab_start + 1.52
-        walk_start = grab_end + 1.15
-        place_start = max(walk_start + 5.0, release_time - 1.05)
-        walk_end = place_start
-        route_y = -0.80
-        goal_stand = [
-            float(goal_center[0]) - (float(target_position[0]) - float(actor_position[0])),
-            float(goal_center[1]) - (float(target_position[1]) - float(actor_position[1])),
-            float(actor_position[2]),
-        ]
-        first_turn_end = walk_start + 1.45
-        cross_end = first_turn_end + 2.7
-        grab = "/Game/DD_Vehicles_Advanced/Animations/Mannequin_UE5/Sequences/Objects/A_GrabMid.A_GrabMid"
-        idle = "/Game/DD_Vehicles_Advanced/Animations/Mannequin_UE5/Manny/MM_Idle.MM_Idle"
-        walk = "/Game/DD_Vehicles_Advanced/Animations/Mannequin_UE5/Manny/MM_Walk_Fwd.MM_Walk_Fwd"
-        agent_path = "/Game/DD_Vehicles_Advanced/Meshes/Mannequin_UE5/SKM_Manny.SKM_Manny"
-        agent_params = {
-            "force_material_library_mesh": True,
-            "desired_extent_cm": 92.5,
-            "ground_offset_cm": 92.5,
-            "stable_root_motion": True,
-            "sweep_movement": True,
-            "gasp_max_frame_displacement_cm": 12.0,
-            "interaction_slot_name": "DefaultSlot",
-            "movement_waypoints": [
-                {"time_s": 0.0, "position_m": actor_position, "yaw_degrees": interaction_yaw},
-                {"time_s": walk_start, "position_m": actor_position, "yaw_degrees": interaction_yaw},
-                {"time_s": first_turn_end, "position_m": [float(actor_position[0]), route_y, float(actor_position[2])], "yaw_degrees": -90.0},
-                {"time_s": cross_end, "position_m": [float(goal_stand[0]), route_y, float(actor_position[2])], "yaw_degrees": 0.0},
-                {"time_s": walk_end, "position_m": goal_stand, "yaw_degrees": interaction_yaw},
-            ],
-            "animation_segments": [
-                {
-                    "name": "grab_from_floor",
-                    "start_s": grab_start,
-                    "end_s": grab_end,
-                    "animation_ref": grab,
-                    "loop": False,
-                    "warp_target_name": "HarnessInteraction",
-                    "warp_target_position_m": actor_position,
-                    "warp_target_yaw_degrees": interaction_yaw,
-                },
-                {"name": "walk_route", "start_s": walk_start, "end_s": walk_end, "animation_ref": walk, "loop": True},
-                {
-                    "name": "drop",
-                    "start_s": place_start,
-                    "end_s": place_start + 1.52,
-                    "animation_ref": grab,
-                    "loop": False,
-                    "warp_target_name": "HarnessInteraction",
-                    "warp_target_position_m": goal_stand,
-                    "warp_target_yaw_degrees": interaction_yaw,
-                },
-                {"name": "idle", "start_s": place_start + 1.52, "animation_ref": idle, "loop": True},
-            ],
+        size = obj.get("size_m") if isinstance(obj.get("size_m"), list) and len(obj["size_m"]) == 3 else [0.25, 0.25, 0.25]
+        body_type = str(obj.get("body_type") or "").casefold()
+        role = str(obj.get("role") or "").casefold()
+        fixed = obj.get("kinematic") is True or body_type in {"static", "kinematic"} or role in {"support", "floor", "ground"}
+        physics = {
+            "mass_kg": obj.get("mass_kg"),
+            "initial_velocity_m_s": list(obj.get("initial_velocity_m_s") or [0.0, 0.0, 0.0]),
+            "initial_angular_velocity_rad_s": list(obj.get("initial_angular_velocity_rad_s") or [0.0, 0.0, 0.0]),
+            "linear_damping": obj.get("linear_damping"),
+            "angular_damping": obj.get("angular_damping"),
+            "enable_gravity": obj.get("enable_gravity"),
+            "use_ccd": obj.get("use_ccd"),
+            "collision_profile": obj.get("collision_profile"),
+            "collider": obj.get("collider"),
+            "material": obj.get("material"),
+            "simulate_physics": not fixed,
+            "kinematic": body_type == "kinematic",
         }
-    agent_path, agent_kind, agent_params = humanoid_runtime_adapter(
-        agent_path,
-        "character" if is_place else "skeletal_mesh",
-        agent_params,
-    )
-    if agent_params.get("humanoid_adapter") == "gasp":
-        for segment in agent_params.get("animation_segments") or []:
-            if segment.get("name") in {"grab_from_floor", "drop"}:
-                segment["animation_ref"] = (
-                    "/Game/Harness/Retarget/GASP_UEFN_A_GrabMid.GASP_UEFN_A_GrabMid"
-                )
-    native_grabbable = is_place and os.environ.get("SIM_HUMANOID_ADAPTER", "").strip().casefold() in {"gasp", "ddv"}
-
-    dynamic = [
-        runtime_object(
-            actor_id,
-            agent_path,
-            "third_person_runner",
-            actor_position,
-            [1.0, 1.0, 1.0],
-            {"simulate_physics": "force_off", "enable_gravity": False, "collision_enabled": is_place, "collision_profile": "Pawn" if is_place else None},
-            agent_params,
-            asset_kind=agent_kind,
-        ),
-        runtime_object(
-            target_id,
-            (
-                "/Game/DD_Vehicles_Advanced/Blueprints/Objects/BP_GrabbableObject.BP_GrabbableObject_C"
-                if native_grabbable
-                else "/Engine/BasicShapes/Cube.Cube"
-            ),
-            "character_carry_object",
-            target_position,
-            [1.0, 1.0, 1.0],
-            {
-                "mass_kg": float(target.get("mass_kg") or 1.0),
-                "simulate_physics": "force_off_until_release",
-                "enable_gravity": True,
-                "linear_damping": 0.35,
-                "angular_damping": 0.5,
-                "restitution": 0.05,
-                "desired_extent_cm": 10.0 if is_place else 24.0,
-            },
-            {
-                "carrier_id": actor_id,
-                "grasp_time_s": grasp_time,
-                "release_time_s": release_time,
-                "hold_offset_m": hold_offset,
-                "release_position_m": [float(goal_center[0]), float(goal_center[1]), float(goal_center[2]) + 0.2],
-                "release_goal_center_m": goal_center if is_place else None,
-                "release_goal_half_extent_m": list(goal.get("half_extent_m") or [0.24, 0.24, 0.12]) if is_place else None,
-                "attachment_socket": "hand_r" if is_place else None,
-                "grasp_clearance_cm": 3.0 if is_place else None,
-                "max_grasp_gap_cm": 4.0 if is_place else None,
-                "grasp_alignment_start_gap_cm": 4.0 if is_place else None,
-                "grasp_alignment_step_cm": 3.0 if is_place else None,
-                "smooth_socket_follow": is_place,
-                "max_carry_follow_step_cm": 5.0 if is_place else None,
-                "release_from_socket": is_place,
-                "release_velocity_m_s": [0.0, 0.0, 0.0],
-                "desired_extent_cm": 10.0 if is_place else 24.0,
-                "fit_dynamic_plan": False,
-                "blueprint_mesh_override": "/Engine/BasicShapes/Cube.Cube" if native_grabbable else None,
-                "native_grabbable_blueprint": native_grabbable,
-                "native_grab_input_action": (
-                    "/Game/DD_Vehicles_Advanced/Blueprints/Objects/Input/Actions/IA_Object_Grab.IA_Object_Grab"
-                    if native_grabbable
-                    else None
-                ),
-            },
-            asset_kind="blueprint" if native_grabbable else "",
-        ),
-    ]
-    if is_place:
-        dynamic[0]["rotation_degrees"] = [0.0, interaction_yaw, 0.0]
-    static = [
-        runtime_object(
-            "floor",
-            "/Engine/BasicShapes/Cube.Cube",
-            "room_floor",
-            [0.3, 0.0, -0.05],
-            [2.5, 2.0, 0.05],
-            {"simulate_physics": "force_off"},
-            {"preserve_authored_scale": True, "material": "matte floor"},
-        ),
-    ]
-    if is_place:
-        support_top = float(goal_center[2]) - 0.05
-        table_mesh = "/Game/Maps/UrbanDowntown/Meshes/PatioFurniture_Table_A.PatioFurniture_Table_A"
-        static.append(
-            runtime_object(
-                "table",
-                table_mesh,
-                "landing_surface",
-                [float(goal_center[0]) + 0.44, float(goal_center[1]), support_top],
-                [1.0, 1.0, 1.0],
-                {"simulate_physics": "force_off"},
-                {"force_material_library_mesh": True, "preserve_material": True, "desired_extent_cm": 45.0, "support_top_m": support_top},
-            )
+        actor = runtime_object(
+            object_id,
+            asset_path,
+            "llm_static_body" if fixed else "llm_rigid_body",
+            list(obj.get("initial_position_m") or [0.0, 0.0, 0.0]),
+            [float(value) for value in size],
+            physics,
+            {"segmentation_identity": object_id},
         )
-        static.append(
-            runtime_object(
-                "source_table",
-                table_mesh,
-                "landing_surface",
-                [float(target_position[0]) + 0.44, float(target_position[1]), support_top],
-                [1.0, 1.0, 1.0],
-                {"simulate_physics": "force_off"},
-                {"force_material_library_mesh": True, "preserve_material": True, "desired_extent_cm": 45.0, "support_top_m": support_top},
-            )
-        )
-    return dynamic, static
-
-
-def throw_into_bin_objects(case_spec: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    expected = case_spec.get("expected_physics") or {}
-    objects = {str(obj.get("id") or obj.get("object_id")): obj for obj in case_spec.get("objects") or [] if isinstance(obj, dict)}
-    actor_id = str(expected.get("action_actor_id") or "agent")
-    target_id = str(expected.get("target_object_id") or "ball")
-    actor = objects.get(actor_id) or {}
-    target = objects.get(target_id) or {}
-    action = next((item for item in expected.get("action_trace") or [] if isinstance(item, dict)), {})
-    release_time = float(action.get("time_s") or expected.get("action_time_s") or 0.5)
-    goal = ((expected.get("object_effect") or {}).get("final_goal_region") or {})
-    goal_center = list(goal.get("center_m") or [1.4, 0.0, 0.35])
-    actor_position = list(actor.get("initial_position_m") or [-0.8, 0.0, 0.0])
-    target_position = list(target.get("initial_position_m") or [0.0, 0.0, 0.8])
-    release_velocity = list(action.get("release_velocity_m_s") or [3.2, 0.0, 1.0])
-    agent_path, agent_kind, agent_params = humanoid_runtime_adapter(
-        str(actor.get("ue5_path") or "/Game/Characters/BoyAdventurer/Assets/Meshes/Adventurer/SK_Adventurer.SK_Adventurer"),
-        "skeletal_mesh",
-        {
-            "force_material_library_mesh": True,
-            "desired_extent_cm": 92.5,
-            "run_speed_m_s": 0.0001,
-            "move_until_s": release_time,
-            "animation_ref": actor.get("animation_ref") or "/Game/Characters/BoyAdventurer/Animations/MM_Walk_Fwd.MM_Walk_Fwd",
-        },
-    )
-
-    dynamic = [
-        runtime_object(
-            actor_id,
-            agent_path,
-            "third_person_runner",
-            actor_position,
-            [1.0, 1.0, 1.0],
-            {"simulate_physics": "force_off", "enable_gravity": False, "collision_enabled": False},
-            agent_params,
-            asset_kind=agent_kind,
-        ),
-        runtime_object(
-            target_id,
-            "/Engine/BasicShapes/Sphere.Sphere",
-            "character_throw_projectile",
-            target_position,
-            [1.0, 1.0, 1.0],
-            {
-                "mass_kg": float(target.get("mass_kg") or 0.4),
-                "simulate_physics": "force_off_until_release",
-                "enable_gravity": True,
-                "linear_damping": 0.12,
-                "angular_damping": 0.25,
-                "restitution": 0.05,
-                "use_ccd": True,
-                "desired_extent_cm": 12.0,
-            },
-            {
-                "carrier_id": actor_id,
-                "grasp_time_s": release_time,
-                "release_time_s": release_time,
-                "release_position_m": target_position,
-                "release_velocity_m_s": release_velocity,
-                "desired_extent_cm": 12.0,
-                "fit_dynamic_plan": False,
-            },
-        ),
-    ]
-    gx, gy, _gz = (float(value) for value in goal_center)
-    static = [
-        runtime_object("floor", "/Engine/BasicShapes/Cube.Cube", "room_floor", [0.6, 0.0, -0.05], [2.5, 1.5, 0.05], {"simulate_physics": "force_off"}, {"preserve_authored_scale": True}),
-        runtime_object("bin", "/Engine/BasicShapes/Cube.Cube", "landing_surface", [gx, gy, 0.1], [0.3, 0.3, 0.1], {"simulate_physics": "force_off"}, {"preserve_authored_scale": True, "support_top_m": 0.2}),
-        runtime_object("bin_side_left", "/Engine/BasicShapes/Cube.Cube", "room_wall", [gx, gy - 0.32, 0.4], [0.32, 0.04, 0.4], {"simulate_physics": "force_off"}, {"preserve_authored_scale": True}),
-        runtime_object("bin_side_right", "/Engine/BasicShapes/Cube.Cube", "room_wall", [gx, gy + 0.32, 0.4], [0.32, 0.04, 0.4], {"simulate_physics": "force_off"}, {"preserve_authored_scale": True}),
-        runtime_object("bin_back", "/Engine/BasicShapes/Cube.Cube", "room_wall", [gx + 0.32, gy, 0.4], [0.04, 0.32, 0.4], {"simulate_physics": "force_off"}, {"preserve_authored_scale": True}),
-    ]
+        actor["rotation_degrees"] = list(obj.get("initial_rotation_deg") or [0.0, 0.0, 0.0])
+        (static if fixed else dynamic).append(actor)
     return dynamic, static
 
 
@@ -1109,6 +830,9 @@ def runtime_object(
             "blueprint": "Blueprint",
             "geometry_collection": "GeometryCollection",
             "skeletal_mesh": "SkeletalMesh",
+            "articulated_kinematic": "PoseableMesh",
+            "articulated_ragdoll": "SkeletalMesh",
+            "articulated_character": "Character",
         }.get(asset_kind, "StaticMesh"),
         "asset_kind": asset_kind,
         "render_usage": f"runtime_{asset_kind}",
@@ -1135,15 +859,6 @@ def runtime_asset_kind(value: Any) -> str:
 
 
 def native_case_type(case_spec: dict[str, Any]) -> str:
-    capability = canonical_capability_id(str(case_spec.get("capability_id") or ""))
-    if capability == "rigid_body_contact_causality":
-        return "llm_object_graph"
-    if capability == "sequential_contact_propagation":
-        return "bottle_domino_chain"
-    if capability == "rigid_body_gravity_collision":
-        return "falling_crate_collision"
-    if capability == "agent_rigidbody_action_coupling" and str((case_spec.get("expected_physics") or {}).get("coupling_type") or "") == "pick_place":
-        return "character_carry_drop"
     return "llm_object_graph"
 
 
@@ -1166,14 +881,14 @@ def duration_for_case(case_spec: dict[str, Any]) -> float:
 
 
 def post_event_tail_for_case(case_spec: dict[str, Any]) -> float:
-    """Time reserved for the autonomous simulation to settle after its event window."""
+    """Explicit time requested after the declared scene/event duration."""
     if os.environ.get("SIM_STUDIO_UE_DURATION"):
         return 0.0
     if os.environ.get("SIM_STUDIO_UE_POST_EVENT_TAIL_S") is not None:
         return max(0.0, min(3.0, float(os.environ["SIM_STUDIO_UE_POST_EVENT_TAIL_S"])))
     expected = case_spec.get("expected_physics") if isinstance(case_spec.get("expected_physics"), dict) else {}
     scene = case_spec.get("scene") if isinstance(case_spec.get("scene"), dict) else {}
-    value = expected.get("post_event_tail_s", scene.get("post_event_tail_s", 1.0))
+    value = expected.get("post_event_tail_s", scene.get("post_event_tail_s", 0.0))
     return max(0.0, min(3.0, float(value)))
 
 
@@ -1181,7 +896,7 @@ def default_physics_controls(case_spec: dict[str, Any]) -> dict[str, Any]:
     parameters = case_spec.get("physical_parameters") if isinstance(case_spec.get("physical_parameters"), dict) else {}
     expected = case_spec.get("expected_physics") if isinstance(case_spec.get("expected_physics"), dict) else {}
     contract = expected.get("simulation_contract") if isinstance(expected.get("simulation_contract"), dict) else {}
-    return {
+    controls = {
         "schema_version": "physics_controls_v1",
         "gravity_enabled": parameters.get("gravity_enabled", True) is not False,
         "gravity_m_s2": parameters.get("gravity_m_s2") or [0.0, 0.0, -9.81],
@@ -1206,6 +921,19 @@ def default_physics_controls(case_spec: dict[str, Any]) -> dict[str, Any]:
         "state_solver": contract.get("state_solver"),
         "trajectory_role": contract.get("trajectory_role"),
     }
+    if any(
+        isinstance(obj, dict)
+        and isinstance(obj.get("solver"), dict)
+        and obj["solver"].get("type") == "articulated_body"
+        and obj["solver"].get("mode") == "ragdoll"
+        for obj in case_spec.get("objects") or []
+    ):
+        controls.update({
+            "simulation_driver": "ue_chaos_articulated_body",
+            "runtime_driver_backend": "ue_world_simulation",
+            "cpp_runtime_driver_enabled": False,
+        })
+    return controls
 
 
 def default_lighting_controls(pass_mode: str = "data", case_spec: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1320,8 +1048,13 @@ def build_render_config(args: argparse.Namespace, case_spec: dict[str, Any], cam
             "capture_backend": "scene_capture",
             "deterministic": True,
             "physics_enabled": True,
-            "depth_source": "ue",
+            "depth_source": "ue" if "depth" in {item.strip() for item in args.passes.split(",")} else "disabled",
             "mask_source": "ue_instance_material_mask",
+            "diagnostic_sample_count": 6,
+            "diagnostic_resolution": [
+                int(os.environ.get("SIM_STUDIO_UE_DATA_WIDTH", "640")),
+                int(os.environ.get("SIM_STUDIO_UE_DATA_HEIGHT", "360")),
+            ],
         },
     }
 
@@ -1329,7 +1062,7 @@ def build_render_config(args: argparse.Namespace, case_spec: dict[str, Any], cam
 def timebase_for_case(case_spec: dict[str, Any]) -> dict[str, Any]:
     requested = case_spec.get("timebase") if isinstance(case_spec.get("timebase"), dict) else {}
     render_fps = int(os.environ.get("SIM_STUDIO_UE_FPS", requested.get("render_fps") or 24))
-    physics_hz = int(os.environ.get("SIM_STUDIO_UE_PHYSICS_HZ", requested.get("physics_hz") or render_fps))
+    physics_hz = int(requested.get("physics_hz") or os.environ.get("SIM_STUDIO_UE_PHYSICS_HZ", render_fps))
     duration_s = duration_for_case(case_spec)
     timebase = build_timebase(duration_s=duration_s, physics_hz=physics_hz, render_fps=render_fps)
     full_solver_frame_count = int(timebase["solver_frame_count"])
@@ -1368,6 +1101,27 @@ def native_output_dir(run_dir: Path, pass_mode: str, requested_mode: str) -> Pat
     return run_dir / "ue_native_output"
 
 
+def run_precompiled_ue_scene(
+    command: list[str],
+    *,
+    studio_scene_path: Path,
+    runtime_scene_path: Path,
+    native_output: Path,
+    environment: dict[str, str],
+    timeout: int,
+) -> dict[str, Any]:
+    env = os.environ.copy()
+    env.update(
+        {
+            "OUTPUT_DIR": str(native_output),
+            "SCENE_SPEC": str(studio_scene_path),
+            "SCENE_RUNTIME_JSON": str(runtime_scene_path),
+            **environment,
+        }
+    )
+    return run_ue_until_artifacts(command, env=env, native_output=native_output, timeout=timeout)
+
+
 def run_native_pass(
     command: list[str],
     *,
@@ -1379,48 +1133,62 @@ def run_native_pass(
     native_output: Path,
     pass_mode: str,
 ) -> dict[str, Any]:
-    env = os.environ.copy()
     precomputed = (runtime_scene.get("physics_controls") or {}).get("runtime_driver_backend") == "precomputed_trajectory"
     live_rgb_solver = pass_mode in {"rgb", "combined"} and not precomputed
-    env.update(
-        {
-            "OUTPUT_DIR": str(native_output),
-            "SCENE_SPEC": str(studio_scene_path),
-            "SCENE_RUNTIME_JSON": str(runtime_scene_path),
-            "ASSET_DATABASE_ONLY_ASSETS": "0",
-            "GITLAB_ONLY_ASSETS": "0",
-            "SCENE_MAP": args.map or "/Game/Maps/MarketEnvironment/Maps/Day",
-            "SCENE_DESCRIPTION": str(case_spec.get("prompt") or case_spec.get("case_id") or "Harness UE render"),
-            "ASSET_ROOT": str((ROOT / "assets").resolve()),
-            "WIDTH": os.environ.get("SIM_STUDIO_UE_WIDTH", "1920"),
-            "HEIGHT": os.environ.get("SIM_STUDIO_UE_HEIGHT", "1080"),
-            "FPS": os.environ.get("SIM_STUDIO_UE_FPS", "24"),
-            "DURATION": str(runtime_scene["simulation"]["duration_s"]),
-            "MULTI_VIEW": "1",
-            "CANONICAL_MULTI_VIEW": "1",
-            "RENDER_DATA_PASSES": "1" if pass_mode in {"data", "combined"} else "0",
-            "AUDIO_PASS_ENABLED": "0",
-            "KEEP_RENDER_FRAMES": os.environ.get("SIM_STUDIO_KEEP_RENDER_FRAMES", "0"),
-            "CHAOS_RIGID_BODY_SETUP": "1",
-            "CHAOS_SIMULATION_ENABLED": "0" if precomputed else "1",
-            "RENDER_QUALITY_PRESET": os.environ.get("SIM_STUDIO_UE_RENDER_QUALITY", "medium"),
-            "VISUAL_REALISM_PROFILE": os.environ.get("SIM_STUDIO_UE_VISUAL_REALISM_PROFILE", "editor_parity"),
-            "RENDER_VIEWPORT_SETTLE_SECONDS": os.environ.get("SIM_STUDIO_UE_VIEWPORT_SETTLE_SECONDS", "0.5"),
-            "RENDER_WARMUP_FRAMES": os.environ.get("SIM_STUDIO_UE_WARMUP_FRAMES", "2"),
-            "RENDER_FIRST_FRAME_STABILITY_SAMPLES": os.environ.get("SIM_STUDIO_UE_FIRST_FRAME_STABILITY_SAMPLES", "1"),
-            "RENDER_SCREENSHOT_STABLE_TICKS": os.environ.get("SIM_STUDIO_UE_SCREENSHOT_STABLE_TICKS", "1"),
-            "VIDEO_CRF": os.environ.get("SIM_STUDIO_UE_VIDEO_CRF", "18"),
-            "VIDEO_PRESET": os.environ.get("SIM_STUDIO_UE_VIDEO_PRESET", "slow"),
-            "SIM_STUDIO_UE_CAPTURE_BACKEND": "highres_viewport" if live_rgb_solver else (os.environ.get("SIM_STUDIO_UE_RGB_CAPTURE_BACKEND", "highres_viewport") if pass_mode == "rgb" else "scene_capture"),
-            "WORLD_MODEL_RENDER_PASS_MODE": "both" if pass_mode == "combined" else pass_mode,
-            "SIM_STUDIO_SEED": str(os.environ.get("SIM_STUDIO_SEED", case_spec.get("seed") or "0")),
-        }
-    )
-    return run_ue_until_artifacts(
+    requested_passes = {item.strip() for item in str(getattr(args, "passes", "rgb")).split(",") if item.strip()}
+    data_width, data_height = data_render_dimensions(pass_mode, ",".join(sorted(requested_passes)))
+    diagnostic_segmentation = "segmentation" not in requested_passes
+    environment = {
+        "ASSET_DATABASE_ONLY_ASSETS": "0",
+        "GITLAB_ONLY_ASSETS": "0",
+        "SCENE_MAP": runtime_stage_map(case_spec),
+        "SCENE_DESCRIPTION": str(case_spec.get("prompt") or case_spec.get("case_id") or "Harness UE render"),
+        "ASSET_ROOT": str((ROOT / "assets").resolve()),
+        "WIDTH": str(data_width),
+        "HEIGHT": str(data_height),
+        "FPS": os.environ.get("SIM_STUDIO_UE_FPS", "24"),
+        "DURATION": str(runtime_scene["simulation"]["duration_s"]),
+        "MULTI_VIEW": "1",
+        "CANONICAL_MULTI_VIEW": "1",
+        "RENDER_DATA_PASSES": "1" if pass_mode in {"data", "combined"} else "0",
+        "RENDER_DEPTH_PASSES": "1" if "depth" in requested_passes else "0",
+        "RENDER_SEGMENTATION_PASSES": "1" if pass_mode in {"data", "combined"} else "0",
+        "RENDER_DATA_SAMPLE_COUNT": "6" if diagnostic_segmentation else "0",
+        "AUDIO_PASS_ENABLED": "0",
+        "KEEP_RENDER_FRAMES": os.environ.get("SIM_STUDIO_KEEP_RENDER_FRAMES", "0"),
+        "CHAOS_RIGID_BODY_SETUP": "1",
+        "CHAOS_SIMULATION_ENABLED": "0" if precomputed else "1",
+        "RENDER_QUALITY_PRESET": os.environ.get("SIM_STUDIO_UE_RENDER_QUALITY", "medium"),
+        "VISUAL_REALISM_PROFILE": os.environ.get("SIM_STUDIO_UE_VISUAL_REALISM_PROFILE", "editor_parity"),
+        "RENDER_VIEWPORT_SETTLE_SECONDS": os.environ.get("SIM_STUDIO_UE_VIEWPORT_SETTLE_SECONDS", "0.5"),
+        "RENDER_WARMUP_FRAMES": os.environ.get("SIM_STUDIO_UE_WARMUP_FRAMES", "2"),
+        "RENDER_FIRST_FRAME_STABILITY_SAMPLES": os.environ.get("SIM_STUDIO_UE_FIRST_FRAME_STABILITY_SAMPLES", "1"),
+        "RENDER_SCREENSHOT_STABLE_TICKS": os.environ.get("SIM_STUDIO_UE_SCREENSHOT_STABLE_TICKS", "1"),
+        "VIDEO_CRF": os.environ.get("SIM_STUDIO_UE_VIDEO_CRF", "18"),
+        "VIDEO_PRESET": os.environ.get("SIM_STUDIO_UE_VIDEO_PRESET", "slow"),
+        "SIM_STUDIO_UE_CAPTURE_BACKEND": "highres_viewport" if live_rgb_solver else (os.environ.get("SIM_STUDIO_UE_RGB_CAPTURE_BACKEND", "highres_viewport") if pass_mode == "rgb" else "scene_capture"),
+        "WORLD_MODEL_RENDER_PASS_MODE": "both" if pass_mode == "combined" else pass_mode,
+        "SIM_STUDIO_SEED": str(os.environ.get("SIM_STUDIO_SEED", case_spec.get("seed") or "0")),
+    }
+    return run_precompiled_ue_scene(
         command,
-        env=env,
+        studio_scene_path=studio_scene_path,
+        runtime_scene_path=runtime_scene_path,
         native_output=native_output,
+        environment=environment,
         timeout=int(os.environ.get("SIM_STUDIO_UE_TIMEOUT_SECONDS", "1800")),
+    )
+
+
+def data_render_dimensions(pass_mode: str, requested_passes: str) -> tuple[int, int]:
+    width = int(os.environ.get("SIM_STUDIO_UE_WIDTH", "1920"))
+    height = int(os.environ.get("SIM_STUDIO_UE_HEIGHT", "1080"))
+    explicit_sensor_pass = bool({"depth", "segmentation"} & {item.strip() for item in requested_passes.split(",")})
+    if pass_mode != "data" or explicit_sensor_pass:
+        return width, height
+    return (
+        int(os.environ.get("SIM_STUDIO_UE_DATA_WIDTH", "640")),
+        int(os.environ.get("SIM_STUDIO_UE_DATA_HEIGHT", "360")),
     )
 
 
@@ -1453,6 +1221,25 @@ def classify_native_pass_failure(native_output: Path, pass_mode: str) -> dict[st
         return {
             "failure_code": "F_ASSET_RUNTIME_BINDING_INVALID",
             "failure_message": "UE runner tried to load a non-mesh class or invalid asset path as a renderable runtime asset. Keep Blueprint/class paths separate from StaticMesh asset paths.",
+        }
+    if "F_RUNTIME_CONSTRAINT_BINDING_FAILED" in process_text:
+        return {
+            "failure_code": "F_RUNTIME_CONSTRAINT_BINDING_FAILED",
+            "failure_message": "UE PIE could not bind a declared rigid constraint to its runtime body components.",
+        }
+    if "F_RUNTIME_BINDING_MISMATCH" in process_text:
+        return {
+            "failure_code": "F_RUNTIME_BINDING_MISMATCH",
+            "failure_message": "UE PIE runtime components did not match the compiled binding declaration.",
+        }
+    if (
+        "LogPython: Error: Traceback" in process_text
+        or "Python script executed with errors" in process_text
+        or "Traceback (most recent call last)" in error_text
+    ):
+        return {
+            "failure_code": "F_UE_NATIVE_SCRIPT_EXCEPTION",
+            "failure_message": "UE native Python scene execution raised an exception.",
         }
     if pass_mode in {"rgb", "combined"} and "timeout waiting for" in error_text and "frames/frame_" in error_text:
         return {
@@ -1507,6 +1294,11 @@ def camera_runtime_from_plan(camera_plan: dict[str, Any]) -> dict[str, Any]:
                 "fov": view.get("fov"),
                 "near_clip": view.get("near_clip"),
                 "far_clip": view.get("far_clip"),
+                "camera_mode": view.get("camera_mode"),
+                "dynamic_camera_profile": view.get("dynamic_camera_profile"),
+                "subject_follow_location_gain": view.get("subject_follow_location_gain"),
+                "subject_follow_target_gain": view.get("subject_follow_target_gain"),
+                "target_object_ids": list(view.get("target_object_ids") or []),
             }
             for view in views
             if isinstance(view, dict) and view.get("camera_id")
@@ -1520,6 +1312,82 @@ def camera_runtime_from_plan(camera_plan: dict[str, Any]) -> dict[str, Any]:
 
 def duration_from_camera_plan(camera_plan: dict[str, Any]) -> float:
     return 4.0
+
+
+def build_map_report(
+    native_summary: dict[str, Any],
+    rgb_summary: dict[str, Any],
+    scene_spec: dict[str, Any],
+    camera_plan: dict[str, Any],
+) -> dict[str, Any]:
+    selected_map = native_summary.get("selected_map") or {}
+    rgb_lighting = rgb_summary.get("lighting") if isinstance(rgb_summary.get("lighting"), dict) else {}
+    rgb_capture_backend = rgb_summary.get("capture_backend") or rgb_lighting.get("capture_backend")
+    rgb_viewport_hygiene = rgb_lighting.get("highres_viewport") if isinstance(rgb_lighting.get("highres_viewport"), dict) else None
+    rgb_runtime_light_audit = rgb_lighting.get("runtime_light_audit") if isinstance(rgb_lighting.get("runtime_light_audit"), dict) else None
+    rgb_existing_map_lights = rgb_lighting.get("existing_map_lights") if isinstance(rgb_lighting.get("existing_map_lights"), dict) else None
+    requested_map_asset = (scene_spec.get("background") or {}).get("ue5_path")
+    controlled_stage = requested_map_asset == "studio_runtime"
+    requested_map = None if controlled_stage else canonical_game_package(requested_map_asset)
+    opened_map = canonical_game_package(selected_map.get("opened_package") or selected_map.get("path"))
+    actor_count = int(native_summary.get("loaded_map_actor_count") or 0)
+    map_failures = []
+    if controlled_stage and selected_map.get("name") != "StudioRuntimeBlank":
+        map_failures.append("F_CONTROLLED_STAGE_NOT_SELECTED")
+    elif not controlled_stage and not selected_map.get("opened"):
+        map_failures.append("F_MAP_NOT_OPENED")
+    if requested_map and opened_map != requested_map:
+        map_failures.append("F_MAP_PACKAGE_MISMATCH")
+    if not controlled_stage and actor_count < 1:
+        map_failures.append("F_MAP_EMPTY")
+    return {
+        "schema_version": "harness_map_report_v1",
+        "status": "fail" if map_failures else "pass",
+        "failure_codes": map_failures,
+        "requested_package": requested_map,
+        "requested_asset_path": requested_map_asset,
+        "opened_package": opened_map,
+        "opened": controlled_stage or bool(selected_map.get("opened")),
+        "stage_mode": "controlled_runtime" if controlled_stage else "catalog_map",
+        "dependency_policy": "runtime_load_success",
+        "loaded_actor_count": actor_count,
+        "visible_actor_count": int((native_summary.get("visible_map_actors") or {}).get("actors") or 0),
+        "visible_component_count": int((native_summary.get("visible_map_actors") or {}).get("components") or 0),
+        "scene_origin_cm": native_summary.get("scene_origin") or [],
+        "render_bounds_cm": native_summary.get("camera_pose") or {},
+        "available_lights": ((native_summary.get("lighting") or {}).get("existing_map_lights") or {}),
+        "rgb_capture": {
+            "backend": rgb_capture_backend,
+            "existing_map_lights": rgb_existing_map_lights,
+            "runtime_light_audit": rgb_runtime_light_audit,
+            "viewport_hygiene": rgb_viewport_hygiene,
+            "preview_shadow_safe": rgb_lighting.get("preview_shadow_safe"),
+        },
+        "camera_ids": [str(view.get("camera_id")) for view in camera_plan.get("views", []) if view.get("camera_id")],
+    }
+
+
+def canonicalize_native_trajectory(trajectory: Any) -> list[dict[str, Any]]:
+    if not isinstance(trajectory, list):
+        raise ValueError("Native UE trajectory must be a list.")
+    canonical: list[dict[str, Any]] = []
+    for frame in trajectory:
+        if not isinstance(frame, dict) or not isinstance(frame.get("objects"), dict):
+            raise ValueError("Native UE trajectory frames must contain an objects mapping.")
+        canonical_frame = dict(frame)
+        canonical_objects: dict[str, dict[str, Any]] = {}
+        for object_id, state in frame["objects"].items():
+            if not isinstance(state, dict):
+                raise ValueError(f"Native UE trajectory state for {object_id} must be an object.")
+            canonical_state = dict(state)
+            if "position_m" not in canonical_state and isinstance(state.get("position"), list):
+                canonical_state["position_m"] = list(state["position"])
+            if "rotation_deg" not in canonical_state and isinstance(state.get("rotation_degrees"), list):
+                canonical_state["rotation_deg"] = list(state["rotation_degrees"])
+            canonical_objects[str(object_id)] = canonical_state
+        canonical_frame["objects"] = canonical_objects
+        canonical.append(canonical_frame)
+    return canonical
 
 
 def standardize_native_output(
@@ -1553,15 +1421,15 @@ def standardize_native_output(
     )
     missing = [str(path) for path in dict.fromkeys(required_paths) if not path.exists() or path.stat().st_size == 0]
     if missing:
-        return fail_report("F6_RUNTIME_OR_RENDER_FAILURE", f"Native UE output missing: {missing}")
-    shutil.copyfile(trajectory_path, run_dir / "trajectory.json")
+        return fail_report("F6_RUNTIME_OR_RENDER_FAILURE", f"Native UE output missing: {missing}", native_ue_invoked=True)
+    trajectory = canonicalize_native_trajectory(read_json(trajectory_path))
+    write_json(run_dir / "trajectory.json", trajectory)
     fracture_events_path = rgb_source / "fracture_events.json"
     if fracture_events_path.is_file():
         shutil.copyfile(fracture_events_path, run_dir / "fracture_events.json")
     fragment_trajectory_path = rgb_source / "fragment_trajectory.json"
     if fragment_trajectory_path.is_file():
         shutil.copyfile(fragment_trajectory_path, run_dir / "fragment_trajectory.json")
-    trajectory = read_json(trajectory_path)
     contacts = extract_contacts(trajectory)
     write_json(run_dir / "contact_events.json", contacts)
     write_json(run_dir / "action_trace.json", extract_action_trace(trajectory))
@@ -1593,37 +1461,9 @@ def standardize_native_output(
             "passes": {**native_passes, "rgb": rgb_passes.get("rgb") or {"status": "missing", "views": []}},
         },
     )
-    selected_map = native_summary.get("selected_map") or {}
-    requested_map_asset = ((scene_spec or {}).get("background") or {}).get("ue5_path")
-    requested_map = canonical_game_package(requested_map_asset)
-    opened_map = canonical_game_package(selected_map.get("opened_package") or selected_map.get("path"))
-    actor_count = int(native_summary.get("loaded_map_actor_count") or 0)
-    map_failures = []
-    if not selected_map.get("opened"):
-        map_failures.append("F_MAP_NOT_OPENED")
-    if requested_map and opened_map != requested_map:
-        map_failures.append("F_MAP_PACKAGE_MISMATCH")
-    if actor_count < 1:
-        map_failures.append("F_MAP_EMPTY")
     write_json(
         run_dir / "map_report.json",
-        {
-            "schema_version": "harness_map_report_v1",
-            "status": "fail" if map_failures else "pass",
-            "failure_codes": map_failures,
-            "requested_package": requested_map,
-            "requested_asset_path": requested_map_asset,
-            "opened_package": opened_map,
-            "opened": bool(selected_map.get("opened")),
-            "dependency_policy": "runtime_load_success",
-            "loaded_actor_count": actor_count,
-            "visible_actor_count": int((native_summary.get("visible_map_actors") or {}).get("actors") or 0),
-            "visible_component_count": int((native_summary.get("visible_map_actors") or {}).get("components") or 0),
-            "scene_origin_cm": native_summary.get("scene_origin") or [],
-            "render_bounds_cm": native_summary.get("camera_pose") or {},
-            "available_lights": ((native_summary.get("lighting") or {}).get("existing_map_lights") or {}),
-            "camera_ids": [str(view.get("camera_id")) for view in camera_plan.get("views", []) if view.get("camera_id")],
-        },
+        build_map_report(native_summary, rgb_summary, scene_spec or {}, camera_plan),
     )
     native_rgb_views = [
         view
@@ -1671,6 +1511,8 @@ def standardize_native_output(
         segmentation_available = bool(segmentation_copy.get("available"))
         depth_frame_count = int(depth_copy.get("frame_count") or 0)
         segmentation_frame_count = int(segmentation_copy.get("frame_count") or 0)
+        depth_frame_indices = [int(value) for value in depth_copy.get("frame_indices") or range(depth_frame_count)]
+        segmentation_frame_indices = [int(value) for value in segmentation_copy.get("frame_indices") or range(segmentation_frame_count)]
         depth_statistics = depth_pixel_statistics(view_dir / "depth.exr") if depth_available else None
         depth_preview = encode_sensor_preview(view_dir / "depth_frames", view_dir / "depth_preview.mp4", fps=fps, modality="depth")
         segmentation_preview = encode_sensor_preview(view_dir / "segmentation_frames", view_dir / "segmentation_preview.mp4", fps=fps, modality="segmentation")
@@ -1700,8 +1542,8 @@ def standardize_native_output(
                 "frame_count_depth": depth_frame_count,
                 "frame_count_segmentation": segmentation_frame_count,
                 "timestamps_rgb": rgb_timestamps,
-                "timestamps_depth": timestamps[:depth_frame_count],
-                "timestamps_segmentation": timestamps[:segmentation_frame_count],
+                "timestamps_depth": [timestamps[index] for index in depth_frame_indices if 0 <= index < len(timestamps)],
+                "timestamps_segmentation": [timestamps[index] for index in segmentation_frame_indices if 0 <= index < len(timestamps)],
                 "fps": fps,
                 "timebase": timebase,
                 "solver_cache_sha256": solver_cache_sha256,
@@ -1714,11 +1556,13 @@ def standardize_native_output(
                 "depth_variance": float((depth_statistics or {}).get("variance") or 0.0),
                 "depth_pixel_statistics": depth_statistics,
                 "depth_frames": depth_copy.get("frames", []),
+                "depth_frame_indices": depth_frame_indices,
                 "depth_preview": "depth_preview.mp4" if depth_preview else None,
                 "depth_format_mismatch_count": int(depth_copy.get("format_mismatch_count") or 0),
                 "segmentation_type": segmentation_type,
                 "instance_level": segmentation_available,
                 "segmentation_frames": segmentation_copy.get("frames", []),
+                "segmentation_frame_indices": segmentation_frame_indices,
                 "segmentation_preview": "segmentation_preview.mp4" if segmentation_preview else None,
                 "segmentation_format_mismatch_count": int(segmentation_copy.get("format_mismatch_count") or 0),
                 "instance_count": int(segmentation_copy.get("instance_count") or 0),
@@ -1774,6 +1618,11 @@ def standardize_native_output(
                 "existing_map_lights": lighting.get("existing_map_lights"),
             },
         },
+    )
+    cleanup_noncanonical_render_frames(
+        run_dir,
+        native_outputs=[native_output, rgb_source],
+        keep_render_frames=os.environ.get("SIM_STUDIO_KEEP_RENDER_FRAMES", "0") == "1",
     )
     if case_spec is not None and scene_spec is not None and render_config is not None:
         ArtifactManager(run_dir).finalize(
@@ -1858,6 +1707,31 @@ def quantize_rgb24_to_palette(data: bytes, palette: list[tuple[int, int, int]]) 
     return bytes(output)
 
 
+def required_visible_segmentation_object_ids(
+    camera_plan: dict[str, Any],
+    actor_placement: dict[str, Any],
+    *,
+    live_fracture_ids: set[str] | None = None,
+) -> dict[str, set[str]]:
+    hidden_object_ids = {
+        str(binding.get("object_id"))
+        for binding in actor_placement.get("actor_bindings") or []
+        if isinstance(binding, dict)
+        and binding.get("object_id")
+        and isinstance(binding.get("visual_representation"), dict)
+        and binding["visual_representation"].get("visible") is False
+    }
+    fracture_ids = {str(value) for value in live_fracture_ids or set()}
+    return {
+        str(view.get("camera_id")): (
+            {str(value) for value in view.get("target_object_ids") or []} - hidden_object_ids
+        )
+        | fracture_ids
+        for view in camera_plan.get("views") or []
+        if isinstance(view, dict) and view.get("camera_id")
+    }
+
+
 def quantize_native_instance_segmentation(
     native_output: Path,
     *,
@@ -1865,7 +1739,7 @@ def quantize_native_instance_segmentation(
     height: int,
     fps: int,
     required: bool,
-    required_object_ids: set[str] | None = None,
+    required_object_ids_by_view: dict[str, set[str]] | None = None,
 ) -> dict[str, Any]:
     manifest_path = native_output / "render_pass_manifest.json"
     manifest = read_optional_json(manifest_path)
@@ -1883,6 +1757,7 @@ def quantize_native_instance_segmentation(
     results = []
     for view in views:
         view_id = str(view.get("view_id") or "view")
+        required_object_ids = (required_object_ids_by_view or {}).get(view_id, set())
         frame_paths = [Path(str(path)) for path in view.get("frames") or [] if path]
         if len(set(frame_paths)) != len(frame_paths):
             return {
@@ -1892,7 +1767,7 @@ def quantize_native_instance_segmentation(
             }
         mapping = [item for item in view.get("instance_mapping") or [] if isinstance(item, dict)]
         mapped_object_ids = {str(item.get("object_id") or "") for item in mapping}
-        missing_mapping = sorted((required_object_ids or set()) - mapped_object_ids)
+        missing_mapping = sorted(required_object_ids - mapped_object_ids)
         if missing_mapping:
             return {
                 "status": "fail",
@@ -1907,7 +1782,7 @@ def quantize_native_instance_segmentation(
                 continue
             color = tuple(max(0, min(255, int(round(float(value) * 255.0)))) for value in rgb[:3])
             palette.append(color)
-            if str(item.get("object_id") or "") in (required_object_ids or set()):
+            if str(item.get("object_id") or "") in required_object_ids:
                 required_colors.add(color)
         palette = list(dict.fromkeys(palette))
         if not frame_paths or len(palette) <= 1 or any(not path.is_file() for path in frame_paths):
@@ -2124,7 +1999,67 @@ def copy_native_pass_view(native_view: dict[str, Any] | None, view_dir: Path, an
         "palette_closure": native_view.get("palette_closure"),
         "palette_rgb8": native_view.get("palette_rgb8"),
         "raw_frames": native_view.get("raw_frames"),
+        "frame_indices": native_view.get("frame_indices") or [],
     }
+
+
+def cleanup_noncanonical_render_frames(
+    run_dir: Path,
+    *,
+    native_outputs: list[Path],
+    keep_render_frames: bool,
+) -> dict[str, Any]:
+    run_dir = run_dir.resolve()
+    logs_root = (run_dir / "logs").resolve()
+    candidates: list[Path] = []
+    errors: list[dict[str, str]] = []
+    for raw_root in dict.fromkeys(Path(path) for path in native_outputs):
+        native_root = raw_root.resolve()
+        if not native_root.is_relative_to(logs_root):
+            errors.append({"path": str(raw_root), "error": "native_output_outside_run_logs"})
+            continue
+        for name in ("depth_exr", "segmentation", "segmentation_raw"):
+            candidates.append(native_root / name)
+        candidates.extend(sorted(native_root.glob("frames*")))
+
+    removed: list[dict[str, Any]] = []
+    if not keep_render_frames:
+        for path in dict.fromkeys(candidates):
+            if not path.is_dir() or path.is_symlink():
+                continue
+            files = [item for item in path.rglob("*") if item.is_file() and not item.is_symlink()]
+            size_bytes = sum(item.stat().st_size for item in files)
+            try:
+                shutil.rmtree(path)
+            except OSError as exc:
+                errors.append({"path": str(path), "error": str(exc)})
+                continue
+            removed.append(
+                {
+                    "path": path.relative_to(run_dir).as_posix(),
+                    "file_count": len(files),
+                    "nominal_size_bytes": size_bytes,
+                }
+            )
+        for meta_path in sorted((run_dir / "views").glob("*/meta.json")):
+            meta = read_optional_json(meta_path)
+            if not meta:
+                continue
+            meta["segmentation_raw_frames"] = []
+            meta["noncanonical_render_frames_retained"] = False
+            write_json(meta_path, meta)
+
+    report = {
+        "schema_version": "harness_render_frame_cleanup_v1",
+        "keep_render_frames": keep_render_frames,
+        "scope": "noncanonical_native_intermediates",
+        "canonical_sensor_sequences_retained": True,
+        "removed": removed,
+        "errors": errors,
+        "status": "pass" if not errors else "partial",
+    }
+    write_json(run_dir / "render_frame_cleanup.json", report)
+    return report
 
 
 def encode_sensor_preview(frame_dir: Path, output: Path, *, fps: int, modality: str) -> bool:
@@ -2303,13 +2238,13 @@ def extract_contacts(trajectory: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return contacts
 
 
-def fail_report(code: str, message: str, **extra: Any) -> dict[str, Any]:
+def fail_report(code: str, message: str, *, native_ue_invoked: bool = False, **extra: Any) -> dict[str, Any]:
     return {
         "schema_version": "harness_local_ue_runner_report.v1",
         "status": "failed",
         "failure_code": code,
         "failure_message": message,
-        "native_ue_invoked": code.startswith("F6"),
+        "native_ue_invoked": native_ue_invoked,
         **extra,
     }
 

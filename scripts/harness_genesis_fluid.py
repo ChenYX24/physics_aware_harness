@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 from harness.verification.particle_cache_verifier import verify_particle_cache
 from harness.core.artifact_manager import ArtifactManager
 from harness.core.workspace import workspace_path
+from harness.runtime.genesis_headless import import_headless_genesis
 
 
 def simulate_fluid(
@@ -49,7 +50,7 @@ def simulate_fluid(
     maximum_final_surface_area_to_volume_ratio: float,
     maximum_final_surface_volume_relative_error: float,
 ) -> dict[str, Any]:
-    import genesis as gs
+    gs = import_headless_genesis()
     import numpy as np
     import pysplashsurf
 
@@ -615,7 +616,10 @@ def main() -> int:
         report["published_videos"] = [str(path) for path in published]
         (output_dir / "fluid_report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps({"status": report["status"], "output_dir": str(output_dir), **report["checks"]}, indent=2))
-    return 0 if report["status"] == "pass" else 2
+    # The process exit status describes execution/artifact generation only.
+    # Physical assertion failures remain in fluid_report.json and are consumed
+    # by the verifier stage.
+    return 0
 
 
 if __name__ == "__main__":

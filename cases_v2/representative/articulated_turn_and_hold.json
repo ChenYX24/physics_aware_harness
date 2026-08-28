@@ -1,0 +1,198 @@
+{
+  "schema_version": "harness_case_spec_v2",
+  "identity": {
+    "case_id": "articulated_turn_and_hold",
+    "title": "White mannequin turns while holding a ball",
+    "source_request": "Show one basic white human model turning while holding an object."
+  },
+  "capabilities": {
+    "primary": "articulated_body_motion",
+    "required": ["articulated_body_motion"]
+  },
+  "scene": {
+    "environment_intent": "minimal flat test floor",
+    "coordinate_system": "z_up",
+    "duration_s": 2.0,
+    "bounds_hint_m": [3.0, 2.0, 2.5]
+  },
+  "timebase": {
+    "physics_hz": 120,
+    "observation_fps": 24,
+    "deterministic_seed": 17
+  },
+  "backend_constraints": {
+    "required_solver_capabilities": ["articulated_body", "trajectory"],
+    "allowed_solvers": ["ue"],
+    "render_backend": "ue",
+    "allow_multi_backend": false
+  },
+  "asset_policy": {
+    "allow_local": true,
+    "allow_external": false,
+    "allow_generation": true,
+    "allow_analytic_proxy": true,
+    "required_license_tier": "local_preview"
+  },
+  "objects": [
+    {
+      "id": "person",
+      "role": "articulated_body",
+      "geometry": {
+        "shape_hint": "humanoid",
+        "approx_size_m": [0.58, 0.36, 1.92],
+        "scale_policy": "preserve_authored"
+      },
+      "physics": {
+        "body_type": "kinematic",
+        "collision_required": false
+      },
+      "initial_state": {
+        "position_m": [-0.5, 0.0, 0.0],
+        "rotation_deg": [0.0, 0.0, 0.0],
+        "linear_velocity_m_s": [0.0, 0.0, 0.0]
+      },
+      "behavior": {},
+      "visual_representation": {
+        "source": "solver_generated",
+        "visible": true
+      },
+      "solver": {
+        "type": "articulated_body",
+        "model": "harness_ue_mannequin_v1",
+        "mode": "kinematic",
+        "pose_source": {
+          "type": "pose_keyframes",
+          "keyframes": [
+            {
+              "time_s": 0.0,
+              "rotations_deg": {
+                "upperarm_r": [0.0, 0.0, 30.0],
+                "lowerarm_r": [0.0, 0.0, 45.0]
+              }
+            },
+            {
+              "time_s": 2.0,
+              "rotations_deg": {
+                "upperarm_r": [0.0, 0.0, 60.0],
+                "lowerarm_r": [0.0, 0.0, 70.0]
+              }
+            }
+          ]
+        },
+        "root_transform_source": {
+          "type": "root_keyframes",
+          "keyframes": [
+            {
+              "time_s": 0.0,
+              "position_offset_m": [0.0, 0.0, 0.0],
+              "rotation_offset_deg": [0.0, 0.0, 0.0]
+            },
+            {
+              "time_s": 2.0,
+              "position_offset_m": [0.8, 0.0, 0.0],
+              "rotation_offset_deg": [0.0, 90.0, 0.0]
+            }
+          ]
+        },
+        "ik_targets": [],
+        "attachments": [
+          {
+            "object_id": "held_ball",
+            "bone": "hand_r",
+            "start_time_s": 0.0,
+            "end_time_s": 2.0,
+            "local_position_m": [0.0, 0.0, 0.0],
+            "local_rotation_deg": [0.0, 0.0, 0.0]
+          }
+        ]
+      }
+    },
+    {
+      "id": "held_ball",
+      "role": "held_object",
+      "geometry": {
+        "shape_hint": "sphere",
+        "approx_size_m": [0.18, 0.18, 0.18]
+      },
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.2,
+        "collision_required": true,
+        "collision_geometry": {
+          "shape": "sphere",
+          "size_m": [0.18, 0.18, 0.18],
+          "local_center_offset_m": [0.0, 0.0, 0.0]
+        },
+        "material": {
+          "dynamic_friction": 0.4,
+          "restitution": 0.1
+        }
+      },
+      "initial_state": {
+        "position_m": [-0.5, 0.0, 1.2],
+        "rotation_deg": [0.0, 0.0, 0.0],
+        "linear_velocity_m_s": [0.0, 0.0, 0.0]
+      },
+      "behavior": {},
+      "visual_representation": {
+        "source": "asset",
+        "visible": true
+      }
+    },
+    {
+      "id": "floor",
+      "role": "support",
+      "geometry": {
+        "shape_hint": "box",
+        "approx_size_m": [3.0, 2.0, 0.1]
+      },
+      "physics": {
+        "body_type": "static",
+        "mass_kg": 100.0,
+        "collision_required": true,
+        "collision_geometry": {
+          "shape": "box",
+          "size_m": [3.0, 2.0, 0.1],
+          "local_center_offset_m": [0.0, 0.0, 0.0]
+        },
+        "material": {
+          "dynamic_friction": 0.5,
+          "restitution": 0.05
+        }
+      },
+      "initial_state": {
+        "position_m": [0.0, 0.0, -0.05],
+        "rotation_deg": [0.0, 0.0, 0.0],
+        "linear_velocity_m_s": [0.0, 0.0, 0.0]
+      },
+      "behavior": {},
+      "visual_representation": {
+        "source": "asset",
+        "visible": true
+      }
+    }
+  ],
+  "constraints": [],
+  "relations": [],
+  "events": [],
+  "expected_behavior": {},
+  "observation_requirements": {
+    "cameras": [
+      {
+        "role": "front_static",
+        "target_objects": ["person", "held_ball"]
+      }
+    ],
+    "modalities": ["rgb"],
+    "signals": ["trajectory", "articulated_pose"]
+  },
+  "verification_requirements": {
+    "assertions": [],
+    "thresholds": {}
+  },
+  "variant": {
+    "should_pass": true
+  },
+  "provenance": {},
+  "notes": "Generic fixed-skeleton articulated-body smoke case."
+}

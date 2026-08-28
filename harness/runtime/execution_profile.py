@@ -8,23 +8,11 @@ from typing import Any
 from harness.core.artifact_schema import read_json, write_json
 
 
-COMPLETE_CASE_VIEWS = (
-    "front_static",
-    "side_static",
-    "top_down",
-    "tracking_subject",
-    "event_closeup",
-)
-
-
 @dataclass(frozen=True)
 class ExecutionProfile:
     """One small interface for the capture cost/quality contract."""
 
     name: str
-    views: tuple[str, ...]
-    render_passes: tuple[str, ...]
-    render_mode: str
     width: int
     height: int
     render_fps: int
@@ -32,50 +20,45 @@ class ExecutionProfile:
     artifact_eligibility: str
     purpose: str
 
-    @property
-    def complete_sensor_contract(self) -> bool:
-        return set(self.render_passes) == {"rgb", "depth", "segmentation"}
-
     def environment(self) -> dict[str, str]:
         return {
             "SIM_STUDIO_UE_WIDTH": str(self.width),
             "SIM_STUDIO_UE_HEIGHT": str(self.height),
             "SIM_STUDIO_UE_FPS": str(self.render_fps),
             "SIM_STUDIO_UE_PHYSICS_HZ": str(self.physics_hz),
-            "SIM_STUDIO_UE_RENDER_MODE": self.render_mode,
         }
 
 
 EXECUTION_PROFILES: dict[str, ExecutionProfile] = {
     "smoke": ExecutionProfile(
         name="smoke",
-        views=("event_closeup",),
-        render_passes=("rgb",),
-        render_mode="rgb",
-        width=1280,
-        height=720,
+        width=640,
+        height=360,
         render_fps=24,
         physics_hz=120,
         artifact_eligibility="diagnostic_only",
-        purpose="HD event and causality preflight before complete sensor capture.",
+        purpose="Low-resolution technical preflight.",
     ),
     "candidate": ExecutionProfile(
         name="candidate",
-        views=COMPLETE_CASE_VIEWS,
-        render_passes=("rgb", "depth", "segmentation"),
-        render_mode="both",
         width=1920,
         height=1080,
         render_fps=24,
         physics_hz=120,
         artifact_eligibility="review_candidate",
-        purpose="Full-HD five-camera multimodal review candidate.",
+        purpose="Full-HD review candidate.",
+    ),
+    "local_preview": ExecutionProfile(
+        name="local_preview",
+        width=1280,
+        height=720,
+        render_fps=24,
+        physics_hz=120,
+        artifact_eligibility="local_preview",
+        purpose="HD local preview with physics, camera, and semantic verification.",
     ),
     "publish": ExecutionProfile(
         name="publish",
-        views=COMPLETE_CASE_VIEWS,
-        render_passes=("rgb", "depth", "segmentation"),
-        render_mode="both",
         width=3840,
         height=2160,
         render_fps=24,
@@ -93,6 +76,11 @@ def execution_profile(name: str) -> ExecutionProfile:
         raise ValueError(f"unknown execution profile: {name}") from exc
 
 
+def execution_profile_names() -> tuple[str, ...]:
+    """Return the single registered profile set shared by every adapter."""
+    return tuple(EXECUTION_PROFILES)
+
+
 def write_execution_reports(
     run_dir: str | Path,
     profile: ExecutionProfile,
@@ -105,14 +93,26 @@ def write_execution_reports(
     profile_payload = {
         "schema_version": "harness_execution_profile_v1",
         **asdict(profile),
-        "complete_sensor_contract": profile.complete_sensor_contract,
     }
     write_json(run_dir / "execution_profile.json", profile_payload)
 
     render_config = optional_json(run_dir / "inputs" / "render_config.json")
+    observation_plan = optional_json(run_dir / "observation_plan.json")
     frame_count = profile_frame_count(run_dir, render_config)
-    actual_views = render_config.get("views") if isinstance(render_config.get("views"), list) else list(profile.views)
-    actual_passes = render_config.get("passes") if isinstance(render_config.get("passes"), list) else list(profile.render_passes)
+    actual_views = (
+        list(render_config["views"])
+        if isinstance(render_config.get("views"), list)
+        else [
+            str(camera["camera_id"])
+            for camera in observation_plan.get("cameras") or []
+            if isinstance(camera, dict) and camera.get("camera_id")
+        ]
+    )
+    actual_passes = (
+        list(render_config["passes"])
+        if isinstance(render_config.get("passes"), list)
+        else list(observation_plan.get("modalities") or [])
+    )
     work_units = frame_count * len(actual_views) * len(actual_passes)
     native_timing, native_summary = native_timing_for_run(run_dir)
     measured_total = positive_float(native_timing.get("total_seconds")) or max(0.0, float(wall_seconds))
@@ -158,9 +158,7 @@ def verified_run_status(run_dir: str | Path) -> str:
     run_dir = Path(run_dir)
     verifier = optional_json(run_dir / "harness_verifier.json")
     render_sync = optional_json(run_dir / "render_sync_report.json")
-    if verifier.get("status") != "pass":
-        return "fail"
-    if render_sync and render_sync.get("status") != "pass":
+    if verifier.get("status") != "pass" or render_sync.get("status") != "pass":
         return "fail"
     return "pass"
 
@@ -178,6 +176,12 @@ def promotion(profile: ExecutionProfile, status: str) -> dict[str, Any]:
             "eligible": passed,
             "next_profile": "publish" if passed else None,
             "reason": "requires_explicit_keep_before_publish" if passed else "candidate_failed",
+        }
+    if profile.name == "local_preview":
+        return {
+            "eligible": False,
+            "next_profile": None,
+            "reason": "terminal_local_preview" if passed else "local_preview_failed",
         }
     return {"eligible": False, "next_profile": None, "reason": "terminal_profile"}
 

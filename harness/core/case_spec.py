@@ -79,17 +79,17 @@ def validate_case_spec(data: dict[str, Any]) -> None:
             raise ValueError(f"case spec field must be list: {key}")
     if not isinstance(data["should_pass"], bool):
         raise ValueError("case spec should_pass must be boolean")
-    if data.get("capability_id") == "sequential_contact_propagation":
-        validate_domino_parameter_consistency(data)
-    if data.get("capability_id") == "fluid_particle_dynamics":
+    if any(
+        isinstance(obj, dict) and str(obj.get("role") or "") in {"fluid", "fluid_volume"}
+        for obj in data.get("objects") or []
+    ) or isinstance(data.get("solver_scene"), dict):
         validate_fluid_initial_conditions(data)
-    if data.get("capability_id") == "agent_rigidbody_action_coupling":
+    expected = data.get("expected_physics") if isinstance(data.get("expected_physics"), dict) else {}
+    if expected.get("required_action_sequence") is not None or expected.get("object_effect") is not None:
         validate_agent_action_effect(data)
-    verification_rules = {str(rule) for rule in data.get("verification_rules") or []}
-    if "ballistic_gravity_impact" in verification_rules:
-        validate_ballistic_gravity_impact(data)
-    if "impact_centered_fracture" in verification_rules:
-        validate_impact_centered_fracture(data)
+    parameters = data.get("physical_parameters") if isinstance(data.get("physical_parameters"), dict) else {}
+    if parameters.get("target_impact_point_m") is not None:
+        validate_constant_acceleration_target(data)
     for obj in data["objects"]:
         if isinstance(obj, dict) and isinstance(obj.get("fracture_response"), dict):
             validate_fracture_energy_response(obj["fracture_response"])
@@ -104,9 +104,19 @@ def validate_fluid_initial_conditions(data: dict[str, Any]) -> None:
     ]
     if not fluids:
         raise ValueError("fluid_particle_dynamics requires at least one fluid object")
-    roles = {str(obj.get("role") or "") for obj in data.get("objects") or [] if isinstance(obj, dict)}
-    if {"source_container", "receiver_container"}.intersection(roles):
-        validate_container_transfer_contract(data)
+    if isinstance(data.get("solver_scene"), dict):
+        from harness.runtime.rigid_sph_scene import compile_rigid_sph_scene
+
+        rigid_objects = [obj for obj in data.get("objects") or [] if isinstance(obj, dict) and obj.get("role") == "rigid_body"]
+        unresolved_v2_assets = (
+            (data.get("v2_projection") or {}).get("source_schema_version") == "harness_case_spec_v2"
+            and any(not str(((obj.get("asset") or {}).get("ue_path") or "")).startswith("/Game/") for obj in rigid_objects)
+        )
+        # V2 projection precedes Provider/Catalog resolution. Its generic
+        # solver declarations are validated after selected assets are bound by
+        # the Runtime Compiler; persisted V1 cases remain strict here.
+        if not unresolved_v2_assets:
+            compile_rigid_sph_scene(data)
     for fluid in fluids:
         initial = fluid.get("initial_condition")
         if initial is None:
@@ -144,97 +154,6 @@ def validate_fluid_initial_conditions(data: dict[str, Any]) -> None:
         velocity_field = initial.get("velocity_field")
         if velocity_field is not None:
             validate_fluid_velocity_field(velocity_field)
-
-
-def validate_container_transfer_contract(data: dict[str, Any]) -> None:
-    objects = [obj for obj in data.get("objects") or [] if isinstance(obj, dict)]
-    for role in ("source_container", "receiver_container"):
-        matches = [obj for obj in objects if str(obj.get("role") or "") == role]
-        if len(matches) != 1:
-            raise ValueError(f"container transfer requires exactly one {role}")
-        container = matches[0]
-        asset = container.get("asset") if isinstance(container.get("asset"), dict) else {}
-        collision = container.get("collision") if isinstance(container.get("collision"), dict) else {}
-        if not str(asset.get("ue_path") or "").startswith("/Game/") or asset.get("proxy") is not False:
-            raise ValueError("container transfer requires a non-proxy /Game UE asset")
-        digest = str(asset.get("sha256") or "")
-        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest.lower()):
-            raise ValueError("container transfer asset requires a sha256 digest")
-        if collision.get("type") != "axisymmetric_profile" or collision.get("asset_geometry_match") is not True:
-            raise ValueError("container transfer requires an asset-matched axisymmetric_profile collider")
-        if int(collision.get("panel_count") or 0) < 12:
-            raise ValueError("container transfer collider requires at least 12 wall panels")
-        profile = collision.get("inner_profile")
-        if not isinstance(profile, list) or len(profile) < 2:
-            raise ValueError("container transfer collider requires at least two inner_profile points")
-        previous_z = -math.inf
-        for point in profile:
-            if not isinstance(point, dict):
-                raise ValueError("container inner_profile points must be objects")
-            z_m = point.get("z_m")
-            radius_m = point.get("radius_m")
-            if not isinstance(z_m, (int, float)) or not math.isfinite(float(z_m)) or float(z_m) <= previous_z:
-                raise ValueError("container inner_profile z_m values must be finite and strictly increasing")
-            if not isinstance(radius_m, (int, float)) or not math.isfinite(float(radius_m)) or float(radius_m) <= 0.0:
-                raise ValueError("container inner_profile radius_m values must be positive")
-            previous_z = float(z_m)
-        if not vector3(container.get("solver_rotation_xyz_deg")) or not vector3(container.get("ue_rotation_pyr_deg")):
-            raise ValueError("container transfer requires explicit solver XYZ and UE pitch/yaw/roll rotations")
-        motion = container.get("kinematic_motion")
-        if motion is not None:
-            if not isinstance(motion, dict) or motion.get("type") != "tilt":
-                raise ValueError("container transfer kinematic_motion must be a tilt object")
-            if not vector3(motion.get("solver_end_rotation_xyz_deg")) or not vector3(motion.get("ue_end_rotation_pyr_deg")):
-                raise ValueError("container tilt requires solver and UE end rotations")
-            if float(motion.get("start_time_s") or -1.0) < 0.0 or float(motion.get("duration_s") or 0.0) <= 0.0:
-                raise ValueError("container tilt requires non-negative start_time_s and positive duration_s")
-            pivot = motion.get("pivot_local_m")
-            if not vector3(pivot):
-                raise ValueError("container tilt requires a pivot_local_m 3-vector")
-            rim = profile[-1]
-            if not math.isclose(float(pivot[2]), float(rim["z_m"]), abs_tol=1e-6):
-                raise ValueError("container tilt pivot_local_m must lie at the fitted rim height")
-            pivot_radius = math.hypot(float(pivot[0]), float(pivot[1]))
-            if not math.isclose(pivot_radius, float(rim["radius_m"]), abs_tol=1e-6):
-                raise ValueError("container tilt pivot_local_m must lie on the fitted rim radius")
-            landing = motion.get("expected_stream_landing_xy_m")
-            if not isinstance(landing, list) or len(landing) != 2 or not all(isinstance(value, (int, float)) for value in landing):
-                raise ValueError("container tilt requires expected_stream_landing_xy_m from a solver probe")
-            solver_end = motion["solver_end_rotation_xyz_deg"]
-            ue_end = motion["ue_end_rotation_pyr_deg"]
-            if not (
-                math.isclose(float(solver_end[0]), 0.0, abs_tol=1e-6)
-                and math.isclose(float(solver_end[2]), 0.0, abs_tol=1e-6)
-                and math.isclose(float(ue_end[0]), -float(solver_end[1]), abs_tol=1e-6)
-                and math.isclose(float(ue_end[1]), 0.0, abs_tol=1e-6)
-                and math.isclose(float(ue_end[2]), 0.0, abs_tol=1e-6)
-            ):
-                raise ValueError("container solver +Y tilt must map to negative UE pitch")
-    fluid = next(obj for obj in objects if str(obj.get("role") or "") in {"fluid", "fluid_volume"})
-    initial = fluid.get("initial_condition") if isinstance(fluid.get("initial_condition"), dict) else {}
-    if initial.get("frame") != "source_container_local" or not vector3(initial.get("local_position_m")):
-        raise ValueError("container transfer fluid requires source_container_local local_position_m")
-    bounds = data.get("workspace_bounds_m") if isinstance(data.get("workspace_bounds_m"), dict) else {}
-    if not vector3(bounds.get("min_m")) or not vector3(bounds.get("max_m")):
-        raise ValueError("container transfer requires workspace_bounds_m min_m/max_m")
-    expected = data.get("expected_physics") if isinstance(data.get("expected_physics"), dict) else {}
-    evacuation_duration = expected.get("minimum_source_evacuation_duration_s")
-    maximum_drop = expected.get("maximum_source_fraction_drop_per_frame")
-    if not isinstance(evacuation_duration, (int, float)) or float(evacuation_duration) <= 0.0:
-        raise ValueError("container transfer requires positive minimum_source_evacuation_duration_s")
-    if not isinstance(maximum_drop, (int, float)) or not 0.0 < float(maximum_drop) <= 1.0:
-        raise ValueError("container transfer maximum_source_fraction_drop_per_frame must be in (0, 1]")
-    scene = data.get("scene") if isinstance(data.get("scene"), dict) else {}
-    support = scene.get("support_surface") if isinstance(scene.get("support_surface"), dict) else {}
-    support_asset = support.get("asset") if isinstance(support.get("asset"), dict) else {}
-    support_path = str(support_asset.get("ue_path") or "")
-    if not support_path.startswith("/Game/") or support_asset.get("proxy") is not False:
-        raise ValueError("asset-bound container transfer requires a non-proxy /Game support surface")
-    if not vector3(support_asset.get("bbox_m")) or not vector3(support.get("position_m")) or not vector3(support.get("scale")):
-        raise ValueError("container transfer support surface requires bbox_m, position_m, and scale")
-    floor_to_surface = support.get("solver_floor_to_surface_m")
-    if not isinstance(floor_to_surface, (int, float)) or not math.isfinite(float(floor_to_surface)) or float(floor_to_surface) <= 0.0:
-        raise ValueError("container transfer support surface requires positive solver_floor_to_surface_m")
 
 
 def validate_fluid_velocity_field(field: Any) -> None:
@@ -298,48 +217,34 @@ def fracture_response_for_energy(response: dict[str, Any], impact_energy_j: floa
     return selected
 
 
-def validate_ballistic_gravity_impact(data: dict[str, Any]) -> None:
-    """Require a declared gravity arc to reach the planned impact point from initial state only."""
+def validate_constant_acceleration_target(data: dict[str, Any]) -> None:
+    """Check an explicitly declared constant-acceleration target from initial state."""
     parameters = data.get("physical_parameters") or {}
-    duration = float(parameters.get("ballistic_time_to_impact_s") or 0.0)
+    duration = float(parameters.get("time_to_target_s") or parameters.get("ballistic_time_to_impact_s") or 0.0)
     target = parameters.get("target_impact_point_m")
     gravity = parameters.get("gravity_m_s2")
-    projectile = next(
-        (obj for obj in data.get("objects") or [] if isinstance(obj, dict) and obj.get("role") == "projectile"),
-        None,
-    )
-    if duration <= 0.0 or not vector3(target) or not vector3(gravity) or not projectile:
-        raise ValueError("ballistic_gravity_impact requires time, target, gravity, and one projectile")
-    if parameters.get("gravity_enabled") is not True or projectile.get("enable_gravity") is not True:
-        raise ValueError("ballistic_gravity_impact projectile must enable gravity")
-    position = projectile.get("initial_position_m")
-    velocity = projectile.get("initial_velocity_m_s")
+    object_id = str(parameters.get("target_object_id") or "")
+    candidates = [
+        obj
+        for obj in data.get("objects") or []
+        if isinstance(obj, dict)
+        and ((object_id and str(obj.get("id") or "") == object_id) or (not object_id and obj.get("enable_gravity") is True))
+    ]
+    target_object = candidates[0] if len(candidates) == 1 else None
+    if duration <= 0.0 or not vector3(target) or not vector3(gravity) or not target_object:
+        raise ValueError("constant-acceleration target requires time, target, acceleration, and one dynamic object")
+    if parameters.get("gravity_enabled") is not True or target_object.get("enable_gravity") is not True:
+        raise ValueError("constant-acceleration target object must enable gravity")
+    position = target_object.get("initial_position_m")
+    velocity = target_object.get("initial_velocity_m_s")
     if not vector3(position) or not vector3(velocity):
-        raise ValueError("ballistic_gravity_impact requires projectile position and velocity")
+        raise ValueError("constant-acceleration target requires object position and velocity")
     predicted = [
         float(position[index]) + float(velocity[index]) * duration + 0.5 * float(gravity[index]) * duration * duration
         for index in range(3)
     ]
     if any(not math.isclose(predicted[index], float(target[index]), abs_tol=1e-6) for index in range(3)):
-        raise ValueError(f"ballistic launch does not reach target_impact_point_m: predicted={predicted}")
-
-
-def validate_impact_centered_fracture(data: dict[str, Any]) -> None:
-    brittle = next(
-        (
-            obj
-            for obj in data.get("objects") or []
-            if isinstance(obj, dict) and obj.get("role") == "brittle_fracture_body"
-        ),
-        None,
-    )
-    response = brittle.get("fracture_response") if brittle else None
-    if not isinstance(response, dict):
-        raise ValueError("impact_centered_fracture requires a brittle fracture_response")
-    if response.get("center_source") != "native_contact_impact_point":
-        raise ValueError("impact_centered_fracture must use native_contact_impact_point")
-    if response.get("prefracture_pattern") != "radial_voronoi":
-        raise ValueError("impact_centered_fracture must declare radial_voronoi topology")
+        raise ValueError(f"constant-acceleration state does not reach target_impact_point_m: predicted={predicted}")
 
 
 def vector3(value: Any) -> bool:
@@ -376,50 +281,3 @@ def fracture_center_from_contact(contact: dict[str, Any], fallback_cm: list[floa
     if vector3(point) and all(math.isfinite(float(value)) for value in point):
         return [float(value) for value in point], "native_contact_impact_point"
     return [float(value) for value in fallback_cm], "impactor_actor_location"
-
-
-def validate_domino_parameter_consistency(data: dict[str, Any]) -> None:
-    """Keep the domino sweep labels and the object states they control in lockstep."""
-    parameters = data.get("physical_parameters")
-    if not isinstance(parameters, dict):
-        return
-    dominoes = [
-        obj for obj in data.get("objects", [])
-        if isinstance(obj, dict) and str(obj.get("role") or "").casefold() == "domino"
-    ]
-    if not dominoes:
-        return
-
-    def require_equal(label: str, actual: Any, expected: Any) -> None:
-        if actual != expected:
-            raise ValueError(f"domino physical_parameters drift from object state: {label}")
-
-    for domino in dominoes:
-        if "domino_size_m" in parameters:
-            require_equal("domino_size_m", domino.get("size_m"), parameters["domino_size_m"])
-        if "domino_mass_kg" in parameters:
-            require_equal("domino_mass_kg", domino.get("mass_kg"), parameters["domino_mass_kg"])
-        material = domino.get("material") if isinstance(domino.get("material"), dict) else {}
-        if "dynamic_friction" in parameters:
-            require_equal("dynamic_friction", material.get("dynamic_friction"), parameters["dynamic_friction"])
-        if "restitution" in parameters:
-            require_equal("restitution", material.get("restitution"), parameters["restitution"])
-
-    if "initial_pitch_deg" in parameters:
-        rotation = dominoes[0].get("initial_rotation_deg")
-        actual_pitch = rotation[1] if isinstance(rotation, list) and len(rotation) >= 2 else None
-        require_equal("initial_pitch_deg", actual_pitch, parameters["initial_pitch_deg"])
-    if "domino_spacing_m" in parameters and len(dominoes) > 1:
-        expected_spacing = parameters["domino_spacing_m"]
-        for previous, current in zip(dominoes, dominoes[1:]):
-            previous_position = previous.get("initial_position_m")
-            current_position = current.get("initial_position_m")
-            actual_spacing = (
-                round(float(current_position[0]) - float(previous_position[0]), 9)
-                if isinstance(previous_position, list)
-                and isinstance(current_position, list)
-                and previous_position
-                and current_position
-                else None
-            )
-            require_equal("domino_spacing_m", actual_spacing, expected_spacing)

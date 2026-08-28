@@ -5,21 +5,105 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class FluidBatchVerifierTests(unittest.TestCase):
-    def test_fluid_capability_preserves_solver_to_ue_transfer_contract(self) -> None:
+    def test_ue_replay_loads_runtime_case_v2_without_legacy_case_validation(self) -> None:
+        from scripts.harness_render_fluid_ue import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            replay = root / "replay.json"
+            cache = root / "particle_cache.json"
+            case = root / "case_spec.json"
+            run_dir = root / "run"
+            run_dir.mkdir()
+            (run_dir / "observation_plan.json").write_text(
+                json.dumps(
+                    {
+                        "cameras": [
+                            {"camera_id": "overview", "role": "overview"},
+                            {"camera_id": "side_static", "role": "side_static"},
+                        ],
+                        "modalities": ["rgb"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "camera_plan.json").write_text(
+                json.dumps(
+                    {
+                        "views": [
+                            {"camera_id": "overview", "role": "overview"},
+                            {"camera_id": "side_static", "role": "side_static"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            replay.write_text("{}", encoding="utf-8")
+            cache.write_text(json.dumps({"environment": {"type": "rigid_sph_scene"}}), encoding="utf-8")
+            case.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "harness_runtime_case_v2",
+                        "case_id": "runtime_fluid_replay",
+                        "capability_id": "fluid_particle_dynamics",
+                        "prompt": "runtime fluid replay",
+                        "should_pass": True,
+                        "objects": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            arguments = [
+                "harness_render_fluid_ue.py",
+                str(replay),
+                "--particle-cache",
+                str(cache),
+                "--case",
+                str(case),
+                "--run-dir",
+                str(run_dir),
+                "--ue-project",
+                str(root / "test.uproject"),
+                "--profile",
+                "smoke",
+            ]
+            with patch.object(sys, "argv", arguments), self.assertRaisesRegex(
+                SystemExit, "invalid fluid surface replay timebase"
+            ):
+                main()
+
+    def test_rigid_replay_camera_bounds_come_from_declared_workspace(self) -> None:
+        from scripts.harness_render_fluid_ue import replay_scene_bounds
+
+        bounds = replay_scene_bounds(
+            {"workspace_bounds_m": {"min_m": [-0.8, -0.4, -0.1], "max_m": [0.6, 0.4, 0.9]}},
+            render_z_offset_m=-0.05,
+        )
+
+        for actual, expected in zip(bounds["center"], [-0.1, 0.0, 0.35], strict=True):
+            self.assertAlmostEqual(actual, expected)
+        for actual, expected in zip(bounds["extent"], [0.7, 0.4, 0.5], strict=True):
+            self.assertAlmostEqual(actual, expected)
+        with self.assertRaisesRegex(ValueError, "workspace_bounds_m"):
+            replay_scene_bounds({}, render_z_offset_m=0.0)
+
+    def test_fluid_capability_preserves_unified_solver_to_ue_contract(self) -> None:
         capability = json.loads((ROOT / "capabilities" / "fluid_particle_dynamics.json").read_text(encoding="utf-8"))
 
-        self.assertIn("source_container_occupancy", capability["required_signals"])
+        self.assertIn("declared_measurements", capability["required_signals"])
         self.assertIn("surface_import_fingerprint", capability["required_signals"])
-        self.assertIn("container_asset_scale_xyz", capability["required_signals"])
-        self.assertTrue(any("open interior" in rule for rule in capability["physical_assumptions"]))
-        self.assertTrue(any("maximum one-frame source-fraction drop" in rule for rule in capability["verifier_rules"]))
+        self.assertIn("rigid_body_asset_scale_xyz", capability["required_signals"])
+        self.assertTrue(any("rigid collider" in rule for rule in capability["physical_assumptions"]))
+        self.assertTrue(any("generic time-series reductions" in rule for rule in capability["verifier_rules"]))
         self.assertIn("solver_ue_rotation_mapping_mismatch", capability["failure_taxonomy"])
         self.assertIn(
             "cases/fluid/container_to_container_transfer/v002_wine_glass_to_teacup.json",
@@ -70,11 +154,16 @@ class FluidBatchVerifierTests(unittest.TestCase):
         self.assertIn("run_ue_import_until_report", renderer)
         self.assertIn("process.terminate()", renderer)
 
-    def test_ue_replay_uses_a_uv_independent_opaque_surface_material(self) -> None:
-        renderer = (ROOT / "scripts" / "harness_render_fluid_ue.py").read_text(encoding="utf-8")
-        native = (ROOT / "scripts" / "native_ue_physics_phenomena_scene.py").read_text(encoding="utf-8")
+    def test_ue_replay_uses_unified_translucent_surface_material(self) -> None:
+        from scripts.harness_render_fluid_ue import fluid_visual_parameters
 
-        self.assertIn('"generated_material_name": "M_Harness_FluidSurface_OpaqueBlue_TwoSided_V3_DeepTank"', renderer)
+        renderer = (ROOT / "scripts" / "harness_render_fluid_ue.py").read_text(encoding="utf-8")
+        native = (ROOT / "scripts" / "native_ue_scene.py").read_text(encoding="utf-8")
+
+        self.assertEqual(fluid_visual_parameters({"case_id": "water", "objects": []})["color_rgb"], [0.03, 0.28, 0.48])
+        self.assertIn('"generate_translucent_fluid_material": True', renderer)
+        self.assertNotIn('"generate_solid_material": True,\n                    "generated_material_name": fluid_visual', renderer)
+        self.assertIn('"generated_material_name": fluid_visual["generated_material_name"]', renderer)
         self.assertIn('"fixed_material_color": True', renderer)
         self.assertIn('"two_sided_material": True', renderer)
         self.assertIn("quantize_native_instance_segmentation", renderer)
@@ -113,8 +202,12 @@ class FluidBatchVerifierTests(unittest.TestCase):
         renderer = (ROOT / "scripts" / "harness_render_fluid_ue.py").read_text(encoding="utf-8")
         self.assertIn('"trajectory_source": "genesis_sph"', renderer)
         self.assertIn('"source": "genesis_rigid_sph_frame"', renderer)
-        self.assertIn('"front_static" if value == "overview_static"', renderer)
-        self.assertIn("requested UE fluid views did not compile exactly", renderer)
+        self.assertIn("camera_ids_from_observation_plan(observation_plan)", renderer)
+        self.assertNotIn("camera_plan_from_case_spec", renderer)
+        self.assertNotIn("requested UE fluid views did not compile exactly", renderer)
+        deformable_renderer = (ROOT / "scripts" / "harness_render_deformable_ue.py").read_text(encoding="utf-8")
+        self.assertIn("camera_ids_from_observation_plan(observation_plan)", deformable_renderer)
+        self.assertNotIn("camera_plan_from_case_spec", deformable_renderer)
 
         real_basin = basin_runtime_objects(
             {
@@ -166,61 +259,168 @@ class FluidBatchVerifierTests(unittest.TestCase):
         self.assertEqual(summary["artifact_completeness"]["trajectory_empty"], 0)
         self.assertEqual(summary["cases"][0]["artifact_kind"], "particle_surface_cache")
 
-    def test_asset_bound_transfer_replays_the_same_two_real_ue_containers(self) -> None:
+    def test_rigid_sph_replays_declared_real_ue_bodies(self) -> None:
         from scripts.harness_render_fluid_ue import (
-            container_asset_resolution_entries,
-            support_surface_runtime_objects,
-            transfer_container_runtime_objects,
+            rigid_body_asset_resolution_entries,
+            rigid_body_runtime_objects,
+            rigid_body_trajectory_objects,
+            runtime_pose_registration_report,
         )
-        from harness.core.case_spec import load_case_spec
 
-        containers = [
+        bodies = [
             {
-                "id": "source",
+                "id": "moving_body",
+                "mobility": "kinematic",
                 "asset": {"ue_path": "/Game/Props/Dining/SM_Glass04.SM_Glass04", "sha256": "a" * 64},
-                "transform": {"position_m": [-0.25, 0.0, 0.35], "ue_rotation_pyr_deg": [105.0, 0.0, 0.0]},
+                "transform": {"position_m": [-0.25, 0.0, 0.35], "ue_rotation_pyr_deg": [0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0]},
+                "motion": {"type": "pivot_rotation"},
                 "collision": {"type": "axisymmetric_profile", "asset_geometry_match": True},
             },
             {
-                "id": "receiver",
+                "id": "static_body",
+                "mobility": "static",
                 "asset": {"ue_path": "/Game/Props/Dining/SM_Glass01.SM_Glass01", "sha256": "b" * 64},
-                "transform": {"position_m": [0.02, 0.0, 0.0], "ue_rotation_pyr_deg": [0.0, 0.0, 0.0]},
-                "collision": {"type": "axisymmetric_profile", "asset_geometry_match": True},
+                "transform": {"position_m": [0.02, 0.0, -0.025], "ue_rotation_pyr_deg": [0.0, 0.0, 0.0], "scale": [2.0, 1.0, 0.5]},
+                "motion": None,
+                "collision": {"type": "plane", "asset_geometry_match": True},
+            },
+            {
+                "id": "dynamic_body",
+                "mobility": "dynamic",
+                "asset": {"ue_path": "/Game/Generated/Irregular.Irregular", "sha256": "c" * 64},
+                "transform": {"position_m": [0.0, 0.0, 0.5], "ue_rotation_pyr_deg": [0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0]},
+                "motion": None,
+                "collision": {"type": "asset", "asset_geometry_match": True},
             },
         ]
-        cache = {"environment": {"source_container": containers[0], "receiver_container": containers[1]}}
+        for body in bodies:
+            solver_registration_rotation = [10.0, 20.0, 30.0] if body["id"] == "moving_body" else [0.0, 0.0, 0.0]
+            ue_registration_rotation = [-20.0, -30.0, 10.0] if body["id"] == "moving_body" else [0.0, 0.0, 0.0]
+            body["asset"]["geometry_registration"] = {
+                "status": "verified",
+                "method": "test_registration_v1",
+                "asset_sha256": body["asset"]["sha256"],
+                "solver_to_visual": {
+                    "translation_m": [0.0, 0.0, 0.0],
+                    "solver_rotation_xyz_deg": solver_registration_rotation,
+                    "ue_rotation_pyr_deg": ue_registration_rotation,
+                },
+            }
+            body["collision"]["geometry_registration"] = body["asset"]["geometry_registration"]
+        cache = {"environment": {"rigid_bodies": bodies}}
+        placement = {
+            "actor_bindings": [
+                {
+                    "object_id": body["id"],
+                    "asset": {
+                        "ue_path": body["asset"]["ue_path"],
+                        "instance_scale": body["transform"]["scale"],
+                        "geometry_registration": body["asset"]["geometry_registration"],
+                    },
+                    "declared_object_transform": body["transform"],
+                }
+                for body in bodies
+            ]
+        }
 
-        runtime = transfer_container_runtime_objects(cache, render_z_offset_m=0.0)
-        resolution = container_asset_resolution_entries(containers)
+        dynamic, static = rigid_body_runtime_objects(cache, placement, render_z_offset_m=0.025)
+        resolution = rigid_body_asset_resolution_entries(bodies)
 
-        self.assertEqual([item["ue5_path"] for item in runtime], [containers[0]["asset"]["ue_path"], containers[1]["asset"]["ue_path"]])
-        self.assertEqual(runtime[0]["params"]["base_rotation_degrees"], [105.0, 0.0, 0.0])
-        self.assertTrue(runtime[0]["params"]["asset_geometry_match"])
+        self.assertEqual(dynamic[0]["ue5_path"], bodies[0]["asset"]["ue_path"])
+        self.assertEqual(dynamic[1]["ue5_path"], bodies[2]["asset"]["ue_path"])
+        self.assertEqual(static[0]["ue5_path"], bodies[1]["asset"]["ue_path"])
+        self.assertEqual(dynamic[0]["params"]["base_rotation_degrees"], [0.0, 0.0, 0.0])
+        self.assertEqual(dynamic[0]["params"]["pose_anchor"], "solver_to_visual")
+        self.assertEqual(dynamic[0]["params"]["solver_to_visual"]["ue_rotation_pyr_deg"], [-20.0, -30.0, 10.0])
+        self.assertEqual(static[0]["params"]["pose_anchor"], "solver_to_visual")
+        self.assertEqual(static[0]["scale"], [2.0, 1.0, 0.5])
+        self.assertEqual(static[0]["initial_position_m"], [0.02, 0.0, 0.0])
+        self.assertTrue(dynamic[0]["params"]["asset_geometry_match"])
         self.assertEqual(resolution[0]["selected_asset"]["collision_representation"], "axisymmetric_profile")
         self.assertFalse(resolution[0]["selected_asset"]["proxy"])
 
-        case = load_case_spec(ROOT / "cases/fluid/container_to_container_transfer/v002_wine_glass_to_teacup.json")
-        support = support_surface_runtime_objects(case.data, render_z_offset_m=0.9418984985)
-        self.assertEqual(support[0]["ue5_path"], "/Game/Maps/UrbanDowntown/Meshes/PatioFurniture_Table_A.PatioFurniture_Table_A")
-        self.assertEqual(support[0]["initial_position_m"], [-0.24, 0.0, 0.0])
+        mismatched = deepcopy(placement)
+        mismatched["actor_bindings"][0]["asset"]["geometry_registration"]["solver_to_visual"]["translation_m"] = [0.01, 0.0, 0.0]
+        with self.assertRaisesRegex(ValueError, "disagrees with runtime placement"):
+            rigid_body_runtime_objects(cache, mismatched, render_z_offset_m=0.025)
+        native_source = (ROOT / "scripts" / "native_ue_scene.py").read_text(encoding="utf-8")
+        self.assertIn("MathLibrary.compose_rotators", native_source)
+        self.assertIn("MathLibrary.transform_direction", native_source)
 
-        with self.assertRaisesRegex(ValueError, "solver floor"):
-            support_surface_runtime_objects(case.data, render_z_offset_m=0.0)
+        trajectory = rigid_body_trajectory_objects(
+            {
+                "rigid_objects": {
+                    "moving_body": {
+                        "position_m": [-0.25, 0.0, 0.35],
+                        "ue_rotation_pyr_deg": [0.0, 0.0, 0.0],
+                        "linear_velocity_m_s": [0.0, 0.0, 0.0],
+                    },
+                    "dynamic_body": {
+                        "position_m": [0.0, 0.0, 0.42],
+                        "ue_rotation_pyr_deg": [4.0, 5.0, 6.0],
+                        "linear_velocity_m_s": [0.0, 0.0, -1.2],
+                        "angular_velocity_rad_s": [0.1, 0.2, 0.3],
+                    },
+                }
+            },
+            bodies,
+            render_z_offset_m=0.025,
+        )
+        self.assertEqual(trajectory["dynamic_body"]["position"], [0.0, 0.0, 0.445])
+        self.assertEqual(trajectory["dynamic_body"]["rotation_degrees"], [4.0, 5.0, 6.0])
+        self.assertEqual(trajectory["dynamic_body"]["velocity"], [0.0, 0.0, -1.2])
+        self.assertEqual(trajectory["dynamic_body"]["angular_velocity_rad_s"], [0.1, 0.2, 0.3])
 
-        del containers[0]["transform"]["ue_rotation_pyr_deg"]
+        del bodies[0]["transform"]["ue_rotation_pyr_deg"]
         with self.assertRaisesRegex(ValueError, "missing an explicit UE transform"):
-            transfer_container_runtime_objects(cache, render_z_offset_m=0.0)
+            rigid_body_runtime_objects(cache, placement, render_z_offset_m=0.0)
+
+        registration = runtime_pose_registration_report(
+            {
+                "runtime_pose_registrations": {
+                    "moving_body": {
+                        "anchor": "solver_to_visual",
+                        "max_residual_cm": 0.001,
+                        "max_rotation_residual_deg": 0.0,
+                    },
+                    "static_body": {
+                        "anchor": "solver_to_visual",
+                        "max_residual_cm": 0.0,
+                        "max_rotation_residual_deg": 0.0,
+                    },
+                }
+            },
+            ["moving_body", "static_body"],
+        )
+        self.assertEqual(registration["status"], "pass")
+
+        missing_registration = runtime_pose_registration_report({}, ["moving_body"])
+        self.assertEqual(missing_registration["status"], "fail")
+        self.assertEqual(missing_registration["failures"][0]["code"], "pose_registration_missing")
 
 
 def particle_cache() -> dict:
-    surface = {"path": "surface.obj", "vertex_count": 3, "triangle_count": 1, "topology_consistent": True}
+    surface = {
+        "path": "surface.obj",
+        "vertex_count": 3,
+        "triangle_count": 1,
+        "topology_consistent": True,
+        "bounds_m": {"min_m": [0.0, 0.0, 0.9], "max_m": [0.1, 0.0, 1.0]},
+    }
     return {
         "schema_version": "harness_particle_cache_v1",
         "solver": {"gravity_m_s2": [0, 0, -9.81]},
         "particles": {"count": 2, "stable_ids": [0, 1]},
+        "environment": {
+            "type": "rigid_sph_scene",
+            "workspace_bounds_m": {"min_m": [-1.0, -1.0, -0.1], "max_m": [1.0, 1.0, 2.0]},
+            "penetration_tolerance_m": 0.01,
+            "measurements": [{"id": "level", "type": "axis_span", "axes": ["z"]}],
+            "assertions": [{"id": "bounded_level", "measurement_id": "level", "reduction": "final", "operator": "<=", "value": 1.0}],
+        },
         "frames": [
-            {"frame": 0, "time_s": 0.0, "positions_m": [[0, 0, 1], [0.1, 0, 1]], "velocities_m_s": [[0, 0, 0], [0, 0, 0]], "surface": surface},
-            {"frame": 1, "time_s": 0.1, "positions_m": [[0, 0, 0.9], [0.1, 0, 0.9]], "velocities_m_s": [[0, 0, -1], [0, 0, -1]], "surface": surface},
+            {"frame": 0, "time_s": 0.0, "positions_m": [[0, 0, 1], [0.1, 0, 1]], "velocities_m_s": [[0, 0, 0], [0, 0, 0]], "measurements": {"level": 0.0}, "surface": surface},
+            {"frame": 1, "time_s": 0.1, "positions_m": [[0, 0, 0.9], [0.1, 0, 0.9]], "velocities_m_s": [[0, 0, -1], [0, 0, -1]], "measurements": {"level": 0.0}, "surface": surface},
         ],
     }
 

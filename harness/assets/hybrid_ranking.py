@@ -167,7 +167,7 @@ def retrieval_match_decision(
             best_channel = channel_name
             best_scores = scores
     if not best_scores:
-        decision.update(status="not_evaluated", reason="vector_evidence_unavailable")
+        decision.update(status="no_relevant_asset", reason="no_semantic_evidence")
         return decision
 
     top_similarity = best_scores[0]

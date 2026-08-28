@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from harness.core.artifact_schema import read_json, write_json
+from harness.core.stage_result import stage_result_from_render_sync_report, write_stage_result
 
 
 ARTIFACT_SCHEMA_VERSION = "2.3"
@@ -114,12 +115,16 @@ def check_render_sync(
     all_depth_from_ue = bool(expected_camera_ids) and all(
         str(view.get("depth_source")) == "ue" for view in per_view.values()
     )
+    all_rgb_from_ue = bool(expected_camera_ids) and all(
+        view.get("native_ue_rgb") is True or (require_depth and str(view.get("depth_source")) == "ue")
+        for view in per_view.values()
+    )
     camera_state_ready = bool(expected_camera_ids) and native_camera_echo and all(view.get("camera_state_ready") for view in per_view.values())
     report = {
         "schema_version": RENDER_SYNC_SCHEMA_VERSION,
         "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
         "status": status,
-        "ue_render_real": status == "pass" and all_depth_from_ue,
+        "ue_render_real": status == "pass" and all_rgb_from_ue,
         "depth_source": "ue" if all_depth_from_ue else "missing",
         "multi_view_sync_ok": status == "pass",
         "render_pass_valid": status == "pass",
@@ -136,6 +141,7 @@ def check_render_sync(
     }
     if write:
         write_json(run_dir / "render_sync_report.json", report)
+        write_stage_result(run_dir, stage_result_from_render_sync_report(report))
     return report
 
 
@@ -213,6 +219,7 @@ def validate_view(
     timestamps_depth = list(sequence_evidence["depth"].get("timestamps") or [])
     timestamps_segmentation = list(sequence_evidence["segmentation"].get("timestamps") or [])
     depth_source = str(meta.get("depth_source") or "missing")
+    native_ue_rgb = meta.get("native_ue_rgb") is True
     depth_variance = float(meta.get("depth_variance") or 0.0)
     segmentation_instance_level = bool(meta.get("instance_level") or meta.get("segmentation_type") == "instance")
     instance_mapping = meta.get("instance_mapping") if isinstance(meta.get("instance_mapping"), list) else []
@@ -293,6 +300,7 @@ def validate_view(
         "timestamp_count_segmentation": len(timestamps_segmentation),
         "sequence_evidence": sequence_evidence,
         "depth_source": depth_source,
+        "native_ue_rgb": native_ue_rgb,
         "depth_variance": depth_variance,
         "segmentation_instance_level": segmentation_instance_level,
         "segmentation_palette_closure": segmentation_palette_closure,

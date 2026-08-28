@@ -100,6 +100,12 @@ class ProviderRequest:
         _mapping(data, "search_intent")
         _mapping(data, "generation_spec")
         _dict_list(data, "reference_inputs")
+        if "texture_prompt" in data:
+            texture_prompt = data.get("texture_prompt")
+            if not isinstance(texture_prompt, str):
+                raise ValueError("texture_prompt must be a string when present")
+            if len(texture_prompt) > 600:
+                raise ValueError("texture_prompt must contain at most 600 characters")
         return cls(data)
 
     def to_dict(self) -> dict[str, Any]:

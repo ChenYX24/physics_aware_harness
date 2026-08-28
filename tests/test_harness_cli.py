@@ -168,7 +168,7 @@ for view in camera_plan["views"]:
     }), encoding="utf-8")
     render_views.append({"camera_id": camera_id, "rgb": f"views/{camera_id}/rgb.mp4", "depth": f"views/{camera_id}/depth.exr", "segmentation": f"views/{camera_id}/segmentation.exr"})
 (run_dir / "render_manifest.json").write_text(json.dumps({"schema_version": "harness_render_manifest_v1", "backend": "ue", "render_available": True, "views": render_views, "passes": [{"name": "rgb"}, {"name": "depth"}, {"name": "segmentation"}]}), encoding="utf-8")
-(run_dir / "map_report.json").write_text(json.dumps({"schema_version": "harness_map_report_v1", "status": "pass", "requested_package": args.map, "opened_package": args.map, "opened": True, "loaded_actor_count": 1}), encoding="utf-8")
+(run_dir / "map_report.json").write_text(json.dumps({"schema_version": "harness_map_report_v1", "status": "pass", "requested_package": args.map, "opened_package": args.map, "opened": True, "loaded_actor_count": 1, "rgb_capture": {"backend": "scene_capture"}}), encoding="utf-8")
 (run_dir / "video.mp4").write_bytes((run_dir / "views" / camera_plan["views"][0]["camera_id"] / "rgb.mp4").read_bytes())
 """.lstrip(),
         encoding="utf-8",
@@ -342,7 +342,8 @@ class HarnessCliTests(unittest.TestCase):
         self.assertEqual(default.returncode, 0, default.stderr)
         payload = json.loads(default.stdout)
         default_ids = {item["id"] for item in payload["capabilities"]}
-        self.assertIn("rigid_body_contact_causality", default_ids)
+        self.assertIn("rigid_body_dynamics", default_ids)
+        self.assertNotIn("rigid_body_contact_causality", default_ids)
         self.assertNotIn("billiard_causality_compiler", default_ids)
         taxonomy = payload["capability_taxonomy"]
         self.assertIn("prompt_case_capability_planning", taxonomy["pipeline_stage_capabilities"])
@@ -350,7 +351,7 @@ class HarnessCliTests(unittest.TestCase):
         self.assertIn("blueprint_function_invocation", taxonomy["runtime_bridge_capabilities"])
         self.assertIn("physics_parameter_semantics", taxonomy["physical_property_constraint_capabilities"])
         self.assertIn("physics_verifier_truth_gate", taxonomy["verification_capabilities"])
-        self.assertIn("rigid_body_contact_causality", taxonomy["physics_behavior_capabilities"])
+        self.assertIn("rigid_body_dynamics", taxonomy["physics_behavior_capabilities"])
         self.assertEqual(taxonomy["pipeline_execution_order"][0], "prompt_case_capability_planning")
         self.assertLess(
             taxonomy["pipeline_execution_order"].index("runtime_actor_placement_compilation"),
@@ -367,6 +368,7 @@ class HarnessCliTests(unittest.TestCase):
         )
         self.assertEqual(with_deprecated.returncode, 0, with_deprecated.stderr)
         deprecated_ids = {item["id"] for item in json.loads(with_deprecated.stdout)["capabilities"]}
+        self.assertIn("rigid_body_contact_causality", deprecated_ids)
         self.assertNotIn("billiard_causality_compiler", deprecated_ids)
 
     def test_harness_smoke_outputs_summary(self) -> None:
@@ -393,8 +395,8 @@ class HarnessCliTests(unittest.TestCase):
                 [
                     sys.executable,
                     str(ROOT / "scripts" / "harness_generate_cases.py"),
-                    "--suite",
-                    "billiards",
+                    "--case",
+                    "cases/falling/falling_block_on_floor.json",
                     "--count",
                     "4",
                     "--seed",
@@ -409,23 +411,13 @@ class HarnessCliTests(unittest.TestCase):
             )
             self.assertEqual(generated.returncode, 0, generated.stderr)
             manifest = json.loads((case_dir / "manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(manifest["schema_version"], "harness_generated_case_manifest_v1")
+            self.assertEqual(manifest["schema_version"], "harness_generated_case_manifest_v2")
             self.assertEqual(manifest["num_cases"], 4)
             self.assertEqual(len(manifest["cases"]), 4)
             generated_case_path = next(path for path in case_dir.glob("*.json") if path.name != "manifest.json")
             generated_case = json.loads(generated_case_path.read_text(encoding="utf-8"))
-            for key in (
-                "task_type",
-                "scene",
-                "initial_state",
-                "physical_parameters",
-                "expected_event",
-                "negative_or_boundary",
-                "asset_requirements",
-                "allowed_proxy_policy",
-                "verification_rules",
-            ):
-                self.assertIn(key, generated_case)
+            self.assertEqual(generated_case["generation"]["mode"], "declarative_case_replication")
+            self.assertEqual(generated_case["objects"], json.loads((ROOT / "cases/falling/falling_block_on_floor.json").read_text())["objects"])
             batch = subprocess.run(
                 [
                     sys.executable,
@@ -472,6 +464,9 @@ class HarnessCliTests(unittest.TestCase):
             env = ue_env_without_config()
             env.pop("SIM_HARNESS_WORKSPACE", None)
             env["HOME"] = tmp
+            stale_view = Path(tmp) / "low_speed_single_contact_ue" / "views" / "front_static" / "rgb.mp4"
+            stale_view.parent.mkdir(parents=True)
+            stale_view.write_bytes(b"\x00\x00\x00\x18ftypisom00000000")
             result = subprocess.run(
                 [
                     sys.executable,
@@ -494,6 +489,7 @@ class HarnessCliTests(unittest.TestCase):
             self.assertEqual(summary["failure_type"], "F1_UPROJECT_MISSING")
             self.assertEqual(summary["failure_category"], "preflight_failure")
             self.assertFalse(summary["real_ue_invoked"])
+            self.assertEqual(summary["videos"], [])
             run_dir = Path(summary["run_dir"])
             self.assertTrue((run_dir / "scene_spec.json").exists())
             self.assertTrue((run_dir / "harness_artifact.json").exists())
@@ -573,9 +569,9 @@ class HarnessCliTests(unittest.TestCase):
             fake_runner = root / "fake_runner.py"
             write_fake_ue_runner(fake_runner)
             env = ue_env_without_config()
-            env.pop("SIM_HARNESS_WORKSPACE", None)
             env.update(
                 {
+                    "SIM_HARNESS_WORKSPACE": str(workspace),
                     "HOME": str(root),
                     "SIM_STUDIO_UE_EXECUTABLE": str(executable),
                     "SIM_STUDIO_UE_MAP": "/Game/Maps/HarnessSmoke",
@@ -799,6 +795,7 @@ class HarnessCliTests(unittest.TestCase):
             scene_spec = json.loads((run_dir / "scene_spec.json").read_text(encoding="utf-8"))
             received = json.loads((run_dir / "runner_received_args.json").read_text(encoding="utf-8"))
             readiness = json.loads((run_dir / "run_readiness.json").read_text(encoding="utf-8"))
+            verifier = json.loads((run_dir / "verifier_report.json").read_text(encoding="utf-8"))
             self.assertEqual(backend_report["status"], "completed")
             self.assertEqual(scene_spec["map"]["requested_package"], "/Game/Maps/HarnessSmoke")
             self.assertTrue(backend_report["whether_real_ue_invoked"])
@@ -807,13 +804,15 @@ class HarnessCliTests(unittest.TestCase):
             self.assertEqual(received["ue_project"], str(Path(env["SIM_STUDIO_UE_PROJECT"]).resolve()))
             self.assertEqual(received["ue_executable"], str(Path(env["SIM_STUDIO_UE_EXECUTABLE"]).resolve()))
             self.assertTrue(readiness["visual_ready"])
-            self.assertTrue(readiness["physics_ready"])
+            self.assertFalse(readiness["physics_ready"])
             self.assertTrue(readiness["map_ready"])
-            self.assertTrue(readiness["ue_render_real"])
+            self.assertFalse(readiness["ue_render_real"])
             self.assertEqual(readiness["depth_source"], "ue")
             self.assertTrue(readiness["multi_view_sync_ok"])
             self.assertTrue(readiness["render_pass_valid"])
             self.assertEqual(readiness["render_observability_fail"], 0)
+            self.assertTrue(verifier["artifact_completeness"]["run_readiness"])
+            self.assertTrue((run_dir / "ue_output" / "run_readiness.json").exists())
             self.assertTrue((run_dir / "views" / "front_static" / "rgb.mp4").exists())
             self.assertTrue((run_dir / "views" / "front_static" / "depth.exr").exists())
             self.assertTrue((run_dir / "views" / "front_static" / "segmentation.exr").exists())
@@ -893,6 +892,52 @@ class HarnessCliTests(unittest.TestCase):
             self.assertTrue(readiness["multi_view_ready"])
             self.assertFalse(readiness["depth_ready"])
             self.assertFalse(readiness["ue_render_real"])
+
+    def test_cli_returns_failure_when_physics_verifier_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            case_data = json.loads((ROOT / "cases/falling/falling_block_on_floor.json").read_text(encoding="utf-8"))
+            case_data["case_id"] = "declared_assertion_failure"
+            case_data["verification_assertions"] = [
+                {
+                    "id": "impossible_height",
+                    "type": "state_value",
+                    "object_id": "falling_block",
+                    "field": "position_m.z",
+                    "reduction": "final",
+                    "operator": ">",
+                    "value": 100.0,
+                }
+            ]
+            case_path = root / "case.json"
+            case_path.write_text(json.dumps(case_data), encoding="utf-8")
+            env = os.environ.copy()
+            env["SIM_HARNESS_WORKSPACE"] = str(root / "workspace")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "harness_run_case.py"),
+                    str(case_path),
+                    "--backend",
+                    "fallback",
+                    "--out",
+                    str(root / "runs"),
+                    "--video-root",
+                    str(root / "review"),
+                ],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            summary = json.loads(result.stdout)
+            self.assertEqual(summary["status"], "failed_verification")
+            self.assertEqual(summary["verification_status"], "fail")
+            control = json.loads((Path(summary["run_dir"]) / "run_control.json").read_text(encoding="utf-8"))
+            self.assertEqual(control["status"], "failed")
 
     def test_cli_case_route_keeps_runtime_outside_repo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

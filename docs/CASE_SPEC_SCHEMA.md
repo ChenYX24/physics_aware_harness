@@ -1,71 +1,33 @@
 # Case Spec Schema
 
-当前支持两个显式 schema version：
+当前主流程只接受一个源 schema version：
 
 ```text
-harness_case_spec_v1
 harness_case_spec_v2
 ```
 
-V1 继续作为兼容默认。文件输入按 `schema_version` 分派；自然语言输入只有显式传入
-`--case-spec-version v2` 才调用 Expansion/CaseSpec 两阶段 LLM planner。
+文件输入必须是 CaseSpec V2；自然语言/图片输入经 Expansion 后生成一次结构化 CaseSpec V2，
+校验失败时最多进行一次约束修复。`--case-spec-version` 仅保留 `v2` 这个显式值。
 
-必填字段：
+V2 主字段：
 
 | 字段 | 含义 |
 |---|---|
-| `case_id` | 稳定 case id |
-| `capability_id` | 绑定的 capability |
-| `prompt` | 自然语言意图 |
-| `expected_physics` | 物理预期、坐标系、碰撞图等 |
-| `objects` | 对象列表，必须有稳定 id/role |
-| `active_objects` | 可主动受力/初速度对象 |
-| `passive_objects` | 必须由物理事件触发的对象 |
-| `required_assets` | 资产需求 |
-| `required_signals` | 运行必须产出的信号 |
-| `verifier_expectation` | 预期 pass/fail 和 failure type |
-| `should_pass` | smoke 中的期望 |
-| `notes` | 人类说明 |
+| `identity` | case id、用户原始描述、预期 pass/fail |
+| `capabilities` | primary 与 required capability |
+| `scene` / `timebase` | 坐标系、边界、时间步与时长 |
+| `backend_constraints` | backend 与 solver 能力硬约束 |
+| `asset_policy` / `objects` | 资产来源、对象语义、物理与求解器契约 |
+| `relations` / `events` | 对象关系和时序事件 |
+| `expected_behavior` | 通用可测量物理预期 |
+| `observation_requirements` | camera、modality、signal |
+| `verification_requirements` | measurement 与 assertion |
+| `variant` / `provenance` | 变体和来源信息 |
 
-示例：
-
-```bash
-python3 -m json.tool cases/billiards/low_speed_single_contact.json >/dev/null
-```
-
-Case spec 是可执行 contract，不是 prompt 模板。
-
-## `expected_physics` 示例字段
-
-不同 capability 会读取不同字段。常见字段：
-
-| Capability | 关键字段 |
-|---|---|
-| `rigid_body_contact_causality` | `collision_graph`, active/passive object ids, velocity epsilon |
-| `rigid_body_gravity_collision` | `gravity_m_s2`, `support`, `coordinate_system` |
-| `physics_property_constraint_validation` | mass/friction/restitution/damping/material ranges |
-| `agent_rigidbody_action_coupling` | `action_trace`, `action_actor_id`, `target_object_id`, `expected_contact_pair` |
-| `constraint_distance_pendulum_motion` | `anchor_object_id`, `constrained_object_id`, `constraint_length_m`, `constraint_tolerance_m`, `expected_max_step_displacement_m` |
-| `constraint_momentum_transfer` | `chain_objects`, `active_object_id`, `receiver_object_id`, `expected_contact_chain`, `expected_min_receiver_speed_m_s` |
-| `elastic_energy_launch` | `launcher_object_id`, `launched_object_id`, `spring_constant_n_m`, `compression_m`, `payload_mass_kg`, `expected_max_energy_ratio` |
-| `elastic_constraint_rebound` | `anchor_object_id`, `constrained_object_id`, `rest_length_m`, `max_extension_m`, `constraint_stiffness_n_m`, `expected_min_rebound_speed_m_s` |
-| `brittle_impact_fracture` | `impactor_object_id`, `brittle_object_id`, `fracture_threshold_j`, `impact_energy_j`, `expected_min_fragment_count`, `expected_contact_pair` |
-
-物理参数必须结构化放在 `expected_physics` 或 object 字段里；不要只写在 prompt 文本中。
-
-## CaseSpec V2
-
-V2 是语义 contract，主字段为：
-
-```text
-identity / capabilities / scene / timebase / backend_constraints
-asset_policy / objects / relations / events / expected_behavior
-observation_requirements / verification_requirements / variant / provenance
-```
-
-V2 经 schema 与跨字段校验后，通过内存 adapter 投影到现有 V1 runtime contract。原始
-V2 保存为 `case_spec_v2.json`；`runtime_case_spec_v1.json` 和 `case_spec.json` 是迁移期
-runner 兼容投影。
+CaseSpec V2 经 schema 与跨字段校验后，编译为独立的
+`harness_runtime_case_v2` 执行契约。原始 V2 保存为 `case_spec_v2.json`；运行时契约保存为
+`runtime_case.json`，并写入 runner 使用的 `case_spec.json`。该过程不经过其他 CaseSpec schema、
+adapter 或兼容校验器。
 
 当前 Runtime Compiler 每次 compilation 只执行一个 `capabilities.primary`。因此
 `capabilities.required` 必须只包含该 primary（允许其兼容 alias）；额外 capability 即使已经
@@ -114,8 +76,9 @@ default / local_catalog / external_site / procedural_generation / model_generati
 `sphere/ball` 使用 sphere，`cylinder/rod/pole/column/disc` 使用 cylinder。
 `geometry.approx_size_m` 始终是完整的 x/y/z 包围盒尺寸：sphere 三轴直径必须相等，cylinder
 的 x/y 直径必须相等且 z 为长度。不支持的形状或不一致的显式 hint 会结构化失败，不会静默
-变成长方体。UE importer 命令通过
-`SIM_HARNESS_UE_ASSET_IMPORTER_CMD` 显式配置；未配置时返回
+变成长方体。Controller 的 UE importer 命令优先在严格配置的
+`ue_asset_importer.command` argv 数组中持久设置；`SIM_HARNESS_UE_ASSET_IMPORTER_CMD`
+仅作为更高优先级的临时兼容覆盖。两者均未配置时返回
 `backend_importer_unavailable`，不会触发普通 UE runner。仓库提供的真实命令入口为
 `python3.13 scripts/harness_ue_asset_importer.py`；它启动 UE 内部
 `native_ue_asset_importer.py`，执行米→厘米单位转换、StaticMesh bounds、LOD0 section、简单碰撞、

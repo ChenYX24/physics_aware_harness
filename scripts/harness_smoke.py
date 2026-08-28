@@ -20,36 +20,14 @@ from harness.verification.physics_verifier import PhysicsVerifier
 
 DEFAULT_CASES = [
     "cases/billiards/low_speed_single_contact.json",
-    "cases/billiards/multi_ball_chain_contact.json",
-    "cases/billiards/negative_precontact_motion.json",
-    "cases/bowling/bowling_pin_chain_contact.json",
-    "cases/bowling/negative_pin_precontact_motion.json",
     "cases/domino/five_domino_chain.json",
-    "cases/domino/negative_simultaneous_motion.json",
     "cases/falling/falling_block_on_floor.json",
-    "cases/falling/stacked_blocks_contact.json",
-    "cases/falling/negative_floating_block.json",
-    "cases/spin/high_damping_spin_decay.json",
-    "cases/spin/negative_spin_gain.json",
-    "cases/agent_action/agent_push_box_contact.json",
-    "cases/agent_action/negative_target_preaction_motion.json",
-    "cases/constraint/pendulum_length_preserved.json",
-    "cases/constraint/negative_constraint_length_drift.json",
-    "cases/impulse_chain/newton_cradle_five_ball_transfer.json",
-    "cases/impulse_chain/negative_terminal_no_response.json",
-    "cases/elastic_launch/spring_launch_forward_arc.json",
-    "cases/elastic_launch/negative_missing_release_event.json",
-    "cases/elastic_constraint/bungee_rebound.json",
-    "cases/elastic_constraint/negative_overstretch.json",
-    "cases/fracture/glass_panel_impact_fracture.json",
-    "cases/fracture/negative_below_threshold_fracture.json",
-    "cases/magnetic/attract_magnetic_body.json",
-    "cases/magnetic/negative_wrong_magnetic_direction.json",
+    "cases/projectile/upward_throw_arc.json",
 ]
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the minimal physics-aware harness smoke suite.")
+    parser = argparse.ArgumentParser(description="Run generic scene-contract smoke cases without process routing.")
     parser.add_argument("--backend", choices=["fallback"], default="fallback")
     parser.add_argument("--output-root", default="runs/harness_smoke")
     parser.add_argument("--timestamp", default="")
@@ -77,6 +55,7 @@ def main() -> int:
             width=1920,
             height=1080,
             camera_strategy="bounds_auto_v1",
+            source_case_filename="case_spec.json",
         )
         write_run_control_page(
             run_dir,

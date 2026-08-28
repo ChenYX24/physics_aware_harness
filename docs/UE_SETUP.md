@@ -86,7 +86,17 @@ The plugin provides the runtime physics capture bridge used by the harness.
 When opening the template project for the first time, let UE rebuild the plugin
 if prompted.
 
-## Environment Variables
+## Configuration and Environment Variables
+
+For Controller jobs, persist the importer as a strict argv array in `config/harness.json`:
+
+```json
+"ue_asset_importer": {
+  "command": ["/absolute/path/to/python3.13", "/absolute/path/to/scripts/harness_ue_asset_importer.py"]
+}
+```
+
+`SIM_HARNESS_UE_ASSET_IMPORTER_CMD` remains a higher-precedence compatibility override for temporary testing.
 
 Set these before running `--backend ue`:
 
@@ -98,7 +108,6 @@ export SIM_STUDIO_UE_ACTOR_CLASS="/Script/Engine.StaticMeshActor"
 export SIM_STUDIO_ASSET_REGISTRY="$PWD/assets/asset_registry.example.json"
 export SIM_STUDIO_UE_CONTACT_EXPORT=1
 export SIM_STUDIO_UE_RUNNER_CMD="python3.13 scripts/harness_local_ue_runner.py"
-export SIM_HARNESS_UE_ASSET_IMPORTER_CMD="python3.13 scripts/harness_ue_asset_importer.py"
 ```
 
 When `SIM_HARNESS_WORKSPACE` is explicitly set and its initialized `ue/SimulatorWorkspace.uproject` exists, the Harness resolves that project automatically. Set `SIM_STUDIO_UE_PROJECT=/absolute/path/Other.uproject` only to override it. An explicit override wins; missing or invalid projects still fail preflight.

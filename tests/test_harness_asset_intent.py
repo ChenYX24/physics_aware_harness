@@ -31,7 +31,9 @@ class HarnessAssetIntentTests(unittest.TestCase):
         self.assertEqual(intent.raw_query, "brown wooden chair")
         self.assertEqual(intent.must["backend"], "unreal")
         self.assertTrue(intent.must["collision"])
-        self.assertEqual(intent.must["physics_role"], "static_support")
+        self.assertNotIn("physics_role", intent.must)
+        self.assertEqual(intent.should[0].field, "physics_role")
+        self.assertEqual(intent.should[0].value, "static_support")
         self.assertEqual(intent.must["approx_size_m"], [0.6, 0.6, 1.0])
         with self.assertRaisesRegex(ValueError, "unsupported hard fields"):
             SearchIntent.from_dict({"raw_query": "chair", "must": {"made_up_constraint": True}})

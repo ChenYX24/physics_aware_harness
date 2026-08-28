@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
-from harness.runtime.actor_placement import RUNTIME_ACTOR_PLACEMENT_SCHEMA_VERSION
+from harness.runtime.actor_placement import (
+    RUNTIME_ACTOR_PLACEMENT_SCHEMA_VERSION,
+    actorless_world_anchor_object_ids,
+    constraint_frame_in_world,
+    world_constraint_endpoint_object_ids,
+)
 
 
 def verify_runtime_actor_placement(case_spec: dict[str, Any], placement: dict[str, Any] | None) -> dict[str, Any]:
@@ -17,6 +23,16 @@ def verify_runtime_actor_placement(case_spec: dict[str, Any], placement: dict[st
     if duplicate:
         return fail_report(case_id, "F7_runtime_artifact_incomplete", duplicate, "duplicate_runtime_actor_id", duplicate)
     by_object = {str(binding.get("object_id")): binding for binding in bindings if binding.get("object_id")}
+    constraint_error = first_bad_constraint_binding(case_spec, placement, by_object)
+    if constraint_error:
+        return fail_report(
+            case_id,
+            "F7_runtime_artifact_incomplete",
+            constraint_error["constraint_id"],
+            constraint_error["metric"],
+            constraint_error["value"],
+            checks=checks(placement, bindings),
+        )
     missing_physics_object = first_missing_physics_object(case_spec, by_object)
     if missing_physics_object:
         return fail_report(case_id, "F7_runtime_artifact_incomplete", missing_physics_object, "missing_runtime_actor_binding", missing_physics_object, checks=checks(placement, bindings))
@@ -61,14 +77,99 @@ def verify_runtime_actor_placement(case_spec: dict[str, Any], placement: dict[st
 
 
 def first_missing_physics_object(case_spec: dict[str, Any], by_object: dict[str, dict[str, Any]]) -> str | None:
+    actorless_anchor_ids = actorless_world_anchor_object_ids(case_spec)
     for obj in case_spec.get("objects") or []:
         if not isinstance(obj, dict):
             continue
         object_id = str(obj.get("id") or "")
         if not object_id:
             continue
-        if object_id not in by_object and is_physics_contract_object(obj):
+        if object_id not in by_object and object_id not in actorless_anchor_ids and is_physics_contract_object(obj):
             return object_id
+    return None
+
+
+def first_bad_constraint_binding(
+    case_spec: dict[str, Any],
+    placement: dict[str, Any],
+    by_object: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    expected = {
+        str(item.get("id") or ""): item
+        for item in case_spec.get("constraints") or []
+        if isinstance(item, dict) and item.get("id")
+    }
+    actual = {
+        str(item.get("constraint_id") or ""): item
+        for item in placement.get("constraint_bindings") or []
+        if isinstance(item, dict) and item.get("constraint_id")
+    }
+    if set(expected) != set(actual):
+        return {
+            "constraint_id": sorted(set(expected) ^ set(actual))[0],
+            "metric": "missing_runtime_constraint_binding",
+            "value": {"expected": sorted(expected), "actual": sorted(actual)},
+        }
+    objects_by_id = {
+        str(obj.get("id") or ""): obj
+        for obj in case_spec.get("objects") or []
+        if isinstance(obj, dict) and obj.get("id")
+    }
+    world_anchor_ids = world_constraint_endpoint_object_ids(case_spec)
+    actorless_anchor_ids = actorless_world_anchor_object_ids(case_spec)
+    for constraint_id, declaration in expected.items():
+        binding = actual[constraint_id]
+        for side in ("a", "b"):
+            object_id = str(declaration.get(f"body_{side}") or "")
+            body_binding = binding.get(f"body_{side}") if isinstance(binding.get(f"body_{side}"), dict) else {}
+            frame = binding.get(f"frame_{side}")
+            if object_id in world_anchor_ids:
+                expected_frame = constraint_frame_in_world(objects_by_id[object_id], declaration[f"frame_{side}"])
+                valid = bool(
+                    (object_id in by_object) == (object_id not in actorless_anchor_ids)
+                    and body_binding.get("endpoint_type") == "world_anchor"
+                    and body_binding.get("object_id") == object_id
+                    and body_binding.get("frame_space") == "world"
+                    and not body_binding.get("runtime_actor_id")
+                    and frame == expected_frame
+                )
+            else:
+                valid = bool(
+                    object_id in by_object
+                    and body_binding.get("endpoint_type") == "rigid_body"
+                    and body_binding.get("object_id") == object_id
+                    and body_binding.get("runtime_actor_id") == by_object[object_id].get("runtime_actor_id")
+                    and body_binding.get("frame_space") == "body_local"
+                    and frame == declaration.get(f"frame_{side}")
+                )
+            if not valid:
+                return {
+                    "constraint_id": constraint_id,
+                    "metric": "invalid_runtime_constraint_body_binding",
+                    "value": {"side": side, "object_id": object_id, "binding": body_binding},
+                }
+        for field in (
+            "linear_motion",
+            "linear_limit_m",
+            "unilateral_distance_spring",
+            "angular_motion",
+            "angular_limits_deg",
+            "linear_drive",
+            "angular_drive",
+            "break_thresholds",
+            "axial_visual",
+            "collision_enabled",
+        ):
+            if declaration.get(field) != binding.get(field):
+                return {
+                    "constraint_id": constraint_id,
+                    "metric": "runtime_constraint_configuration_mismatch",
+                    "value": {
+                        "field": field,
+                        "expected": declaration.get(field),
+                        "actual": binding.get(field),
+                    },
+                }
     return None
 
 
@@ -85,7 +186,8 @@ def first_structured_physics_contract_mismatch(
             continue
         physics = binding.get("physics") if isinstance(binding.get("physics"), dict) else {}
         body_type = str(obj.get("body_type") or "").casefold()
-        if body_type == "dynamic" and physics.get("simulate_physics") is not True:
+        state_kind = str(physics.get("state_kind") or "rigid").casefold()
+        if state_kind != "particle" and body_type == "dynamic" and physics.get("simulate_physics") is not True:
             return {
                 "object_id": object_id,
                 "metric": "dynamic_object_not_simulated",
@@ -148,18 +250,100 @@ def first_bad_physics_binding(bindings: list[dict[str, Any]]) -> dict[str, Any] 
         object_id = str(binding.get("object_id") or "")
         asset = binding.get("asset") if isinstance(binding.get("asset"), dict) else {}
         physics = binding.get("physics") if isinstance(binding.get("physics"), dict) else {}
-        if not asset.get("ue_path") and not asset.get("proxy"):
-            return {"failure_type": "F2_asset_missing", "object_id": object_id, "metric": "missing_asset_or_proxy_binding", "value": None}
-        quality_gate = asset.get("quality_gate")
-        if asset.get("ue_path") and (
-            not isinstance(quality_gate, dict)
-            or quality_gate.get("status") not in {"pass", "pass_local_preview"}
-        ):
-            return {"failure_type": "F2_asset_missing", "object_id": object_id, "metric": "asset_quality_gate", "value": quality_gate}
+        visual = binding.get("visual_representation") if isinstance(binding.get("visual_representation"), dict) else {}
+        visual_source = str(visual.get("source") or "asset")
+        render_binding = binding.get("render_binding") if isinstance(binding.get("render_binding"), dict) else {}
+        if visual_source == "solver_generated":
+            if render_binding.get("kind") == "articulated_body":
+                articulated = binding.get("articulated_body") if isinstance(binding.get("articulated_body"), dict) else {}
+                if (
+                    render_binding.get("model") != articulated.get("model")
+                    or render_binding.get("mode") != articulated.get("mode")
+                    or render_binding.get("asset_path") != articulated.get("asset_path")
+                    or render_binding.get("pose_source_type") != (articulated.get("pose_source") or {}).get("type")
+                    or render_binding.get("root_transform_source_type") != (articulated.get("root_transform_source") or {}).get("type")
+                    or render_binding.get("runtime_actor_class") != (
+                        "Character"
+                        if (articulated.get("pose_source") or {}).get("type") == "animation_sequence"
+                        else "Actor"
+                    )
+                ):
+                    return {
+                        "failure_type": "F7_runtime_artifact_incomplete",
+                        "object_id": object_id,
+                        "metric": "articulated_body_render_binding",
+                        "value": render_binding,
+                    }
+                continue
+            cache_contract = render_binding.get("cache_contract") if isinstance(render_binding.get("cache_contract"), dict) else {}
+            if (
+                render_binding.get("kind") != "solver_generated"
+                or render_binding.get("solver_declared") is not True
+                or not str(cache_contract.get("contract_id") or "")
+                or not str(cache_contract.get("schema_version") or "")
+                or not str(cache_contract.get("producer_backend") or "")
+                or not str(cache_contract.get("consumer_backend") or "")
+                or not isinstance(cache_contract.get("required_artifacts"), list)
+                or not cache_contract.get("required_artifacts")
+                or not str(cache_contract.get("adapter_contract") or "")
+            ):
+                return {
+                    "failure_type": "F7_runtime_artifact_incomplete",
+                    "object_id": object_id,
+                    "metric": "solver_generated_render_cache_binding",
+                    "value": render_binding,
+                }
+        elif visual_source == "asset":
+            if not asset.get("ue_path") and not asset.get("proxy"):
+                return {"failure_type": "F2_asset_missing", "object_id": object_id, "metric": "missing_asset_or_proxy_binding", "value": None}
+            quality_gate = asset.get("quality_gate")
+            if asset.get("ue_path") and (
+                not isinstance(quality_gate, dict)
+                or quality_gate.get("status") not in {"pass", "pass_local_preview"}
+            ):
+                return {"failure_type": "F2_asset_missing", "object_id": object_id, "metric": "asset_quality_gate", "value": quality_gate}
+        if visual_source == "asset" and asset.get("ue_path") and asset.get("scale_policy") == "fit_uniform_to_approx_size":
+            instance_scale = asset.get("instance_scale")
+            valid_scale = bool(
+                asset.get("scale_applied") is True
+                and isinstance(instance_scale, list)
+                and len(instance_scale) == 3
+                and all(
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and math.isfinite(float(value))
+                    and float(value) > 0.0
+                    for value in instance_scale
+                )
+                and max(float(value) for value in instance_scale)
+                - min(float(value) for value in instance_scale)
+                <= 1e-6
+            )
+            if not valid_scale:
+                return {
+                    "failure_type": "F3_invalid_initial_physics_state",
+                    "object_id": object_id,
+                    "metric": "invalid_uniform_asset_instance_scale",
+                    "value": {
+                        "scale_applied": asset.get("scale_applied"),
+                        "instance_scale": instance_scale,
+                    },
+                }
         if physics.get("collision_enabled") and not physics.get("collider"):
             return {"failure_type": "F3_invalid_initial_physics_state", "object_id": object_id, "metric": "missing_collider", "value": None}
         if physics.get("collision_enabled") and not physics.get("collision_profile"):
             return {"failure_type": "F3_invalid_initial_physics_state", "object_id": object_id, "metric": "missing_collision_profile", "value": None}
+        if physics.get("collision_enabled") and physics.get("collision_geometry_verification") not in {
+            "runtime_controlled",
+            "body_setup_verified",
+            "asset_body_setup_reflected",
+        }:
+            return {
+                "failure_type": "F2_asset_missing",
+                "object_id": object_id,
+                "metric": "collision_binding_unverified",
+                "value": physics.get("collision_geometry_verification"),
+            }
         if physics.get("simulate_physics") and physics.get("mass_kg") is None:
             return {"failure_type": "F3_invalid_initial_physics_state", "object_id": object_id, "metric": "missing_mass_kg", "value": None}
     return None
@@ -181,12 +365,18 @@ def checks(placement: dict[str, Any], bindings: list[dict[str, Any]]) -> dict[st
         "physics_critical_count": sum(1 for binding in bindings if binding.get("physics_critical")),
         "simulated_actor_count": sum(1 for binding in bindings if (binding.get("physics") or {}).get("simulate_physics")),
         "proxy_actor_count": sum(1 for binding in bindings if (binding.get("asset") or {}).get("proxy")),
+        "solver_generated_actor_count": sum(
+            1
+            for binding in bindings
+            if ((binding.get("render_binding") or {}).get("kind") == "solver_generated")
+        ),
         "local_preview_asset_count": sum(
             1
             for binding in bindings
             if (((binding.get("asset") or {}).get("quality_gate") or {}).get("status") == "pass_local_preview")
         ),
         "camera_count": len(placement.get("camera_bindings") or []),
+        "constraint_count": len(placement.get("constraint_bindings") or []),
         "collision_edge_count": len((placement.get("physics_graph") or {}).get("collision_edges") or []),
     }
 

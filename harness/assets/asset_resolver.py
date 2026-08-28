@@ -7,8 +7,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from harness.assets.asset_intent_compiler import CompiledAssetIntent, local_catalog_allowed, provider_route_required
 from harness.assets.asset_intent import intent_from_object
+from harness.assets.asset_intent_compiler import CompiledAssetIntent, local_catalog_allowed, provider_route_required
 from harness.assets.asset_registry import AssetRegistry, candidate_matches_search_intent
 from harness.assets.search_intent import SearchIntent, analytic_search_intent_from_asset_intent, search_intent_from_asset_intent
 from harness.assets.sqlite_catalog import effective_license_tier, reference_license_authorized
@@ -23,31 +23,58 @@ def resolve_asset_intents(
     provider_results: dict[tuple[str, str], dict[str, Any]] | None = None,
     target_backend: str = "unreal",
     allow_local_preview: bool | None = None,
+    ignore_provenance_and_release_gates: bool | None = None,
+    requested_map_package: str | None = None,
 ) -> dict[str, Any]:
     registry = registry or AssetRegistry()
     if allow_local_preview is None:
         allow_local_preview = os.environ.get("SIM_HARNESS_ALLOW_LOCAL_PREVIEW_ASSETS", "").casefold() in {"1", "true", "yes"}
+    if ignore_provenance_and_release_gates is None:
+        ignore_provenance_and_release_gates = os.environ.get(
+            "SIM_HARNESS_IGNORE_PROVENANCE_AND_RELEASE_GATES", ""
+        ).casefold() in {"1", "true", "yes"}
     objects = [obj for obj in case_spec.get("objects", []) if isinstance(obj, dict)]
-    compiled_by_id = {item.object_id: item for item in compiled_intents or []}
-    intents = [
-        compiled_by_id[str(obj.get("id") or "")].legacy_intent
-        if str(obj.get("id") or "") in compiled_by_id
-        else intent_from_object(obj)
-        for obj in objects
+    objects_by_id = {str(obj.get("id") or ""): obj for obj in objects if obj.get("id")}
+    compiled_intents_provided = compiled_intents is not None
+    if compiled_intents is None:
+        compiled_intents = []
+        for obj in objects:
+            object_id = str(obj.get("id") or "")
+            if not object_id:
+                continue
+            legacy_intent = intent_from_object(obj)
+            explicit_proxy = bool(obj.get("force_analytic_proxy") or obj.get("asset_policy") == "analytic_proxy")
+            compiled_intents.append(
+                CompiledAssetIntent(
+                    object_id=object_id,
+                    legacy_intent=legacy_intent,
+                    search_intent=(
+                        analytic_search_intent_from_asset_intent(legacy_intent, obj, backend=target_backend)
+                        if explicit_proxy
+                        else search_intent_from_asset_intent(legacy_intent, backend=target_backend)
+                    ),
+                    acquisition={},
+                )
+            )
+    missing_object_ids = [item.object_id for item in compiled_intents if item.object_id not in objects_by_id]
+    if missing_object_ids:
+        raise ValueError(f"compiled asset intents reference missing runtime objects: {missing_object_ids}")
+    work_items = [
+        (objects_by_id[item.object_id], item.legacy_intent, item)
+        for item in compiled_intents
     ]
+    intents = [intent for _, intent, _ in work_items]
     rows = []
-    for obj, intent in zip(objects, intents):
-        compiled = compiled_by_id.get(str(obj.get("id") or ""))
-        acquisition = compiled.acquisition if compiled else None
+    for obj, intent, compiled in work_items:
+        acquisition = compiled.acquisition
         provider_pending = bool(acquisition and provider_route_required(acquisition))
-        provider_result = provider_results.get((compiled.object_id, compiled.slot)) if compiled and provider_results else None
+        provider_result = provider_results.get((compiled.object_id, compiled.slot)) if provider_results else None
         explicit_proxy = bool(obj.get("force_analytic_proxy") or obj.get("asset_policy") == "analytic_proxy")
-        search_intent = (
-            compiled.search_intent
-            if compiled
-            else analytic_search_intent_from_asset_intent(intent, obj, backend=target_backend)
-            if explicit_proxy
-            else search_intent_from_asset_intent(intent, backend=target_backend)
+        search_intent = without_license_requirements(compiled.search_intent) if ignore_provenance_and_release_gates else compiled.search_intent
+        required_source_uri = (
+            str(acquisition.get("source_uri_hint") or "").strip()
+            if acquisition and acquisition.get("requirement") == "required"
+            else ""
         )
         provider_fulfilled = bool(provider_result and provider_result.get("status") == "fulfilled")
         provider_failed = bool(provider_result and provider_result.get("status") in {"blocked", "failed"})
@@ -59,9 +86,9 @@ def resolve_asset_intents(
             or acquisition is None
             or (not provider_pending and local_catalog_allowed(
                 acquisition,
-                allow_local=compiled.allow_local if compiled else True,
+                allow_local=compiled.allow_local,
             ))
-            or (provider_failed and explicit_local_fallback and bool(compiled and compiled.allow_local))
+            or (provider_failed and explicit_local_fallback and compiled.allow_local)
         )
         if provider_fulfilled:
             ranked = [
@@ -71,6 +98,14 @@ def resolve_asset_intents(
                 )
                 if candidate_matches_search_intent(candidate, search_intent)
             ]
+            if required_source_uri:
+                ranked = [
+                    candidate
+                    for candidate in ranked
+                    if candidate_matches_required_source_uri(candidate, required_source_uri)
+                ]
+        elif required_source_uri:
+            ranked = registry.get_assets_by_source_uri(required_source_uri) if can_search_catalog else []
         else:
             ranked = registry.search_intent(search_intent, top_k=max(top_k * 4, top_k)) if can_search_catalog else []
         if explicit_proxy:
@@ -82,6 +117,7 @@ def resolve_asset_intents(
                     candidate,
                     physics_critical=intent.physics_critical,
                     allow_local_preview=allow_local_preview,
+                    ignore_provenance_and_release_gates=ignore_provenance_and_release_gates,
                 ),
             }
             for candidate in ranked
@@ -94,7 +130,9 @@ def resolve_asset_intents(
             "rejected_candidates": rejected,
             "selected_asset": selected,
             "selection_reason": (
-                "explicit_analytic_recipe_policy"
+                "required_source_uri_exact_match"
+                if required_source_uri and selected
+                else "explicit_analytic_recipe_policy"
                 if explicit_proxy and selected
                 else "first_reference_approved_candidate"
                 if selected and selected["quality_gate"]["status"] == "pass"
@@ -112,6 +150,8 @@ def resolve_asset_intents(
             "fallback_reason": (
                 None
                 if selected
+                else f"required source_uri_hint did not resolve exactly: {required_source_uri}"
+                if required_source_uri
                 else str((provider_result.get("failure") or {}).get("message") or "Provider result did not yield a qualified registered asset")
                 if provider_result
                 else f"requested acquisition route requires next-stage Provider: {acquisition['route']}"
@@ -121,7 +161,9 @@ def resolve_asset_intents(
                 else "no quality-approved registry candidate; use analytic/proxy asset"
             ),
             "fallback_mode": (
-                "provider_required"
+                None
+                if required_source_uri
+                else "provider_required"
                 if provider_pending and not selected
                 else "harness_generate_analytic"
                 if explicit_proxy and not selected
@@ -130,7 +172,7 @@ def resolve_asset_intents(
                 else None
             ),
         }
-        if acquisition is not None:
+        if compiled_intents_provided:
             provider_status = str(provider_result.get("status")) if provider_result else None
             row["acquisition"] = {
                 "requested": dict(acquisition),
@@ -159,7 +201,7 @@ def resolve_asset_intents(
             row["intent"] = {
                 **row["intent"],
                 "compiled_search_intent": search_intent.to_dict(),
-                "slot": compiled.slot if compiled else "primary",
+                "slot": compiled.slot,
             }
         rows.append(row)
     scene_map = resolve_scene_map(
@@ -167,6 +209,8 @@ def resolve_asset_intents(
         registry=registry,
         top_k=top_k,
         allow_local_preview=allow_local_preview,
+        ignore_provenance_and_release_gates=ignore_provenance_and_release_gates,
+        requested_reference=requested_map_package,
     )
     resolution_rows = [*rows, *([scene_map] if scene_map else [])]
     selected = [row["selected_asset"] for row in resolution_rows if row.get("selected_asset")]
@@ -195,7 +239,7 @@ def resolve_asset_intents(
         },
         "assets": rows,
     }
-    if compiled_intents is not None:
+    if compiled_intents_provided:
         result["asset_intent_compiler"] = {
             "schema_version": "harness_compiled_asset_intents_v1",
             "target_backend": target_backend,
@@ -211,12 +255,32 @@ def resolve_asset_intents(
     return result
 
 
-def requested_map_reference(case_spec: dict[str, Any] | None = None) -> str:
-    explicit = os.environ.get("SIM_STUDIO_UE_MAP", "").strip()
+def candidate_matches_required_source_uri(candidate: dict[str, Any], source_uri: str) -> bool:
+    expected = str(source_uri).strip()
+    if not expected:
+        return False
+    provenance = candidate.get("provenance") if isinstance(candidate.get("provenance"), dict) else {}
+    return expected in {
+        str(candidate.get("source_uri") or "").strip(),
+        str(provenance.get("requested_source_uri_hint") or "").strip(),
+    }
+
+
+def requested_map_reference(
+    case_spec: dict[str, Any] | None = None,
+    *,
+    explicit_override: str | None = None,
+    default: str = "",
+) -> str:
+    explicit = (
+        os.environ.get("SIM_STUDIO_UE_MAP", "").strip()
+        if explicit_override is None
+        else str(explicit_override).strip()
+    )
     if explicit:
         return explicit
     scene = case_spec.get("scene") if isinstance(case_spec, dict) and isinstance(case_spec.get("scene"), dict) else {}
-    return str(scene.get("map_preference") or scene.get("map_package") or "").strip()
+    return str(scene.get("map_preference") or scene.get("map_package") or default).strip()
 
 
 def resolve_scene_map(
@@ -225,8 +289,10 @@ def resolve_scene_map(
     registry: AssetRegistry,
     top_k: int,
     allow_local_preview: bool,
+    ignore_provenance_and_release_gates: bool = False,
+    requested_reference: str | None = None,
 ) -> dict[str, Any] | None:
-    requested = requested_map_reference(case_spec)
+    requested = requested_map_reference(case_spec, explicit_override=requested_reference)
     if not requested:
         return None
     query = requested.rsplit(".", 1)[-1].rsplit("/", 1)[-1] if requested.startswith("/Game/") else requested
@@ -253,6 +319,7 @@ def resolve_scene_map(
                 candidate,
                 physics_critical=False,
                 allow_local_preview=allow_local_preview,
+                ignore_provenance_and_release_gates=ignore_provenance_and_release_gates,
             ),
         }
         for candidate in ranked
@@ -295,7 +362,12 @@ def asset_quality_gate(
     *,
     physics_critical: bool,
     allow_local_preview: bool = False,
+    ignore_provenance_and_release_gates: bool | None = None,
 ) -> dict[str, Any]:
+    if ignore_provenance_and_release_gates is None:
+        ignore_provenance_and_release_gates = os.environ.get(
+            "SIM_HARNESS_IGNORE_PROVENANCE_AND_RELEASE_GATES", ""
+        ).casefold() in {"1", "true", "yes"}
     execution_failures: list[str] = []
     reference_failures: list[str] = []
     source_kind = str(asset.get("source_kind") or "").strip()
@@ -368,18 +440,35 @@ def asset_quality_gate(
             execution_failures.append("collision_not_ready")
     execution_failures = dedupe(execution_failures)
     reference_failures = dedupe(reference_failures)
+    provenance_execution_codes = {"missing_source_kind", "missing_source_uri", "sha256_mismatch"}
+    ignored_findings = (
+        [code for code in execution_failures if code in provenance_execution_codes]
+        + reference_failures
+        if ignore_provenance_and_release_gates
+        else []
+    )
+    blocking_execution_failures = [code for code in execution_failures if code not in ignored_findings]
+    blocking_reference_failures = [] if ignore_provenance_and_release_gates else reference_failures
     local_preview = (
         allow_local_preview
         and license_tier == "local_preview"
         and quality_status in {"approved", "approved_proxy", "local_preview"}
-        and not execution_failures
+        and not blocking_execution_failures
     )
     failures = [*execution_failures, *reference_failures]
     return {
-        "status": "fail" if execution_failures or (reference_failures and not local_preview) else "pass_local_preview" if local_preview else "pass",
+        "status": (
+            "fail"
+            if blocking_execution_failures or (blocking_reference_failures and not local_preview)
+            else "pass_local_preview"
+            if local_preview or ignored_findings
+            else "pass"
+        ),
         "failure_codes": failures,
-        "execution_failure_codes": execution_failures,
+        "execution_failure_codes": blocking_execution_failures,
         "reference_blockers": reference_failures,
+        "ignored_provenance_and_release_codes": dedupe(ignored_findings),
+        "provenance_and_release_gate_override": ignore_provenance_and_release_gates,
         "reference_approved": not failures,
         "content_identity": sha256 or source_uri or None,
         "hash_required": source_requires_file,
@@ -389,6 +478,13 @@ def asset_quality_gate(
         "dependency_status": dependency_status,
         "ue_binding_ready": bool(asset.get("ue_path")) and (binding is None or binding.get("runtime_ready") is not False),
     }
+
+
+def without_license_requirements(intent: SearchIntent) -> SearchIntent:
+    value = intent.to_dict()
+    value["must"].pop("license_tier", None)
+    value["must_not"].pop("license_tier", None)
+    return SearchIntent.from_dict(value)
 
 
 def resolved_analytic_recipe(

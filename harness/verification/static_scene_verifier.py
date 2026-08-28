@@ -18,11 +18,29 @@ def verify_static_scene_layout(case_spec: dict[str, Any], scene_layout: dict[str
             {},
         )
     nodes = scene_layout.get("object_nodes") if isinstance(scene_layout.get("object_nodes"), list) else []
+    overlap_diagnostics = [
+        item
+        for item in scene_layout.get("overlap_diagnostics") or []
+        if isinstance(item, dict)
+    ]
+    sat_diagnostics = [
+        item
+        for item in overlap_diagnostics
+        if item.get("overlap_test") == "oriented_box_sat"
+    ]
+    closest_sat_pair = min(
+        sat_diagnostics,
+        key=lambda item: float(item.get("signed_margin_m", float("inf"))),
+        default=None,
+    )
     checks = {
         "object_count": len(nodes),
         "physics_critical_count": sum(1 for node in nodes if isinstance(node, dict) and node.get("physics_critical")),
         "support_relation_count": len(scene_layout.get("support_relations") or []),
         "overlap_pair_count": len(scene_layout.get("overlap_pairs") or []),
+        "overlap_narrow_phase": "oriented_box_sat" if sat_diagnostics else None,
+        "oriented_box_sat_pair_count": len(sat_diagnostics),
+        "closest_oriented_box_pair": closest_sat_pair,
         "camera_count": len(((scene_layout.get("camera_plan") or {}).get("views") or [])),
     }
     duplicate = first_duplicate([str(node.get("object_id")) for node in nodes if isinstance(node, dict)])
@@ -56,21 +74,36 @@ def first_missing_physics_asset(nodes: list[dict[str, Any]]) -> dict[str, Any] |
             continue
         binding = node.get("asset_binding") or {}
         physics = node.get("physics") or {}
+        if physics.get("state_kind") == "particle":
+            continue
         selected = binding.get("selected_asset_id")
         fallback = binding.get("fallback_reason")
         if not selected and not fallback:
             return {"object_id": node.get("object_id"), "reason": "no selected asset or fallback reason"}
-        for key in ("collider", "mass_kg", "collision_profile"):
+        required = []
+        if physics.get("collision_required") is not False:
+            required.extend(("collider", "collision_profile"))
+            if (
+                not isinstance(physics.get("collision_geometry"), dict)
+                and physics.get("collision_binding_source") not in {
+                    "asset_body_setup",
+                    "explicit_solver_analytic",
+                }
+            ):
+                return {"object_id": node.get("object_id"), "missing_property": "verified_collision_body_setup"}
+        if str(physics.get("body_type") or "").casefold() in {"", "dynamic"}:
+            required.append("mass_kg")
+        for key in required:
             value = physics.get(key)
             if value is None:
                 return {"object_id": node.get("object_id"), "missing_property": key}
-        if physics.get("material") is None and not str(node.get("role", "")).endswith("anchor"):
+        if physics.get("collision_required") is not False and physics.get("material") is None and not str(node.get("role", "")).endswith("anchor"):
             return {"object_id": node.get("object_id"), "missing_property": "material"}
     return None
 
 
 def first_bad_support(relations: list[dict[str, Any]]) -> dict[str, Any] | None:
-    bad_statuses = {"missing_support", "penetrating_support", "unsupported_gap"}
+    bad_statuses = {"missing_support", "penetrating_support", "unsupported_gap", "outside_support_footprint"}
     for relation in relations:
         if isinstance(relation, dict) and relation.get("status") in bad_statuses:
             return relation

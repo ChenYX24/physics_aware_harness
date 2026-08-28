@@ -1,0 +1,155 @@
+{
+  "schema_version": "harness_case_spec_v1",
+  "case_id": "coffee_mug_table_spill_v001",
+  "capability_id": "fluid_particle_dynamics",
+  "prompt": "A real coffee mug starts upright just above a flat tabletop with settled coffee inside. The mug tilts around its rim, and gravity pours the coffee onto the tabletop where it splashes and spreads horizontally.",
+  "expected_physics": {
+    "gravity_m_s2": 9.81,
+    "coordinate_system": "z_up",
+    "coordinate_system": "z_up"
+  },
+  "physical_parameters": {
+    "gravity_m_s2": [0.0, 0.0, -9.81],
+    "water_density_kg_m3": 1000.0
+  },
+  "workspace_bounds_m": {
+    "min_m": [-0.42, -0.35, -0.01],
+    "max_m": [0.4, 0.35, 0.35]
+  },
+  "objects": [
+    {
+      "id": "coffee",
+      "role": "fluid",
+      "visual": {
+        "color_rgb": [0.12, 0.045, 0.015],
+        "roughness": 0.18,
+        "emissive": 0.03
+      },
+      "solver": {
+        "material_model": "sph_liquid",
+        "initial_volume": {
+          "shape": "cylinder",
+          "frame": {"type": "body_local", "body_id": "coffee_mug"},
+          "position_m": [0.0, 0.0, 0.005],
+          "radius_m": 0.03,
+          "height_m": 0.06,
+          "euler_xyz_deg": [0.0, 0.0, 0.0]
+        }
+      }
+    },
+    {
+      "id": "coffee_mug",
+      "role": "rigid_body",
+      "asset": {
+        "ue_path": "/Game/Generated/Provider/user_fab_coffee_mug_99de80f66495.user_fab_coffee_mug_99de80f66495",
+        "material_path": "",
+        "sha256": "99de80f664958a875ea60b6244a60c969ef956942b632f3c25e6dd3de1cb6f11",
+        "proxy": false,
+        "catalog_source": "user-provided Fab FBX",
+        "bbox_m": [0.131555, 0.105135, 0.099992]
+      },
+      "solver": {
+        "mobility": "kinematic",
+        "transform": {
+          "position_m": [-0.22, 0.0, 0.05],
+          "euler_xyz_deg": [0.0, 0.0, 0.0],
+          "ue_rotation_pyr_deg": [0.0, 0.0, 0.0]
+        },
+        "motion": {
+          "type": "pivot_rotation",
+          "start_time_s": 0.3,
+          "duration_s": 1.5,
+          "pivot_local_m": [0.042, 0.0, 0.042],
+          "solver_end_rotation_xyz_deg": [0.0, 110.0, 0.0],
+          "ue_end_rotation_pyr_deg": [-110.0, 0.0, 0.0]
+        },
+        "collision": {
+          "type": "axisymmetric_profile",
+          "fit_method": "fbx_mesh_bounds_and_open_cavity_visual_fit_v1",
+          "asset_geometry_match": true,
+          "inner_profile": [
+            {"z_m": -0.038, "radius_m": 0.032},
+            {"z_m": -0.015, "radius_m": 0.036},
+            {"z_m": 0.015, "radius_m": 0.04},
+            {"z_m": 0.042, "radius_m": 0.042}
+          ],
+          "wall_thickness_m": 0.005,
+          "panel_count": 24
+        }
+      }
+    },
+    {
+      "id": "tabletop",
+      "role": "rigid_body",
+      "asset": {
+        "ue_path": "/Game/Generated/Provider/generated_local_box_mesh_v1_aac66ea29e36eb5083c5b979.generated_local_box_mesh_v1_aac66ea29e36eb5083c5b979",
+        "material_path": "",
+        "sha256": "ccf1312609851524915ccd9bf65c73d0fac663746a60fbcb934a3219659fa841",
+        "proxy": false,
+        "catalog_source": "local procedural asset provider",
+        "bbox_m": [0.06, 0.18, 0.42]
+      },
+      "solver": {
+        "mobility": "static",
+        "transform": {
+          "position_m": [0.0, 0.0, -0.025],
+          "euler_xyz_deg": [0.0, 0.0, 0.0],
+          "ue_rotation_pyr_deg": [0.0, 0.0, 0.0],
+          "scale": [13.3333333333, 4.4444444444, 0.119047619]
+        },
+        "collision": {
+          "type": "plane",
+          "position_m": [0.0, 0.0, 0.0],
+          "normal": [0.0, 0.0, 1.0],
+          "asset_geometry_match": true
+        }
+      }
+    }
+  ],
+  "active_objects": ["coffee"],
+  "passive_objects": ["coffee_mug", "tabletop"],
+  "required_assets": [
+    "/Game/Generated/Provider/user_fab_coffee_mug_99de80f66495.user_fab_coffee_mug_99de80f66495",
+    "/Game/Generated/Provider/generated_local_box_mesh_v1_aac66ea29e36eb5083c5b979.generated_local_box_mesh_v1_aac66ea29e36eb5083c5b979",
+    "reconstructed coffee surface"
+  ],
+  "required_signals": [
+    "particle_positions",
+    "particle_velocities",
+    "stable_particle_ids",
+    "declared_measurements",
+    "solver_assertion_results",
+    "surface_mesh_sequence",
+    "solver_timebase",
+    "rgb",
+    "metric_depth",
+    "instance_segmentation"
+  ],
+  "verifier_expectation": {"status": "pass"},
+  "should_pass": true,
+  "solver_scene": {
+    "type": "rigid_sph",
+    "measurements": [
+      {"id": "mug_occupancy", "type": "body_interior_fraction", "body_id": "coffee_mug"},
+      {"id": "outside_mug", "type": "outside_body_interiors_fraction", "body_ids": ["coffee_mug"]},
+      {"id": "near_table", "type": "plane_proximity_fraction", "body_id": "tabletop", "distance_m": 0.01},
+      {"id": "horizontal_span", "type": "axis_span", "axes": ["x", "y"]}
+    ],
+    "assertions": [
+      {"id": "initially_in_mug", "measurement_id": "mug_occupancy", "reduction": "initial", "operator": ">=", "value": 0.85},
+      {"id": "leaves_mug", "measurement_id": "mug_occupancy", "reduction": "initial_minus_final", "operator": ">=", "value": 0.65},
+      {"id": "outside_mug_at_end", "measurement_id": "outside_mug", "reduction": "final", "operator": ">=", "value": 0.65},
+      {"id": "reaches_table", "measurement_id": "near_table", "reduction": "final", "operator": ">=", "value": 0.35},
+      {"id": "spreads_horizontally", "measurement_id": "horizontal_span", "reduction": "final", "operator": ">=", "value": 0.12},
+      {"id": "bounded_frame_discharge", "measurement_id": "mug_occupancy", "reduction": "max_frame_decrease", "operator": "<=", "value": 0.35},
+      {"id": "non_instantaneous_discharge", "measurement_id": "mug_occupancy", "reduction": "threshold_crossing_duration", "operator": ">=", "value": 0.25, "start_delta": 0.01, "end_value": 0.01}
+    ]
+  },
+  "scene": {
+    "duration_s": 3.0,
+    "map_preference": "/Game/HarnessGenerated/Maps/BallBoardSmoke.BallBoardSmoke",
+    "event_window_s": 1.5,
+    "post_event_tail_s": 1.0
+  },
+  "notes": "This case contains no pour/spill execution mode. It declares one kinematic rigid body with an open axisymmetric collider, one static rigid body with a plane collider, one SPH initial volume, generic measurements, and generic assertions."
+}

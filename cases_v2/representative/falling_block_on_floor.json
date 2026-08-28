@@ -1,0 +1,168 @@
+{
+  "schema_version": "harness_case_spec_v2",
+  "identity": {
+    "case_id": "falling_block_on_floor",
+    "title": "Rigid block falling onto a floor",
+    "source_request": "A rigid block falls under gravity and contacts the floor."
+  },
+  "capabilities": {
+    "primary": "rigid_body_dynamics",
+    "required": [
+      "rigid_body_dynamics"
+    ]
+  },
+  "scene": {
+    "environment_intent": "minimal flat test floor",
+    "coordinate_system": "z_up",
+    "duration_s": 3.0,
+    "bounds_hint_m": [
+      3.0,
+      2.0,
+      2.0
+    ]
+  },
+  "timebase": {
+    "physics_hz": 120,
+    "observation_fps": 24,
+    "deterministic_seed": 42
+  },
+  "backend_constraints": {
+    "required_solver_capabilities": [
+      "rigid_body",
+      "contact_events",
+      "trajectory"
+    ],
+    "allowed_solvers": [
+      "fallback",
+      "ue"
+    ],
+    "render_backend": null,
+    "allow_multi_backend": true
+  },
+  "asset_policy": {
+    "allow_local": true,
+    "allow_external": false,
+    "allow_generation": false,
+    "allow_analytic_proxy": true,
+    "required_license_tier": "local_preview"
+  },
+  "objects": [
+    {
+      "id": "falling_block",
+      "role": "falling_body",
+      "geometry": {
+        "shape_hint": "box"
+      },
+      "physics": {
+        "body_type": "dynamic",
+        "collision_required": true,
+        "enable_gravity": true
+      },
+      "initial_state": {
+        "position_m": [
+          0.0,
+          0.0,
+          1.2
+        ],
+        "rotation_deg": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "behavior": {}
+    },
+    {
+      "id": "floor",
+      "role": "support",
+      "geometry": {
+        "shape_hint": "box"
+      },
+      "physics": {
+        "body_type": "static",
+        "collision_required": true,
+        "enable_gravity": false
+      },
+      "initial_state": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation_deg": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "behavior": {}
+    }
+  ],
+  "relations": [
+    {
+      "type": "support_contact",
+      "source": "falling_block",
+      "target": "floor"
+    }
+  ],
+  "events": [
+    {
+      "type": "gravity_release",
+      "object": "falling_block"
+    }
+  ],
+  "expected_behavior": {
+    "gravity_m_s2": 9.81,
+    "support": "floor"
+  },
+  "observation_requirements": {
+    "cameras": [
+      {
+        "role": "front_static",
+        "target_objects": [
+          "falling_block",
+          "floor"
+        ]
+      }
+    ],
+    "modalities": [
+      "rgb"
+    ],
+    "signals": [
+      "trajectory",
+      "contact_events",
+      "gravity_label"
+    ]
+  },
+  "verification_requirements": {
+    "assertions": [
+      {
+        "type": "event_exists",
+        "event": "contact",
+        "objects": [
+          "falling_block",
+          "floor"
+        ]
+      }
+    ],
+    "thresholds": {}
+  },
+  "variant": {
+    "should_pass": true
+  },
+  "provenance": {
+    "migrated_from": "cases/falling/falling_block_on_floor.json",
+    "migration_kind": "v1_to_v2_representative"
+  },
+  "notes": "V2 migration of the positive V1 gravity case; analytic proxy geometry preserves the original execution policy."
+}
