@@ -28,6 +28,7 @@ The model must receive one source of truth per concern:
 - **UE/reference video = motion, camera, timing, contact, and final-state teacher.**
 - **Original-video keyframes = appearance, identity, material, lighting, and background teacher only.**
 - Do not pass the erroneous original as a second motion reference unless the experiment explicitly studies dual-video conditioning; it can overpower the UE motion and reproduce the original error.
+- For exact-count scenes, default to one start-state appearance keyframe. Add more only when instance-to-reference binding is explicit: repeated snapshots of the same objects can induce transient or terminal duplication and must be treated as an ablation, not a free quality improvement.
 
 Use this template for every model in a comparison, replacing only bracketed case facts:
 
@@ -77,11 +78,11 @@ For a whole-shot UE restyle, replace the three timeline bullets with: `Use the U
 
 | Model | Motion input | Appearance input | Required run setting |
 |---|---|---|---|
-| MiniMax H3 Ref2VA | one validated UE video | 1--3 source keyframes | Ref2VA worker; generated audio off |
-| Seedance 2.0 Fast | one validated UE video | 1--3 source keyframes | fixed duration and aspect ratio; generated audio off |
-| Seedance 2.5 | one validated UE video | 1--3 source keyframes | adaptive reference edit; generated audio off |
+| MiniMax H3 Ref2VA | one validated UE video | one start-state source keyframe by default | Ref2VA worker; generated audio off |
+| Seedance 2.0 Fast | one validated UE video | one start-state source keyframe by default | fixed duration and aspect ratio; generated audio off |
+| Seedance 2.5 | one validated UE video | one start-state source keyframe by default | adaptive reference edit; generated audio off |
 
-Every H3/Seedance row for the same case must share the same prompt text, UE teacher, source keyframes, and seed where supported. Record the prompt hash, input hashes, task ID, endpoint, output hash, and `generated_pending_user_acceptance`; API success alone is not repair success.
+Every H3/Seedance row for the same case must share the same prompt text, UE teacher, appearance keyframe set, reference count, and seed where supported. Record the prompt hash, input hashes, task ID, endpoint, output hash, and `generated_pending_user_acceptance`; API success alone is not repair success.
 
 ## Reference projects
 
