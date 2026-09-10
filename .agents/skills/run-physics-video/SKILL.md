@@ -67,7 +67,7 @@ When generation stops with `native_generation_submission_required`, read only th
 
 The submission contains exactly `intent_draft`, `case_spec`, and `agent_reported` plus its schema, Job identity, and generation-context digest. Report TUI thread/model/provider/turn information only when known; use `null` when unknown. These fields are audit declarations and are not Controller-observed usage. Report image input IDs as used only when the context marks planning images required and the Job authorization permits their use; optional images remain metadata-only.
 
-For local procedural assets, the built-in recipes are exactly `box_mesh_v1`, `sphere_mesh_v1`, and `cylinder_mesh_v1`; their CaseSpec `shape_hint` values are exactly `box`, `sphere`, and `cylinder`. Express proportions and orientation through `approx_size_m` and UE `[pitch, yaw, roll]`, never by putting prose into `shape_hint`. When the user has not required local procedural generation, treat these recipes as an efficient option for matching primitives, not as a mandatory route; for non-primitive assets prefer an authorized Catalog/external/model source when it better matches the request. Do not claim that a custom procedural recipe exists when the Controller has not registered one.
+For local procedural assets, the built-in recipes are exactly `box_mesh_v1`, `sphere_mesh_v1`, `cylinder_mesh_v1`, and `open_conical_frustum_mesh_v1`; their CaseSpec `shape_hint` values are exactly `box`, `sphere`, `cylinder`, and `open_conical_frustum`. Express proportions and orientation through `approx_size_m` and UE `[pitch, yaw, roll]`, never by putting prose into `shape_hint`. The open frustum additionally requires `shape_parameters.top_diameter_m` and `shape_parameters.bottom_diameter_m`, with `approx_size_m` equal to its outer bounds; it is a static collision asset with open top and bottom. When the user has not required local procedural generation, treat these recipes as an efficient option for matching primitives, not as a mandatory route; for non-primitive assets prefer an authorized Catalog/external/model source when it better matches the request. Do not claim that a custom procedural recipe exists when the Controller has not registered one.
 
 When the user explicitly provides a local FBX, OBJ, or archive as the required asset, register it through the Controller before composing the native submission:
 
@@ -85,6 +85,16 @@ python3 scripts/harness_agent_job.py --jsonl advance-until-blocked <job_id>
 ```
 
 The Controller validates the context digest, image-use declaration, Intent adjustment bounds, CaseSpec V2, request identity, backend constraints, and immutable ack. A rejected submission must be corrected at its source; never edit the context, ack, Intent Contract, or attempt by hand. Re-submitting the exact payload is idempotent; different content under an existing ack is rejected.
+
+## Preview layout cheaply
+
+After compilation completes, use the Controller-owned layout preview when the task is still checking object scale, placement, background alignment, visible contact, attachment gaps, or camera framing:
+
+```bash
+python3 scripts/harness_agent_job.py layout-preview <job_id> --time-s 0
+```
+
+The preview invokes the real UE scene compiler and production cameras, writes only a few low-resolution RGB PNGs under the current attempt, and leaves the Job stage unchanged. It must retain no EXR or per-frame sequence. `--time-s 0` shows the exact compiled initial layout. A later time is only an authored/analytic pose preview; it is not physics evidence and must not be used to judge fluid, cloth, contacts, or dynamics. Use Smoke for those.
 
 Make control decisions only from stable structured fields: `status`, `failure_class`, `failure_code`, `retryable`, `checkpoint_ref`, `artifact_refs`, `allowed_next_actions`, and `required_user_action`. Do not classify failures from traceback or message wording, and do not copy the schema, failure-code registry, retry loop, budgets, or checkpoints into this Skill.
 

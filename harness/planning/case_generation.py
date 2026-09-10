@@ -43,12 +43,9 @@ from harness.core.case_spec_v2 import (
 )
 from harness.runtime.stage_contracts import BACKEND_STAGE_IO, stage_handoff_contract
 from harness.runtime.articulated_body import (
-    ARTICULATED_ANIMATION_ASSETS,
     ARTICULATED_BODY_BONES,
     ARTICULATED_BODY_MODEL_ID,
-    ARTICULATED_IK_GOALS,
-    ARTICULATED_POSE_OVERLAY_BONES,
-    ARTICULATED_POSE_OVERLAY_TYPE,
+    ARTICULATED_CHARACTER_MODEL_ID,
     ARTICULATED_POSE_SOURCE_TYPES,
     ARTICULATED_ROOT_TRANSFORM_SOURCE_TYPES,
 )
@@ -1283,6 +1280,7 @@ def _route_for_provider(provider: str) -> str:
         "box_mesh_v1": "procedural_generation",
         "sphere_mesh_v1": "procedural_generation",
         "cylinder_mesh_v1": "procedural_generation",
+        "open_conical_frustum_mesh_v1": "procedural_generation",
     }.get(provider, "")
 
 
@@ -1555,7 +1553,9 @@ FIELD-BY-FIELD INSTRUCTIONS
 7. objects: create one entry per logical scene object. Each id must be unique, stable, machine-friendly,
    and independent of an eventual asset ID. role is semantic. geometry uses shape_hint, positive
    approx_size_m, and optional scale_policy. For a built-in local procedural recipe, shape_hint is
-   exactly box, sphere, or cylinder; dimensions and orientation never belong in shape_hint prose.
+   exactly box, sphere, cylinder, or open_conical_frustum; dimensions and orientation never belong in
+   shape_hint prose. An open_conical_frustum additionally requires geometry.shape_parameters with exactly
+   top_diameter_m and bottom_diameter_m; approx_size_m is [larger_diameter, larger_diameter, axial_height].
    scale_policy is preserve_authored or
    fit_uniform_to_approx_size. Use fit_uniform_to_approx_size for an external/model-generated mesh when
    the requested physical dimensions are part of the scenario; it applies one uniform instance scale,
@@ -1591,6 +1591,10 @@ FIELD-BY-FIELD INSTRUCTIONS
    surface must be independent of that unknown asset origin, model it as a separate source=none, visible=false
    object with an explicit world transform, and set collision_required=false on the visible asset. Never request
    an implicit bounds-derived collision fallback.
+   A pre-fractured Geometry Collection whose seams must remain invisible before impact may declare
+   behavior.fracture.intact_visual={"shape":"box","size_m":[x,y,z],"material_source":"fracture_body"}.
+   This renders one intact collision-free shell with the collection material, then switches to the actual
+   collection only when the measured fracture response is applied; do not use it for non-box intact shapes.
 8. solver_scene and object.solver: use these only when the selected backend needs explicit generic
    solver primitives beyond rigid-body fields. For a coupled particle/rigid scene, set
    solver_scene.type="rigid_sph" and declare initialization, measurements, and numeric assertions there.
@@ -1600,8 +1604,9 @@ FIELD-BY-FIELD INSTRUCTIONS
    participant uses role="fluid" and solver.material_model="sph_liquid" plus solver.initial_volume with a geometric shape,
    dimensions, pose, and a frame. Use frame={"type":"body_local","body_id":exact_id} when the initial
    volume is contained by a moving rigid body; use a world frame otherwise. Every coupled rigid participant
-   uses role="rigid_body" and declares
-   solver.mobility, solver.transform, and solver.collision. Use collision={"type":"asset"} only for a Catalog
+   uses role="rigid_body" and declares solver.mobility and solver.collision. Do not emit solver.transform:
+   the compiler derives its position and rotation from object.initial_state and its scale from resolved asset
+   geometry. Use collision={"type":"asset"} only for a Catalog
    qualification that includes a portable collision mesh, hash, and artifact-to-asset transform. Genesis consumes
    only that qualified collision artifact; a missing artifact, hash mismatch, unsupported transform, or conversion
    failure is capability_missing. It never substitutes the visual source mesh or asset bounds. Explicit analytic collision
@@ -1611,34 +1616,56 @@ FIELD-BY-FIELD INSTRUCTIONS
    asset_geometry_match=true, and a non-empty fit_method naming the evidence used to align that profile
    to the render asset. Do not claim asset_geometry_match without such evidence. A body-local cylindrical
    fluid volume must clear the profile wall, bottom, and rim by at least 0.003 m; never make its radius
-   exactly equal to the container's inner radius. solver.transform uses position_m, euler_xyz_deg,
-   ue_rotation_pyr_deg, and
-   optional scale. Kinematic pivot_rotation uses start_time_s, duration_s, pivot_local_m,
+   exactly equal to the container's inner radius. Kinematic pivot_rotation uses start_time_s, duration_s, pivot_local_m,
    solver_end_rotation_xyz_deg, and ue_end_rotation_pyr_deg; do not invent angle/axis/pivot objects.
    Convert every solver XYZ rotation [x,y,z] to UE pitch/yaw/roll as [-y,-z,x], including motion endpoints.
    pivot_local_m is the actual local pivot point: if the request names a rim or profile edge, use that
    edge's radial coordinate and z coordinate rather than the profile center [0,0,z].
-   Keep solver transforms consistent with
-   object.initial_state. Also provide workspace_bounds_m={"min_m":[x,y,z],"max_m":[x,y,z]} enclosing
+   Also provide workspace_bounds_m={"min_m":[x,y,z],"max_m":[x,y,z]} enclosing
    every declared body, initial volume, and expected motion. Do not name a physical phenomenon, select a prepared process, or put rendering
    behavior in these declarations. If the request does not require such coupling, omit both fields.
-   For the fixed white articulated body, use role="articulated_body",
+   For a Taichi cloth scene, use exactly one role="deformable_cloth" object with
+   visual_representation.source="solver_generated", physics.body_type="dynamic",
+   collision_required=false, material_model="cloth", positive mass_kg, and material values
+   structural_stiffness_n_m, shear_stiffness_n_m, bending_stiffness_n_m,
+   spring_damping_kg_s, and air_damping_1_s. Its solver is
+   {"type":"mass_spring_cloth","grid_resolution":integer>=4,
+   "initial_orientation":"horizontal_xy"|"vertical_xz",
+   either legacy "pinned_boundary":"none"|"negative_u" or
+   "pinned_boundaries":["negative_u"|"positive_u"|"negative_v"|"positive_v",...],
+   optional "width_scale_by_v":[negative_v_scale,positive_v_scale] for a trapezoidal planform,
+   optional "u_cuts":[{"fraction":0..1,"gap_m":nonnegative}] for disconnected panels,
+   "substeps_per_frame":positive integer,
+   "collision_thickness_m":positive}. geometry.approx_size_m is the full world-axis size;
+   initial_state.position_m is the grid center. Zero or more role="rigid_collider" objects use exact
+   geometry.shape_hint sphere|box|cylinder, positive geometry.approx_size_m, static or kinematic body type,
+   collision_required=false, initial_state, and physics.material. A kinematic collider may use the same
+   linear kinematic_motion keyframes as UE. At most one static role="support_surface" supplies the horizontal
+   floor plane. These are one-way analytic contacts: cloth reacts but does not apply force back to a collider.
+   Tearing, self-collision, arbitrary mesh collision, and two-way rigid coupling are not part of this contract.
+   For natural human motion, use role="articulated_body",
    visual_representation={"source":"solver_generated","visible":true}, omit object.asset, and declare
-   solver={"type":"articulated_body","model":"harness_ue_mannequin_v1","mode":"kinematic"|"ragdoll",
-   "pose_source":{...},"pose_overlay":{...},"root_transform_source":{...},"ik_targets":[...],
-   "head_look_target":{...},"support_object_id":"optional explicit support id","attachments":[...]}.
-   pose_source is exactly pose_keyframes with keyframes, or animation_sequence with non-overlapping timed
-   segments referencing only registered animation_asset_id values. root_transform_source is exactly
-   root_keyframes, animation_root_motion, or character_movement. Root keyframes contain time_s,
-   position_offset_m, and rotation_offset_deg and begin at time zero with zero offsets. Pose keyframes
-   contain time_s and rotations_deg keyed only by the fixed mannequin bones listed in the contract. Optional
-   pose_overlay is exactly type=bone_local_rotation_offsets plus time-ordered rotations_deg and weight keyframes;
-   it excludes root and never owns root translation or rotation. Character
-   Movement requires animation_sequence with in-place clips. Animation Root Motion requires qualified
-   root-motion clips. IK targets use only declared hand/foot goal IDs and explicit timed world transforms;
-   pole_position_m is optional inside every keyframe of that same chain. head_look_target is one explicit timed
-   world-space target with weight and angular tolerance. Ground calibration occurs only for one explicit
-   supported_by relation or support_object_id and changes only initial Z.
+   solver={"type":"articulated_body","model":"harness_ue_gasp_character_v1","mode":"kinematic",
+   "movement_control":{"type":"character_movement","max_speed_m_s":positive,
+   "max_acceleration_m_s2":positive,"max_turn_rate_deg_s":positive,"keyframes":[...],"events":[...]},
+   "head_look_target":{"tolerance_deg":positive,"keyframes":[{"time_s":...,"position_m":[x,y,z],"weight":0..1},...]}
+   or null,
+   "support_object_id":"optional explicit support id","attachments":[...]}.
+   Each movement keyframe contains time_s, horizontal target_velocity_m_s=[x,y,0], facing_yaw_deg,
+   and crouched. Keyframes begin at time zero; speed selects idle/walk/run/sprint through Motion Matching,
+   and facing supplies one continuous official GASP turn target; Motion Matching owns head, upper-body, and foot sequencing.
+   Optional head_look_target is a world-space gaze trajectory and requires facing_yaw to remain fixed for the whole
+   scene. Do not combine explicit gaze with changing body facing: the current GASP adapter cannot preserve normal
+   locomotion pose while independently controlling gaze.
+   Do not emit look yaw/pitch, named action phases, animation clips, or bone rotations. Weight zero disables gaze control.
+   Keep a stationary facing change at or below 65 degrees. Larger reorientation requires genuine nonzero horizontal
+   motion and case-level visible-root verification; do not add tiny movement solely to release a stationary root offset,
+   because that selects a locomotion pose.
+   The only discrete event is {"time_s":...,"type":"jump"}. Do not
+   select animation clips or action names. For a fixed authored pose or ragdoll experiment only, use
+   model="harness_ue_mannequin_v1" with pose_source.type=pose_keyframes and
+   root_transform_source.type=root_keyframes. Ground calibration occurs only for one explicit supported_by
+   relation or support_object_id and changes only initial Z.
    Kinematic
    mode requires physics.body_type="kinematic" and collision_required=false. Ragdoll mode requires
    physics.body_type="dynamic", an explicit ragdoll_start_time_s, and the UE solver capability
@@ -1658,8 +1685,11 @@ FIELD-BY-FIELD INSTRUCTIONS
    resource_kind must use its enum. must contains hard filters that every candidate must satisfy;
    must_not contains hard exclusions; preferences contains soft ranking preferences and can never override
    must/must_not. taxonomy contains string hierarchy labels such as domain, category, subcategory, and
-   object_type. relaxation_policy contains boolean allow_parent_category and allow_format_conversion;
-   enable relaxation only when the user allows a broader match. When the request explicitly contrasts
+   object_type. Category, object_type, and physics_role are semantic retrieval hints, not hard filters;
+   put physics_role in preferences and never in must. relaxation_policy contains boolean
+   allow_parent_category and allow_format_conversion. Set allow_parent_category=true by default so an
+   over-specific object_type can relax through its declared parents; set it false only when the user
+   explicitly requires that exact semantic class. When the request explicitly contrasts
    multiple semantic object classes, encode the competing classes as must_not.category exclusions for
    each role; shared material or approximate size is not sufficient identity evidence. must_not must never
    exclude the requested category itself or a parent category that contains it. A required Provider
@@ -1669,17 +1699,20 @@ FIELD-BY-FIELD INSTRUCTIONS
    routes have no fallback. provider_hint is null or an exact stable ID listed for that route in
    case_spec_contract.enums.provider_hint_by_acquisition_route; never use a display name. For exact
    rule-based primitives, prefer procedural_generation and use only
-   the registered provider hints box_mesh_v1, sphere_mesh_v1, or cylinder_mesh_v1; alternatively leave
+   the registered provider hints box_mesh_v1, sphere_mesh_v1, cylinder_mesh_v1, or
+   open_conical_frustum_mesh_v1; alternatively leave
    provider_hint null so the Provider can infer it from shape_hint. Never invent a recipe ID. Use box for
    boxes/plates/walls, sphere for balls/spheres, and cylinder for rods/poles/columns/discs. When the user
    has not required local procedural generation, use these built-ins as an efficient option for matching
-   primitives rather than a mandatory route; non-primitive assets may be better served by an authorized
+   primitives rather than a mandatory route. open_conical_frustum_mesh_v1 creates one uncapped ring of
+   closed convex wall sectors, uses local Z from bottom to top, and supports static UE collision only; never use it
+   for a dynamic body or when either opening must be capped. Non-primitive assets may be better served by an authorized
    Catalog, external_site, or model_generation source. approx_size_m
    is the full x/y/z bounding-box size in meters; sphere dimensions must be equal and cylinder x/y must
    be equal with z as its length. Irregular or articulated objects are not local primitives. If
    must.source_kind is used with procedural_generation, write the exact token procedural_generation,
    not procedural or descriptive prose. asset_type is the backend asset class such as StaticMesh;
-   geometry_type is the shape such as box, sphere, or cylinder. If must.physics_role is needed, use
+   geometry_type is the shape such as box, sphere, or cylinder. A physics_role preference uses
    dynamic_rigid_body, static_rigid_body, or kinematic_rigid_body to match physics.body_type.
    Expansion asset_source_constraints are hard: for every scoped exact object ID, choose only an allowed
    route and allowed Provider, preserve required and user_explicit, and do not add an unauthorized fallback.
@@ -1687,8 +1720,13 @@ FIELD-BY-FIELD INSTRUCTIONS
 10. acquisition.reference_inputs: every entry is an object with input_id copied exactly from
    request.inputs, usage as an array of registered usage enums, and allow_similarity_search as a boolean.
    Do not copy local paths, hashes, image bytes, captions, or invented IDs into this object.
-   acquisition.texture_prompt is optional, applies only to model_generation texturing, and is limited to
-   600 characters. Fill it only from an explicit material, color, or style intent. When the user wants to
+   For model_generation, always fill acquisition.generation_prompt with a concise, self-contained description
+   of one isolated object: identity, defining silhouette/openings or separable parts, realistic construction,
+   and any geometry that must not be added. Keep it within 800 characters; do not include a scene, camera,
+   motion, forces, or unsupported claims about collision. With no generation reference images this drives
+   Meshy Text-to-3D geometry. With reference images it remains an auditable generation brief, while the images
+   drive geometry. acquisition.texture_prompt is optional, applies only to model_generation texturing, and is
+   limited to 800 characters. Fill it only from an explicit material, color, or style intent. When the user wants to
    preserve the source photos' original texture/colors without a new style, omit texture_prompt. Never use
    it as a geometry prompt or synthesize it from description, role, or shape.
 11. constraints: use this array only when two rigid bodies need a physical joint. Declare two exact body
@@ -1709,7 +1747,29 @@ FIELD-BY-FIELD INSTRUCTIONS
     physics.collision_required=false, and the constraint remains the sole physics source. Omit an unused
     optional block and any neutral target/limit/acceleration field; absent members use the documented neutral runtime
     default. Every enabled drive axis must still declare the corresponding positive stiffness or damping.
-12. relations and events: use canonical reference-bearing objects. A binary relation is
+12. compliant_contacts: use this array only for an explicitly declared unilateral sphere contact. Every
+    entry identifies two exact rigid-body IDs with explicit sphere collision_geometry, an activation center
+    distance in meters, positive stiffness in N/m, and non-negative damping in N*s/m. The activation distance
+    must exceed the sum of the hard collision radii, so this force acts before the safety collider. The force
+    is repulsive only while the center distance is below activation_distance_m and becomes zero on separation;
+    it never pulls bodies together. Require solver capability compliant_contact. Do not infer pairs, distances,
+    stiffness, or damping from semantic relations. With dt=1/physics_hz and the dynamic pair's reduced mass m_eff,
+    the declared coefficients must satisfy k*dt^2/m_eff + 2*c*dt/m_eff < 4.
+13. forces: use this array for explicit rigid-body force laws. A constant world-space force is exactly
+    {id,type:"continuous_force",object,vector_n,start_time_s,end_time_s}; vector_n is non-zero newtons.
+    A point-source radial field is exactly {id,type:"radial_force",source,object,strength_n_m2,
+    softening_distance_m,max_distance_m,start_time_s,end_time_s}; positive strength attracts, negative
+    strength repels, and F=strength/(r^2+softening^2) along the live target-to-source direction inside
+    max_distance_m. The target is one exact dynamic rigid-body ID and every finite interval lies inside
+    scene.duration_s. Require continuous_external_force or radial_field_force respectively. These declared
+    vectors/laws are the physics truth; do not route execution by wind, magnetism, or another phenomenon name.
+    Environmental wind is not a constant force. Declare exactly one ordinary object with role="wind_field",
+    physics={body_type:"static",collision_required:false}, visual_representation={source:"none",visible:false},
+    and solver={type:"aerodynamic_wind",velocity_m_s:[x,y,z],air_density_kg_m3:positive,
+    gust_amplitude:0..1,gust_frequency_hz:nonnegative,targets:[{object:exact_id,drag_coefficient:positive},...]}.
+    Require aerodynamic_wind. The same declaration targets dynamic rigid bodies in UE or deformable_cloth in
+    Taichi; never create backend-specific wind roles or use continuous_force as a wind substitute.
+14. relations and events: use canonical reference-bearing objects. A binary relation is
     {"type": string, "source": exact_id, "target": exact_id}; a group relation may use
     {"type": string, "objects": [exact_ids]}; an object event is
     {"type": string, "object": exact_id}. Additional semantic parameters may be objects or scalars, but
@@ -1737,8 +1797,10 @@ FIELD-BY-FIELD INSTRUCTIONS
 13. expected_behavior: describe causal and observable outcomes without claiming success.
 14. observation_requirements: cameras use registered camera roles and exact target object IDs. A camera may
     name one exact subject and framing=full_subject when that subject must determine a complete front/side
-    composition; use framing=scene otherwise. Modalities use registered values; signals name evidence required
-    by the capability and assertions. Do not emit exact camera coordinates.
+    composition; use framing=scene otherwise. Default video cases to modalities=["rgb"]. Add depth or segmentation
+    only when the user explicitly requests that sensor modality or the primary scientific claim requires it;
+    never add them as generic diagnostics. Signals name evidence required by the capability and assertions.
+    Do not emit exact camera coordinates.
 15. verification_requirements: each assertion is an object with a registered type and exact object IDs.
     event_sequence uses pairs=[[id_a,id_b],[id_b,id_c],...] with at least two explicit event pairs; a start/end
     objects list does not express a sequence.
@@ -1830,7 +1892,7 @@ def case_spec_generation_contract() -> dict[str, Any]:
         "optional_top_level_fields": ["solver_scene", "workspace_bounds_m", "notes"],
         "object_shape": {
             "required": ["id", "role", "visual_representation"],
-            "semantic_sections": ["visual_representation", "asset", "geometry", "physics", "initial_state", "behavior", "solver"],
+            "semantic_sections": ["visual_representation", "asset", "geometry", "physics", "initial_state", "kinematic_motion", "behavior", "solver"],
             "asset_cardinality": "zero_or_one_direct_request",
         },
         "field_shapes": {
@@ -1851,9 +1913,11 @@ def case_spec_generation_contract() -> dict[str, Any]:
                 },
                 "color_rgb": "optional [red, green, blue], each component between 0 and 1",
                 "fixed_material_color": "optional boolean; true when an explicit color_rgb must be rendered",
+                "visual_material_path": "optional qualified /Game/... UE material asset path",
                 "geometry": {
-                    "shape_hint": "string; exactly box, sphere, or cylinder for built-in local procedural recipes",
+                    "shape_hint": "registered shape string; built-in local recipes include box, sphere, cylinder, and open_conical_frustum",
                     "approx_size_m": ["positive x", "positive y", "positive z"],
+                    "shape_parameters": "required only for open_conical_frustum: {top_diameter_m, bottom_diameter_m}",
                     "scale_policy": "preserve_authored or fit_uniform_to_approx_size",
                 },
                 "physics": {
@@ -1879,30 +1943,24 @@ def case_spec_generation_contract() -> dict[str, Any]:
                     "rotation_deg": ["pitch", "yaw", "roll"],
                     "linear_velocity_m_s": ["x", "y", "z"],
                 },
+                "kinematic_motion": {
+                    "interpolation": "linear",
+                    "keyframes": "at least two strictly time-ordered {time_s, position_m, optional rotation_deg} entries; if rotation is used it appears on every keyframe; first is time 0 and equals initial_state position/rotation; requires a kinematic body and kinematic_motion solver capability",
+                },
                 "behavior": "object, never a string",
                 "solver": "optional object of generic backend solver primitives; never a named physical-process mode",
                 "articulated_body_solver": {
                     "type": "articulated_body",
-                    "model": ARTICULATED_BODY_MODEL_ID,
-                    "mode": "kinematic or ragdoll",
+                    "natural_motion_model": ARTICULATED_CHARACTER_MODEL_ID,
+                    "fixed_pose_or_ragdoll_model": ARTICULATED_BODY_MODEL_ID,
+                    "mode": "kinematic for natural motion; kinematic or ragdoll for fixed mannequin",
                     "ragdoll_start_time_s": "required only for ragdoll; within scene duration",
                     "pose_source_types": sorted(ARTICULATED_POSE_SOURCE_TYPES),
                     "root_transform_source_types": sorted(ARTICULATED_ROOT_TRANSFORM_SOURCE_TYPES),
-                    "animation_asset_ids": sorted(ARTICULATED_ANIMATION_ASSETS),
                     "pose_keyframes": "time-ordered component-space rotation offsets beginning at time 0",
                     "root_keyframes": "time-ordered position/rotation offsets beginning with zero offsets at time 0",
-                    "character_movement": "root keyframes plus positive max_speed_m_s and max_acceleration_m_s2",
+                    "movement_control": "world target_velocity_m_s, facing_yaw_deg target, max_turn_rate_deg_s, and crouched keyframes plus jump events",
                     "allowed_bones": sorted(ARTICULATED_BODY_BONES),
-                    "allowed_ik_goals": sorted(ARTICULATED_IK_GOALS),
-                    "pose_overlay": {
-                        "type": ARTICULATED_POSE_OVERLAY_TYPE,
-                        "rotation_space": "bone_local_offset",
-                        "blend_mode": "weighted_additive",
-                        "allowed_bones": sorted(ARTICULATED_POSE_OVERLAY_BONES),
-                        "root_allowed": False,
-                    },
-                    "ik_pole": "optional pole_position_m in every keyframe of the corresponding hand/foot chain",
-                    "head_look_target": "optional world position keyframes, weight and tolerance_deg",
                     "support_object_id": "optional explicit support object for one-time vertical foot/bounds alignment",
                     "attachments": "optional object_id/bone/time interval/local transform entries ending before ragdoll",
                 },
@@ -1926,6 +1984,17 @@ def case_spec_generation_contract() -> dict[str, Any]:
                 ),
                 "linear_motion": {"x": "locked, limited, or free", "y": "locked, limited, or free", "z": "locked, limited, or free"},
                 "linear_limit_m": "positive shared limit, present exactly when any linear axis is limited",
+                "unilateral_distance_spring": {
+                    "rest_length_m": "positive zero-tension distance between the two frame origins",
+                    "stiffness_n_m": "positive Hooke stiffness applied only beyond rest_length_m",
+                    "damping_n_s_m": "non-negative axial damping; total tension is clamped to be non-negative",
+                },
+                "unilateral_path_length_spring": {
+                    "fixed_waypoint_m": "world-space guide point shared by both dynamic endpoints",
+                    "rest_length_m": "positive zero-tension sum of endpoint-to-waypoint distances",
+                    "stiffness_n_m": "positive Hooke stiffness applied only beyond rest_length_m",
+                    "damping_n_s_m": "non-negative path-length damping; total tension is clamped non-negative",
+                },
                 "angular_motion": {"x": "locked, limited, or free around primary axis", "y": "locked, limited, or free around secondary axis", "z": "locked, limited, or free around the derived third axis"},
                 "angular_limits_deg": "object containing exactly the limited angular axes with positive limits",
                 "linear_drive": {
@@ -1960,6 +2029,35 @@ def case_spec_generation_contract() -> dict[str, Any]:
                 "collision_enabled": "boolean controlling collision between the two constrained bodies",
             },
             "constraints": ["zero or more rigid_constraint objects"],
+            "compliant_contact": {
+                "id": "unique compliant-contact ID",
+                "body_a": "exact sphere rigid-body object ID",
+                "body_b": "different exact sphere rigid-body object ID",
+                "activation_distance_m": "positive center distance exceeding the sum of hard collision radii",
+                "stiffness_n_m": "positive unilateral contact stiffness",
+                "damping_n_s_m": "non-negative normal damping",
+            },
+            "compliant_contacts": ["zero or more compliant_contact objects"],
+            "continuous_force": {
+                "id": "unique force ID",
+                "type": "continuous_force",
+                "object": "exact dynamic rigid-body object ID",
+                "vector_n": ["world x newtons", "world y newtons", "world z newtons"],
+                "start_time_s": "finite non-negative number",
+                "end_time_s": "finite number greater than start and no later than scene.duration_s",
+            },
+            "radial_force": {
+                "id": "unique force ID",
+                "type": "radial_force",
+                "source": "exact source object ID",
+                "object": "different exact dynamic rigid-body object ID",
+                "strength_n_m2": "non-zero signed coefficient; positive attracts and negative repels",
+                "softening_distance_m": "positive finite distance",
+                "max_distance_m": "positive finite range greater than softening_distance_m",
+                "start_time_s": "finite non-negative number",
+                "end_time_s": "finite number greater than start and no later than scene.duration_s",
+            },
+            "forces": ["zero or more continuous_force or radial_force objects"],
             "solver_scene": {
                 "type": "rigid_sph when explicit rigid/particle coupling is required",
                 "initialization": "{state:settled|as_authored,pre_roll_s:nonnegative,capture_after_pre_roll:boolean}",
@@ -1969,6 +2067,7 @@ def case_spec_generation_contract() -> dict[str, Any]:
                         "outside_body_interiors_fraction",
                         "plane_proximity_fraction",
                         "axis_span",
+                        "mean_tangential_speed",
                         "rigid_body_state",
                     ],
                     "shape": (
@@ -2010,7 +2109,37 @@ def case_spec_generation_contract() -> dict[str, Any]:
             "rigid_sph_fluid_object_solver": {
                 "role": "fluid",
                 "material_model": "sph_liquid",
+                "source": "exactly one of initial_volume or emitter",
                 "initial_volume": "{shape:cylinder,frame:{type:world|body_local,body_id?:exact_id},position_m,radius_m,height_m,euler_xyz_deg?}",
+                "emitter": "{shape:circle,position_m,direction,diameter_m,speed_m_s,start_time_s,end_time_s,max_particles}",
+            },
+            "mass_spring_cloth_object_solver": {
+                "role": "exactly one deformable_cloth object",
+                "physics": (
+                    "body_type=dynamic, collision_required=false, material_model=cloth, positive mass_kg, "
+                    "and structural/shear/bending stiffness plus spring/air damping"
+                ),
+                "solver": (
+                    "{type:mass_spring_cloth,grid_resolution,initial_orientation:horizontal_xy|vertical_xz,"
+                    "pinned_boundary:none|negative_u or pinned_boundaries:[grid edges], optional width_scale_by_v,"
+                    "optional u_cuts:[{fraction,gap_m}],substeps_per_frame,collision_thickness_m}"
+                ),
+                "render_source": "visual_representation.source=solver_generated",
+                "colliders": (
+                    "zero or more role=rigid_collider objects with exact sphere|box|cylinder shape, positive size, "
+                    "static|kinematic body type, collision_required=false, optional linear kinematic_motion; "
+                    "at most one static support_surface is the horizontal floor; contacts are one-way"
+                ),
+            },
+            "wind_field_object_solver": {
+                "role": "wind_field",
+                "physics": "body_type=static and collision_required=false",
+                "visual_representation": "source=none and visible=false",
+                "solver": (
+                    "{type:aerodynamic_wind,velocity_m_s,air_density_kg_m3,gust_amplitude,gust_frequency_hz,"
+                    "targets:[{object,drag_coefficient},...]}"
+                ),
+                "dispatch": "dynamic rigid targets use UE; deformable_cloth targets use Taichi",
             },
             "workspace_bounds_m": {
                 "min_m": ["finite x", "finite y", "finite z"],
@@ -2024,7 +2153,8 @@ def case_spec_generation_contract() -> dict[str, Any]:
                 "source_uri_hint": "string or null",
                 "reference_inputs": [],
                 "fallback_order": [],
-                "texture_prompt": "optional texture-only guidance string of at most 600 characters",
+                "generation_prompt": "object geometry/appearance generation brief of at most 800 characters",
+                "texture_prompt": "optional texture-only guidance string of at most 800 characters",
             },
             "asset_request": {
                 "description": "natural-language asset intent string",
@@ -2111,7 +2241,12 @@ def case_spec_generation_contract() -> dict[str, Any]:
             "observation_modality": sorted(OBSERVATION_MODALITIES),
             "verification_assertion": sorted(VERIFICATION_ASSERTION_TYPES),
             "relation_type": sorted(AGENT_RELATION_TYPES),
-            "local_procedural_recipe": ["box_mesh_v1", "sphere_mesh_v1", "cylinder_mesh_v1"],
+            "local_procedural_recipe": [
+                "box_mesh_v1",
+                "sphere_mesh_v1",
+                "cylinder_mesh_v1",
+                "open_conical_frustum_mesh_v1",
+            ],
         },
         "backend_solver_capability_matrix": {
             backend: sorted(capabilities)
@@ -2127,12 +2262,16 @@ def case_spec_generation_contract() -> dict[str, Any]:
         "hard_rules": [
             "capabilities must be an object and capabilities.required must contain exactly capabilities.primary",
             "every object behavior must be an object and every physics.body_type must use the body_type enum",
+            "kinematic_motion is a generic linear world transform trajectory for physics.body_type=kinematic; position_m is required and rotation_deg is optional but complete across keyframes; it starts at time 0 from initial_state and requires the kinematic_motion solver capability",
             "every relation, event, camera, and assertion object reference must exactly equal one declared object.id; never use a phrase",
             "physical joints are declared only in top-level constraints; relations are semantic and never configure a runtime joint",
             "relations use only the registered semantic relation_type enum; never emit fixed_to, hinged_to, attached_to, or another mechanical connection relation",
             "constraints require the rigid_constraints solver capability and explicit local frames whose transformed origins and corresponding axes form the same initial world joint frame; never infer frames or encode a named hinge/fixed workflow",
+            "compliant_contacts require the compliant_contact solver capability, explicit sphere collision geometry, and an activation distance larger than the hard collision radius sum; they push only and never pull",
             "every constrained dynamic body requires physics.collision_required=true to create a rigid-body physics state; constraint.collision_enabled=false only disables collision between the connected pair",
             "constraint drives are optional complete blocks; enabled axes must be free or limited, position stiffness represents a spring, velocity damping represents a motor, and declared break thresholds must be positive",
+            "radial_force is a generic live point-source force law with a signed strength, explicit softening/range, distinct source and dynamic target, and the radial_field_force solver capability; never encode a phenomenon-specific runtime mode",
+            "wind_field is one backend-independent environmental declaration; UE rigid bodies and Taichi cloth consume the same velocity, density, gust, target, and drag fields",
             "initial load-bearing support uses supported_by; expected future contacts use collision/impacts relations",
             "event_sequence uses at least two explicit ordered pairs; never use start/end shorthand or next_in_chain, chain_order, or topple_order",
             "an explicitly requested collision surface clearance belongs in relation.surface_gap_m and must survive projection",
@@ -2248,6 +2387,8 @@ def _valid_case_spec_structure_example() -> dict[str, Any]:
             },
         ],
         "constraints": [],
+        "compliant_contacts": [],
+        "forces": [],
         "relations": [{"type": "collision", "source": "generated_box", "target": "floor"}],
         "events": [],
         "expected_behavior": {"contact_required": True},
@@ -2286,6 +2427,10 @@ def _valid_rigid_sph_shape_example() -> dict[str, Any]:
             {
                 "id": "container",
                 "role": "rigid_body",
+                "initial_state": {
+                    "position_m": [0.0, 0.0, 0.1],
+                    "rotation_deg": [0.0, 0.0, 0.0],
+                },
                 "visual_representation": {"source": "asset"},
                 "asset": {
                     "description": "visual mesh for this same physical container",
@@ -2310,11 +2455,6 @@ def _valid_rigid_sph_shape_example() -> dict[str, Any]:
                 },
                 "solver": {
                     "mobility": "kinematic",
-                    "transform": {
-                        "position_m": [0.0, 0.0, 0.1],
-                        "euler_xyz_deg": [0.0, 0.0, 0.0],
-                        "ue_rotation_pyr_deg": [0.0, 0.0, 0.0],
-                    },
                     "collision": {
                         "type": "axisymmetric_profile",
                         "asset_geometry_match": True,
@@ -2339,6 +2479,10 @@ def _valid_rigid_sph_shape_example() -> dict[str, Any]:
             {
                 "id": "surface",
                 "role": "rigid_body",
+                "initial_state": {
+                    "position_m": [0.0, 0.0, -0.025],
+                    "rotation_deg": [0.0, 0.0, 0.0],
+                },
                 "visual_representation": {"source": "asset"},
                 "geometry": {"shape_hint": "box", "approx_size_m": [0.8, 0.8, 0.05]},
                 "asset": {
@@ -2364,11 +2508,6 @@ def _valid_rigid_sph_shape_example() -> dict[str, Any]:
                 },
                 "solver": {
                     "mobility": "static",
-                    "transform": {
-                        "position_m": [0.0, 0.0, -0.025],
-                        "euler_xyz_deg": [0.0, 0.0, 0.0],
-                        "ue_rotation_pyr_deg": [0.0, 0.0, 0.0],
-                    },
                     "collision": {
                         "type": "plane",
                         "position_m": [0.0, 0.0, 0.0],

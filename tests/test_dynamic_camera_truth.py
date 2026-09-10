@@ -24,6 +24,7 @@ def load_camera_functions() -> dict:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     wanted = {
         "apply_explicit_runtime_visual_appearance",
+        "authoritative_character_mesh_component",
         "actor_runtime_component",
         "bool_control",
         "camera_view_for_frame",

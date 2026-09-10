@@ -230,14 +230,16 @@ def search_intent_from_v2_asset_intent(data: Mapping[str, Any]) -> SearchIntent:
     elif "approx_size_cm" in constraints:
         size_cm = _validate_size_vector(constraints["approx_size_cm"], "constraints.approx_size_cm")
         must["approx_size_m"] = [float(component) / 100.0 for component in size_cm]
+    should: list[dict[str, Any]] = []
     if data.get("physics_role"):
-        must["physics_role"] = data["physics_role"]
+        should.append({"field": "physics_role", "value": data["physics_role"]})
     taxonomy = data.get("taxonomy") if isinstance(data.get("taxonomy"), Mapping) else {}
     return SearchIntent.from_dict(
         {
             "raw_query": data.get("query") or data.get("asset_query") or data.get("intent_id"),
             "taxonomy": taxonomy,
             "must": must,
+            "should": should,
             "semantic_text": data.get("semantic_text") or data.get("query") or data.get("asset_query"),
             "relaxation_policy": data.get("relaxation_policy") or {},
         }

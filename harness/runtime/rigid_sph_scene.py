@@ -42,6 +42,10 @@ def compile_rigid_sph_scene(
     parameters = rigid_sph_parameters(solver_configuration)
     particle_size_m = positive(parameters.get("particle_size_m"), "solver_configuration.parameters.particle_size_m")
     fluid = compile_fluid(fluids[0], body_by_id, particle_radius_m=particle_size_m / 2.0)
+    if fluid["source_type"] == "emitter":
+        duration_s = positive((case_spec.get("scene") or {}).get("duration_s"), "scene.duration_s")
+        if float(fluid["emitter"]["end_time_s"]) > duration_s:
+            raise ValueError("fluid emitter end_time_s must not exceed scene.duration_s")
     workspace = case_spec.get("workspace_bounds_m")
     if not isinstance(workspace, dict):
         raise ValueError("rigid_sph scene requires workspace_bounds_m")
@@ -89,6 +93,7 @@ def compile_initialization(value: Any) -> dict[str, Any]:
 
 def evaluate_measurements(
     positions: list[list[float]],
+    velocities: list[list[float]],
     bodies: dict[str, dict[str, Any]],
     rigid_states: dict[str, dict[str, Any]],
     definitions: list[dict[str, Any]],
@@ -119,6 +124,26 @@ def evaluate_measurements(
                 - min(float(row[axis_indices[axis]]) for row in positions)
                 for axis in definition["axes"]
             ) if positions else 0.0
+        elif kind == "mean_tangential_speed":
+            center = definition["center_m"]
+            axis = definition["axis"]
+            axis_length = math.sqrt(sum(float(component) ** 2 for component in axis))
+            unit_axis = [float(component) / axis_length for component in axis]
+            tangential_speeds = []
+            for position, velocity in zip(positions, velocities, strict=True):
+                offset = [float(position[index]) - float(center[index]) for index in range(3)]
+                axial = sum(offset[index] * unit_axis[index] for index in range(3))
+                radial = [offset[index] - axial * unit_axis[index] for index in range(3)]
+                radial_length = math.sqrt(sum(component * component for component in radial))
+                if radial_length <= 1e-12:
+                    continue
+                tangent = [
+                    (unit_axis[1] * radial[2] - unit_axis[2] * radial[1]) / radial_length,
+                    (unit_axis[2] * radial[0] - unit_axis[0] * radial[2]) / radial_length,
+                    (unit_axis[0] * radial[1] - unit_axis[1] * radial[0]) / radial_length,
+                ]
+                tangential_speeds.append(abs(sum(float(velocity[index]) * tangent[index] for index in range(3))))
+            value = sum(tangential_speeds) / len(tangential_speeds) if tangential_speeds else 0.0
         else:
             state = rigid_states[definition["body_id"]]
             vector = [float(component) for component in state[definition["field"]]]
@@ -131,6 +156,7 @@ def evaluate_measurements(
 def compile_rigid_body(body: dict[str, Any]) -> dict[str, Any]:
     solver = body.get("solver") if isinstance(body.get("solver"), dict) else {}
     asset = body.get("asset") if isinstance(body.get("asset"), dict) else {}
+    visual = body.get("visual_representation") if isinstance(body.get("visual_representation"), dict) else {}
     collision = solver.get("collision") if isinstance(solver.get("collision"), dict) else {}
     body_id = str(body.get("id") or "")
     if not body_id:
@@ -179,6 +205,7 @@ def compile_rigid_body(body: dict[str, Any]) -> dict[str, Any]:
         "id": body_id,
         "role": "rigid_body",
         "mobility": mobility,
+        "visible": visual.get("visible") is not False,
         "asset": {
             "ue_path": ue_path,
             "material_path": str(asset.get("material_path") or ""),
@@ -377,9 +404,41 @@ def compile_fluid(
     particle_radius_m: float,
 ) -> dict[str, Any]:
     solver = fluid.get("solver") if isinstance(fluid.get("solver"), dict) else {}
-    initial = solver.get("initial_volume") if isinstance(solver.get("initial_volume"), dict) else {}
-    if solver.get("material_model") != "sph_liquid" or initial.get("shape") != "cylinder":
-        raise ValueError("rigid_sph currently supports sph_liquid with a cylindrical initial_volume")
+    initial = solver.get("initial_volume") if isinstance(solver.get("initial_volume"), dict) else None
+    emitter = solver.get("emitter") if isinstance(solver.get("emitter"), dict) else None
+    if solver.get("material_model") != "sph_liquid" or (initial is None) == (emitter is None):
+        raise ValueError("rigid_sph fluid requires sph_liquid and exactly one of initial_volume or emitter")
+    if emitter is not None:
+        direction = vec3(emitter.get("direction"), "fluid emitter direction")
+        if math.sqrt(sum(component * component for component in direction)) <= 1e-12:
+            raise ValueError("fluid emitter direction must be non-zero")
+        start_time_s = finite(emitter.get("start_time_s"), "fluid emitter start_time_s")
+        end_time_s = finite(emitter.get("end_time_s"), "fluid emitter end_time_s")
+        max_particles = emitter.get("max_particles")
+        if emitter.get("shape") != "circle":
+            raise ValueError("rigid_sph emitter shape must be circle")
+        if abs(start_time_s) > 1e-12 or end_time_s <= start_time_s:
+            raise ValueError("fluid emitter currently requires start_time_s=0 and end_time_s>0")
+        if not isinstance(max_particles, int) or isinstance(max_particles, bool) or max_particles <= 0:
+            raise ValueError("fluid emitter max_particles must be a positive integer")
+        return {
+            "id": str(fluid.get("id") or "fluid"),
+            "material_model": "sph_liquid",
+            "source_type": "emitter",
+            "emitter": {
+                "shape": "circle",
+                "position_m": vec3(emitter.get("position_m"), "fluid emitter position_m"),
+                "direction": direction,
+                "diameter_m": positive(emitter.get("diameter_m"), "fluid emitter diameter_m"),
+                "speed_m_s": positive(emitter.get("speed_m_s"), "fluid emitter speed_m_s"),
+                "start_time_s": start_time_s,
+                "end_time_s": end_time_s,
+                "max_particles": max_particles,
+            },
+        }
+    assert initial is not None
+    if initial.get("shape") != "cylinder":
+        raise ValueError("rigid_sph initial_volume shape must be cylinder")
     frame = initial.get("frame") if isinstance(initial.get("frame"), dict) else {}
     frame_type = str(frame.get("type") or "")
     local_position = vec3(initial.get("position_m"), "fluid initial position")
@@ -414,6 +473,7 @@ def compile_fluid(
     return {
         "id": str(fluid.get("id") or "fluid"),
         "material_model": "sph_liquid",
+        "source_type": "initial_volume",
         "shape": "cylinder",
         "radius_m": radius_m,
         "height_m": height_m,
@@ -504,6 +564,14 @@ def compile_measurements(value: Any, bodies: dict[str, dict[str, Any]]) -> list[
             if not axes or any(axis not in {"x", "y", "z"} for axis in axes):
                 raise ValueError("axis_span requires axes drawn from x/y/z")
             compiled["axes"] = axes
+        elif kind == "mean_tangential_speed":
+            axis = vec3(item.get("axis"), "mean_tangential_speed axis")
+            if math.sqrt(sum(component * component for component in axis)) <= 1e-12:
+                raise ValueError("mean_tangential_speed axis must be non-zero")
+            compiled.update({
+                "center_m": vec3(item.get("center_m"), "mean_tangential_speed center_m"),
+                "axis": axis,
+            })
         elif kind == "rigid_body_state":
             body_id = str(item.get("body_id") or "")
             field = str(item.get("field") or "")

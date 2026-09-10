@@ -68,6 +68,7 @@ def plan_cameras_for_scene(
     far_clip = round(max(distance * 6.0, radius * 8.0, 10.0), 4)
     views: list[CameraViewSpec] = []
     for role in roles:
+        view_fov = DYNAMIC_CAMERA_FOV.get(role, float(fov))
         if role == "overview":
             location = (cx + distance, cy - distance, cz + vertical)
             rotation = look_at_rotation(location, bounds.center)
@@ -91,6 +92,10 @@ def plan_cameras_for_scene(
             rotation = look_at_rotation(location, bounds.center)
         elif role == "event_closeup":
             location = (cx - distance * 0.72, cy - distance * 0.82, cz + max(ez * 0.58, distance * 0.46))
+            view_fov = max(
+                view_fov,
+                framing_fov(max(ex, ey), ez, math.dist(location, bounds.center)),
+            )
             rotation = look_at_rotation(location, bounds.center)
         else:
             warnings.append(f"unknown view role dropped: {role}")
@@ -102,7 +107,7 @@ def plan_cameras_for_scene(
                 role=role,
                 location=round_vec(location),
                 rotation=round_vec(rotation),
-                fov=DYNAMIC_CAMERA_FOV.get(role, float(fov)),
+                fov=view_fov,
                 target=round_vec(bounds.center),
                 near_clip=1.0,
                 far_clip=far_clip,
@@ -329,6 +334,15 @@ def framing_distance(width: float, height: float, horizontal_fov_deg: float) -> 
         (width * 0.5 * margin) / math.tan(horizontal_fov / 2.0),
         1.5,
     )
+
+
+def framing_fov(width: float, height: float, distance: float) -> float:
+    margin = 1.15
+    safe_distance = max(float(distance), 1e-6)
+    horizontal_half = math.atan((width * 0.5 * margin) / safe_distance)
+    vertical_half = math.atan((height * 0.5 * margin) / safe_distance)
+    vertical_as_horizontal = math.atan(math.tan(vertical_half) * (16.0 / 9.0))
+    return min(90.0, math.degrees(2.0 * max(horizontal_half, vertical_as_horizontal)))
 
 
 def apply_camera_overrides(

@@ -10,14 +10,14 @@ RIGID_SPH_QUALIFICATION_POLICY_ID = "genesis_wcsph_surface_v2"
 _CURRENT_POLICY = {
     "particle_size_m": 0.005,
     "fps": 24,
-    "steps_per_frame": 100,
+    "steps_per_frame": 240,
     "pre_roll_s": 0.25,
     "sph_material": {
         "pressure_solver": "WCSPH",
         "rest_density_kg_m3": 1000.0,
         "stiffness_pa": 50000.0,
         "equation_of_state_exponent": 7.0,
-        "viscosity_pa_s": 0.005,
+        "viscosity_pa_s": 0.001,
         "surface_tension_n_m": 0.01,
     },
     "surface_reconstruction": {

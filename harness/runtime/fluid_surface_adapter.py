@@ -187,6 +187,7 @@ def validate_spatial_registration(cache: dict[str, Any], *, tolerance: float) ->
     for frame in cache.get("frames") or []:
         frame_index = int(frame.get("frame") or 0)
         positions = frame.get("positions_m") if isinstance(frame.get("positions_m"), list) else []
+        velocities = frame.get("velocities_m_s") if isinstance(frame.get("velocities_m_s"), list) else []
         states = frame.get("rigid_objects") if isinstance(frame.get("rigid_objects"), dict) else {}
         declared = frame.get("measurements") if isinstance(frame.get("measurements"), dict) else {}
         bodies: dict[str, dict[str, Any]] = {}
@@ -203,7 +204,7 @@ def validate_spatial_registration(cache: dict[str, Any], *, tolerance: float) ->
             body["transform"] = transform
             bodies[body_id] = body
         try:
-            measured = evaluate_measurements(positions, bodies, states, definitions)
+            measured = evaluate_measurements(positions, velocities, bodies, states, definitions)
         except (KeyError, TypeError, ValueError) as exc:
             raise FluidSurfaceAdapterError(
                 f"cannot recompute handoff spatial measurements at frame {frame_index}: {exc}",

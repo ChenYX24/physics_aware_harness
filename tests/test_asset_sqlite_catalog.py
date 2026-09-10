@@ -101,9 +101,88 @@ class AssetSQLiteCatalogTests(unittest.TestCase):
                 }
             )
 
-            results = catalog.search(intent, top_k=1)
+            detailed = catalog.search_detailed(intent, top_k=1)
+            results = [row["asset"] for row in detailed["results"]]
 
             self.assertEqual(results[0]["asset_id"], "modern_wood_chair")
+            self.assertEqual(
+                [row["category"] for row in detailed["retrieval"]["taxonomy_attempts"]],
+                ["ergonomic_office_chair", "chair"],
+            )
+
+    def test_geometry_type_filters_shape_instead_of_asset_class(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            catalog = initialize_catalog(root / "catalog.sqlite")
+            payload = self.registry_payload(root)
+            sphere = {
+                **payload["assets"][0],
+                "asset_id": "test_sphere_mesh",
+                "name": "Test Sphere Mesh",
+                "semantic_name": "sphere",
+                "aliases": ["round ball"],
+                "tags": ["sphere", "dynamic_rigid_body"],
+                "category_l1": "geometry",
+                "category_l2": "primitive",
+                "source_uri": "harness://tests/sphere",
+                "shape": "sphere",
+                "collider": "sphere",
+            }
+            catalog.import_registry({"assets": [sphere]})
+            intent = SearchIntent.from_dict(
+                {
+                    "raw_query": "test sphere mesh",
+                    "must": {"asset_type": "StaticMesh", "geometry_type": "sphere"},
+                }
+            )
+
+            results = catalog.search(intent, top_k=1)
+
+            self.assertEqual(results[0]["asset_id"], "test_sphere_mesh")
+
+    def test_unknown_semantics_do_not_return_arbitrary_category_member(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            catalog = initialize_catalog(root / "catalog.sqlite")
+            catalog.import_registry(self.registry_payload(root))
+            intent = SearchIntent.from_dict(
+                {
+                    "raw_query": "office unicorn",
+                    "taxonomy": {"category": "furniture"},
+                    "must": {"asset_type": "StaticMesh", "collision": True},
+                    "relaxation_policy": {"allow_parent_category": True},
+                }
+            )
+
+            detailed = catalog.search_detailed(intent, top_k=1)
+
+            self.assertEqual(detailed["results"], [])
+            self.assertNotIn("category_fallback", detailed["retrieval"]["channels"])
+            self.assertEqual(
+                detailed["retrieval"]["match_decision"]["reason"],
+                "no_semantic_evidence",
+            )
+
+    def test_empty_strict_taxonomy_reports_no_relevant_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            catalog = initialize_catalog(root / "catalog.sqlite")
+            catalog.import_registry(self.registry_payload(root))
+            intent = SearchIntent.from_dict(
+                {
+                    "raw_query": "marble funnel",
+                    "taxonomy": {"category": "prop", "subcategory": "funnel"},
+                    "must": {"asset_type": "StaticMesh", "collision": True},
+                    "relaxation_policy": {"allow_parent_category": False},
+                }
+            )
+
+            detailed = catalog.search_detailed(intent, top_k=5)
+
+            self.assertEqual(detailed["results"], [])
+            self.assertEqual(detailed["retrieval"]["match_decision"]["status"], "no_relevant_asset")
+            self.assertEqual(detailed["retrieval"]["match_decision"]["reason"], "no_eligible_candidates")
+            self.assertEqual(detailed["retrieval"]["taxonomy_attempts"][0]["match_status"], "no_relevant_asset")
 
     def test_reimport_updates_rows_without_duplicates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

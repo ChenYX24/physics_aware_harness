@@ -1,0 +1,112 @@
+{
+  "schema_version": "harness_case_spec_v2",
+  "identity": {
+    "case_id": "smoke_aerodynamic_wind_rigid_v1",
+    "title": "A uniform wind field accelerates a grounded rigid sphere",
+    "source_request": "Verify that a dynamic rigid sphere responds to aerodynamic drag from the shared V2 wind-field declaration."
+  },
+  "capabilities": {"primary": "rigid_body_dynamics", "required": ["rigid_body_dynamics"]},
+  "scene": {
+    "environment_intent": "minimal controlled wind stage",
+    "coordinate_system": "z_up",
+    "duration_s": 2.5,
+    "bounds_hint_m": [6.0, 3.0, 2.0]
+  },
+  "timebase": {"physics_hz": 120, "observation_fps": 24, "deterministic_seed": 20260904},
+  "backend_constraints": {
+    "required_solver_capabilities": ["rigid_body", "aerodynamic_wind", "trajectory"],
+    "allowed_solvers": ["ue"],
+    "render_backend": "ue",
+    "allow_multi_backend": false
+  },
+  "asset_policy": {
+    "allow_local": true,
+    "allow_external": false,
+    "allow_generation": false,
+    "allow_analytic_proxy": true,
+    "required_license_tier": "local_preview"
+  },
+  "objects": [
+    {
+      "id": "wind_ball",
+      "role": "rigid_body",
+      "geometry": {"shape_hint": "sphere", "approx_size_m": [0.4, 0.4, 0.4]},
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.8,
+        "collision_required": true,
+        "collision_geometry": {"shape": "sphere", "size_m": [0.4, 0.4, 0.4], "local_center_offset_m": [0.0, 0.0, 0.0]},
+        "enable_gravity": true,
+        "linear_damping": 0.05,
+        "angular_damping": 0.08,
+        "material": {"dynamic_friction": 0.18, "static_friction": 0.2, "restitution": 0.05}
+      },
+      "initial_state": {"position_m": [-1.2, 0.0, 0.2], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "color_rgb": [0.16, 0.42, 0.78],
+      "fixed_material_color": true,
+      "visual_representation": {"source": "none", "visible": true},
+      "behavior": {}
+    },
+    {
+      "id": "floor",
+      "role": "support_surface",
+      "geometry": {"shape_hint": "box", "approx_size_m": [6.0, 3.0, 0.05]},
+      "physics": {
+        "body_type": "static",
+        "mass_kg": 1.0,
+        "collision_required": true,
+        "collision_geometry": {"shape": "box", "size_m": [6.0, 3.0, 0.05], "local_center_offset_m": [0.0, 0.0, 0.0]},
+        "material": {"dynamic_friction": 0.18, "static_friction": 0.2, "restitution": 0.0}
+      },
+      "initial_state": {"position_m": [0.0, 0.0, -0.025], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "color_rgb": [0.32, 0.34, 0.37],
+      "fixed_material_color": true,
+      "visual_representation": {"source": "none", "visible": true},
+      "behavior": {}
+    },
+    {
+      "id": "wind",
+      "role": "wind_field",
+      "physics": {"body_type": "static", "collision_required": false},
+      "initial_state": {"position_m": [0.0, 0.0, 0.0], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "visual_representation": {"source": "none", "visible": false},
+      "solver": {
+        "type": "aerodynamic_wind",
+        "velocity_m_s": [5.5, 0.0, 0.0],
+        "air_density_kg_m3": 1.225,
+        "gust_amplitude": 0.12,
+        "gust_frequency_hz": 0.8,
+        "targets": [{"object": "wind_ball", "drag_coefficient": 0.47}]
+      },
+      "behavior": {}
+    }
+  ],
+  "relations": [{"type": "supported_by", "source": "wind_ball", "target": "floor"}],
+  "events": [],
+  "forces": [],
+  "constraints": [],
+  "expected_behavior": {"native_wind_force_trace_required": true},
+  "observation_requirements": {
+    "cameras": [{
+      "role": "front_static",
+      "coordinate_frame": "world",
+      "position_m": [0.0, -5.0, 1.45],
+      "look_at_m": [0.25, 0.0, 0.35],
+      "fov_deg": 50.0,
+      "framing": "scene",
+      "target_objects": ["wind_ball", "floor"]
+    }],
+    "modalities": ["rgb"],
+    "signals": ["trajectory"]
+  },
+  "verification_requirements": {
+    "assertions": [
+      {"id": "trajectory_integrity", "type": "trajectory_integrity"},
+      {"id": "downwind_motion", "type": "state_delta", "object_id": "wind_ball", "field": "position_m.x", "operator": ">=", "value": 0.5}
+    ],
+    "thresholds": {}
+  },
+  "variant": {"should_pass": true},
+  "provenance": {"purpose": "capability_first_isolated_smoke"},
+  "notes": "The wind declaration is backend-independent; this rigid target is integrated by UE/Chaos."
+}

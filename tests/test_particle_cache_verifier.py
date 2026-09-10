@@ -32,6 +32,56 @@ class ParticleCacheVerifierTests(unittest.TestCase):
         self.assertIn("particle_count_changed", report["failure_codes"])
         self.assertIn("surface_mesh_missing", report["failure_codes"])
 
+    def test_progressive_emitter_particle_ids_pass(self) -> None:
+        cache = particle_cache()
+        cache["particles"]["population_mode"] = "progressive_activation"
+        cache["frames"][0]["active_particle_ids"] = [0]
+        cache["frames"][0]["positions_m"] = cache["frames"][0]["positions_m"][:1]
+        cache["frames"][0]["velocities_m_s"] = cache["frames"][0]["velocities_m_s"][:1]
+        cache["frames"][1]["active_particle_ids"] = [0, 1]
+
+        report = verify_particle_cache(cache)
+
+        self.assertEqual(report["status"], "pass")
+        self.assertTrue(report["checks"]["progressive_particle_activation"])
+
+    def test_progressive_emitter_volume_uses_final_active_particles(self) -> None:
+        cache = particle_cache()
+        cache["particles"].update({"population_mode": "progressive_activation", "radius_m": 0.005})
+        cache["frames"][0]["active_particle_ids"] = [0]
+        cache["frames"][0]["positions_m"] = cache["frames"][0]["positions_m"][:1]
+        cache["frames"][0]["velocities_m_s"] = cache["frames"][0]["velocities_m_s"][:1]
+        cache["frames"][1]["active_particle_ids"] = [0, 1]
+        cache["frames"][1]["surface"] = {
+            **cache["frames"][1]["surface"],
+            "enclosed_volume_m3": 2.1e-6,
+        }
+        cache["environment"]["verification_tolerances"] = {"surface_volume_relative_error_max": 0.1}
+
+        report = verify_particle_cache(cache)
+
+        self.assertEqual(report["status"], "pass", report)
+        self.assertAlmostEqual(report["checks"]["final_surface_volume_relative_error"], 0.05)
+
+    def test_fixed_population_volume_keeps_initial_volume_reference(self) -> None:
+        cache = particle_cache()
+        cache["particles"]["radius_m"] = 0.005
+        cache["environment"].update(
+            {
+                "initial_liquid_volume_m3": 4.0e-6,
+                "verification_tolerances": {"surface_volume_relative_error_max": 0.01},
+            }
+        )
+        cache["frames"][1]["surface"] = {
+            **cache["frames"][1]["surface"],
+            "enclosed_volume_m3": 4.0e-6,
+        }
+
+        report = verify_particle_cache(cache)
+
+        self.assertEqual(report["status"], "pass", report)
+        self.assertEqual(report["checks"]["final_surface_volume_relative_error"], 0.0)
+
     def test_legacy_environment_contract_is_rejected(self) -> None:
         cache = particle_cache()
         cache["environment"] = {"type": "five_plane_basin"}

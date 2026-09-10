@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from harness.agent.job_controller import AgentJobController
+from harness.agent.job_controller import ADVANCE_STAGES, AgentJobController
 from harness.assets.providers.input_manifest import build_provider_input_manifest
 from harness.core.artifact_schema import read_json
 from harness.core.harness_config import load_harness_config
@@ -61,9 +61,24 @@ def parse_args() -> argparse.Namespace:
     create.add_argument("--generation-mode", choices=["native", "legacy"], default="native")
     create.add_argument("--job-id")
 
-    for name in ("inspect", "advance-until-blocked", "recover-interrupted", "review", "cancel"):
+    for name in ("inspect", "recover-interrupted", "review", "cancel"):
         command = commands.add_parser(name)
         command.add_argument("job_id")
+
+    advance = commands.add_parser("advance-until-blocked")
+    advance.add_argument("job_id")
+    advance.add_argument(
+        "--stop-after-stage",
+        choices=ADVANCE_STAGES,
+        help="Pause at an audited boundary after this stage completes successfully.",
+    )
+
+    layout_preview = commands.add_parser(
+        "layout-preview",
+        help="Render low-resolution RGB layout images from the frozen compilation without advancing the Job.",
+    )
+    layout_preview.add_argument("job_id")
+    layout_preview.add_argument("--time-s", type=float, default=0.0)
 
     retry_failed = commands.add_parser("retry-failed", help="Audit and reopen one terminal transient failure.")
     retry_failed.add_argument("job_id")
@@ -128,6 +143,11 @@ def parse_args() -> argparse.Namespace:
     resume.add_argument("--allow-semantic-reviewer-image-upload", action="store_true")
     resume.add_argument("--revised-case-spec")
     resume.add_argument("--revision-reason")
+    resume.add_argument(
+        "--stop-after-stage",
+        choices=ADVANCE_STAGES,
+        help="Pause at an audited boundary after this stage completes successfully.",
+    )
     resume.add_argument("--intent-amendment", help="JSON ambiguity-resolution amendment.")
     return parser.parse_args()
 
@@ -198,7 +218,12 @@ def main() -> int:
     elif args.command == "inspect":
         result = controller.inspect(args.job_id)
     elif args.command == "advance-until-blocked":
-        result = controller.advance_until_blocked(args.job_id)
+        result = controller.advance_until_blocked(
+            args.job_id,
+            stop_after_stage=args.stop_after_stage,
+        )
+    elif args.command == "layout-preview":
+        result = controller.run_layout_preview(args.job_id, time_s=args.time_s)
     elif args.command == "recover-interrupted":
         result = controller.recover_interrupted(args.job_id)
     elif args.command == "retry-failed":
@@ -257,6 +282,7 @@ def main() -> int:
             intent_amendment=read_json(args.intent_amendment) if args.intent_amendment else None,
             revised_case_spec=read_json(args.revised_case_spec) if args.revised_case_spec else None,
             revision_reason=args.revision_reason,
+            stop_after_stage=args.stop_after_stage,
         )
     else:
         result = controller.cancel(args.job_id)

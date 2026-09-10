@@ -1,0 +1,402 @@
+{
+  "asset_policy": {
+    "allow_analytic_proxy": true,
+    "allow_external": false,
+    "allow_generation": true,
+    "allow_local": true,
+    "required_license_tier": "local_preview"
+  },
+  "backend_constraints": {
+    "allow_multi_backend": false,
+    "allowed_solvers": [
+      "ue"
+    ],
+    "render_backend": "ue",
+    "required_solver_capabilities": [
+      "articulated_body",
+      "rigid_body",
+      "trajectory"
+    ]
+  },
+  "capabilities": {
+    "primary": "articulated_body_motion",
+    "required": [
+      "articulated_body_motion"
+    ]
+  },
+  "constraints": [],
+  "events": [],
+  "expected_behavior": {
+    "grounded_idle": true,
+    "head_tracks_moving_target": true,
+    "body_facing_remains_fixed": true
+  },
+  "identity": {
+    "case_id": "smoke_gasp_character_head_tracking_v1",
+    "source_request": "Verify a grounded GASP character tracks a smoothly moving world-space target with the head while body facing stays fixed.",
+    "title": "GASP world-space head tracking capability smoke"
+  },
+  "notes": "Generic world-space head-look target with fixed body facing; no action phases, body-turn choreography, clips, or bone writes.",
+  "objects": [
+    {
+      "behavior": {},
+      "geometry": {
+        "approx_size_m": [
+          0.58,
+          0.36,
+          1.92
+        ],
+        "shape_hint": "humanoid"
+      },
+      "id": "character",
+      "initial_state": {
+        "linear_velocity_m_s": [
+          0,
+          0,
+          0
+        ],
+        "position_m": [
+          0,
+          0,
+          -1.37
+        ],
+        "rotation_deg": [
+          0,
+          0,
+          0
+        ]
+      },
+      "physics": {
+        "body_type": "kinematic",
+        "collision_required": false
+      },
+      "role": "articulated_body",
+      "solver": {
+        "attachments": [],
+        "mode": "kinematic",
+        "model": "harness_ue_gasp_character_v1",
+        "movement_control": {
+          "events": [],
+          "keyframes": [
+            {
+              "time_s": 0,
+              "target_velocity_m_s": [
+                0,
+                0,
+                0
+              ],
+              "facing_yaw_deg": 0,
+              "crouched": false
+            },
+            {
+              "time_s": 5,
+              "target_velocity_m_s": [
+                0,
+                0,
+                0
+              ],
+              "facing_yaw_deg": 0,
+              "crouched": false
+            }
+          ],
+          "max_acceleration_m_s2": 4,
+          "max_speed_m_s": 2,
+          "max_turn_rate_deg_s": 60,
+          "type": "character_movement"
+        },
+        "support_object_id": "floor",
+        "type": "articulated_body",
+        "head_look_target": {
+          "tolerance_deg": 20,
+          "keyframes": [
+            {
+              "time_s": 0,
+              "position_m": [
+                3,
+                0,
+                -0.2
+              ],
+              "weight": 0
+            },
+            {
+              "time_s": 0.5,
+              "position_m": [
+                2.457,
+                1.721,
+                -0.2
+              ],
+              "weight": 1
+            },
+            {
+              "time_s": 2.5,
+              "position_m": [
+                2.457,
+                -1.721,
+                -0.2
+              ],
+              "weight": 1
+            },
+            {
+              "time_s": 4.5,
+              "position_m": [
+                2.457,
+                1.721,
+                -0.2
+              ],
+              "weight": 1
+            },
+            {
+              "time_s": 5,
+              "position_m": [
+                3,
+                0,
+                -0.2
+              ],
+              "weight": 0
+            }
+          ]
+        }
+      },
+      "visual_representation": {
+        "source": "solver_generated",
+        "visible": true
+      }
+    },
+    {
+      "behavior": {},
+      "geometry": {
+        "approx_size_m": [
+          4,
+          3,
+          0.1
+        ],
+        "shape_hint": "box"
+      },
+      "id": "floor",
+      "initial_state": {
+        "linear_velocity_m_s": [
+          0,
+          0,
+          0
+        ],
+        "position_m": [
+          0,
+          0,
+          -1.42
+        ],
+        "rotation_deg": [
+          0,
+          0,
+          0
+        ]
+      },
+      "physics": {
+        "body_type": "static",
+        "collision_geometry": {
+          "local_center_offset_m": [
+            0,
+            0,
+            0
+          ],
+          "shape": "box",
+          "size_m": [
+            4,
+            3,
+            0.1
+          ]
+        },
+        "collision_required": true,
+        "mass_kg": 100
+      },
+      "role": "support",
+      "visual_representation": {
+        "source": "none",
+        "visible": false
+      }
+    }
+  ],
+  "observation_requirements": {
+    "cameras": [
+      {
+        "coordinate_frame": "world",
+        "fov_deg": 62,
+        "framing": "full_subject",
+        "look_at_m": [
+          0,
+          0,
+          -0.41
+        ],
+        "position_m": [
+          -2.9,
+          -0.96,
+          -0.41
+        ],
+        "role": "front",
+        "subject": "character",
+        "target_objects": [
+          "character"
+        ]
+      },
+      {
+        "coordinate_frame": "world",
+        "fov_deg": 62,
+        "framing": "full_subject",
+        "look_at_m": [
+          0,
+          0,
+          -0.41
+        ],
+        "position_m": [
+          0.6,
+          -2.9,
+          -0.41
+        ],
+        "role": "side",
+        "subject": "character",
+        "target_objects": [
+          "character"
+        ]
+      }
+    ],
+    "modalities": [
+      "rgb"
+    ],
+    "signals": [
+      "trajectory",
+      "articulated_pose"
+    ]
+  },
+  "provenance": {
+    "capability_smoke_id": "gasp_character_head_tracking_v1",
+    "generation_mode": "agent_native",
+    "prepared_map_asset_id": "prepared_map.game_home_interior_maps_home_interior.b83a34674d53",
+    "purpose": "capability_first_gasp_world_target_head_tracking_smoke"
+  },
+  "relations": [
+    {
+      "source": "character",
+      "target": "floor",
+      "type": "supported_by"
+    }
+  ],
+  "scene": {
+    "bounds_hint_m": [
+      4,
+      3,
+      2.5
+    ],
+    "coordinate_system": "z_up",
+    "duration_s": 5,
+    "environment_intent": "GASP character aligned to the visible floor of the qualified Home Interior geometry Map",
+    "map_preference": "prepared_map.game_home_interior_maps_home_interior.b83a34674d53"
+  },
+  "schema_version": "harness_case_spec_v2",
+  "timebase": {
+    "deterministic_seed": 100001,
+    "observation_fps": 24,
+    "physics_hz": 120
+  },
+  "variant": {
+    "should_pass": true
+  },
+  "verification_requirements": {
+    "assertions": [
+      {
+        "id": "trajectory_integrity",
+        "type": "trajectory_integrity",
+        "objects": [
+          "character"
+        ]
+      },
+      {
+        "id": "body_yaw_max",
+        "type": "state_value",
+        "object_id": "character",
+        "field": "rotation_deg.y",
+        "reduction": "max",
+        "operator": "<=",
+        "value": 1
+      },
+      {
+        "id": "body_yaw_min",
+        "type": "state_value",
+        "object_id": "character",
+        "field": "rotation_deg.y",
+        "reduction": "min",
+        "operator": ">=",
+        "value": -1
+      },
+      {
+        "id": "visible_root_yaw_max",
+        "type": "state_value",
+        "object_id": "character",
+        "field": "articulated_observed.bones.root.rotation_deg.y",
+        "reduction": "max",
+        "operator": "<=",
+        "value": -85
+      },
+      {
+        "id": "visible_root_yaw_min",
+        "type": "state_value",
+        "object_id": "character",
+        "field": "articulated_observed.bones.root.rotation_deg.y",
+        "reduction": "min",
+        "operator": ">=",
+        "value": -95
+      },
+      {
+        "id": "character_x_max",
+        "type": "state_value",
+        "object_id": "character",
+        "field": "position_m.x",
+        "reduction": "max",
+        "operator": "<=",
+        "value": 0.05
+      },
+      {
+        "id": "character_x_min",
+        "type": "state_value",
+        "object_id": "character",
+        "field": "position_m.x",
+        "reduction": "min",
+        "operator": ">=",
+        "value": -0.05
+      },
+      {
+        "id": "character_y_max",
+        "type": "state_value",
+        "object_id": "character",
+        "field": "position_m.y",
+        "reduction": "max",
+        "operator": "<=",
+        "value": 0.05
+      },
+      {
+        "id": "character_y_min",
+        "type": "state_value",
+        "object_id": "character",
+        "field": "position_m.y",
+        "reduction": "min",
+        "operator": ">=",
+        "value": -0.05
+      },
+      {
+        "id": "capture_start_vertical_settled_max",
+        "type": "state_delta",
+        "object_id": "character",
+        "field": "articulated_observed.actor_transform.position_m.z",
+        "operator": "<=",
+        "value": 0.005
+      },
+      {
+        "id": "capture_start_vertical_settled_min",
+        "type": "state_delta",
+        "object_id": "character",
+        "field": "articulated_observed.actor_transform.position_m.z",
+        "operator": ">=",
+        "value": -0.005
+      }
+    ],
+    "thresholds": {}
+  }
+}

@@ -12,7 +12,11 @@ BACKEND_STAGE_IO: dict[str, dict[str, dict[str, dict[str, Any]]]] = {
         "produces": {
             "deformable_mesh_cache_v1": {
                 "schema_version": "harness_deformable_mesh_cache_v1",
-                "required_artifacts": ["deformable_cache.json", "deformable_cache.npz"],
+                "required_artifacts": [
+                    "deformable_cache.json",
+                    "deformable_cache.npz",
+                    "deformable_solver_verifier.json",
+                ],
             }
         },
         "consumes": {},
@@ -31,7 +35,11 @@ BACKEND_STAGE_IO: dict[str, dict[str, dict[str, dict[str, Any]]]] = {
         "produces": {
             "deformable_mesh_cache_v1": {
                 "schema_version": "harness_deformable_mesh_cache_v1",
-                "required_artifacts": ["deformable_cache.json", "deformable_cache.npz"],
+                "required_artifacts": [
+                    "deformable_cache.json",
+                    "deformable_cache.npz",
+                    "deformable_solver_verifier.json",
+                ],
             }
         },
         "consumes": {},

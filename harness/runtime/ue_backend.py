@@ -21,6 +21,7 @@ from harness.assets.asset_resolver import requested_map_reference
 from harness.planning.runtime_compiler import RuntimeCompilation, compile_runtime_case
 from harness.runtime.observation_planner import camera_ids_from_observation_plan, render_passes_from_observation_plan
 from harness.runtime.render_pass_contract import normalize_passes, verify_render_observability, write_render_contract_artifacts
+from harness.runtime.articulated_body import ARTICULATED_BODY_MODEL_ID
 from harness.verification.render_sync_checker import ARTIFACT_SCHEMA_VERSION, check_render_sync
 
 
@@ -638,6 +639,7 @@ def invoke_real_ue_runner(
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:  # pragma: no cover - requires a real long-running UE child.
+        cleanup_interrupted_render_frames(run_dir)
         write_json(output_dir / "runner_stdout.json", {"stdout": exc.stdout or ""})
         write_json(output_dir / "runner_stderr.json", {"stderr": exc.stderr or ""})
         return build_backend_report(
@@ -661,6 +663,9 @@ def invoke_real_ue_runner(
             failure_message=str(exc),
             runner_command=runner_command,
         )
+    except BaseException:
+        cleanup_interrupted_render_frames(run_dir)
+        raise
     write_json(output_dir / "runner_stdout.json", {"stdout": completed.stdout})
     write_json(output_dir / "runner_stderr.json", {"stderr": completed.stderr})
     if completed.returncode != 0:
@@ -713,6 +718,7 @@ def materialize_articulated_body_assets(case: RuntimeCase, preflight: dict[str, 
         if isinstance(obj, dict)
         and isinstance(obj.get("solver"), dict)
         and obj["solver"].get("type") == "articulated_body"
+        and obj["solver"].get("model") == ARTICULATED_BODY_MODEL_ID
     ]
     if not articulated:
         return
@@ -791,7 +797,40 @@ def run_runner_process_group(
                 proc.kill()
             stdout, stderr = proc.communicate()
         raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
+    except BaseException:
+        if proc.poll() is None:
+            if os.name == "posix":
+                os.killpg(proc.pid, signal.SIGTERM)
+            else:  # pragma: no cover
+                proc.terminate()
+            try:
+                proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                if os.name == "posix":
+                    os.killpg(proc.pid, signal.SIGKILL)
+                else:  # pragma: no cover
+                    proc.kill()
+                proc.communicate()
+        raise
     return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
+
+
+def cleanup_interrupted_render_frames(run_dir: Path) -> None:
+    logs_root = (run_dir / "logs").resolve()
+    if not logs_root.is_dir():
+        return
+    for native_root in logs_root.iterdir():
+        if not native_root.is_dir() or native_root.is_symlink():
+            continue
+        for frames_dir in native_root.glob("frames*"):
+            if frames_dir.is_dir() and not frames_dir.is_symlink():
+                shutil.rmtree(frames_dir, ignore_errors=True)
+        for log_path in native_root.glob("*.ffmpeg.log"):
+            if log_path.is_file() and not log_path.is_symlink():
+                try:
+                    log_path.unlink()
+                except OSError:
+                    pass
 
 
 def build_runner_command(run_dir: Path, preflight: dict[str, Any], *, requested_views: list[str], render_passes: list[str]) -> list[str]:

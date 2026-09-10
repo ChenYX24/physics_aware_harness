@@ -23,7 +23,7 @@ from harness.core.artifact_schema import write_json
 # outer command timeout longer so it does not terminate the launcher first.
 DEFAULT_TIMEOUT_S = 330.0
 IMPORTER_COMMAND_ENV = "SIM_HARNESS_UE_ASSET_IMPORTER_CMD"
-IMPORTER_CONTRACT_VERSION = "ue_static_mesh_import_v4"
+IMPORTER_CONTRACT_VERSION = "ue_static_mesh_import_v6"
 
 
 class BackendImporterAdapter:

@@ -16,6 +16,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "ADP Physics", meta = (WorldContext = "WorldContextObject"))
 	static AADPPhysicsRuntimeDriver* SpawnPhysicsRuntimeDriver(UObject* WorldContextObject);
 
+	UFUNCTION(BlueprintCallable, Category = "ADP Physics|Character")
+	static bool SetCharacterAimIntent(AActor* CharacterActor, bool bEnabled);
+
+	UFUNCTION(BlueprintCallable, Category = "ADP Physics|Runtime")
+	static bool ConfigureFixedFrameStep(double FixedDeltaSeconds);
+
 #if WITH_EDITOR
 	UFUNCTION(BlueprintCallable, Category = "ADP Physics|Geometry Collection")
 	static FString CaptureGeometryCollectionFragmentState(AActor* GeometryCollectionActor);

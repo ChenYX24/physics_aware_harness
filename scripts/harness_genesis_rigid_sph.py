@@ -125,22 +125,31 @@ def simulate_rigid_sph_scene(
             elif body["mobility"] == "dynamic":
                 dynamic_entities[body["id"]] = entity
     fluid_spec = compiled["fluid"]
-    liquid = scene.add_entity(
-        morph=gs.morphs.Cylinder(
-            radius=float(fluid_spec["radius_m"]),
-            height=float(fluid_spec["height_m"]),
-            pos=tuple(fluid_spec["world_position_m"]),
-            quat=tuple(fluid_spec["world_quaternion_wxyz"]),
-        ),
-        material=gs.materials.SPH.Liquid(
-            sampler="regular",
-            rho=float(material_options["rest_density_kg_m3"]),
-            stiffness=float(material_options["stiffness_pa"]),
-            exponent=float(material_options["equation_of_state_exponent"]),
-            mu=float(material_options["viscosity_pa_s"]),
-            gamma=float(material_options["surface_tension_n_m"]),
-        ),
+    liquid_material = gs.materials.SPH.Liquid(
+        sampler="regular",
+        rho=float(material_options["rest_density_kg_m3"]),
+        stiffness=float(material_options["stiffness_pa"]),
+        exponent=float(material_options["equation_of_state_exponent"]),
+        mu=float(material_options["viscosity_pa_s"]),
+        gamma=float(material_options["surface_tension_n_m"]),
     )
+    emitter = None
+    if fluid_spec["source_type"] == "initial_volume":
+        liquid = scene.add_entity(
+            morph=gs.morphs.Cylinder(
+                radius=float(fluid_spec["radius_m"]),
+                height=float(fluid_spec["height_m"]),
+                pos=tuple(fluid_spec["world_position_m"]),
+                quat=tuple(fluid_spec["world_quaternion_wxyz"]),
+            ),
+            material=liquid_material,
+        )
+    else:
+        emitter = scene.add_emitter(
+            material=liquid_material,
+            max_particles=int(fluid_spec["emitter"]["max_particles"]),
+        )
+        liquid = emitter.entity
     scene.build()
     for body in compiled["rigid_bodies"]:
         if body["id"] in dynamic_entities:
@@ -158,12 +167,13 @@ def simulate_rigid_sph_scene(
             set_rigid_body_pose(kinematic_entities[body["id"]], body, 0.0)
         elif body["id"] in dynamic_entities:
             set_dynamic_body_initial_state(dynamic_entities[body["id"]], body, hold=False)
+    if emitter is not None:
+        emit_fluid(emitter, fluid_spec["emitter"], droplet_length_m=particle_size)
 
     frame_count = simulation_settings["frame_count"]
     frames: list[dict[str, Any]] = []
     for frame_index in range(simulation_settings["output_frame_count"]):
-        positions = tensor_rows(liquid.get_particles_pos())
-        velocities = tensor_rows(liquid.get_particles_vel())
+        active_particle_ids, positions, velocities = active_particle_state(liquid, np)
         bodies_at_frame: dict[str, dict[str, Any]] = {}
         rigid_states: dict[str, dict[str, Any]] = {}
         for body in compiled["rigid_bodies"]:
@@ -207,6 +217,7 @@ def simulate_rigid_sph_scene(
                 }
         measurements = evaluate_measurements(
             positions,
+            velocities,
             bodies_at_frame,
             rigid_states,
             compiled["measurements"],
@@ -236,6 +247,7 @@ def simulate_rigid_sph_scene(
             {
                 "frame": frame_index,
                 "time_s": round(frame_index / fps, 8),
+                "active_particle_ids": active_particle_ids,
                 "positions_m": positions,
                 "velocities_m_s": velocities,
                 "rigid_objects": rigid_states,
@@ -262,10 +274,16 @@ def simulate_rigid_sph_scene(
                 for body in compiled["rigid_bodies"]:
                     if body["id"] in kinematic_entities:
                         set_rigid_body_pose(kinematic_entities[body["id"]], body, current_time, next_time_s=next_time)
+                if emitter is not None and current_time < float(fluid_spec["emitter"]["end_time_s"]):
+                    emit_fluid(emitter, fluid_spec["emitter"])
                 scene.step()
 
-    particle_count = len(frames[0]["positions_m"])
-    initial_volume = math.pi * float(fluid_spec["radius_m"]) ** 2 * float(fluid_spec["height_m"])
+    particle_count = max((max(frame["active_particle_ids"], default=-1) for frame in frames), default=-1) + 1
+    initial_volume = (
+        math.pi * float(fluid_spec["radius_m"]) ** 2 * float(fluid_spec["height_m"])
+        if fluid_spec["source_type"] == "initial_volume"
+        else None
+    )
     return {
         "schema_version": "harness_particle_cache_v1",
         "backend": "genesis_sph",
@@ -288,6 +306,7 @@ def simulate_rigid_sph_scene(
         "particles": {
             "count": particle_count,
             "stable_ids": list(range(particle_count)),
+            "population_mode": "fixed" if fluid_spec["source_type"] == "initial_volume" else "progressive_activation",
             "radius_m": particle_size / 2.0,
             "rest_density_kg_m3": 1000.0,
         },
@@ -302,13 +321,17 @@ def simulate_rigid_sph_scene(
             "rigid_bodies": [without_parts(body) for body in compiled["rigid_bodies"]],
             "measurements": compiled["measurements"],
             "assertions": compiled["assertions"],
-            "initial_condition": {
-                "type": "bounded_volume",
-                "shape": "cylinder",
-                "frame": fluid_spec["frame"],
-                "velocity_field": {"type": "still"},
-            },
-            "initial_liquid_position_m": fluid_spec["world_position_m"],
+            "initial_condition": (
+                {
+                    "type": "bounded_volume",
+                    "shape": "cylinder",
+                    "frame": fluid_spec["frame"],
+                    "velocity_field": {"type": "still"},
+                }
+                if fluid_spec["source_type"] == "initial_volume"
+                else {"type": "emitter", **fluid_spec["emitter"]}
+            ),
+            "initial_liquid_position_m": fluid_spec.get("world_position_m"),
             "initial_liquid_volume_m3": initial_volume,
             "surface_container_intersection_metric": "not_applied_for_boundary_contacting_fluid",
         },
@@ -324,6 +347,32 @@ def simulate_rigid_sph_scene(
         },
         "frames": frames,
     }
+
+
+def emit_fluid(emitter: Any, spec: dict[str, Any], *, droplet_length_m: float | None = None) -> None:
+    before = int(emitter.next_particle)
+    emitter.emit(
+        droplet_shape="circle",
+        droplet_size=float(spec["diameter_m"]),
+        droplet_length=droplet_length_m,
+        pos=tuple(spec["position_m"]),
+        direction=tuple(spec["direction"]),
+        speed=float(spec["speed_m_s"]),
+    )
+    if int(emitter.next_particle) < before:
+        raise RuntimeError("fluid emitter max_particles capacity was exhausted")
+
+
+def active_particle_state(liquid: Any, np_module: Any) -> tuple[list[int], list[list[float]], list[list[float]]]:
+    active = liquid.get_particles_active().detach().cpu().numpy().reshape(-1).astype(bool)
+    active_ids = np_module.flatnonzero(active).astype(int).tolist()
+    positions = liquid.get_particles_pos().detach().cpu().numpy().reshape(-1, 3)[active]
+    velocities = liquid.get_particles_vel().detach().cpu().numpy().reshape(-1, 3)[active]
+    return (
+        active_ids,
+        [[round(float(component), 8) for component in row] for row in positions],
+        [[round(float(component), 8) for component in row] for row in velocities],
+    )
 
 
 def rigid_sph_simulation_settings(

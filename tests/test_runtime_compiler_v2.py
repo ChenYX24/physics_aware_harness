@@ -30,6 +30,67 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RuntimeCompilerV2Tests(unittest.TestCase):
+    def test_catalog_map_id_is_bound_to_qualified_runtime_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            map_file = root / "CatalogMap.umap"
+            map_file.write_bytes(b"catalog-map")
+            registry_data = json.loads((ROOT / "assets" / "asset_registry.example.json").read_text(encoding="utf-8"))
+            registry_data["assets"].append(
+                {
+                    "asset_id": "prepared_map.catalog_map.v1",
+                    "name": "CatalogMap",
+                    "category_l1": "map",
+                    "type": "World",
+                    "ue_path": "/Game/Harness/CatalogMap.CatalogMap",
+                    "source_kind": "harness_generated",
+                    "source_uri": "harness://tests/maps/catalog-map",
+                    "license": "CC0-1.0",
+                    "quality_status": "approved",
+                    "materialized": True,
+                    "sha256": hashlib.sha256(map_file.read_bytes()).hexdigest(),
+                    "paths": {"local_file": str(map_file)},
+                    "ue": {
+                        "object_path": "/Game/Harness/CatalogMap.CatalogMap",
+                        "class_name": "World",
+                        "dependencies": [],
+                    },
+                    "backend_bindings": {
+                        "unreal": {
+                            "object_path": "/Game/Harness/CatalogMap.CatalogMap",
+                            "class_name": "World",
+                            "materialized": True,
+                            "runtime_ready": True,
+                        }
+                    },
+                }
+            )
+            registry_path = root / "registry.json"
+            registry_path.write_text(json.dumps(registry_data), encoding="utf-8")
+            case_data = case_spec_v2_fixture()
+            case_data["scene"]["map_preference"] = "prepared_map.catalog_map.v1"
+            compilation = compile_runtime_case(
+                case_spec_v2_from_dict(case_data),
+                requested_backend="fallback",
+                registry=AssetRegistry(registry_path),
+                transaction_dir=root / "transaction",
+                compile_config={
+                    "schema_version": "harness_ue_compile_config_v1",
+                    "map_package": "prepared_map.catalog_map.v1",
+                    "ue_project": str(root / "Project.uproject"),
+                    "catalog": str(registry_path),
+                },
+            )
+
+        self.assertEqual(
+            compilation.artifacts["asset_resolution"]["scene_map"]["selected_asset"]["asset_id"],
+            "prepared_map.catalog_map.v1",
+        )
+        self.assertEqual(
+            compilation.runtime_case.data["scene"]["map_preference"],
+            "/Game/Harness/CatalogMap.CatalogMap",
+        )
+
     def test_ue_runtime_failure_artifacts_preserve_runtime_phase(self) -> None:
         from types import SimpleNamespace
 
@@ -480,6 +541,40 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
             ["floor"],
         )
 
+    def test_semantic_asset_hints_compile_as_taxonomy_and_preferences(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["asset"] = {
+            "description": "industrial rolling barrel",
+            "resource_kind": "mesh_3d",
+            "must": {
+                "category": "industrial_prop",
+                "physics_role": "dynamic_rigid_body",
+                "collision": True,
+            },
+            "taxonomy": {
+                "domain": "prop",
+                "object_type": "steel_oil_barrel",
+            },
+            "relaxation_policy": {"allow_parent_category": True},
+            "acquisition": {
+                "route": "default",
+                "requirement": "preferred",
+                "origin": "system_default",
+            },
+        }
+        source = case_spec_v2_from_dict(data)
+        runtime = compile_case_spec_v2_runtime(source)
+
+        intent = compile_v2_asset_intents(source, runtime.data, target_backend="unreal")[0].search_intent
+
+        self.assertNotIn("category", intent.must)
+        self.assertNotIn("physics_role", intent.must)
+        self.assertEqual(intent.taxonomy["category"], "industrial_prop")
+        self.assertIn(
+            ("physics_role", "dynamic_rigid_body"),
+            {(preference.field, preference.value) for preference in intent.should},
+        )
+
     def test_solver_generated_fluid_compiles_with_cache_binding_and_no_asset(self) -> None:
         data = case_spec_v2_fixture()
         data["identity"]["case_id"] = "solver_generated_fluid"
@@ -635,7 +730,9 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
         self.assertNotIn("contact_events", solve_stage["outputs"])
         solver_configuration = compilation.artifacts["solver_configuration"]
         self.assertEqual(solver_configuration["qualification_policy_id"], "genesis_wcsph_surface_v2")
-        self.assertEqual(solver_configuration["parameters"]["steps_per_frame"], 100)
+        self.assertEqual(solver_configuration["parameters"]["steps_per_frame"], 240)
+        self.assertLessEqual(solver_configuration["parameters"]["solver_dt_s"], 0.0002)
+        self.assertEqual(solver_configuration["parameters"]["sph_material"]["viscosity_pa_s"], 0.001)
         self.assertEqual(
             solver_configuration["parameters"]["surface_reconstruction"],
             {
@@ -739,6 +836,7 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
                 {
                     "id": "table",
                     "role": "rigid_body",
+                    "visual_material_path": "/Game/Materials/M_Declared.M_Declared",
                     "solver": {
                         "mobility": "static",
                         "transform": {
@@ -762,6 +860,7 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
                     "intent": {"object_id": "table"},
                     "selected_asset": {
                         "ue_path": "/Game/Generated/Table.Table",
+                        "material_path": "/Game/Materials/M_Catalog.M_Catalog",
                         "sha256": "a" * 64,
                         "bbox_size_m": [1.0, 1.0, 0.05],
                         "source_kind": "procedural_generation",
@@ -779,6 +878,7 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
 
         self.assertIsNone(error)
         self.assertEqual(case["objects"][1]["asset"]["ue_path"], "/Game/Generated/Table.Table")
+        self.assertEqual(case["objects"][1]["asset"]["material_path"], "/Game/Materials/M_Declared.M_Declared")
         self.assertFalse(case["objects"][1]["asset"]["proxy"])
 
     def test_dynamic_rigid_sph_asset_binding_fails_closed_as_capability_missing(self) -> None:
@@ -789,6 +889,8 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
             source.write_text("v 0 0 0\nv 0.1 0 0\nv 0 0.2 0\nf 1 2 3\n", encoding="utf-8")
             source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
             case = dynamic_asset_case(source)
+            case["objects"][1]["size_m"] = [0.2, 0.4, 0.2]
+            case["objects"][1]["asset_scale_policy"] = "fit_uniform_to_approx_size"
             resolution = {
                 "assets": [
                     {
@@ -854,6 +956,8 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
                 case["objects"][1]["asset"]["collision"]["portable_mesh"]["local_path"],
                 str(source),
             )
+            self.assertEqual(case["objects"][1]["solver"]["transform"]["scale"], [2.0, 2.0, 2.0])
+            self.assertEqual(case["objects"][0]["solver"]["transform"]["scale"], [1.0, 1.0, 1.0])
 
             unqualified = dynamic_asset_case(source)
             resolution["assets"][1]["selected_asset"]["collision"]["present"] = False
@@ -1245,6 +1349,7 @@ class RuntimeCompilerV2Tests(unittest.TestCase):
                 "origin": "user_explicit",
                 "reference_inputs": [],
                 "fallback_order": [],
+                "generation_prompt": "A realistic isolated ball generated from the textual design.",
             },
         }
         compilation = compile_runtime_case(

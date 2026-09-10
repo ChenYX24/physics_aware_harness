@@ -1,0 +1,125 @@
+{
+  "schema_version": "harness_case_spec_v2",
+  "identity": {
+    "case_id": "smoke_taichi_cloth_wind_v2",
+    "title": "A pinned cloth flag responds to a gusting wind field",
+    "source_request": "Verify that a fixed-edge cloth sheet deforms under the same shared V2 wind-field declaration without detaching or stretching excessively."
+  },
+  "capabilities": {"primary": "deformable_body_dynamics", "required": ["deformable_body_dynamics"]},
+  "scene": {
+    "environment_intent": "minimal controlled flag stage",
+    "coordinate_system": "z_up",
+    "duration_s": 4.0,
+    "bounds_hint_m": [4.0, 4.0, 3.0]
+  },
+  "timebase": {"physics_hz": 2400, "observation_fps": 24, "deterministic_seed": 20260905},
+  "backend_constraints": {
+    "required_solver_capabilities": ["soft_body", "cloth", "aerodynamic_wind", "mesh_cache", "trajectory"],
+    "allowed_solvers": ["taichi_cloth"],
+    "render_backend": "ue",
+    "allow_multi_backend": true
+  },
+  "asset_policy": {
+    "allow_local": true,
+    "allow_external": false,
+    "allow_generation": false,
+    "allow_analytic_proxy": true,
+    "required_license_tier": "local_preview"
+  },
+  "objects": [
+    {
+      "id": "flag",
+      "role": "deformable_cloth",
+      "geometry": {"shape_hint": "cloth_grid", "approx_size_m": [1.5, 0.01, 1.0]},
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.32,
+        "collision_required": false,
+        "material_model": "cloth",
+        "material": {
+          "structural_stiffness_n_m": 110.0,
+          "shear_stiffness_n_m": 65.0,
+          "bending_stiffness_n_m": 7.0,
+          "spring_damping_kg_s": 0.02,
+          "air_damping_1_s": 1.3
+        }
+      },
+      "initial_state": {"position_m": [0.0, 0.0, 1.3], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "visual_representation": {"source": "solver_generated", "visible": true},
+      "solver": {
+        "type": "mass_spring_cloth",
+        "grid_resolution": 25,
+        "initial_orientation": "vertical_xz",
+        "pinned_boundary": "negative_u",
+        "substeps_per_frame": 100,
+        "collision_thickness_m": 0.012
+      },
+      "behavior": {}
+    },
+    {
+      "id": "wind",
+      "role": "wind_field",
+      "physics": {"body_type": "static", "collision_required": false},
+      "initial_state": {"position_m": [0.0, 0.0, 0.0], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "visual_representation": {"source": "none", "visible": false},
+      "solver": {
+        "type": "aerodynamic_wind",
+        "velocity_m_s": [0.0, 5.0, 0.0],
+        "air_density_kg_m3": 1.225,
+        "gust_amplitude": 0.22,
+        "gust_frequency_hz": 0.7,
+        "targets": [{"object": "flag", "drag_coefficient": 1.15}]
+      },
+      "behavior": {}
+    },
+    {
+      "id": "flagpole",
+      "role": "anchor_support",
+      "geometry": {"shape_hint": "cylinder", "approx_size_m": [0.07, 0.07, 2.5]},
+      "physics": {"body_type": "static", "mass_kg": 1.0, "collision_required": false},
+      "initial_state": {"position_m": [-0.79, 0.0, 1.25], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "visual_representation": {"source": "none", "visible": true},
+      "behavior": {}
+    },
+    {
+      "id": "floor",
+      "role": "support_surface",
+      "geometry": {"shape_hint": "box", "approx_size_m": [4.0, 4.0, 0.05]},
+      "physics": {"body_type": "static", "mass_kg": 1.0, "collision_required": false, "material": {"dynamic_friction": 0.2, "restitution": 0.0}},
+      "initial_state": {"position_m": [0.0, 0.0, 0.0], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "visual_representation": {"source": "none", "visible": true},
+      "behavior": {}
+    }
+  ],
+  "relations": [],
+  "events": [],
+  "forces": [],
+  "constraints": [],
+  "expected_behavior": {
+    "maximum_structural_edge_stretch_ratio": 1.25,
+    "maximum_pinned_vertex_displacement_m": 0.0001,
+    "minimum_mean_wind_axis_displacement_m": 0.12,
+    "minimum_final_vertical_span_m": 0.75,
+    "penetration_tolerance_m": 0.002
+  },
+  "observation_requirements": {
+    "cameras": [{
+      "role": "event_closeup",
+      "coordinate_frame": "world",
+      "position_m": [-2.0, -2.6, 1.65],
+      "look_at_m": [0.0, 0.15, 1.2],
+      "fov_deg": 52.0,
+      "framing": "scene",
+      "target_objects": ["flag", "flagpole"]
+    }],
+    "modalities": ["rgb"],
+    "signals": ["mesh_cache", "trajectory"]
+  },
+  "verification_requirements": {
+    "assertions": [{"id": "trajectory_integrity", "type": "trajectory_integrity"}],
+    "thresholds": {}
+  },
+  "variant": {"should_pass": true},
+  "provenance": {"purpose": "capability_first_isolated_smoke"},
+  "notes": "The wind declaration is backend-independent; this cloth target is integrated per triangle by Taichi. Tearing and self-collision remain out of scope."
+}

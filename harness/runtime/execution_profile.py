@@ -32,12 +32,12 @@ class ExecutionProfile:
 EXECUTION_PROFILES: dict[str, ExecutionProfile] = {
     "smoke": ExecutionProfile(
         name="smoke",
-        width=1280,
-        height=720,
+        width=640,
+        height=360,
         render_fps=24,
         physics_hz=120,
         artifact_eligibility="diagnostic_only",
-        purpose="HD low-cost technical preflight.",
+        purpose="Low-resolution technical preflight.",
     ),
     "candidate": ExecutionProfile(
         name="candidate",

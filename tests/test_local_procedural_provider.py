@@ -416,6 +416,90 @@ class LocalProceduralProviderTests(unittest.TestCase):
                 for actual, expected in zip(actual_size, expected_size):
                     self.assertAlmostEqual(actual, expected, places=12)
 
+    def test_open_conical_frustum_is_an_uncapped_ring_of_closed_convex_sectors(self) -> None:
+        spec = {
+            "recipe_id": "open_conical_frustum_mesh_v1",
+            "recipe_version": "v1",
+            "shape": "open_conical_frustum",
+            "size_m": [0.8, 0.8, 0.6],
+            "shape_parameters": {"top_diameter_m": 0.8, "bottom_diameter_m": 0.12},
+        }
+
+        generated = generate_procedural_obj(spec, self.workspace / "frustum" / "shell.obj")
+        lines = generated["path"].read_text(encoding="utf-8").splitlines()
+        vertices = [[float(value) for value in line.split()[1:]] for line in lines if line.startswith("v ")]
+        faces = [[int(value) for value in line.split()[1:]] for line in lines if line.startswith("f ")]
+
+        self.assertEqual(len(vertices), 48 * 8)
+        self.assertEqual(len(faces), 48 * 6)
+        self.assertTrue(all(len(face) == 4 for face in faces))
+        self.assertEqual(
+            [max(row[axis] for row in vertices) - min(row[axis] for row in vertices) for axis in range(3)],
+            [0.8, 0.8, 0.6],
+        )
+        bottom = [row for row in vertices if row[2] == -0.3]
+        top = [row for row in vertices if row[2] == 0.3]
+        self.assertEqual(len(bottom), 48 * 4)
+        self.assertEqual(len(top), 48 * 4)
+        self.assertAlmostEqual(max((row[0] ** 2 + row[1] ** 2) ** 0.5 for row in bottom), 0.06)
+        self.assertAlmostEqual(max((row[0] ** 2 + row[1] ** 2) ** 0.5 for row in top), 0.4)
+
+    def test_open_conical_frustum_provider_requests_compound_convex_collision(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["geometry"] = {
+            "shape_hint": "open_conical_frustum",
+            "approx_size_m": [0.8, 0.8, 0.6],
+            "shape_parameters": {
+                "top_diameter_m": 0.8,
+                "bottom_diameter_m": 0.12,
+            },
+        }
+        data["objects"][0]["physics"].update(
+            {"body_type": "static", "collision_required": True}
+        )
+        data["objects"][0]["asset"] = {
+            "description": "open conical frustum collision shell",
+            "resource_kind": "mesh_3d",
+            "must": {"geometry_type": "open_conical_frustum"},
+            "acquisition": {
+                "route": "procedural_generation",
+                "requirement": "required",
+                "origin": "user_explicit",
+                "provider_hint": "open_conical_frustum_mesh_v1",
+                "reference_inputs": [],
+                "fallback_order": [],
+            },
+        }
+        case = case_spec_v2_from_dict(data)
+        orchestrator = self.orchestrator()
+        with patch.dict(os.environ, {"SIM_HARNESS_ALLOW_LOCAL_PREVIEW_ASSETS": "1"}):
+            compilation = compile_runtime_case(
+                case,
+                requested_backend="ue",
+                registry=self.registry,
+                provider_orchestrator=orchestrator,
+            )
+
+        provider_request = compilation.artifacts["asset_provider_batch"]["requests"][0]
+        backend_request = json.loads(
+            (
+                self.workspace
+                / "providers"
+                / "local_procedural_mesh_v1"
+                / provider_request["request_digest"]
+                / "backend_import_request.json"
+            ).read_text(encoding="utf-8")
+        )
+        selected = compilation.artifacts["asset_resolution"]["assets"][0]["selected_asset"]
+
+        self.assertEqual(backend_request["collision_mode"], "convex_decomposition")
+        self.assertEqual(backend_request["convex_hull_count"], 48)
+        self.assertEqual(provider_request["generation_spec"]["shape_parameters"], {
+            "top_diameter_m": 0.8,
+            "bottom_diameter_m": 0.12,
+        })
+        self.assertEqual(selected["collision"]["kind"], "compound_convex")
+
     def test_provider_infers_registered_recipes_for_primitive_aliases(self) -> None:
         cases = [
             ("wall", [2.0, 0.1, 1.0], "box_mesh_v1", "box"),
@@ -513,6 +597,28 @@ class LocalProceduralProviderTests(unittest.TestCase):
         self.assertEqual(provider_result["failure"]["code"], "asset_qualification_failed")
         self.assertIn("hard_constraint_mismatch", provider_result["failure"]["message"])
         self.assertEqual(compilation.report["asset_resolve_invocation_count"], 1)
+
+    def test_provider_qualification_override_ignores_only_license_constraints(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"SIM_HARNESS_IGNORE_PROVENANCE_AND_RELEASE_GATES": "1"},
+        ):
+            compilation = compile_runtime_case(
+                self.provider_case(license_tier="reference"),
+                requested_backend="ue",
+                registry=self.registry,
+                provider_orchestrator=self.orchestrator(),
+            )
+
+        provider_result = compilation.artifacts["asset_provider_batch"]["results"][0]
+        selected = compilation.artifacts["asset_resolution"]["assets"][0]["selected_asset"]
+        self.assertEqual(provider_result["status"], "fulfilled")
+        self.assertIsNotNone(selected)
+        self.assertTrue(selected["qualification"]["provenance_and_release_gate_override"])
+        self.assertEqual(
+            selected["qualification"]["ignored_provenance_and_release_codes"],
+            ["license_tier_local_preview", "reference_license_evidence_missing"],
+        )
 
     def test_sphere_and_cylinder_dimension_rules_fail_structurally(self) -> None:
         invalid = [

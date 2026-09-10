@@ -51,7 +51,18 @@ class TaichiClothBackend:
                 "Taichi environment missing. Set SIM_TAICHI_PYTHON or create "
                 f"{workspace_root() / 'envs' / 'taichi'} with Python 3.11 and taichi==1.7.4."
             )
-        result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
+        cache_dir = workspace_root() / "cache" / "taichi"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        environment = os.environ.copy()
+        environment["TI_OFFLINE_CACHE_FILE_PATH"] = str(cache_dir)
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
         verifier_path = run_dir / "harness_verifier.json"
         verification_status = read_json(verifier_path).get("status") if verifier_path.is_file() else "missing"
         status = "completed" if result.returncode == 0 and verification_status == "pass" else "failed"

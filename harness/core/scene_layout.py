@@ -178,6 +178,7 @@ def build_object_node(
             "visible": visual_representation.get("visible") is not False,
         },
         "solver_declared": isinstance(obj.get("solver"), dict),
+        **({"kinematic_motion": obj["kinematic_motion"]} if isinstance(obj.get("kinematic_motion"), dict) else {}),
         **(
             {"articulated_body_contract": solver_contract}
             if str((solver_contract or {}).get("type") or "") == "articulated_body"

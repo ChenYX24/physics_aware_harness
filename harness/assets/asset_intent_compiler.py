@@ -124,6 +124,8 @@ def normalized_acquisition(value: Any) -> dict[str, Any]:
     }
     if "texture_prompt" in acquisition:
         normalized["texture_prompt"] = acquisition.get("texture_prompt")
+    if "generation_prompt" in acquisition:
+        normalized["generation_prompt"] = acquisition.get("generation_prompt")
     return normalized
 
 
@@ -158,6 +160,11 @@ def _compile_search_intent(
     acquisition = request.get("acquisition") if isinstance(request.get("acquisition"), Mapping) else {}
     raw_must = request.get("must") if isinstance(request.get("must"), Mapping) else {}
     must = dict(raw_must)
+    semantic_hard_preferences = {
+        field: must.pop(field)
+        for field in ("category", "physics_role")
+        if field in must
+    }
     if must.get("source_kind") is not None:
         must["source_kind"] = _canonical_source_kind(
             must["source_kind"],
@@ -189,6 +196,10 @@ def _compile_search_intent(
         must.setdefault("license_tier", "reference")
     preferences = request.get("preferences") if isinstance(request.get("preferences"), Mapping) else {}
     should = [SearchPreference(field="physics_role", value=legacy_intent.role)]
+    should.extend(
+        SearchPreference(field=field, value=value)
+        for field, value in semantic_hard_preferences.items()
+    )
     for field, raw_value in preferences.items():
         if isinstance(raw_value, Mapping) and "value" in raw_value:
             should.append(
@@ -201,7 +212,9 @@ def _compile_search_intent(
             )
         else:
             should.append(SearchPreference(field=str(field), value=raw_value))
-    taxonomy = request.get("taxonomy") if isinstance(request.get("taxonomy"), Mapping) else {}
+    taxonomy = dict(request.get("taxonomy")) if isinstance(request.get("taxonomy"), Mapping) else {}
+    if semantic_hard_preferences.get("category") is not None:
+        taxonomy.setdefault("category", str(semantic_hard_preferences["category"]))
     relaxation_policy = dict(request.get("relaxation_policy") or {})
     relaxation_policy.setdefault("allow_parent_category", True)
     relaxation_policy.setdefault("allow_format_conversion", False)

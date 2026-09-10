@@ -18,6 +18,7 @@ RESULT_PATH = Path(os.environ["SIM_HARNESS_UE_IMPORT_RESULT"]).expanduser().reso
 BATCH_REQUEST_PATH = Path(os.environ["SIM_HARNESS_UE_IMPORT_BATCH_REQUEST"]).expanduser().resolve() if os.environ.get("SIM_HARNESS_UE_IMPORT_BATCH_REQUEST") else None
 BATCH_RESULT_PATH = Path(os.environ["SIM_HARNESS_UE_IMPORT_BATCH_RESULT"]).expanduser().resolve() if os.environ.get("SIM_HARNESS_UE_IMPORT_BATCH_RESULT") else None
 CONTENT_ROOT = Path(os.environ["SIM_HARNESS_UE_IMPORT_PROJECT_CONTENT"]).expanduser().resolve()
+BASE_COLOR_IMAGE_SUFFIXES = {".jpeg", ".jpg", ".png", ".tif", ".tiff"}
 
 
 def main() -> None:
@@ -36,7 +37,7 @@ def _import_one(request: dict[str, Any]) -> dict[str, Any]:
     try:
         source = _source_file(request)
         asset_name = _safe_asset_name(str(request.get("desired_name") or request["asset_id"]))
-        destination_path = "/Game/Generated/Provider"
+        destination_path = _safe_destination_path(str(request.get("destination_path") or "/Game/Generated/Provider"))
         object_path = f"{destination_path}/{asset_name}.{asset_name}"
         task = unreal.AssetImportTask()
         task.filename = str(source)
@@ -48,14 +49,17 @@ def _import_one(request: dict[str, Any]) -> dict[str, Any]:
         task.save = True
         options = unreal.FbxImportUI()
         source_kind = str(request.get("source_kind") or "")
-        remote_asset = source_kind in {"external_site", "model_generation", "user_file"}
+        remote_asset = source_kind in {"external_site", "local_input", "model_generation", "user_file"}
         options.import_as_skeletal = False
         options.import_mesh = True
         options.import_materials = remote_asset
         options.import_textures = remote_asset
         options.static_mesh_import_data.combine_meshes = True
         options.static_mesh_import_data.generate_lightmap_u_vs = True
-        options.static_mesh_import_data.auto_generate_collision = True
+        collision_mode = str(request.get("collision_mode") or "simple_convex")
+        if collision_mode not in {"simple_convex", "complex_as_simple", "convex_decomposition"}:
+            raise RuntimeError(f"unsupported collision_mode: {collision_mode}")
+        options.static_mesh_import_data.auto_generate_collision = collision_mode == "simple_convex"
         # The outer launcher materializes a temporary centimeter-normalized OBJ.
         # UE 5.7's OBJ/Interchange path ignores FbxImportUI's meter scale.
         import_uniform_scale = float(request.get("import_uniform_scale") or 1.0)
@@ -88,6 +92,13 @@ def _import_one(request: dict[str, Any]) -> dict[str, Any]:
                 raise RuntimeError(f"corrected FBX import is not a StaticMesh: {object_path}")
             if int(asset.get_num_sections(0)) <= 0:
                 raise RuntimeError(f"corrected FBX import has no LOD0 render sections: {object_path}")
+        sidecar_binding = _bind_single_sidecar_base_color(
+            asset,
+            image=_base_color_file(request),
+            asset_name=asset_name,
+            destination_path=destination_path,
+        )
+        sidecar_dependency_paths = sidecar_binding.pop("dependency_object_paths", [])
         actual_size_cm = _validate_dimensions(
             asset,
             request.get("expected_size_m"),
@@ -99,15 +110,6 @@ def _import_one(request: dict[str, Any]) -> dict[str, Any]:
             geometry_analysis = _analyze_asset_geometry(asset)
         except Exception as exc:
             geometry_analysis_error = str(exc)
-        mesh_editor = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
-        if mesh_editor is None:
-            raise RuntimeError("StaticMeshEditorSubsystem is unavailable for collision validation")
-        collision_count = int(mesh_editor.get_convex_collision_count(asset))
-        if collision_count <= 0:
-            generated_collision = mesh_editor.set_convex_decomposition_collisions(asset, 1, 8, 100000)
-            collision_count = int(mesh_editor.get_convex_collision_count(asset))
-            if generated_collision is False or collision_count <= 0:
-                raise RuntimeError(f"could not generate simple collision for imported StaticMesh: {object_path}")
         body_setup = (
             asset.get_body_setup()
             if hasattr(asset, "get_body_setup")
@@ -115,23 +117,59 @@ def _import_one(request: dict[str, Any]) -> dict[str, Any]:
         )
         if body_setup is None:
             raise RuntimeError(f"imported StaticMesh has no collision body setup: {object_path}")
+        mesh_editor = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
+        if mesh_editor is None:
+            raise RuntimeError("StaticMeshEditorSubsystem is unavailable for collision validation")
+        collision_count = int(mesh_editor.get_convex_collision_count(asset))
+        collision_trace_flag = "simple_convex"
+        double_sided_geometry = False
+        if collision_mode == "complex_as_simple":
+            collision_trace_flag = "CTF_USE_COMPLEX_AS_SIMPLE"
+            body_setup.set_editor_property(
+                "collision_trace_flag",
+                unreal.CollisionTraceFlag.CTF_USE_COMPLEX_AS_SIMPLE,
+            )
+            body_setup.set_editor_property("double_sided_geometry", True)
+            body_setup.modify()
+            asset.modify()
+            double_sided_geometry = True
+        elif collision_mode == "convex_decomposition" or collision_count <= 0:
+            requested_hulls = int(request.get("convex_hull_count") or 1)
+            if requested_hulls < 1 or requested_hulls > 64:
+                raise RuntimeError("convex_hull_count must be between 1 and 64")
+            generated_collision = mesh_editor.set_convex_decomposition_collisions(
+                asset,
+                requested_hulls,
+                8,
+                100000,
+            )
+            collision_count = int(mesh_editor.get_convex_collision_count(asset))
+            if generated_collision is False or collision_count <= 0:
+                raise RuntimeError(f"could not generate simple collision for imported StaticMesh: {object_path}")
         portable_collision_artifact = None
         portable_collision_error = None
-        try:
-            portable_collision_artifact = _export_portable_collision_artifact(asset, request)
-        except Exception as exc:
-            # UE runtime qualification remains useful to UE-only cases.  A
-            # solver that requires the portable collision contract will reject
-            # this asset as capability_missing instead of substituting visual
-            # geometry or a bounds proxy.
-            portable_collision_error = str(exc)
+        if collision_mode == "complex_as_simple":
+            portable_collision_error = "complex triangle collision is UE-static-only"
+        else:
+            try:
+                portable_collision_artifact = _export_portable_collision_artifact(asset, request)
+            except Exception as exc:
+                # UE runtime qualification remains useful to UE-only cases.  A
+                # solver that requires the portable collision contract will reject
+                # this asset as capability_missing instead of substituting visual
+                # geometry or a bounds proxy.
+                portable_collision_error = str(exc)
         unreal.EditorAssetLibrary.save_loaded_asset(asset, only_if_is_dirty=False)
 
-        package_file = CONTENT_ROOT / "Generated" / "Provider" / f"{asset_name}.uasset"
+        package_file = CONTENT_ROOT / destination_path.removeprefix("/Game/") / f"{asset_name}.uasset"
         if not package_file.is_file():
             raise RuntimeError(f"saved Unreal package is missing: {package_file}")
         payload = package_file.read_bytes()
-        dependencies = _imported_dependencies(task, primary_object_path=object_path)
+        dependencies = _imported_dependencies(
+            task,
+            primary_object_path=object_path,
+            extra_object_paths=sidecar_dependency_paths,
+        )
         result = {
             "schema_version": "harness_backend_asset_import_result_v1",
             "request_id": request["request_id"],
@@ -158,6 +196,9 @@ def _import_one(request: dict[str, Any]) -> dict[str, Any]:
                 "loaded_class": asset.get_class().get_name(),
                 "lod0_section_count": int(asset.get_num_sections(0)),
                 "collision_body_setup_present": True,
+                "collision_mode": collision_mode,
+                "collision_trace_flag": collision_trace_flag,
+                "double_sided_geometry": double_sided_geometry,
                 "convex_collision_count": collision_count,
                 "portable_collision_artifact_status": (
                     "qualified" if portable_collision_artifact is not None else "unavailable"
@@ -176,6 +217,7 @@ def _import_one(request: dict[str, Any]) -> dict[str, Any]:
                 "scale_correction_applied": corrected_scale is not None,
                 "materials_imported": remote_asset,
                 "textures_imported": remote_asset,
+                "sidecar_base_color_binding": sidecar_binding,
             },
         }
     except Exception as exc:
@@ -272,20 +314,116 @@ def _format_float(value: float) -> str:
 
 def _source_file(request: dict[str, Any]) -> Path:
     sources = request.get("source_files") or []
-    if len(sources) != 1:
-        raise RuntimeError("UE static-mesh importer requires exactly one source file")
-    source = Path(str(sources[0].get("local_path") or "")).expanduser().resolve()
-    if source.suffix.casefold() not in {".obj", ".fbx"} or not source.is_file():
+    geometry_sources = [
+        row
+        for row in sources
+        if Path(str(row.get("local_path") or "")).suffix.casefold() in {".obj", ".fbx"}
+    ]
+    if len(geometry_sources) != 1:
+        raise RuntimeError("UE static-mesh importer requires exactly one materialized OBJ or FBX")
+    source = Path(str(geometry_sources[0].get("local_path") or "")).expanduser().resolve()
+    if not source.is_file():
         raise RuntimeError(f"UE static-mesh importer requires a materialized OBJ or FBX: {source}")
     return source
 
 
-def _imported_dependencies(task: Any, *, primary_object_path: str) -> list[dict[str, Any]]:
+def _base_color_file(request: dict[str, Any]) -> Path | None:
+    sources = [row for row in request.get("source_files") or [] if row.get("role") == "texture_base_color"]
+    if len(sources) > 1:
+        raise RuntimeError("UE static-mesh importer accepts at most one base-color source")
+    if not sources:
+        return None
+    image = Path(str(sources[0].get("local_path") or "")).expanduser().resolve()
+    if image.suffix.casefold() not in BASE_COLOR_IMAGE_SUFFIXES or not image.is_file():
+        raise RuntimeError(f"UE static-mesh importer requires a materialized base-color image: {image}")
+    return image
+
+
+def _bind_single_sidecar_base_color(
+    asset: Any,
+    *,
+    image: Path | None,
+    asset_name: str,
+    destination_path: str,
+) -> dict[str, Any]:
+    if image is None:
+        return {"status": "not_applied", "base_color_source_count": 0}
+    texture_name = _safe_asset_name(f"{asset_name}_base_color")
+    texture_path = f"{destination_path}/{texture_name}.{texture_name}"
+    texture_task = unreal.AssetImportTask()
+    texture_task.filename = str(image)
+    texture_task.destination_path = destination_path
+    texture_task.destination_name = texture_name
+    texture_task.automated = True
+    texture_task.replace_existing = True
+    texture_task.save = True
+    unreal.AssetToolsHelpers.get_asset_tools().import_asset_tasks([texture_task])
+    texture = unreal.load_asset(texture_path)
+    if texture is None or texture.get_class().get_name() != "Texture2D":
+        raise RuntimeError(f"sidecar base-color image did not import as Texture2D: {image}")
+
+    material_name = _safe_asset_name(f"{asset_name}_sidecar_base_color")
+    material_path = f"{destination_path}/{material_name}.{material_name}"
+    material = unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+        material_name,
+        destination_path,
+        unreal.Material,
+        unreal.MaterialFactoryNew(),
+    )
+    if material is None:
+        raise RuntimeError(f"could not create sidecar base-color material: {material_path}")
+    sample = unreal.MaterialEditingLibrary.create_material_expression(
+        material,
+        unreal.MaterialExpressionTextureSample,
+        -420,
+        -80,
+    )
+    sample.set_editor_property("texture", texture)
+    unreal.MaterialEditingLibrary.connect_material_property(
+        sample,
+        "RGB",
+        unreal.MaterialProperty.MP_BASE_COLOR,
+    )
+    roughness = unreal.MaterialEditingLibrary.create_material_expression(
+        material,
+        unreal.MaterialExpressionConstant,
+        -420,
+        80,
+    )
+    roughness.set_editor_property("r", 0.18)
+    unreal.MaterialEditingLibrary.connect_material_property(
+        roughness,
+        "",
+        unreal.MaterialProperty.MP_ROUGHNESS,
+    )
+    unreal.MaterialEditingLibrary.recompile_material(material)
+    asset.set_material(0, material)
+    unreal.EditorAssetLibrary.save_loaded_asset(texture, only_if_is_dirty=False)
+    unreal.EditorAssetLibrary.save_loaded_asset(material, only_if_is_dirty=False)
+    unreal.EditorAssetLibrary.save_loaded_asset(asset, only_if_is_dirty=False)
+    return {
+        "status": "applied",
+        "source_image": image.name,
+        "material_slot": 0,
+        "texture_path": texture_path,
+        "material_path": material_path,
+        "dependency_object_paths": [texture_path, material_path],
+    }
+
+
+def _imported_dependencies(
+    task: Any,
+    *,
+    primary_object_path: str,
+    extra_object_paths: list[str] | None = None,
+) -> list[dict[str, Any]]:
     dependencies: list[dict[str, Any]] = []
-    for raw_path in task.imported_object_paths or []:
+    seen: set[str] = set()
+    for raw_path in [*(task.imported_object_paths or []), *(extra_object_paths or [])]:
         object_path = str(raw_path)
-        if object_path == primary_object_path:
+        if object_path == primary_object_path or object_path in seen:
             continue
+        seen.add(object_path)
         imported = unreal.load_asset(object_path)
         if imported is None:
             raise RuntimeError(f"imported dependency cannot be loaded: {object_path}")
@@ -316,6 +454,13 @@ def _safe_asset_name(value: str) -> str:
     if not name:
         raise RuntimeError("backend import request has no usable asset name")
     return name[:120]
+
+
+def _safe_destination_path(value: str) -> str:
+    path = value.rstrip("/")
+    if not re.fullmatch(r"/Game(?:/[A-Za-z0-9_]+)+", path):
+        raise RuntimeError(f"backend import destination_path must be a package path under /Game: {value!r}")
+    return path
 
 
 def _dimensions_match_source(

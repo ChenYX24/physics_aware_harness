@@ -2,17 +2,211 @@ from __future__ import annotations
 
 from copy import deepcopy
 import unittest
+from pathlib import Path
 
 from harness.core.case_spec_v2 import (
     CaseSpecV2ValidationError,
     case_spec_v2_from_dict,
     compile_case_spec_v2_runtime,
+    load_case_spec_v2,
     validate_agent_case_spec_contract,
 )
 from tests.case_spec_v2_fixture import case_spec_v2_fixture
 
 
 class CaseSpecV2Tests(unittest.TestCase):
+    def test_mass_spring_cloth_contract_validates_and_projects(self) -> None:
+        source = load_case_spec_v2(
+            Path(__file__).resolve().parents[1] / "cases/smokes/taichi_cloth_drape_v2.json"
+        )
+
+        runtime = compile_case_spec_v2_runtime(source)
+        cloth = next(obj for obj in runtime.data["objects"] if obj["role"] == "deformable_cloth")
+
+        self.assertEqual(cloth["size_m"], [1.5, 1.5, 0.01])
+        self.assertEqual(cloth["initial_position_m"], [0.0, 0.0, 1.35])
+        self.assertEqual(cloth["solver"]["type"], "mass_spring_cloth")
+        self.assertEqual(cloth["solver"]["substeps_per_frame"], 100)
+
+    def test_mass_spring_cloth_rejects_unknown_solver_fields(self) -> None:
+        source = load_case_spec_v2(
+            Path(__file__).resolve().parents[1] / "cases/smokes/taichi_cloth_drape_v2.json"
+        )
+        data = deepcopy(source.data)
+        data["objects"][0]["solver"]["tearing_magic"] = True
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        self.assertIn("unknown_cloth_solver_fields", {issue.code for issue in context.exception.issues})
+
+    def test_mass_spring_cloth_accepts_general_grid_topology(self) -> None:
+        source = load_case_spec_v2(
+            Path(__file__).resolve().parents[1] / "cases/smokes/taichi_cloth_drape_v2.json"
+        )
+        data = deepcopy(source.data)
+        solver = data["objects"][0]["solver"]
+        solver.pop("pinned_boundary")
+        solver.update(
+            {
+                "pinned_boundaries": ["negative_v", "positive_v"],
+                "width_scale_by_v": [1.25, 0.75],
+                "u_cuts": [{"fraction": 0.5, "gap_m": 0.08}],
+            }
+        )
+
+        runtime = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data))
+        projected = runtime.data["objects"][0]["solver"]
+        self.assertEqual(projected["pinned_boundaries"], ["negative_v", "positive_v"])
+        self.assertEqual(projected["width_scale_by_v"], [1.25, 0.75])
+        self.assertEqual(projected["u_cuts"], [{"fraction": 0.5, "gap_m": 0.08}])
+
+    def test_mass_spring_cloth_rejects_ambiguous_pin_contract(self) -> None:
+        source = load_case_spec_v2(
+            Path(__file__).resolve().parents[1] / "cases/smokes/taichi_cloth_drape_v2.json"
+        )
+        data = deepcopy(source.data)
+        data["objects"][0]["solver"]["pinned_boundaries"] = ["positive_v"]
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        self.assertIn("ambiguous_cloth_pin_contract", {issue.code for issue in context.exception.issues})
+
+    def test_fracture_intact_visual_projects_to_generic_runtime_shell(self) -> None:
+        data = case_spec_v2_fixture()
+        target = data["objects"][1]
+        target["behavior"] = {
+            "fracture": {
+                "impactor_id": data["objects"][0]["id"],
+                "minimum_impact_energy_j": 2.0,
+                "intact_visual": {
+                    "shape": "box",
+                    "size_m": [1.2, 0.02, 0.7],
+                    "material_source": "fracture_body",
+                },
+            }
+        }
+
+        runtime = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data))
+        projected = runtime.data["objects"][1]
+        self.assertEqual(projected["intact_visual_ue_path"], "/Engine/BasicShapes/Cube.Cube")
+        self.assertEqual(projected["intact_visual_scale"], [1.2, 0.02, 0.7])
+        self.assertEqual(projected["intact_visual_material_source"], "fracture_body")
+        self.assertNotIn("intact_visual", projected["fracture_response"])
+
+    def test_mass_spring_cloth_accepts_multiple_static_and_kinematic_analytic_colliders(self) -> None:
+        source = load_case_spec_v2(
+            Path(__file__).resolve().parents[1] / "cases/smokes/taichi_cloth_drape_v2.json"
+        )
+        data = deepcopy(source.data)
+        data["backend_constraints"]["required_solver_capabilities"].append("kinematic_motion")
+        sphere = data["objects"][1]
+        sphere["physics"]["body_type"] = "kinematic"
+        sphere["kinematic_motion"] = {
+            "interpolation": "linear",
+            "keyframes": [
+                {"time_s": 0.0, "position_m": [0.1, -0.04, 0.48]},
+                {"time_s": 1.0, "position_m": [0.3, -0.04, 0.48]},
+            ],
+        }
+        box = deepcopy(sphere)
+        box.update({"id": "box", "geometry": {"shape_hint": "box", "approx_size_m": [0.8, 0.6, 0.2]}})
+        box["physics"]["body_type"] = "static"
+        box.pop("kinematic_motion")
+        cylinder = deepcopy(box)
+        cylinder.update({"id": "cylinder", "geometry": {"shape_hint": "cylinder", "approx_size_m": [0.4, 0.4, 0.8]}})
+        data["objects"][2:2] = [box, cylinder]
+
+        runtime = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data))
+
+        colliders = [obj for obj in runtime.data["objects"] if obj["role"] == "rigid_collider"]
+        self.assertEqual([obj["shape"] for obj in colliders], ["sphere", "box", "cylinder"])
+        self.assertEqual(colliders[0]["kinematic_motion"], sphere["kinematic_motion"])
+
+    def test_mass_spring_cloth_rejects_ambiguous_collider_contracts(self) -> None:
+        source = load_case_spec_v2(
+            Path(__file__).resolve().parents[1] / "cases/smokes/taichi_cloth_drape_v2.json"
+        )
+        data = deepcopy(source.data)
+        collider = data["objects"][1]
+        collider["geometry"]["shape_hint"] = "mesh"
+        collider["physics"]["body_type"] = "dynamic"
+        collider["physics"]["collision_required"] = True
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        codes = {issue.code for issue in context.exception.issues}
+        self.assertIn("unsupported_cloth_collider_shape", codes)
+        self.assertIn("invalid_cloth_collider_body_type", codes)
+        self.assertIn("invalid_cloth_collider_collision_contract", codes)
+
+    def test_shared_wind_field_validates_and_projects_for_rigid_and_cloth(self) -> None:
+        for filename in ("aerodynamic_wind_rigid_v1.json", "taichi_cloth_wind_v2.json"):
+            source = load_case_spec_v2(Path(__file__).resolve().parents[1] / "cases" / "smokes" / filename)
+            runtime = compile_case_spec_v2_runtime(source)
+            wind = next(obj for obj in runtime.data["objects"] if obj["role"] == "wind_field")
+            self.assertEqual(wind["solver"]["type"], "aerodynamic_wind")
+            self.assertTrue(wind["solver"]["targets"])
+
+    def test_wind_field_rejects_backend_specific_or_unknown_targets(self) -> None:
+        source = load_case_spec_v2(
+            Path(__file__).resolve().parents[1] / "cases" / "smokes" / "aerodynamic_wind_rigid_v1.json"
+        )
+        data = deepcopy(source.data)
+        wind = next(obj for obj in data["objects"] if obj["role"] == "wind_field")
+        wind["solver"]["cloth_wind_mode"] = "special"
+        wind["solver"]["targets"][0]["object"] = "missing"
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        codes = {issue.code for issue in context.exception.issues}
+        self.assertIn("unknown_wind_field_fields", codes)
+        self.assertIn("unknown_object_reference", codes)
+
+    def kinematic_motion_case(self) -> dict:
+        data = case_spec_v2_fixture()
+        data["backend_constraints"]["allowed_solvers"] = ["ue"]
+        data["backend_constraints"]["required_solver_capabilities"].append("kinematic_motion")
+        platform = data["objects"][2]
+        platform["physics"]["body_type"] = "kinematic"
+        platform["kinematic_motion"] = {
+            "interpolation": "linear",
+            "keyframes": [
+                {"time_s": 0.0, "position_m": [0.0, 0.0, 0.0]},
+                {"time_s": 1.0, "position_m": [0.5, 0.0, 0.0]},
+                {"time_s": 2.0, "position_m": [0.5, 0.0, 0.0]},
+            ],
+        }
+        return data
+
+    def test_kinematic_motion_validates_and_projects(self) -> None:
+        data = self.kinematic_motion_case()
+
+        runtime = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data))
+
+        self.assertEqual(runtime.data["objects"][2]["kinematic_motion"], data["objects"][2]["kinematic_motion"])
+
+    def test_kinematic_motion_requires_capability_body_and_ordered_initial_keyframe(self) -> None:
+        data = self.kinematic_motion_case()
+        data["backend_constraints"]["required_solver_capabilities"].remove("kinematic_motion")
+        data["objects"][2]["physics"]["body_type"] = "static"
+        data["objects"][2]["kinematic_motion"]["keyframes"][0] = {
+            "time_s": 0.5,
+            "position_m": [0.1, 0.0, 0.0],
+        }
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        codes = {issue.code for issue in context.exception.issues}
+        self.assertIn("kinematic_motion_capability_missing", codes)
+        self.assertIn("kinematic_motion_requires_kinematic_body", codes)
+        self.assertIn("kinematic_motion_must_start_at_zero", codes)
+        self.assertIn("kinematic_motion_initial_position_mismatch", codes)
+
     def driven_constraint_case(self) -> dict:
         data = case_spec_v2_fixture()
         data["backend_constraints"]["required_solver_capabilities"].append("rigid_constraints")
@@ -63,6 +257,49 @@ class CaseSpecV2Tests(unittest.TestCase):
         runtime = compile_case_spec_v2_runtime(case)
 
         self.assertEqual(runtime.data["constraints"], data["constraints"])
+
+    def test_unilateral_distance_spring_validates_and_projects(self) -> None:
+        data = self.driven_constraint_case()
+        constraint = data["constraints"][0]
+        constraint["linear_motion"] = {"x": "free", "y": "free", "z": "free"}
+        constraint.pop("linear_drive")
+        constraint["unilateral_distance_spring"] = {
+            "rest_length_m": 0.8,
+            "stiffness_n_m": 45.0,
+            "damping_n_s_m": 3.0,
+        }
+
+        runtime = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data))
+
+        self.assertEqual(runtime.data["constraints"][0]["unilateral_distance_spring"], constraint["unilateral_distance_spring"])
+
+    def test_unilateral_distance_spring_requires_free_axes_and_known_fields(self) -> None:
+        data = self.driven_constraint_case()
+        data["constraints"][0]["unilateral_distance_spring"] = {
+            "rest_length_m": 0.8,
+            "stiffness_n_m": 45.0,
+            "damping_n_s_m": 3.0,
+            "unsupported": True,
+        }
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        codes = {issue.code for issue in context.exception.issues}
+        self.assertIn("unilateral_distance_spring_requires_free_linear_axes", codes)
+        self.assertIn("unilateral_distance_spring_with_linear_drive", codes)
+        self.assertIn("unknown_unilateral_distance_spring_fields", codes)
+
+    def test_fixed_waypoint_path_length_spring_smoke_validates_and_projects(self) -> None:
+        source = load_case_spec_v2(
+            Path(__file__).resolve().parents[1] / "cases/smokes/fixed_waypoint_path_length_spring_v1.json"
+        )
+
+        runtime = compile_case_spec_v2_runtime(source)
+        spring = runtime.data["constraints"][0]["unilateral_path_length_spring"]
+
+        self.assertEqual(spring["fixed_waypoint_m"], [0.0, 0.0, 1.1])
+        self.assertEqual(spring["rest_length_m"], 1.7)
 
     def test_constraint_drive_rejects_locked_axis_and_unknown_field(self) -> None:
         data = self.driven_constraint_case()
@@ -403,6 +640,50 @@ class CaseSpecV2Tests(unittest.TestCase):
         acquisition["provider_hint"] = "poly_haven"
         validate_agent_case_spec_contract(case_spec_v2_from_dict(data).data)
 
+    def test_open_conical_frustum_requires_exact_bounds_and_static_asset_collision(self) -> None:
+        data = case_spec_v2_fixture()
+        subject = data["objects"][0]
+        subject["geometry"] = {
+            "shape_hint": "open_conical_frustum",
+            "approx_size_m": [0.8, 0.8, 0.6],
+            "shape_parameters": {"top_diameter_m": 0.8, "bottom_diameter_m": 0.12},
+        }
+        subject["physics"].update({"body_type": "static", "collision_required": True})
+        subject["asset"] = {
+            "description": "open conical frustum collision shell",
+            "resource_kind": "mesh_3d",
+            "must": {"geometry_type": "open_conical_frustum"},
+            "acquisition": {
+                "route": "procedural_generation",
+                "requirement": "required",
+                "origin": "user_explicit",
+                "provider_hint": "open_conical_frustum_mesh_v1",
+                "reference_inputs": [],
+                "fallback_order": [],
+            },
+        }
+
+        case = case_spec_v2_from_dict(data)
+        validate_agent_case_spec_contract(case.data)
+        projected = compile_case_spec_v2_runtime(case).data
+        self.assertEqual(projected["objects"][0]["collider"], "mesh")
+
+        for field, value, expected_code in (
+            ("body_type", "dynamic", "open_conical_frustum_requires_static_body"),
+            ("collision_required", False, "open_conical_frustum_requires_collision"),
+        ):
+            invalid = deepcopy(data)
+            invalid["objects"][0]["physics"][field] = value
+            with self.subTest(field=field), self.assertRaises(CaseSpecV2ValidationError) as context:
+                case_spec_v2_from_dict(invalid)
+            self.assertIn(expected_code, {issue.code for issue in context.exception.issues})
+
+        invalid_bounds = deepcopy(data)
+        invalid_bounds["objects"][0]["geometry"]["approx_size_m"] = [0.7, 0.7, 0.6]
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(invalid_bounds)
+        self.assertIn("invalid_open_conical_frustum_bounds", {issue.code for issue in context.exception.issues})
+
     def test_agent_contract_rejects_mechanical_relations(self) -> None:
         data = case_spec_v2_fixture()
         data["relations"].append({"type": "hinged_to", "source": "cue_ball", "target": "floor"})
@@ -591,12 +872,81 @@ class CaseSpecV2Tests(unittest.TestCase):
                 "asset_geometry_match": True,
             },
         }
+        data["objects"][2]["initial_state"]["position_m"] = [0.0, 0.0, -0.025]
+        legacy_data = deepcopy(data)
+        data["objects"][1]["solver"].pop("transform")
 
         projection = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data)).data
 
         self.assertEqual(projection["solver_scene"], data["solver_scene"])
         self.assertEqual(projection["workspace_bounds_m"], data["workspace_bounds_m"])
-        self.assertEqual(projection["objects"][1]["solver"], data["objects"][1]["solver"])
+        self.assertEqual(
+            projection["objects"][1]["solver"]["transform"],
+            {
+                "position_m": [0.0, 0.0, 0.09],
+                "euler_xyz_deg": [0.0, 0.0, 0.0],
+                "ue_rotation_pyr_deg": [-0.0, -0.0, 0.0],
+                "scale": [1.0, 1.0, 1.0],
+            },
+        )
+
+        stale_legacy = deepcopy(legacy_data)
+        stale_legacy["objects"][1]["initial_state"]["position_m"] = [0.0, 0.0, 0.12]
+        stale_legacy["objects"][1]["initial_state"]["rotation_deg"] = [10.0, 20.0, 30.0]
+        stale_projection = compile_case_spec_v2_runtime(case_spec_v2_from_dict(stale_legacy)).data
+        self.assertEqual(stale_projection["objects"][1]["solver"]["transform"]["position_m"], [0.0, 0.0, 0.12])
+        self.assertEqual(stale_projection["objects"][1]["solver"]["transform"]["euler_xyz_deg"], [10.0, 20.0, 30.0])
+        self.assertEqual(stale_projection["objects"][1]["solver"]["transform"]["ue_rotation_pyr_deg"], [-20.0, -30.0, 10.0])
+
+        legacy_without_initial = deepcopy(legacy_data)
+        legacy_without_initial["objects"][2].pop("initial_state")
+        migrated = case_spec_v2_from_dict(legacy_without_initial)
+        self.assertNotIn("initial_state", migrated.data["objects"][2])
+        migrated_projection = compile_case_spec_v2_runtime(migrated).data
+        self.assertEqual(migrated_projection["objects"][2]["initial_position_m"], [0.0, 0.0, -0.025])
+        self.assertEqual(migrated_projection["objects"][2]["initial_rotation_deg"], [0.0, 0.0, 0.0])
+
+        circulation = deepcopy(data)
+        circulation["solver_scene"]["measurements"].append(
+            {
+                "id": "circulation",
+                "type": "mean_tangential_speed",
+                "center_m": [0.0, 0.0, 0.0],
+                "axis": [0.0, 0.0, 1.0],
+            }
+        )
+        circulation["solver_scene"]["assertions"].append(
+            {
+                "id": "circulation_present",
+                "measurement_id": "circulation",
+                "reduction": "max",
+                "operator": ">=",
+                "value": 0.01,
+            }
+        )
+        case_spec_v2_from_dict(circulation)
+
+        emitted = deepcopy(data)
+        emitted["objects"][0]["solver"] = {
+            "material_model": "sph_liquid",
+            "emitter": {
+                "shape": "circle",
+                "position_m": [0.0, 0.0, 0.5],
+                "direction": [0.0, 0.0, -1.0],
+                "diameter_m": 0.03,
+                "speed_m_s": 0.8,
+                "start_time_s": 0.0,
+                "end_time_s": 1.0,
+                "max_particles": 4000,
+            },
+        }
+        case_spec_v2_from_dict(emitted)
+
+        ambiguous_source = deepcopy(emitted)
+        ambiguous_source["objects"][0]["solver"]["initial_volume"] = data["objects"][0]["solver"]["initial_volume"]
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(ambiguous_source)
+        self.assertIn("invalid_rigid_sph_fluid_source", {issue.code for issue in context.exception.issues})
 
         dynamic = deepcopy(data)
         dynamic["objects"][1]["solver"]["mobility"] = "dynamic"
@@ -717,6 +1067,22 @@ class CaseSpecV2Tests(unittest.TestCase):
             case_spec_v2_from_dict(data)
         self.assertIn("invalid_type", {issue.code for issue in context.exception.issues})
 
+    def test_visual_material_path_is_validated_and_projected(self) -> None:
+        data = case_spec_v2_fixture()
+        data["objects"][0]["visual_material_path"] = "/Game/Materials/M_Oak.M_Oak"
+
+        projection = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data))
+
+        self.assertEqual(
+            projection.data["objects"][0]["visual_material_path"],
+            "/Game/Materials/M_Oak.M_Oak",
+        )
+
+        data["objects"][0]["visual_material_path"] = "Materials/M_Oak"
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("invalid_ue_asset_path", {issue.code for issue in context.exception.issues})
+
     def test_uniform_asset_scale_policy_requires_a_target_size(self) -> None:
         data = case_spec_v2_fixture()
         geometry = data["objects"][0]["geometry"]
@@ -739,12 +1105,14 @@ class CaseSpecV2Tests(unittest.TestCase):
                 "origin": "user_explicit",
                 "reference_inputs": [],
                 "fallback_order": [],
+                "generation_prompt": "A realistic isolated sports ball with clean round geometry.",
             },
         }
         case = case_spec_v2_from_dict(data)
         acquisition = case.data["objects"][0]["asset"]["acquisition"]
         self.assertEqual(acquisition["route"], "model_generation")
         self.assertEqual(acquisition["reference_inputs"], [])
+        self.assertIn("sports ball", acquisition["generation_prompt"])
 
     def test_reference_image_can_be_generation_only_and_not_similarity_search(self) -> None:
         data = case_spec_v2_fixture()
@@ -769,7 +1137,7 @@ class CaseSpecV2Tests(unittest.TestCase):
         reference = case.data["objects"][0]["asset"]["acquisition"]["reference_inputs"][0]
         self.assertFalse(reference["allow_similarity_search"])
 
-    def test_meshy_texture_prompt_is_optional_and_limited_to_600_characters(self) -> None:
+    def test_meshy_generation_and_texture_prompts_are_limited_to_800_characters(self) -> None:
         data = case_spec_v2_fixture()
         data["objects"][0]["asset"] = {
             "description": "a generated ball",
@@ -781,6 +1149,7 @@ class CaseSpecV2Tests(unittest.TestCase):
                 "provider_hint": "meshy",
                 "reference_inputs": [],
                 "fallback_order": [],
+                "generation_prompt": "A realistic isolated wooden ball.",
                 "texture_prompt": "matte red painted wood",
             },
         }
@@ -791,7 +1160,7 @@ class CaseSpecV2Tests(unittest.TestCase):
             "matte red painted wood",
         )
 
-        acquisition["texture_prompt"] = "x" * 601
+        acquisition["texture_prompt"] = "x" * 801
         with self.assertRaises(CaseSpecV2ValidationError) as context:
             case_spec_v2_from_dict(data)
         self.assertIn("texture_prompt_too_long", {issue.code for issue in context.exception.issues})
@@ -801,6 +1170,13 @@ class CaseSpecV2Tests(unittest.TestCase):
         with self.assertRaises(CaseSpecV2ValidationError) as context:
             case_spec_v2_from_dict(data)
         self.assertIn("texture_prompt_route_mismatch", {issue.code for issue in context.exception.issues})
+
+        acquisition["route"] = "model_generation"
+        acquisition["texture_prompt"] = "red"
+        acquisition["generation_prompt"] = "x" * 801
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("generation_prompt_too_long", {issue.code for issue in context.exception.issues})
 
     def test_llm_inferred_route_cannot_become_a_hard_requirement(self) -> None:
         data = case_spec_v2_fixture()
@@ -1017,6 +1393,126 @@ class CaseSpecV2Tests(unittest.TestCase):
         self.assertEqual(ball["release_time_s"], 0.8)
         self.assertEqual(ball["release_velocity_m_s"], [1.2, 0.0, 0.0])
         self.assertEqual(ball["release_angular_velocity_deg_s"], [0.0, 57.29577951308232, 0.0])
+
+    def test_continuous_force_requires_dynamic_target_vector_and_time_window(self) -> None:
+        data = case_spec_v2_fixture()
+        data["backend_constraints"]["required_solver_capabilities"].append("continuous_external_force")
+        data["forces"] = [
+            {
+                "id": "wind_force",
+                "type": "continuous_force",
+                "object": "cue_ball",
+                "vector_n": [1.5, 0.0, 0.0],
+                "start_time_s": 0.25,
+                "end_time_s": 1.75,
+            }
+        ]
+
+        source = case_spec_v2_from_dict(data)
+        projected = compile_case_spec_v2_runtime(source).data
+
+        self.assertEqual(projected["forces"], data["forces"])
+
+        invalid = deepcopy(data)
+        invalid["forces"][0]["object"] = "floor"
+        invalid["forces"][0]["vector_n"] = [0.0, 0.0, 0.0]
+        invalid["forces"][0]["end_time_s"] = 9.0
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(invalid)
+        self.assertTrue(
+            {"force_target_not_dynamic", "zero_force", "force_window_outside_scene"}.issubset(
+                {issue.code for issue in context.exception.issues}
+            )
+        )
+
+    def test_radial_force_requires_generic_capability_and_distinct_source(self) -> None:
+        data = case_spec_v2_fixture()
+        data["backend_constraints"]["allowed_solvers"] = ["ue"]
+        data["backend_constraints"]["required_solver_capabilities"].append("radial_field_force")
+        data["forces"] = [{
+            "id": "point_field",
+            "type": "radial_force",
+            "source": "floor",
+            "object": "cue_ball",
+            "strength_n_m2": 0.08,
+            "softening_distance_m": 0.1,
+            "max_distance_m": 2.0,
+            "start_time_s": 0.0,
+            "end_time_s": 2.0,
+        }]
+
+        projected = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data)).data
+
+        self.assertEqual(projected["forces"], data["forces"])
+
+        invalid = deepcopy(data)
+        invalid["backend_constraints"]["required_solver_capabilities"].remove("radial_field_force")
+        invalid["forces"][0]["source"] = "cue_ball"
+        invalid["forces"][0]["strength_n_m2"] = 0.0
+        invalid["forces"][0]["max_distance_m"] = 0.05
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(invalid)
+        self.assertTrue(
+            {
+                "radial_field_force_capability_missing",
+                "radial_force_same_body",
+                "zero_force",
+                "invalid_radial_force_range",
+            }.issubset({issue.code for issue in context.exception.issues})
+        )
+
+    def test_compliant_sphere_contact_validates_and_projects(self) -> None:
+        data = case_spec_v2_fixture()
+        data["backend_constraints"]["required_solver_capabilities"].append("compliant_contact")
+        data["backend_constraints"]["allowed_solvers"] = ["ue"]
+        data["timebase"]["physics_hz"] = 360
+        data["timebase"]["observation_fps"] = 30
+        for obj in data["objects"][:2]:
+            obj["physics"]["mass_kg"] = 0.62
+            obj["physics"]["collision_geometry"] = {
+                "shape": "sphere",
+                "size_m": [0.176, 0.176, 0.176],
+            }
+        data["compliant_contacts"] = [{
+            "id": "ball_pair",
+            "body_a": "cue_ball",
+            "body_b": "target_ball",
+            "activation_distance_m": 0.18,
+            "stiffness_n_m": 50000.0,
+            "damping_n_s_m": 5.0,
+        }]
+
+        projected = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data)).data
+
+        self.assertEqual(projected["compliant_contacts"], data["compliant_contacts"])
+
+    def test_compliant_contact_rejects_missing_capability_and_hard_stop_clearance(self) -> None:
+        data = case_spec_v2_fixture()
+        data["backend_constraints"]["allowed_solvers"] = ["ue"]
+        data["timebase"]["physics_hz"] = 360
+        data["timebase"]["observation_fps"] = 30
+        for obj in data["objects"][:2]:
+            obj["physics"]["mass_kg"] = 0.62
+            obj["physics"]["collision_geometry"] = {
+                "shape": "sphere",
+                "size_m": [0.18, 0.18, 0.18],
+            }
+        data["compliant_contacts"] = [{
+            "id": "ball_pair",
+            "body_a": "cue_ball",
+            "body_b": "target_ball",
+            "activation_distance_m": 0.18,
+            "stiffness_n_m": 200000.0,
+            "damping_n_s_m": 5.0,
+        }]
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+
+        codes = {issue.code for issue in context.exception.issues}
+        self.assertIn("compliant_contact_capability_missing", codes)
+        self.assertIn("compliant_contact_requires_hard_stop_clearance", codes)
+        self.assertIn("compliant_contact_explicit_step_unstable", codes)
 
     def test_release_event_infers_active_body_without_language_specific_role(self) -> None:
         data = case_spec_v2_fixture()

@@ -4,11 +4,157 @@ from pathlib import Path
 from typing import Any
 
 from harness.core.artifact_schema import read_json, write_json
+from harness.core.case_spec import load_case_spec
+from harness.core.runtime_case import RUNTIME_CASE_SCHEMA_VERSION, RuntimeCase
+from harness.core.scene_layout import rotate_local_vector_ue
 from harness.runtime.fluid_surface_adapter import convert_obj_m_rh_to_cm_lh, file_sha256
+from harness.runtime.kinematic_motion import sample_linear_kinematic_position, sample_linear_kinematic_rotation
 
 
 class DeformableSurfaceAdapterError(RuntimeError):
     pass
+
+
+def load_deformable_case_data(path: str | Path) -> dict[str, Any]:
+    raw = read_json(Path(path))
+    if not isinstance(raw, dict):
+        raise ValueError("deformable case root must be an object")
+    if raw.get("schema_version") == RUNTIME_CASE_SCHEMA_VERSION:
+        return RuntimeCase(raw).data
+    if raw.get("schema_version") == "harness_case_spec_v1":
+        return load_case_spec(path).data
+    raise ValueError("deformable backend requires a runtime CaseSpec V2 or legacy CaseSpec V1")
+
+
+def object_position_m(
+    obj: dict[str, Any],
+    default: list[float],
+    *,
+    legacy_field: str = "position_m",
+) -> list[float]:
+    value = obj.get("initial_position_m")
+    if value is None:
+        value = obj.get(legacy_field)
+    return [float(component) for component in (value if value is not None else default)]
+
+
+def support_height_m(obj: dict[str, Any]) -> float:
+    if obj.get("z_m") is not None:
+        return float(obj["z_m"])
+    return object_position_m(obj, [0.0, 0.0, 0.0])[2]
+
+
+def objects_with_role(case_data: dict[str, Any], role: str) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in case_data.get("objects") or []
+        if isinstance(item, dict) and item.get("role") == role
+    ]
+
+
+def deformable_analytic_colliders(case_data: dict[str, Any]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for obj in objects_with_role(case_data, "rigid_collider"):
+        shape = str(obj.get("shape") or "").casefold()
+        size = [float(value) for value in obj.get("size_m") or []]
+        if shape not in {"sphere", "box", "cylinder"}:
+            raise ValueError(f"unsupported deformable analytic collider shape: {shape}")
+        if len(size) != 3 or min(size) <= 0.0:
+            raise ValueError("deformable analytic collider size_m must contain three positive values")
+        rotation = [float(value) for value in obj.get("initial_rotation_deg") or [0.0, 0.0, 0.0]]
+        world_from_local = [
+            rotate_local_vector_ue(
+                [1.0 if axis == basis else 0.0 for axis in range(3)],
+                rotation,
+            )
+            for basis in range(3)
+        ]
+        result.append({
+            "id": str(obj.get("id") or ""),
+            "shape": shape,
+            "size_m": size,
+            "initial_position_m": object_position_m(obj, [0.0, 0.0, 0.0]),
+            "initial_rotation_deg": rotation,
+            "world_from_local_columns": world_from_local,
+            "dynamic_friction": object_material_number(obj, "dynamic_friction", legacy_field="friction"),
+            "restitution": object_material_number(obj, "restitution"),
+            "kinematic_motion": dict(obj["kinematic_motion"]) if isinstance(obj.get("kinematic_motion"), dict) else None,
+        })
+    return result
+
+
+def collider_position_m(collider: dict[str, Any], time_s: float) -> list[float]:
+    motion = collider.get("kinematic_motion")
+    if isinstance(motion, dict):
+        return sample_linear_kinematic_position(motion, time_s)
+    return [float(value) for value in collider["initial_position_m"]]
+
+
+def collider_rotation_deg(collider: dict[str, Any], time_s: float) -> list[float]:
+    motion = collider.get("kinematic_motion")
+    initial = [float(value) for value in collider.get("initial_rotation_deg") or [0.0, 0.0, 0.0]]
+    if isinstance(motion, dict):
+        return sample_linear_kinematic_rotation(motion, time_s, initial)
+    return initial
+
+
+def collider_world_from_local_columns(collider: dict[str, Any], time_s: float) -> list[list[float]]:
+    rotation = collider_rotation_deg(collider, time_s)
+    return [
+        rotate_local_vector_ue(
+            [1.0 if axis == basis else 0.0 for axis in range(3)],
+            rotation,
+        )
+        for basis in range(3)
+    ]
+
+
+def object_material_number(
+    obj: dict[str, Any] | None,
+    field: str,
+    *,
+    legacy_field: str | None = None,
+) -> float:
+    if not obj:
+        return 0.0
+    material = obj.get("material") if isinstance(obj.get("material"), dict) else {}
+    value = material.get(field)
+    if value is None and legacy_field is not None:
+        value = obj.get(legacy_field)
+    if value is None:
+        value = obj.get(field)
+    return float(value or 0.0)
+
+
+def wind_field_parameters(wind: dict[str, Any] | None, target_id: str) -> dict[str, Any] | None:
+    if not wind:
+        return None
+    solver = wind.get("solver") if isinstance(wind.get("solver"), dict) else {}
+    if solver.get("type") == "aerodynamic_wind":
+        target = next(
+            (
+                item
+                for item in solver.get("targets") or []
+                if isinstance(item, dict) and str(item.get("object") or "") == target_id
+            ),
+            None,
+        )
+        if target is None:
+            return None
+        return {
+            "velocity_m_s": [float(value) for value in solver["velocity_m_s"]],
+            "air_density_kg_m3": float(solver["air_density_kg_m3"]),
+            "drag_coefficient": float(target["drag_coefficient"]),
+            "gust_amplitude": float(solver["gust_amplitude"]),
+            "gust_frequency_hz": float(solver["gust_frequency_hz"]),
+        }
+    return {
+        "velocity_m_s": [float(value) for value in wind.get("velocity_m_s") or [0.0, 0.0, 0.0]],
+        "air_density_kg_m3": float(wind.get("air_density_kg_m3") or 1.225),
+        "drag_coefficient": float(wind.get("drag_coefficient") or 1.0),
+        "gust_amplitude": float(wind.get("gust_amplitude") or 0.0),
+        "gust_frequency_hz": float(wind.get("gust_frequency_hz") or 0.0),
+    }
 
 
 def prepare_ue_deformable_replay(

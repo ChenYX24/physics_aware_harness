@@ -7,9 +7,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from harness.assets.asset_intent import intent_from_object
 from harness.assets.asset_intent_compiler import CompiledAssetIntent, local_catalog_allowed, provider_route_required
 from harness.assets.asset_registry import AssetRegistry, candidate_matches_search_intent
-from harness.assets.search_intent import SearchIntent
+from harness.assets.search_intent import SearchIntent, analytic_search_intent_from_asset_intent, search_intent_from_asset_intent
 from harness.assets.sqlite_catalog import effective_license_tier, reference_license_authorized
 
 
@@ -18,7 +19,7 @@ def resolve_asset_intents(
     *,
     top_k: int = 5,
     registry: AssetRegistry | None = None,
-    compiled_intents: list[CompiledAssetIntent],
+    compiled_intents: list[CompiledAssetIntent] | None = None,
     provider_results: dict[tuple[str, str], dict[str, Any]] | None = None,
     target_backend: str = "unreal",
     allow_local_preview: bool | None = None,
@@ -34,6 +35,27 @@ def resolve_asset_intents(
         ).casefold() in {"1", "true", "yes"}
     objects = [obj for obj in case_spec.get("objects", []) if isinstance(obj, dict)]
     objects_by_id = {str(obj.get("id") or ""): obj for obj in objects if obj.get("id")}
+    compiled_intents_provided = compiled_intents is not None
+    if compiled_intents is None:
+        compiled_intents = []
+        for obj in objects:
+            object_id = str(obj.get("id") or "")
+            if not object_id:
+                continue
+            legacy_intent = intent_from_object(obj)
+            explicit_proxy = bool(obj.get("force_analytic_proxy") or obj.get("asset_policy") == "analytic_proxy")
+            compiled_intents.append(
+                CompiledAssetIntent(
+                    object_id=object_id,
+                    legacy_intent=legacy_intent,
+                    search_intent=(
+                        analytic_search_intent_from_asset_intent(legacy_intent, obj, backend=target_backend)
+                        if explicit_proxy
+                        else search_intent_from_asset_intent(legacy_intent, backend=target_backend)
+                    ),
+                    acquisition={},
+                )
+            )
     missing_object_ids = [item.object_id for item in compiled_intents if item.object_id not in objects_by_id]
     if missing_object_ids:
         raise ValueError(f"compiled asset intents reference missing runtime objects: {missing_object_ids}")
@@ -150,7 +172,7 @@ def resolve_asset_intents(
                 else None
             ),
         }
-        if acquisition is not None:
+        if compiled_intents_provided:
             provider_status = str(provider_result.get("status")) if provider_result else None
             row["acquisition"] = {
                 "requested": dict(acquisition),
@@ -217,16 +239,17 @@ def resolve_asset_intents(
         },
         "assets": rows,
     }
-    result["asset_intent_compiler"] = {
-        "schema_version": "harness_compiled_asset_intents_v1",
-        "target_backend": target_backend,
-        "intent_count": len(compiled_intents),
-        "provider_required_count": sum(
-            1
-            for row in rows
-            if (row.get("acquisition") or {}).get("status") == "provider_required"
-        ),
-    }
+    if compiled_intents_provided:
+        result["asset_intent_compiler"] = {
+            "schema_version": "harness_compiled_asset_intents_v1",
+            "target_backend": target_backend,
+            "intent_count": len(compiled_intents),
+            "provider_required_count": sum(
+                1
+                for row in rows
+                if (row.get("acquisition") or {}).get("status") == "provider_required"
+            ),
+        }
     if scene_map:
         result["scene_map"] = scene_map
     return result

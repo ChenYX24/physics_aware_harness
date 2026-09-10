@@ -92,6 +92,7 @@ def main() -> int:
     )
     if rigid_scene_mode:
         declared_rigid_bodies = [item for item in environment.get("rigid_bodies") or [] if isinstance(item, dict)]
+        rendered_rigid_bodies = [item for item in declared_rigid_bodies if item.get("visible") is not False]
         placement_by_id = runtime_placement_by_object_id(runtime_actor_placement)
         asset_geometry_match = bool(declared_rigid_bodies) and all(
             ((item.get("collision") or {}).get("asset_geometry_match") is True)
@@ -100,6 +101,7 @@ def main() -> int:
         )
     else:
         declared_rigid_bodies = []
+        rendered_rigid_bodies = []
         if not all((args.basin_asset, args.basin_geometry, basin_scale_xyz, args.basin_pivot_to_rim_m)):
             raise SystemExit("legacy basin replay requires --basin-asset/geometry/scale-or-scale-xyz/pivot-to-rim-m")
         asset_geometry_match = args.basin_geometry == solver_basin_geometry
@@ -317,7 +319,7 @@ def main() -> int:
         "surface_replay_manifest": str(Path(args.replay_manifest).resolve()),
         "particle_cache": str(Path(args.particle_cache).resolve()),
         "render_assets": {
-            "rigid_bodies": [str((item.get("asset") or {}).get("ue_path")) for item in declared_rigid_bodies],
+            "rigid_bodies": [str((item.get("asset") or {}).get("ue_path")) for item in rendered_rigid_bodies],
             "basin": None if rigid_scene_mode else args.basin_asset,
             "rigid_objects": [item["ue5_path"] for item in rigid_runtime_objects],
         },
@@ -486,7 +488,7 @@ def main() -> int:
     native_summary = read_json(native_output / "summary.json")
     pose_registration = runtime_pose_registration_report(
         native_summary,
-        [str(body.get("id") or "") for body in declared_rigid_bodies],
+        [str(body.get("id") or "") for body in rendered_rigid_bodies],
     ) if rigid_scene_mode else {
         "schema_version": "harness_runtime_pose_registration_report_v1",
         "status": "not_required",
@@ -748,9 +750,29 @@ def replay_scene_bounds(environment: dict, *, render_z_offset_m: float) -> dict:
 
 
 def fluid_visual_parameters(case_spec: dict) -> dict:
+    color_rgb = [0.03, 0.28, 0.48]
+    fluid_objects = [
+        obj
+        for obj in case_spec.get("objects") or []
+        if isinstance(obj, dict) and obj.get("role") == "fluid"
+    ]
+    if len(fluid_objects) == 1 and fluid_objects[0].get("fixed_material_color") is True:
+        declared_color = fluid_objects[0].get("color_rgb")
+        if (
+            isinstance(declared_color, list)
+            and len(declared_color) == 3
+            and all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+                and 0.0 <= float(value) <= 1.0
+                for value in declared_color
+            )
+        ):
+            color_rgb = [float(value) for value in declared_color]
     return {
         "generated_material_name": "M_Harness_UnifiedFluid",
-        "color_rgb": [0.03, 0.28, 0.48],
+        "color_rgb": color_rgb,
         "roughness": 0.08,
         "opacity": 0.32,
         "refraction": 1.333,
@@ -871,6 +893,8 @@ def rigid_body_runtime_objects(
     for body in environment.get("rigid_bodies") or []:
         if not isinstance(body, dict):
             continue
+        if body.get("visible") is False:
+            continue
         body_id = str(body.get("id") or "")
         binding = placement_by_id.get(body_id)
         if not isinstance(binding, dict):
@@ -906,7 +930,7 @@ def rigid_body_runtime_objects(
                 "pose_anchor": "solver_to_visual",
                 "solver_to_visual": solver_to_visual,
                 "preserve_material": True,
-                "visual_material_path": str(asset.get("material_path") or ""),
+                "visual_material_path": str(handoff_asset.get("material_path") or ""),
                 "segmentation_identity": str(body.get("id") or "rigid_body"),
                 "asset_geometry_match": ((body.get("collision") or {}).get("asset_geometry_match") is True),
             },

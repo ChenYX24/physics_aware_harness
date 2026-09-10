@@ -151,6 +151,8 @@ def first_bad_constraint_binding(
         for field in (
             "linear_motion",
             "linear_limit_m",
+            "unilateral_distance_spring",
+            "unilateral_path_length_spring",
             "angular_motion",
             "angular_limits_deg",
             "linear_drive",
@@ -261,9 +263,10 @@ def first_bad_physics_binding(bindings: list[dict[str, Any]]) -> dict[str, Any] 
                     or render_binding.get("asset_path") != articulated.get("asset_path")
                     or render_binding.get("pose_source_type") != (articulated.get("pose_source") or {}).get("type")
                     or render_binding.get("root_transform_source_type") != (articulated.get("root_transform_source") or {}).get("type")
+                    or render_binding.get("movement_control_type") != (articulated.get("movement_control") or {}).get("type")
                     or render_binding.get("runtime_actor_class") != (
                         "Character"
-                        if (articulated.get("pose_source") or {}).get("type") == "animation_sequence"
+                        if isinstance(articulated.get("movement_control"), dict)
                         else "Actor"
                     )
                 ):

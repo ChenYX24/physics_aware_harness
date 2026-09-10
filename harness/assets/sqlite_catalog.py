@@ -178,17 +178,34 @@ class SQLiteCatalog:
                 "retrieval": {"eligible_count": 0, "channels": {}, "vector_status": "not_requested"},
             }
         abstained: dict[str, Any] | None = None
+        attempts: list[dict[str, Any]] = []
         for requested_category in taxonomy_relaxation_values(intent):
             detailed = self._search_one_category(intent, top_k=top_k, requested_category=requested_category)
+            attempts.append(
+                {
+                    "category": requested_category,
+                    "eligible_count": detailed["retrieval"].get("eligible_count", 0),
+                    "result_count": len(detailed["results"]),
+                    "vector_status": detailed["retrieval"].get("vector_status"),
+                    "match_status": detailed["retrieval"].get("match_decision", {}).get("status"),
+                }
+            )
             if detailed["results"]:
+                detailed["retrieval"]["taxonomy_attempts"] = attempts
                 return detailed
             if detailed["retrieval"].get("match_decision", {}).get("status") == "no_relevant_asset":
                 abstained = detailed
         if abstained is not None:
+            abstained["retrieval"]["taxonomy_attempts"] = attempts
             return abstained
         return {
             "results": [],
-            "retrieval": {"eligible_count": 0, "channels": {}, "vector_status": "no_candidates"},
+            "retrieval": {
+                "eligible_count": 0,
+                "channels": {},
+                "vector_status": "no_candidates",
+                "taxonomy_attempts": attempts,
+            },
         }
 
     def _search_one_category(
@@ -230,6 +247,8 @@ class SQLiteCatalog:
                     ).fetchone()[0]
                 )
             if eligible_count == 0:
+                match_decision = retrieval_match_decision({}, config=self.ranking_config)
+                match_decision["reason"] = "no_eligible_candidates"
                 return {
                     "results": [],
                     "retrieval": {
@@ -237,6 +256,8 @@ class SQLiteCatalog:
                         "eligible_count": 0,
                         "channels": {},
                         "vector_status": "hard_filter_empty",
+                        "ranking_config": self.ranking_config.schema_version,
+                        "match_decision": match_decision,
                     },
                 }
             if query:
@@ -352,31 +373,6 @@ class SQLiteCatalog:
             intent=intent,
             config=self.ranking_config,
         )
-        if not ranked and (_filterable_category(requested_category) or not query):
-            with closing(self.connect()) as connection:
-                fallback_rows = connection.execute(
-                    f"""
-                    SELECT a.asset_id, a.row_json
-                    FROM assets a
-                    WHERE {candidate_where}
-                    ORDER BY a.materialized DESC, a.asset_id
-                    LIMIT ?
-                    """,
-                    [*candidate_parameters, max(top_k * 4, top_k)],
-                ).fetchall()
-            assets = {str(row["asset_id"]): json.loads(str(row["row_json"])) for row in fallback_rows}
-            ranked = [
-                {
-                    "asset_id": str(row["asset_id"]),
-                    "rrf_score": 0.0,
-                    "rule_score": 0.0,
-                    "final_score": 0.0,
-                    "exact_priority": 0,
-                    "channels": {"category_fallback": {"rank": index + 1}},
-                    "rules": {},
-                }
-                for index, row in enumerate(fallback_rows)
-            ]
         selected = ranked[:top_k]
         return {
             "results": [{"asset": assets[row["asset_id"]], "score": row} for row in selected],
@@ -1201,12 +1197,10 @@ def _hard_filter_sql(intent: SearchIntent, *, requested_category: str | None) ->
             f"EXISTS (SELECT 1 FROM asset_sources s WHERE s.asset_id = a.asset_id AND lower(s.source_kind) IN ({placeholders}))"
         )
         parameters.extend(value.casefold() for value in values)
-    for field, column in (
-        ("asset_type", "a.asset_type"),
-        ("geometry_type", "a.asset_type"),
-    ):
-        if field in must:
-            _append_value_filter(clauses, parameters, column, must[field], negate=False)
+    if "asset_type" in must:
+        _append_value_filter(clauses, parameters, "a.asset_type", must["asset_type"], negate=False)
+    if "geometry_type" in must:
+        _append_geometry_filter(clauses, parameters, must["geometry_type"], negate=False)
     if "license_tier" in must:
         _append_value_filter(
             clauses,
@@ -1238,13 +1232,11 @@ def _hard_filter_sql(intent: SearchIntent, *, requested_category: str | None) ->
             f"EXISTS (SELECT 1 FROM asset_tags t WHERE t.asset_id = a.asset_id AND t.normalized_tag IN ({placeholders}))"
         )
         parameters.extend(normalize_search_value(value) for value in values)
-    for field, column in (
-        ("asset_type", "a.asset_type"),
-        ("geometry_type", "a.asset_type"),
-        ("license_tier", "a.license_tier"),
-    ):
+    for field, column in (("asset_type", "a.asset_type"), ("license_tier", "a.license_tier")):
         if field in intent.must_not:
             _append_value_filter(clauses, parameters, column, intent.must_not[field], negate=True)
+    if "geometry_type" in intent.must_not:
+        _append_geometry_filter(clauses, parameters, intent.must_not["geometry_type"], negate=True)
     if "class_name" in intent.must_not:
         values = _as_values(intent.must_not["class_name"])
         placeholders = ",".join("?" for _ in values)
@@ -1286,6 +1278,23 @@ def _append_value_filter(
     operator = "NOT IN" if negate else "IN"
     clauses.append(f"lower({column}) {operator} ({placeholders})")
     parameters.extend(value.casefold() for value in values)
+
+
+def _append_geometry_filter(
+    clauses: list[str], parameters: list[Any], raw_value: Any, *, negate: bool
+) -> None:
+    values = [value.casefold() for value in _as_values(raw_value)]
+    placeholders = ",".join("?" for _ in values)
+    match = (
+        f"(lower(coalesce(json_extract(a.row_json, '$.shape'), '')) IN ({placeholders}) "
+        f"OR lower(coalesce(json_extract(a.row_json, '$.collider'), '')) IN ({placeholders}) "
+        f"OR EXISTS (SELECT 1 FROM asset_tags t WHERE t.asset_id = a.asset_id "
+        f"AND t.normalized_tag IN ({placeholders})))"
+    )
+    clauses.append(f"NOT {match}" if negate else match)
+    parameters.extend(values)
+    parameters.extend(values)
+    parameters.extend(normalize_search_value(value) for value in values)
 
 
 def _as_values(value: Any) -> list[str]:
@@ -1356,7 +1365,12 @@ def _batches(values: list[dict[str, Any]], batch_size: int) -> Iterable[list[dic
 
 def _fts_query(value: str) -> str:
     tokens = [token for token in normalize_search_value(value).split() if token]
-    return " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"*' for token in tokens)
+    terms = [f'"{token.replace(chr(34), chr(34) * 2)}"*' for token in tokens]
+    conjunction = " AND ".join(terms)
+    if 2 <= len(tokens) <= 3 and all(token.isascii() and token.isalnum() for token in tokens):
+        compact = "".join(tokens)
+        return f'({conjunction}) OR "{compact}"*'
+    return conjunction
 
 
 def normalize_search_value(value: Any) -> str:

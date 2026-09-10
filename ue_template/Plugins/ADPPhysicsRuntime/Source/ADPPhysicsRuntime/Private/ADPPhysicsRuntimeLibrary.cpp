@@ -3,6 +3,13 @@
 #include "ADPPhysicsRuntimeDriver.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "EnhancedPlayerInput.h"
+#include "GameFramework/Character.h"
+#include "GameFramework/Actor.h"
+#include "GameFramework/PlayerController.h"
+#include "InputAction.h"
+#include "InputActionValue.h"
+#include "Misc/App.h"
 
 #if WITH_EDITOR
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -53,6 +60,32 @@ AADPPhysicsRuntimeDriver* UADPPhysicsRuntimeLibrary::SpawnPhysicsRuntimeDriver(U
 	}
 #endif
 	return Driver;
+}
+
+bool UADPPhysicsRuntimeLibrary::SetCharacterAimIntent(AActor* CharacterActor, bool bEnabled)
+{
+	ACharacter* Character = Cast<ACharacter>(CharacterActor);
+	APlayerController* Controller = Character != nullptr ? Cast<APlayerController>(Character->GetController()) : nullptr;
+	UEnhancedPlayerInput* PlayerInput = Controller != nullptr ? Cast<UEnhancedPlayerInput>(Controller->PlayerInput) : nullptr;
+	const UInputAction* AimAction = LoadObject<UInputAction>(nullptr, TEXT("/Game/Input/IA_Aim.IA_Aim"));
+	if (PlayerInput == nullptr || AimAction == nullptr)
+	{
+		return false;
+	}
+	PlayerInput->InjectInputForAction(AimAction, FInputActionValue(bEnabled));
+	return true;
+}
+
+bool UADPPhysicsRuntimeLibrary::ConfigureFixedFrameStep(double FixedDeltaSeconds)
+{
+	if (!FMath::IsFinite(FixedDeltaSeconds) || FixedDeltaSeconds <= 0.0)
+	{
+		return false;
+	}
+	FApp::SetFixedDeltaTime(FixedDeltaSeconds);
+	FApp::SetUseFixedTimeStep(true);
+	return FApp::UseFixedTimeStep()
+		&& FMath::IsNearlyEqual(FApp::GetFixedDeltaTime(), FixedDeltaSeconds, 1.e-9);
 }
 
 #if WITH_EDITOR

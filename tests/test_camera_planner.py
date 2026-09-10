@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import math
 import unittest
 
-from harness.runtime.camera_planner import SceneBounds, camera_plan_from_case_spec, plan_cameras_for_scene
+from harness.runtime.camera_planner import (
+    SceneBounds,
+    camera_plan_from_case_spec,
+    framing_fov,
+    plan_cameras_for_scene,
+)
 
 
 class CameraPlannerTests(unittest.TestCase):
@@ -29,12 +35,31 @@ class CameraPlannerTests(unittest.TestCase):
         self.assertEqual(event.dynamic_camera_profile, "damped_event_context_v1")
         self.assertEqual(event.camera_mode, "trajectory")
         self.assertEqual((event.subject_follow_location_gain, event.subject_follow_target_gain), (0.2, 0.1))
-        self.assertEqual(event.fov, 46.0)
+        self.assertGreaterEqual(event.fov, 46.0)
 
     def test_tiny_bounds_do_not_crash(self) -> None:
         plan = plan_cameras_for_scene(SceneBounds(center=(0.0, 0.0, 0.0), extent=(0.0, 0.0, 0.0)))
         self.assertEqual(len(plan.views), 5)
         self.assertTrue(plan.warnings)
+
+    def test_event_closeup_frames_tall_initial_scene_extent(self) -> None:
+        bounds = SceneBounds(center=(0.0, 0.0, 0.725), extent=(0.9, 0.5, 1.55))
+
+        event = plan_cameras_for_scene(bounds, requested_views=["event_closeup"]).views[0]
+
+        horizontal_distance = math.hypot(
+            event.location[0] - bounds.center[0],
+            event.location[1] - bounds.center[1],
+        )
+        self.assertGreaterEqual(
+            event.fov,
+            framing_fov(
+                max(bounds.extent[0], bounds.extent[1]),
+                bounds.extent[2],
+                math.dist(event.location, bounds.center),
+            ),
+        )
+        self.assertLess(horizontal_distance, 2.0)
 
     def test_planner_is_deterministic(self) -> None:
         bounds = SceneBounds(center=(1.0, 2.0, 3.0), extent=(4.0, 5.0, 6.0))

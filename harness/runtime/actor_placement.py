@@ -124,6 +124,16 @@ def constraint_bindings_from_case(
                 if constraint.get("linear_limit_m") is not None
                 else {}
             ),
+            **(
+                {"unilateral_distance_spring": constraint["unilateral_distance_spring"]}
+                if constraint.get("unilateral_distance_spring") is not None
+                else {}
+            ),
+            **(
+                {"unilateral_path_length_spring": constraint["unilateral_path_length_spring"]}
+                if constraint.get("unilateral_path_length_spring") is not None
+                else {}
+            ),
             "angular_motion": constraint["angular_motion"],
             "angular_limits_deg": constraint["angular_limits_deg"],
             **(
@@ -270,6 +280,7 @@ def actor_binding_from_node(
         else None
     )
     articulated_mode = str((articulated_contract or {}).get("mode") or "")
+    articulated_character = isinstance((articulated_contract or {}).get("movement_control"), dict)
     is_articulated = articulated_contract is not None
     kinematic = bool(body_type in {"static", "kinematic"} if body_type else physics.get("kinematic") or is_support or is_field)
     simulate_physics = bool(
@@ -374,10 +385,11 @@ def actor_binding_from_node(
             "local_bounds_center_from_collision_m": relative_visual_center_offset,
         },
         "render_binding": render_binding,
+        **({"kinematic_motion": node["kinematic_motion"]} if isinstance(node.get("kinematic_motion"), dict) else {}),
         "asset": {
             "selected_asset_id": asset_binding.get("selected_asset_id"),
             "ue_path": ue_path,
-            "asset_kind": "skeletal_mesh" if is_articulated else asset_binding.get("asset_kind"),
+            "asset_kind": "blueprint" if articulated_character else "skeletal_mesh" if is_articulated else asset_binding.get("asset_kind"),
             "proxy": proxy,
             "binding_source": "analytic_proxy" if controlled_analytic_collision and not ue_path else "ue_asset" if ue_path else "unbound",
             "runtime_usage": runtime_usage,
@@ -450,9 +462,10 @@ def render_binding_for(
             "asset_path": articulated_contract.get("asset_path"),
             "pose_source_type": ((articulated_contract.get("pose_source") or {}).get("type")),
             "root_transform_source_type": ((articulated_contract.get("root_transform_source") or {}).get("type")),
+            "movement_control_type": ((articulated_contract.get("movement_control") or {}).get("type")),
             "runtime_actor_class": (
                 "Character"
-                if ((articulated_contract.get("pose_source") or {}).get("type")) == "animation_sequence"
+                if isinstance(articulated_contract.get("movement_control"), dict)
                 else "Actor"
             ),
         }
@@ -510,7 +523,10 @@ def placement_warnings_for(actor_bindings: list[dict[str, Any]], scene_layout: d
 def ue_class_for(node: dict[str, Any], *, is_field: bool) -> str:
     if is_field:
         return "/Script/Engine.Actor"
-    if isinstance(node.get("articulated_body_contract"), dict):
+    articulated = node.get("articulated_body_contract")
+    if isinstance(articulated, dict) and isinstance(articulated.get("movement_control"), dict):
+        return str(articulated.get("asset_path") or "")
+    if isinstance(articulated, dict):
         return "/Script/Engine.SkeletalMeshActor"
     asset_binding = node.get("asset_binding") if isinstance(node.get("asset_binding"), dict) else {}
     asset_kind = str(asset_binding.get("asset_kind") or "").casefold()

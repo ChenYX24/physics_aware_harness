@@ -1,0 +1,113 @@
+{
+  "schema_version": "harness_case_spec_v2",
+  "identity": {
+    "case_id": "template_taichi_cloth_ue_trajectory_collider_v1",
+    "title": "UE trajectory-driven sphere pushes a pinned cloth",
+    "source_request": "Verify that a completed UE rigid trajectory can drive a Taichi cloth collider and replay in UE."
+  },
+  "capabilities": {"primary": "deformable_body_dynamics", "required": ["deformable_body_dynamics"]},
+  "scene": {
+    "environment_intent": "minimal controlled cross-solver cloth stage",
+    "coordinate_system": "z_up",
+    "duration_s": 5.0,
+    "bounds_hint_m": [4.0, 4.0, 2.8]
+  },
+  "timebase": {"physics_hz": 2400, "observation_fps": 24, "deterministic_seed": 20260908},
+  "backend_constraints": {
+    "required_solver_capabilities": ["soft_body", "cloth", "kinematic_motion", "mesh_cache", "trajectory"],
+    "allowed_solvers": ["taichi_cloth"],
+    "render_backend": "ue",
+    "allow_multi_backend": true
+  },
+  "asset_policy": {
+    "allow_local": true,
+    "allow_external": false,
+    "allow_generation": false,
+    "allow_analytic_proxy": true,
+    "required_license_tier": "local_preview"
+  },
+  "objects": [
+    {
+      "id": "curtain",
+      "role": "deformable_cloth",
+      "geometry": {"shape_hint": "cloth_grid", "approx_size_m": [1.8, 0.01, 1.3]},
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.38,
+        "collision_required": false,
+        "material_model": "cloth",
+        "material": {
+          "structural_stiffness_n_m": 105.0,
+          "shear_stiffness_n_m": 62.0,
+          "bending_stiffness_n_m": 8.0,
+          "spring_damping_kg_s": 0.015,
+          "air_damping_1_s": 1.2
+        }
+      },
+      "initial_state": {"position_m": [0.0, 0.35, 1.1], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "visual_representation": {"source": "solver_generated", "visible": true},
+      "solver": {
+        "type": "mass_spring_cloth",
+        "grid_resolution": 25,
+        "initial_orientation": "vertical_xz",
+        "pinned_boundary": "negative_u",
+        "substeps_per_frame": 100,
+        "collision_thickness_m": 0.012
+      },
+      "behavior": {}
+    },
+    {
+      "id": "ue_driven_collider",
+      "role": "rigid_collider",
+      "geometry": {"shape_hint": "sphere", "approx_size_m": [0.18, 0.18, 0.18]},
+      "physics": {"body_type": "kinematic", "mass_kg": 1.0, "collision_required": false, "material": {"dynamic_friction": 0.2, "restitution": 0.0}},
+      "initial_state": {"position_m": [0.8, 0.0, 1.1], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "kinematic_motion": {
+        "interpolation": "linear",
+        "keyframes": [
+          {"time_s": 0.0, "position_m": [0.8, 0.0, 1.1], "rotation_deg": [0.0, 0.0, 0.0]},
+          {"time_s": 5.0, "position_m": [0.8, 0.0, 1.1], "rotation_deg": [0.0, 0.0, 0.0]}
+        ]
+      },
+      "visual_representation": {"source": "none", "visible": true},
+      "behavior": {}
+    },
+    {
+      "id": "floor",
+      "role": "support_surface",
+      "geometry": {"shape_hint": "box", "approx_size_m": [4.0, 4.0, 0.05]},
+      "physics": {"body_type": "static", "mass_kg": 1.0, "collision_required": false, "material": {"dynamic_friction": 0.2, "restitution": 0.0}},
+      "initial_state": {"position_m": [0.0, 0.0, 0.0], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "visual_representation": {"source": "none", "visible": true},
+      "behavior": {}
+    }
+  ],
+  "relations": [],
+  "events": [],
+  "forces": [],
+  "constraints": [],
+  "expected_behavior": {
+    "minimum_contact_frames_by_collider": {"ue_driven_collider": 2},
+    "maximum_pinned_vertex_displacement_m": 0.0001,
+    "maximum_structural_edge_stretch_ratio": 1.4,
+    "minimum_final_vertical_span_m": 1.0,
+    "penetration_tolerance_m": 0.003
+  },
+  "observation_requirements": {
+    "cameras": [{
+      "role": "event_closeup",
+      "coordinate_frame": "world",
+      "position_m": [-2.1, -2.4, 1.5],
+      "look_at_m": [0.0, 0.25, 1.05],
+      "fov_deg": 50.0,
+      "framing": "scene",
+      "target_objects": ["curtain", "ue_driven_collider"]
+    }],
+    "modalities": ["rgb"],
+    "signals": ["mesh_cache", "trajectory"]
+  },
+  "verification_requirements": {"assertions": [{"id": "trajectory_integrity", "type": "trajectory_integrity"}], "thresholds": {}},
+  "variant": {"should_pass": true},
+  "provenance": {"purpose": "capability_first_isolated_smoke"},
+  "notes": "The sphere transform is replaced by a completed UE trajectory before execution; cloth reaction is one-way."
+}

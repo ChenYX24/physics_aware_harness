@@ -43,6 +43,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ue-project", default="")
     parser.add_argument("--ue-executable", default="")
     parser.add_argument("--mode", choices=["rgb", "data", "both"], default=os.environ.get("SIM_STUDIO_UE_RENDER_MODE", "both"))
+    parser.add_argument(
+        "--layout-preview-time-s",
+        type=float,
+        help="Render one low-resolution RGB layout image per planned view without running a video pass.",
+    )
     return parser.parse_args()
 
 
@@ -97,6 +102,64 @@ def main() -> int:
         return 2
 
     command = unreal_editor_command(ue_executable, ue_project, ue_script)
+    if args.layout_preview_time_s is not None:
+        if args.layout_preview_time_s < 0.0 or args.layout_preview_time_s > duration_s:
+            write_json(
+                run_dir / "local_ue_runner_report.json",
+                fail_report(
+                    "F_LAYOUT_PREVIEW_TIME_INVALID",
+                    f"layout preview time must be between 0 and {duration_s:g} seconds",
+                ),
+            )
+            return 2
+        preview_args = argparse.Namespace(**vars(args))
+        preview_args.passes = "rgb"
+        preview_args.mode = "rgb"
+        native_output = run_dir / "logs" / "native_layout_preview"
+        proc_result = run_native_pass(
+            command,
+            args=preview_args,
+            case_spec=case_spec,
+            runtime_scene=runtime_scene,
+            studio_scene_path=studio_scene_path,
+            runtime_scene_path=runtime_scene_path,
+            native_output=native_output,
+            pass_mode="rgb",
+        )
+        native_manifest = read_optional_json(native_output / "layout_preview_manifest.json")
+        if proc_result["status"] != "completed" or native_manifest.get("status") != "pass":
+            write_json(
+                run_dir / "local_ue_runner_report.json",
+                fail_report(
+                    "F_LAYOUT_PREVIEW_FAILED",
+                    "UE layout preview did not produce its image manifest.",
+                    native_ue_invoked=True,
+                    pass_results={"layout_preview": proc_result},
+                ),
+            )
+            return 2
+        images = []
+        for row in native_manifest.get("images") or []:
+            source = Path(str(row.get("path") or ""))
+            if not source.is_file():
+                continue
+            target = run_dir / "views" / str(row["view_id"]) / "layout.png"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+            images.append({**row, "path": str(target)})
+        report = {
+            "schema_version": "harness_layout_preview_v1",
+            "status": "pass" if images else "fail",
+            "case_id": case_spec.get("case_id"),
+            "time_s": float(args.layout_preview_time_s),
+            "width": 640,
+            "height": 360,
+            "images": images,
+            "native_ue_invoked": True,
+        }
+        write_json(run_dir / "layout_preview_manifest.json", report)
+        write_json(run_dir / "local_ue_runner_report.json", report)
+        return 0 if images else 2
     started = time.perf_counter()
     pass_results: dict[str, dict[str, Any]] = {}
     rgb_native_output: Path | None = None
@@ -170,18 +233,16 @@ def main() -> int:
                     if live_fracture_ids:
                         shutil.copyfile(sampling_source, run_dir / "rgb_sampling_map.json")
         if pass_mode in {"data", "combined"}:
-            required_visible_ids = {
-                str(view.get("camera_id")): {
-                    *(str(value) for value in view.get("target_object_ids") or []),
-                    *live_fracture_ids,
-                }
-                for view in camera_plan.get("views") or []
-                if isinstance(view, dict) and view.get("camera_id")
-            }
+            required_visible_ids = required_visible_segmentation_object_ids(
+                camera_plan,
+                actor_placement,
+                live_fracture_ids=live_fracture_ids,
+            )
+            data_width, data_height = data_render_dimensions(pass_mode, args.passes)
             quantization = quantize_native_instance_segmentation(
                 native_output,
-                width=int(render_config.get("width") or 0),
-                height=int(render_config.get("height") or 0),
+                width=data_width,
+                height=data_height,
                 fps=int(render_config.get("fps") or 0),
                 required="segmentation" in {item.strip() for item in args.passes.split(",")},
                 required_object_ids_by_view=required_visible_ids,
@@ -356,6 +417,23 @@ def runtime_stage_map(case_spec: dict[str, Any]) -> str:
     return str(scene.get("map_preference") or scene.get("map_package") or "studio_runtime")
 
 
+def uses_gasp_character(case_spec: dict[str, Any] | None) -> bool:
+    return any(
+        isinstance(obj, dict)
+        and isinstance(obj.get("solver"), dict)
+        and obj["solver"].get("type") == "articulated_body"
+        and isinstance(obj["solver"].get("movement_control"), dict)
+        for obj in ((case_spec or {}).get("objects") or [])
+    )
+
+
+def runtime_capture_backend(runtime_scene: dict[str, Any], pass_mode: str) -> str:
+    return str(
+        (runtime_scene.get("map_lighting_controls") or {}).get("capture_backend")
+        or ("highres_viewport" if pass_mode in {"rgb", "combined"} else "scene_capture")
+    )
+
+
 def build_runtime_scene(case_spec: dict[str, Any], camera_plan: dict[str, Any], args: argparse.Namespace, *, pass_mode: str, actor_placement: dict[str, Any] | None = None, simulation_trajectory: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     timebase = timebase_for_case(case_spec)
     dynamic_objects, static_objects = runtime_objects_for_case(case_spec, actor_placement=actor_placement)
@@ -384,7 +462,17 @@ def build_runtime_scene(case_spec: dict[str, Any], camera_plan: dict[str, Any], 
             }
         )
     live_geometry_collection_data = pass_mode in {"data", "combined"} and bool(fracture_object_ids(case_spec))
-    if physics_controls.get("simulate_physics") and (pass_mode == "rgb" or live_geometry_collection_data):
+    capture_backend_explicit = (
+        "SIM_STUDIO_UE_RGB_CAPTURE_BACKEND" in os.environ
+        if pass_mode == "rgb"
+        else "SIM_STUDIO_UE_CAPTURE_BACKEND" in os.environ
+    )
+    if (
+        physics_controls.get("simulate_physics")
+        and (pass_mode == "rgb" or live_geometry_collection_data)
+        and not capture_backend_explicit
+        and not uses_gasp_character(case_spec)
+    ):
         lighting_controls["capture_backend"] = "highres_viewport"
     return {
         "schema_version": "studio_runtime_v1",
@@ -415,6 +503,9 @@ def build_runtime_scene(case_spec: dict[str, Any], camera_plan: dict[str, Any], 
         "dynamic_objects": dynamic_objects,
         "static_objects": static_objects,
         "constraints": list((actor_placement or {}).get("constraint_bindings") or []),
+        "compliant_contacts": list(case_spec.get("compliant_contacts") or []),
+        "forces": list(case_spec.get("forces") or []),
+        "wind_fields": runtime_wind_fields(case_spec),
         "action_trace": list((case_spec.get("expected_physics") or {}).get("action_trace") or []),
         "validation_targets": [],
         "precomputed_trajectory": simulation_trajectory or [],
@@ -426,6 +517,17 @@ def runtime_objects_for_case(case_spec: dict[str, Any], actor_placement: dict[st
     if actor_placement and actor_placement.get("actor_bindings"):
         return runtime_objects_from_actor_placement(actor_placement, case_spec)
     return generic_objects(case_spec)
+
+
+def runtime_wind_fields(case_spec: dict[str, Any]) -> list[dict[str, Any]]:
+    result = []
+    for obj in case_spec.get("objects") or []:
+        if not isinstance(obj, dict) or obj.get("role") != "wind_field":
+            continue
+        solver = obj.get("solver") if isinstance(obj.get("solver"), dict) else {}
+        if solver.get("type") == "aerodynamic_wind":
+            result.append({"id": str(obj.get("id") or "wind"), **solver})
+    return result
 
 
 def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_spec: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -457,6 +559,8 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
             continue
         object_id = str(binding.get("object_id") or f"actor_{index:02d}")
         case_object = by_case_object.get(object_id, {})
+        if case_object.get("role") == "wind_field":
+            continue
         physics = binding.get("physics") if isinstance(binding.get("physics"), dict) else {}
         material = physics.get("material") if isinstance(physics.get("material"), dict) else {}
         collider = str(physics.get("collider") or "").casefold()
@@ -491,6 +595,7 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
             "fracture_response": case_object.get("fracture_response"),
             "visual_material_path": case_object.get("visual_material_path"),
             "intact_visual_material_path": case_object.get("intact_visual_material_path"),
+            "intact_visual_material_source": case_object.get("intact_visual_material_source"),
             "intact_visual_scale": case_object.get("intact_visual_scale"),
             "visible": visible,
             "visual_local_bounds_center_from_collision_m": visual_representation.get(
@@ -567,6 +672,14 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
         ):
             if case_object.get(key) is not None:
                 params[key] = case_object[key]
+        if (
+            params.get("fixed_material_color") is True
+            and params.get("color_rgb") is not None
+            and case_object.get("generate_solid_material") is None
+        ):
+            params["generate_solid_material"] = True
+            params["generated_material_name"] = f"M_Harness_{object_id}_Solid"
+            params["preserve_material"] = False
         visual_path = str(asset.get("ue_path") or "")
         intact_visual_path = str(case_object.get("intact_visual_ue_path") or "")
         if intact_visual_path:
@@ -601,6 +714,11 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
                 else bool(physics.get("simulate_physics"))
             ),
             "kinematic": bool(physics.get("kinematic")),
+            **(
+                {"kinematic_motion": binding["kinematic_motion"]}
+                if isinstance(binding.get("kinematic_motion"), dict)
+                else {}
+            ),
         }
         runtime_path = ue_path_for_binding(binding)
         params["expected_render_mesh_path"] = (
@@ -611,8 +729,7 @@ def runtime_objects_from_actor_placement(actor_placement: dict[str, Any], case_s
         params["expected_collision_mesh_path"] = runtime_path if physics.get("collision_enabled") else None
         uses_character = (
             articulated is not None
-            and isinstance(articulated.get("pose_source"), dict)
-            and articulated["pose_source"].get("type") == "animation_sequence"
+            and isinstance(articulated.get("movement_control"), dict)
         )
         runtime_kind = (
             "articulated_character"
@@ -706,6 +823,12 @@ def scale_for_binding(binding: dict[str, Any]) -> list[float]:
         # declared full dimensions are the exact component scale.
         return [float(value) for value in collision_size[:3]]
     asset = binding.get("asset") if isinstance(binding.get("asset"), dict) else {}
+    if asset.get("runtime_usage") == "analytic_proxy":
+        target_size = asset.get("target_size_m") or asset.get("effective_size_m")
+        if positive_scale3(target_size):
+            # UE basic primitives are one metre across at scale 1.0. Bounds
+            # extents are half-sizes and must not be reused as actor scale.
+            return [float(value) for value in target_size[:3]]
     instance_scale = asset.get("instance_scale")
     if (
         asset.get("scale_policy") == "fit_uniform_to_approx_size"
@@ -768,6 +891,8 @@ def generic_objects(case_spec: dict[str, Any]) -> tuple[list[dict[str, Any]], li
         if not isinstance(obj, dict):
             continue
         object_id = str(obj.get("id") or obj.get("object_id") or f"object_{index}")
+        if obj.get("role") == "wind_field":
+            continue
         shape = str(obj.get("shape") or "box").casefold()
         asset_path = (
             "/Engine/BasicShapes/Sphere.Sphere"
@@ -958,7 +1083,9 @@ def default_lighting_controls(pass_mode: str = "data", case_spec: dict[str, Any]
         "video_filter": "",
     }
     if pass_mode == "rgb":
-        rgb_backend = os.environ.get("SIM_STUDIO_UE_RGB_CAPTURE_BACKEND", "highres_viewport")
+        rgb_backend = os.environ.get("SIM_STUDIO_UE_RGB_CAPTURE_BACKEND") or (
+            "scene_capture" if uses_gasp_character(case_spec) else "highres_viewport"
+        )
         controls.update(
             {
                 "preset": "harness_rgb_editor_viewport",
@@ -1048,8 +1175,13 @@ def build_render_config(args: argparse.Namespace, case_spec: dict[str, Any], cam
             "capture_backend": "scene_capture",
             "deterministic": True,
             "physics_enabled": True,
-            "depth_source": "ue",
+            "depth_source": "ue" if "depth" in {item.strip() for item in args.passes.split(",")} else "disabled",
             "mask_source": "ue_instance_material_mask",
+            "diagnostic_sample_count": 0,
+            "diagnostic_resolution": [
+                int(os.environ.get("SIM_STUDIO_UE_DATA_WIDTH", "640")),
+                int(os.environ.get("SIM_STUDIO_UE_DATA_HEIGHT", "360")),
+            ],
         },
     }
 
@@ -1057,7 +1189,7 @@ def build_render_config(args: argparse.Namespace, case_spec: dict[str, Any], cam
 def timebase_for_case(case_spec: dict[str, Any]) -> dict[str, Any]:
     requested = case_spec.get("timebase") if isinstance(case_spec.get("timebase"), dict) else {}
     render_fps = int(os.environ.get("SIM_STUDIO_UE_FPS", requested.get("render_fps") or 24))
-    physics_hz = int(os.environ.get("SIM_STUDIO_UE_PHYSICS_HZ", requested.get("physics_hz") or render_fps))
+    physics_hz = int(requested.get("physics_hz") or os.environ.get("SIM_STUDIO_UE_PHYSICS_HZ", render_fps))
     duration_s = duration_for_case(case_spec)
     timebase = build_timebase(duration_s=duration_s, physics_hz=physics_hz, render_fps=render_fps)
     full_solver_frame_count = int(timebase["solver_frame_count"])
@@ -1114,7 +1246,13 @@ def run_precompiled_ue_scene(
             **environment,
         }
     )
-    return run_ue_until_artifacts(command, env=env, native_output=native_output, timeout=timeout)
+    return run_ue_until_artifacts(
+        command,
+        env=env,
+        native_output=native_output,
+        timeout=timeout,
+        layout_preview="LAYOUT_PREVIEW_TIME_S" in environment,
+    )
 
 
 def run_native_pass(
@@ -1129,20 +1267,26 @@ def run_native_pass(
     pass_mode: str,
 ) -> dict[str, Any]:
     precomputed = (runtime_scene.get("physics_controls") or {}).get("runtime_driver_backend") == "precomputed_trajectory"
-    live_rgb_solver = pass_mode in {"rgb", "combined"} and not precomputed
+    capture_backend = runtime_capture_backend(runtime_scene, pass_mode)
+    requested_passes = {item.strip() for item in str(getattr(args, "passes", "rgb")).split(",") if item.strip()}
+    data_width, data_height = data_render_dimensions(pass_mode, ",".join(sorted(requested_passes)))
+    segmentation_requested = "segmentation" in requested_passes
     environment = {
         "ASSET_DATABASE_ONLY_ASSETS": "0",
         "GITLAB_ONLY_ASSETS": "0",
         "SCENE_MAP": runtime_stage_map(case_spec),
         "SCENE_DESCRIPTION": str(case_spec.get("prompt") or case_spec.get("case_id") or "Harness UE render"),
         "ASSET_ROOT": str((ROOT / "assets").resolve()),
-        "WIDTH": os.environ.get("SIM_STUDIO_UE_WIDTH", "1920"),
-        "HEIGHT": os.environ.get("SIM_STUDIO_UE_HEIGHT", "1080"),
+        "WIDTH": str(data_width),
+        "HEIGHT": str(data_height),
         "FPS": os.environ.get("SIM_STUDIO_UE_FPS", "24"),
         "DURATION": str(runtime_scene["simulation"]["duration_s"]),
         "MULTI_VIEW": "1",
         "CANONICAL_MULTI_VIEW": "1",
         "RENDER_DATA_PASSES": "1" if pass_mode in {"data", "combined"} else "0",
+        "RENDER_DEPTH_PASSES": "1" if "depth" in requested_passes else "0",
+        "RENDER_SEGMENTATION_PASSES": "1" if segmentation_requested and pass_mode in {"data", "combined"} else "0",
+        "RENDER_DATA_SAMPLE_COUNT": "0",
         "AUDIO_PASS_ENABLED": "0",
         "KEEP_RENDER_FRAMES": os.environ.get("SIM_STUDIO_KEEP_RENDER_FRAMES", "0"),
         "CHAOS_RIGID_BODY_SETUP": "1",
@@ -1155,10 +1299,23 @@ def run_native_pass(
         "RENDER_SCREENSHOT_STABLE_TICKS": os.environ.get("SIM_STUDIO_UE_SCREENSHOT_STABLE_TICKS", "1"),
         "VIDEO_CRF": os.environ.get("SIM_STUDIO_UE_VIDEO_CRF", "18"),
         "VIDEO_PRESET": os.environ.get("SIM_STUDIO_UE_VIDEO_PRESET", "slow"),
-        "SIM_STUDIO_UE_CAPTURE_BACKEND": "highres_viewport" if live_rgb_solver else (os.environ.get("SIM_STUDIO_UE_RGB_CAPTURE_BACKEND", "highres_viewport") if pass_mode == "rgb" else "scene_capture"),
+        "SIM_STUDIO_UE_CAPTURE_BACKEND": capture_backend,
         "WORLD_MODEL_RENDER_PASS_MODE": "both" if pass_mode == "combined" else pass_mode,
         "SIM_STUDIO_SEED": str(os.environ.get("SIM_STUDIO_SEED", case_spec.get("seed") or "0")),
     }
+    if getattr(args, "layout_preview_time_s", None) is not None:
+        environment.update(
+            {
+                "LAYOUT_PREVIEW_TIME_S": str(float(args.layout_preview_time_s)),
+                "WIDTH": "640",
+                "HEIGHT": "360",
+                "MULTI_VIEW": "1",
+                "CANONICAL_MULTI_VIEW": "1",
+                "RENDER_DATA_PASSES": "0",
+                "KEEP_RENDER_FRAMES": "0",
+                "SIM_STUDIO_UE_CAPTURE_BACKEND": "scene_capture",
+            }
+        )
     return run_precompiled_ue_scene(
         command,
         studio_scene_path=studio_scene_path,
@@ -1166,6 +1323,18 @@ def run_native_pass(
         native_output=native_output,
         environment=environment,
         timeout=int(os.environ.get("SIM_STUDIO_UE_TIMEOUT_SECONDS", "1800")),
+    )
+
+
+def data_render_dimensions(pass_mode: str, requested_passes: str) -> tuple[int, int]:
+    width = int(os.environ.get("SIM_STUDIO_UE_WIDTH", "1920"))
+    height = int(os.environ.get("SIM_STUDIO_UE_HEIGHT", "1080"))
+    explicit_sensor_pass = bool({"depth", "segmentation"} & {item.strip() for item in requested_passes.split(",")})
+    if pass_mode != "data" or explicit_sensor_pass:
+        return width, height
+    return (
+        int(os.environ.get("SIM_STUDIO_UE_DATA_WIDTH", "640")),
+        int(os.environ.get("SIM_STUDIO_UE_DATA_HEIGHT", "360")),
     )
 
 
@@ -1488,9 +1657,30 @@ def standardize_native_output(
         segmentation_available = bool(segmentation_copy.get("available"))
         depth_frame_count = int(depth_copy.get("frame_count") or 0)
         segmentation_frame_count = int(segmentation_copy.get("frame_count") or 0)
+        depth_frame_indices = [int(value) for value in depth_copy.get("frame_indices") or range(depth_frame_count)]
+        segmentation_frame_indices = [int(value) for value in segmentation_copy.get("frame_indices") or range(segmentation_frame_count)]
         depth_statistics = depth_pixel_statistics(view_dir / "depth.exr") if depth_available else None
-        depth_preview = encode_sensor_preview(view_dir / "depth_frames", view_dir / "depth_preview.mp4", fps=fps, modality="depth")
-        segmentation_preview = encode_sensor_preview(view_dir / "segmentation_frames", view_dir / "segmentation_preview.mp4", fps=fps, modality="segmentation")
+        depth_preview_path = view_dir / "depth_preview.mp4"
+        native_depth_preview = Path(str(depth_copy.get("video_path") or ""))
+        if depth_copy.get("video_encoded") and has_mp4_magic(native_depth_preview):
+            link_or_copy(native_depth_preview, depth_preview_path)
+            depth_preview = True
+        else:
+            depth_preview = encode_sensor_preview(
+                view_dir / "depth_frames", depth_preview_path, fps=fps, modality="depth"
+            )
+        segmentation_preview_path = view_dir / "segmentation_preview.mp4"
+        native_segmentation_preview = Path(str(segmentation_copy.get("video_path") or ""))
+        if segmentation_copy.get("video_encoded") and has_mp4_magic(native_segmentation_preview):
+            link_or_copy(native_segmentation_preview, segmentation_preview_path)
+            segmentation_preview = True
+        else:
+            segmentation_preview = encode_sensor_preview(
+                view_dir / "segmentation_frames",
+                segmentation_preview_path,
+                fps=fps,
+                modality="segmentation",
+            )
         segmentation_type = "instance" if segmentation_available else "missing"
         actual_camera = actual_camera_views.get(camera_id) or {}
         camera_frames = actual_camera.get("frames") if isinstance(actual_camera.get("frames"), list) else []
@@ -1517,8 +1707,8 @@ def standardize_native_output(
                 "frame_count_depth": depth_frame_count,
                 "frame_count_segmentation": segmentation_frame_count,
                 "timestamps_rgb": rgb_timestamps,
-                "timestamps_depth": timestamps[:depth_frame_count],
-                "timestamps_segmentation": timestamps[:segmentation_frame_count],
+                "timestamps_depth": [timestamps[index] for index in depth_frame_indices if 0 <= index < len(timestamps)],
+                "timestamps_segmentation": [timestamps[index] for index in segmentation_frame_indices if 0 <= index < len(timestamps)],
                 "fps": fps,
                 "timebase": timebase,
                 "solver_cache_sha256": solver_cache_sha256,
@@ -1531,11 +1721,15 @@ def standardize_native_output(
                 "depth_variance": float((depth_statistics or {}).get("variance") or 0.0),
                 "depth_pixel_statistics": depth_statistics,
                 "depth_frames": depth_copy.get("frames", []),
+                "depth_frame_indices": depth_frame_indices,
+                "depth_sample_frame_indices": depth_copy.get("sample_frame_indices") or [],
                 "depth_preview": "depth_preview.mp4" if depth_preview else None,
                 "depth_format_mismatch_count": int(depth_copy.get("format_mismatch_count") or 0),
                 "segmentation_type": segmentation_type,
                 "instance_level": segmentation_available,
                 "segmentation_frames": segmentation_copy.get("frames", []),
+                "segmentation_frame_indices": segmentation_frame_indices,
+                "segmentation_sample_frame_indices": segmentation_copy.get("sample_frame_indices") or [],
                 "segmentation_preview": "segmentation_preview.mp4" if segmentation_preview else None,
                 "segmentation_format_mismatch_count": int(segmentation_copy.get("format_mismatch_count") or 0),
                 "instance_count": int(segmentation_copy.get("instance_count") or 0),
@@ -1680,6 +1874,31 @@ def quantize_rgb24_to_palette(data: bytes, palette: list[tuple[int, int, int]]) 
     return bytes(output)
 
 
+def required_visible_segmentation_object_ids(
+    camera_plan: dict[str, Any],
+    actor_placement: dict[str, Any],
+    *,
+    live_fracture_ids: set[str] | None = None,
+) -> dict[str, set[str]]:
+    hidden_object_ids = {
+        str(binding.get("object_id"))
+        for binding in actor_placement.get("actor_bindings") or []
+        if isinstance(binding, dict)
+        and binding.get("object_id")
+        and isinstance(binding.get("visual_representation"), dict)
+        and binding["visual_representation"].get("visible") is False
+    }
+    fracture_ids = {str(value) for value in live_fracture_ids or set()}
+    return {
+        str(view.get("camera_id")): (
+            {str(value) for value in view.get("target_object_ids") or []} - hidden_object_ids
+        )
+        | fracture_ids
+        for view in camera_plan.get("views") or []
+        if isinstance(view, dict) and view.get("camera_id")
+    }
+
+
 def quantize_native_instance_segmentation(
     native_output: Path,
     *,
@@ -1744,9 +1963,16 @@ def quantize_native_instance_segmentation(
         raw_dir.mkdir(parents=True, exist_ok=True)
         output_dir = frame_paths[0].parent
         output_dir.mkdir(parents=True, exist_ok=True)
+        source_extension = frame_paths[0].suffix.lower()
+        if source_extension not in {".exr", ".png"}:
+            return {
+                "status": "fail",
+                "error": f"unsupported segmentation sample format for {view_id}: {source_extension}",
+                "views": results,
+            }
         raw_frames = []
         for index, source in enumerate(frame_paths):
-            raw_target = raw_dir / f"frame_{index:04d}.exr"
+            raw_target = raw_dir / f"frame_{index:04d}{source_extension}"
             shutil.move(str(source), raw_target)
             raw_frames.append(raw_target)
 
@@ -1759,7 +1985,7 @@ def quantize_native_instance_segmentation(
                 "-start_number",
                 "0",
                 "-i",
-                str(raw_dir / "frame_%04d.exr"),
+                str(raw_dir / f"frame_%04d{source_extension}"),
                 "-frames:v",
                 str(len(raw_frames)),
                 "-pix_fmt",
@@ -1930,9 +2156,10 @@ def copy_native_pass_view(native_view: dict[str, Any] | None, view_dir: Path, an
     elif anchor_target.exists():
         anchor_target.unlink()
     available = has_openexr_magic(anchor_target) if anchor_name.endswith(".exr") else anchor_target.exists() and anchor_target.stat().st_size > 0
+    declared_frame_count = int(native_view.get("frame_count") or len(copied_frames) or (1 if available else 0))
     return {
         "available": available,
-        "frame_count": len(copied_frames) if copied_frames else (1 if available else 0),
+        "frame_count": declared_frame_count,
         "frames": copied_frames,
         "format_mismatch_count": format_mismatch_count,
         "depth_variance": native_view.get("depth_variance"),
@@ -1947,6 +2174,10 @@ def copy_native_pass_view(native_view: dict[str, Any] | None, view_dir: Path, an
         "palette_closure": native_view.get("palette_closure"),
         "palette_rgb8": native_view.get("palette_rgb8"),
         "raw_frames": native_view.get("raw_frames"),
+        "frame_indices": native_view.get("frame_indices") or [],
+        "sample_frame_indices": native_view.get("sample_frame_indices") or [],
+        "video_path": native_view.get("video_path"),
+        "video_encoded": native_view.get("video_encoded") is True,
     }
 
 
@@ -2056,7 +2287,14 @@ def encode_sensor_preview(frame_dir: Path, output: Path, *, fps: int, modality: 
     return completed.returncode == 0 and has_mp4_magic(output)
 
 
-def run_ue_until_artifacts(command: list[str], *, env: dict[str, str], native_output: Path, timeout: int) -> dict[str, Any]:
+def run_ue_until_artifacts(
+    command: list[str],
+    *,
+    env: dict[str, str],
+    native_output: Path,
+    timeout: int,
+    layout_preview: bool = False,
+) -> dict[str, Any]:
     if native_output.exists():
         shutil.rmtree(native_output)
     native_output.mkdir(parents=True, exist_ok=True)
@@ -2069,33 +2307,45 @@ def run_ue_until_artifacts(command: list[str], *, env: dict[str, str], native_ou
     stable_signature = None
     stable_count = 0
     ready = False
-    while True:
-        returncode = proc.poll()
-        signature = native_artifact_signature(native_output)
-        if signature is not None and signature == stable_signature:
-            stable_count += 1
-        elif signature is not None:
-            stable_signature = signature
-            stable_count = 1
-        if signature is not None and stable_count >= 2:
-            ready = True
-            break
-        if returncode is not None:
+    try:
+        while True:
+            returncode = proc.poll()
+            signature = native_artifact_signature(native_output, layout_preview=layout_preview)
+            if signature is not None and signature == stable_signature:
+                stable_count += 1
+            elif signature is not None:
+                stable_signature = signature
+                stable_count = 1
+            if signature is not None and stable_count >= 2:
+                ready = True
+                break
+            if returncode is not None:
+                stdout_handle.close()
+                stderr_handle.close()
+                stdout = read_text_tail(stdout_path, limit=200000)
+                stderr = read_text_tail(stderr_path, limit=200000)
+                if native_output_ready(native_output, layout_preview=layout_preview):
+                    return {"status": "completed", "returncode": returncode, "stdout": stdout or "", "stderr": stderr or ""}
+                cleanup_incomplete_native_frames(native_output)
+                return {"status": "failed", "returncode": returncode, "stdout": stdout or "", "stderr": stderr or ""}
+            if time.perf_counter() - started > timeout:
+                terminate_process(proc)
+                stdout_handle.close()
+                stderr_handle.close()
+                stdout = read_text_tail(stdout_path, limit=200000)
+                stderr = read_text_tail(stderr_path, limit=200000)
+                cleanup_incomplete_native_frames(native_output)
+                return {"status": "timeout", "returncode": proc.returncode, "stdout": stdout or "", "stderr": stderr or "", "timeout": timeout}
+            time.sleep(5.0)
+    except BaseException:
+        terminate_process(proc)
+        cleanup_incomplete_native_frames(native_output)
+        raise
+    finally:
+        if not stdout_handle.closed:
             stdout_handle.close()
+        if not stderr_handle.closed:
             stderr_handle.close()
-            stdout = read_text_tail(stdout_path, limit=200000)
-            stderr = read_text_tail(stderr_path, limit=200000)
-            if native_output_ready(native_output):
-                return {"status": "completed", "returncode": returncode, "stdout": stdout or "", "stderr": stderr or ""}
-            return {"status": "failed", "returncode": returncode, "stdout": stdout or "", "stderr": stderr or ""}
-        if time.perf_counter() - started > timeout:
-            terminate_process(proc)
-            stdout_handle.close()
-            stderr_handle.close()
-            stdout = read_text_tail(stdout_path, limit=200000)
-            stderr = read_text_tail(stderr_path, limit=200000)
-            return {"status": "timeout", "returncode": proc.returncode, "stdout": stdout or "", "stderr": stderr or "", "timeout": timeout}
-        time.sleep(5.0)
     if ready:
         terminate_process(proc)
         stdout_handle.close()
@@ -2110,7 +2360,31 @@ def run_ue_until_artifacts(command: list[str], *, env: dict[str, str], native_ou
     return {"status": "completed", "returncode": proc.returncode, "stdout": stdout or "", "stderr": stderr or ""}
 
 
-def native_output_ready(native_output: Path) -> bool:
+def cleanup_incomplete_native_frames(native_output: Path) -> None:
+    for frames_dir in native_output.glob("frames*"):
+        if frames_dir.is_dir() and not frames_dir.is_symlink():
+            shutil.rmtree(frames_dir, ignore_errors=True)
+    for log_path in native_output.glob("*.ffmpeg.log"):
+        if log_path.is_file() and not log_path.is_symlink():
+            try:
+                log_path.unlink()
+            except OSError:
+                pass
+
+
+def native_output_ready(native_output: Path, *, layout_preview: bool = False) -> bool:
+    if layout_preview:
+        manifest = read_optional_json(native_output / "layout_preview_manifest.json")
+        images = [
+            Path(str(row.get("path") or ""))
+            for row in manifest.get("images") or []
+            if isinstance(row, dict)
+        ]
+        return (
+            manifest.get("status") == "pass"
+            and bool(images)
+            and all(path.is_file() and path.stat().st_size > 0 for path in images)
+        )
     required = [
         native_output / "summary.json",
         native_output / "trajectory.json",
@@ -2121,9 +2395,21 @@ def native_output_ready(native_output: Path) -> bool:
     return all(path.exists() and path.stat().st_size > 0 for path in required)
 
 
-def native_artifact_signature(native_output: Path) -> tuple[int, ...] | None:
-    if not native_output_ready(native_output):
+def native_artifact_signature(native_output: Path, *, layout_preview: bool = False) -> tuple[int, ...] | None:
+    if not native_output_ready(native_output, layout_preview=layout_preview):
         return None
+    if layout_preview:
+        manifest_path = native_output / "layout_preview_manifest.json"
+        manifest = read_optional_json(manifest_path)
+        images = [
+            Path(str(row.get("path") or ""))
+            for row in manifest.get("images") or []
+            if isinstance(row, dict)
+        ]
+        try:
+            return tuple([manifest_path.stat().st_size, *[path.stat().st_size for path in images]])
+        except OSError:
+            return None
     paths = [
         native_output / "summary.json",
         native_output / "trajectory.json",
@@ -2141,11 +2427,20 @@ def native_primary_video(native_output: Path, *, camera_plan: dict[str, Any] | N
     default = native_output / "preview.mp4"
     manifest = read_optional_json(native_output / "render_pass_manifest.json")
     views = [view for view in (((manifest.get("passes") or {}).get("rgb") or {}).get("views") or []) if isinstance(view, dict)]
+    data_videos = [
+        Path(str(view.get("video_path") or ""))
+        for modality in ("depth", "segmentation")
+        for view in ((((manifest.get("passes") or {}).get(modality) or {}).get("views") or []))
+        if isinstance(view, dict) and view.get("video_path")
+    ]
     if camera_plan is None:
         if default.is_file() and default.stat().st_size > 0:
             return default
         for view in views:
             candidate = Path(str(view.get("path") or ""))
+            if candidate.is_file() and candidate.stat().st_size > 0:
+                return candidate
+        for candidate in data_videos:
             if candidate.is_file() and candidate.stat().st_size > 0:
                 return candidate
         return default

@@ -1,0 +1,157 @@
+{
+  "schema_version": "harness_case_spec_v2",
+  "identity": {
+    "case_id": "smoke_radial_field_force_v1",
+    "title": "Signed radial point fields attract and repel rigid bodies",
+    "source_request": "Verify a generic live point-source force law using one attractive and one repulsive rigid-body branch."
+  },
+  "capabilities": {
+    "primary": "rigid_body_dynamics",
+    "required": ["rigid_body_dynamics"]
+  },
+  "scene": {
+    "environment_intent": "minimal controlled point-field stage",
+    "coordinate_system": "z_up",
+    "duration_s": 2.5,
+    "bounds_hint_m": [4.0, 2.5, 1.5]
+  },
+  "timebase": {
+    "physics_hz": 120,
+    "observation_fps": 24,
+    "deterministic_seed": 660072
+  },
+  "backend_constraints": {
+    "required_solver_capabilities": ["rigid_body", "radial_field_force", "trajectory"],
+    "allowed_solvers": ["ue"],
+    "render_backend": "ue",
+    "allow_multi_backend": false
+  },
+  "asset_policy": {
+    "allow_local": true,
+    "allow_external": false,
+    "allow_generation": false,
+    "allow_analytic_proxy": true,
+    "required_license_tier": "local_preview"
+  },
+  "objects": [
+    {
+      "id": "attract_source",
+      "role": "field_source",
+      "geometry": {"shape_hint": "box", "approx_size_m": [0.22, 0.22, 0.22]},
+      "physics": {"body_type": "static", "mass_kg": 1.0, "collision_required": false},
+      "initial_state": {"position_m": [0.0, -0.7, 0.6], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "color_rgb": [0.9, 0.12, 0.08],
+      "fixed_material_color": true,
+      "visual_representation": {"source": "none", "visible": true},
+      "behavior": {}
+    },
+    {
+      "id": "attract_subject",
+      "role": "field_subject",
+      "geometry": {"shape_hint": "sphere", "approx_size_m": [0.2, 0.2, 0.2]},
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.3,
+        "collision_required": true,
+        "collision_geometry": {"shape": "sphere", "size_m": [0.2, 0.2, 0.2], "local_center_offset_m": [0.0, 0.0, 0.0]},
+        "enable_gravity": false,
+        "linear_damping": 0.15,
+        "angular_damping": 0.1,
+        "material": {"dynamic_friction": 0.1, "restitution": 0.0}
+      },
+      "initial_state": {"position_m": [-1.2, -0.7, 0.6], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "color_rgb": [0.25, 0.3, 0.36],
+      "fixed_material_color": true,
+      "visual_representation": {"source": "none", "visible": true},
+      "behavior": {}
+    },
+    {
+      "id": "repel_source",
+      "role": "field_source",
+      "geometry": {"shape_hint": "box", "approx_size_m": [0.22, 0.22, 0.22]},
+      "physics": {"body_type": "static", "mass_kg": 1.0, "collision_required": false},
+      "initial_state": {"position_m": [0.0, 0.7, 0.6], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "color_rgb": [0.08, 0.28, 0.9],
+      "fixed_material_color": true,
+      "visual_representation": {"source": "none", "visible": true},
+      "behavior": {}
+    },
+    {
+      "id": "repel_subject",
+      "role": "field_subject",
+      "geometry": {"shape_hint": "sphere", "approx_size_m": [0.2, 0.2, 0.2]},
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.3,
+        "collision_required": true,
+        "collision_geometry": {"shape": "sphere", "size_m": [0.2, 0.2, 0.2], "local_center_offset_m": [0.0, 0.0, 0.0]},
+        "enable_gravity": false,
+        "linear_damping": 0.15,
+        "angular_damping": 0.1,
+        "material": {"dynamic_friction": 0.1, "restitution": 0.0}
+      },
+      "initial_state": {"position_m": [1.2, 0.7, 0.6], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "color_rgb": [0.25, 0.3, 0.36],
+      "fixed_material_color": true,
+      "visual_representation": {"source": "none", "visible": true},
+      "behavior": {}
+    }
+  ],
+  "relations": [],
+  "events": [],
+  "forces": [
+    {
+      "id": "attractive_point_field",
+      "type": "radial_force",
+      "source": "attract_source",
+      "object": "attract_subject",
+      "strength_n_m2": 0.1,
+      "softening_distance_m": 0.2,
+      "max_distance_m": 2.5,
+      "start_time_s": 0.0,
+      "end_time_s": 2.5
+    },
+    {
+      "id": "repulsive_point_field",
+      "type": "radial_force",
+      "source": "repel_source",
+      "object": "repel_subject",
+      "strength_n_m2": -0.1,
+      "softening_distance_m": 0.2,
+      "max_distance_m": 2.5,
+      "start_time_s": 0.0,
+      "end_time_s": 2.5
+    }
+  ],
+  "constraints": [],
+  "expected_behavior": {
+    "native_radial_force_trace_required": true,
+    "attraction_and_repulsion_required": true
+  },
+  "observation_requirements": {
+    "cameras": [
+      {
+        "role": "front_static",
+        "coordinate_frame": "world",
+        "position_m": [0.0, -4.4, 2.0],
+        "look_at_m": [0.0, 0.0, 0.6],
+        "fov_deg": 48.0,
+        "framing": "scene",
+        "target_objects": ["attract_source", "attract_subject", "repel_source", "repel_subject"]
+      }
+    ],
+    "modalities": ["rgb"],
+    "signals": ["trajectory"]
+  },
+  "verification_requirements": {
+    "assertions": [
+      {"id": "trajectory_integrity", "type": "trajectory_integrity"},
+      {"id": "attracted_toward_source", "type": "state_delta", "object_id": "attract_subject", "field": "position_m.x", "operator": ">=", "value": 0.12},
+      {"id": "repelled_from_source", "type": "state_delta", "object_id": "repel_subject", "field": "position_m.x", "operator": ">=", "value": 0.12}
+    ],
+    "thresholds": {}
+  },
+  "variant": {"should_pass": true},
+  "provenance": {"purpose": "capability_first_isolated_smoke"},
+  "notes": "The runtime sees only a signed generic radial point-field law; magnetic interpretation is Case-level semantics."
+}

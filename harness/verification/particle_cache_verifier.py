@@ -16,9 +16,13 @@ def verify_particle_cache(
     particles = cache.get("particles") if isinstance(cache.get("particles"), dict) else {}
     expected_count = int(particles.get("count") or 0)
     stable_ids = particles.get("stable_ids") if isinstance(particles.get("stable_ids"), list) else []
+    population_mode = str(particles.get("population_mode") or "fixed")
     if stable_ids != list(range(expected_count)):
         failures.append(failure("particle_ids_unstable", 0, {"count": len(stable_ids), "expected": expected_count}))
+    if population_mode not in {"fixed", "progressive_activation"}:
+        failures.append(failure("particle_population_mode", 0, population_mode))
     previous_time = -math.inf
+    previous_active_ids: set[int] = set()
     environment = cache.get("environment") if isinstance(cache.get("environment"), dict) else {}
     if environment.get("type") != "rigid_sph_scene":
         failures.append(failure("particle_environment_contract", 0, environment.get("type")))
@@ -40,7 +44,26 @@ def verify_particle_cache(
         if time_s <= previous_time:
             failures.append(failure("non_monotonic_time", frame_id, time_s))
         previous_time = time_s
-        if len(positions) != expected_count or len(velocities) != expected_count:
+        if population_mode == "progressive_activation":
+            active_ids = frame.get("active_particle_ids") if isinstance(frame.get("active_particle_ids"), list) else []
+            active_set = set(active_ids)
+            valid_ids = (
+                len(active_ids) == len(active_set)
+                and active_ids == sorted(active_ids)
+                and all(isinstance(value, int) and not isinstance(value, bool) and 0 <= value < expected_count for value in active_ids)
+            )
+            if not valid_ids or len(positions) != len(active_ids) or len(velocities) != len(active_ids):
+                failures.append(
+                    failure(
+                        "invalid_active_particle_ids",
+                        frame_id,
+                        {"ids": len(active_ids), "positions": len(positions), "velocities": len(velocities)},
+                    )
+                )
+            if not previous_active_ids.issubset(active_set):
+                failures.append(failure("particle_activation_not_monotonic", frame_id, active_ids))
+            previous_active_ids = active_set
+        elif len(positions) != expected_count or len(velocities) != expected_count:
             failures.append(failure("particle_count_changed", frame_id, {"positions": len(positions), "velocities": len(velocities), "expected": expected_count}))
         if not finite_vec3_rows(positions) or not finite_vec3_rows(velocities):
             failures.append(failure("non_finite_particle_state", frame_id, None))
@@ -67,11 +90,13 @@ def verify_particle_cache(
             path = Path(root) / str(surface["path"])
             if not path.is_file() or path.stat().st_size == 0:
                 failures.append(failure("surface_mesh_missing", frame_id, str(path)))
+    if population_mode == "progressive_activation" and previous_active_ids != set(stable_ids):
+        failures.append(failure("particle_activation_incomplete", len(frames) - 1, sorted(previous_active_ids)))
     if cache.get("schema_version") != "harness_particle_cache_v1":
         failures.append(failure("particle_cache_schema", 0, cache.get("schema_version")))
     if expected_count <= 0 or not frames:
         failures.append(failure("particle_cache_empty", 0, {"particle_count": expected_count, "frame_count": len(frames)}))
-    surface_volume_error = verify_surface_volume(frames, environment, failures)
+    surface_volume_error = verify_surface_volume(frames, particles, population_mode, environment, failures)
     declared_checks = verify_declared_measurements(frames, environment, failures)
     return {
         "schema_version": "harness_particle_cache_report_v1",
@@ -81,8 +106,28 @@ def verify_particle_cache(
         "checks": {
             "frame_count": len(frames),
             "particle_count": expected_count,
-            "stable_particle_count": not any(item["code"] == "particle_count_changed" for item in failures),
+            "stable_particle_count": not any(
+                item["code"] in {
+                    "particle_count_changed",
+                    "invalid_active_particle_ids",
+                    "particle_activation_not_monotonic",
+                    "particle_activation_incomplete",
+                }
+                for item in failures
+            ),
             "stable_particle_ids": not any(item["code"] == "particle_ids_unstable" for item in failures),
+            "progressive_particle_activation": (
+                not any(
+                    item["code"] in {
+                        "invalid_active_particle_ids",
+                        "particle_activation_not_monotonic",
+                        "particle_activation_incomplete",
+                    }
+                    for item in failures
+                )
+                if population_mode == "progressive_activation"
+                else None
+            ),
             "surface_frame_count": sum(1 for frame in frames if int((frame.get("surface") or {}).get("triangle_count") or 0) > 0),
             "surface_topology_consistent": not any(item["code"] == "surface_topology_invalid" for item in failures),
             "container_bounds_respected": not any(item["code"] == "container_penetration" for item in failures),
@@ -100,12 +145,27 @@ def verify_particle_cache(
 
 def verify_surface_volume(
     frames: list[dict[str, Any]],
+    particles: dict[str, Any],
+    population_mode: str,
     environment: dict[str, Any],
     failures: list[dict[str, Any]],
 ) -> float | None:
     if not frames:
         return None
-    expected = environment.get("initial_liquid_volume_m3")
+    if population_mode == "progressive_activation":
+        active_ids = frames[-1].get("active_particle_ids")
+        radius = particles.get("radius_m")
+        expected = (
+            len(active_ids) * (2.0 * float(radius)) ** 3
+            if isinstance(active_ids, list)
+            and isinstance(radius, (int, float))
+            and not isinstance(radius, bool)
+            and math.isfinite(float(radius))
+            and float(radius) > 0.0
+            else None
+        )
+    else:
+        expected = environment.get("initial_liquid_volume_m3")
     tolerances = environment.get("verification_tolerances") if isinstance(environment.get("verification_tolerances"), dict) else {}
     maximum = tolerances.get("surface_volume_relative_error_max")
     surface = frames[-1].get("surface") if isinstance(frames[-1].get("surface"), dict) else {}

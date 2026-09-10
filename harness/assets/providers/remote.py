@@ -20,6 +20,7 @@ from harness.core.artifact_schema import write_json
 
 MESHY_API_KEY_ENV = "SIM_HARNESS_MESHY_API_KEY"
 MESHY_API_ROOT = "https://api.meshy.ai/openapi/v1"
+MESHY_TEXT_TO_3D_ROOT = "https://api.meshy.ai/openapi/v2/text-to-3d"
 POLY_HAVEN_API_ROOT = "https://api.polyhaven.com"
 POLY_HAVEN_USER_AGENT = "PhysicsAwareHarness/0.1 (asset-provider; https://polyhaven.com)"
 MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
@@ -258,6 +259,19 @@ class MeshyModelGenerationAdapter:
                 f"Meshy API key is not configured in {MESHY_API_KEY_ENV}",
                 status="blocked",
             )
+        generation_prompt = request.get("generation_prompt")
+        if generation_prompt is not None and (
+            not isinstance(generation_prompt, str) or len(generation_prompt) > 800
+        ):
+            code = "generation_prompt_invalid" if not isinstance(generation_prompt, str) else "generation_prompt_too_long"
+            raise RemoteProviderError(code, "Meshy generation_prompt must be a string of at most 800 characters", status="blocked")
+        reference_inputs = request.get("reference_inputs")
+        if isinstance(reference_inputs, list) and not reference_inputs:
+            return self._acquire_text(
+                request,
+                destination=destination,
+                api_key=api_key,
+            )
         references, identities = _meshy_references(request.get("reference_inputs"), workspace=workspace)
         size = _optional_size(request.get("generation_spec"))
         payload = {
@@ -278,189 +292,26 @@ class MeshyModelGenerationAdapter:
         if texture_prompt is not None:
             if not isinstance(texture_prompt, str):
                 raise RemoteProviderError("texture_prompt_invalid", "Meshy texture_prompt must be a string", status="blocked")
-            if len(texture_prompt) > 600:
+            if len(texture_prompt) > 800:
                 raise RemoteProviderError(
                     "texture_prompt_too_long",
-                    "Meshy texture_prompt must contain at most 600 characters",
+                    "Meshy texture_prompt must contain at most 800 characters",
                     status="blocked",
                 )
             if texture_prompt:
                 payload["texture_prompt"] = texture_prompt
         headers = {"Authorization": f"Bearer {api_key}"}
         destination.mkdir(parents=True, exist_ok=True)
-        checkpoint = _load_meshy_checkpoint(destination, request=request, provider_id=self.provider_id)
-        if checkpoint is None:
-            submission = _load_meshy_submission_state(destination, request=request, provider_id=self.provider_id)
-            if submission is not None and submission.get("state") in {"attempting", "unknown", "acknowledged"}:
-                raise RemoteProviderError(
-                    "provider_submission_state_unknown",
-                    "a prior Meshy POST may have created a paid task without returning its ID; refusing to submit again",
-                    status="blocked",
-                    details={"submission_state": str(submission.get("state"))},
-                )
-            if self.resume_request is not None:
-                raise RemoteProviderError(
-                    "provider_resume_checkpoint_missing",
-                    "saved Meshy request has no matching task checkpoint; resume mode will not submit a new paid task",
-                    status="blocked",
-                )
-            _write_meshy_submission_state(
-                destination,
-                request=request,
-                provider_id=self.provider_id,
-                state="attempting",
-            )
-            try:
-                submitted = self.transport.request_json(
-                    "POST",
-                    f"{MESHY_API_ROOT}/multi-image-to-3d",
-                    headers=headers,
-                    payload=payload,
-                    timeout_s=30.0,
-                )
-            except RemoteProviderError as exc:
-                state = "unknown" if exc.retriable else "rejected"
-                _write_meshy_submission_state(
-                    destination,
-                    request=request,
-                    provider_id=self.provider_id,
-                    state=state,
-                    failure_code=exc.code,
-                )
-                if state == "unknown":
-                    raise RemoteProviderError(
-                        "provider_submission_state_unknown",
-                        "Meshy POST failed before a task ID was received; refusing automatic resubmission",
-                        status="blocked",
-                        details={"underlying_failure_code": exc.code},
-                    ) from exc
-                raise
-            write_json(destination / "submit_response.json", _redact_signed_urls(submitted))
-            task_id = str(submitted.get("result") or "").strip()
-            if not task_id:
-                _write_meshy_submission_state(
-                    destination,
-                    request=request,
-                    provider_id=self.provider_id,
-                    state="unknown",
-                    failure_code="provider_response_invalid",
-                )
-                raise RemoteProviderError(
-                    "provider_submission_state_unknown",
-                    "Meshy create response did not contain a task ID; refusing automatic resubmission",
-                    status="blocked",
-                )
-            checkpoint = _write_meshy_checkpoint(
-                destination,
-                request=request,
-                provider_id=self.provider_id,
-                task_id=task_id,
-                task={"status": "SUBMITTED"},
-            )
-            _write_meshy_submission_state(
-                destination,
-                request=request,
-                provider_id=self.provider_id,
-                state="acknowledged",
-                task_id=task_id,
-            )
-        else:
-            task_id = str(checkpoint["task_id"])
-        deadline = time.monotonic() + self.timeout_s
-        task: dict[str, Any] = {}
-        try:
-            while True:
-                task, _ = _retry_remote_operation(
-                    lambda: self.transport.request_json(
-                        "GET",
-                        f"{MESHY_API_ROOT}/multi-image-to-3d/{urllib.parse.quote(task_id, safe='')}",
-                        headers=headers,
-                        timeout_s=30.0,
-                    ),
-                    sleep=self.sleep,
-                )
-                write_json(destination / "task_response_latest.json", _redact_signed_urls(task))
-                _write_meshy_checkpoint(
-                    destination,
-                    request=request,
-                    provider_id=self.provider_id,
-                    task_id=task_id,
-                    task=task,
-                )
-                status = str(task.get("status") or "").upper()
-                if status == "SUCCEEDED":
-                    break
-                if status in {"FAILED", "CANCELED"}:
-                    raise RemoteProviderError(
-                        "provider_task_failed" if status == "FAILED" else "provider_task_canceled",
-                        str(task.get("task_error") or task.get("message") or f"Meshy task {status.casefold()}"),
-                    )
-                if status not in {"PENDING", "IN_PROGRESS"}:
-                    raise RemoteProviderError("provider_response_invalid", f"unknown Meshy task status: {status or '<missing>'}")
-                if time.monotonic() >= deadline:
-                    raise RemoteProviderError("provider_task_timeout", f"Meshy task exceeded {self.timeout_s:g}s", retriable=True)
-                self.sleep(min(self.poll_interval_s, max(0.0, deadline - time.monotonic())))
-            model_urls = task.get("model_urls") if isinstance(task.get("model_urls"), Mapping) else {}
-            glb_url = str(model_urls.get("glb") or task.get("model_url") or "").strip()
-            obj_url = str(model_urls.get("obj") or "").strip()
-            if not glb_url or not obj_url:
-                raise RemoteProviderError("provider_output_missing", "Meshy task did not return both GLB and OBJ outputs")
-            files: list[dict[str, Any]] = []
-            for role, file_format, url in (("canonical", "glb", glb_url), ("import_source", "obj", obj_url)):
-                downloaded, _ = _retry_remote_operation(
-                    lambda url=url, file_format=file_format: self.transport.download(
-                        url,
-                        destination / f"model.{file_format}",
-                        headers={},
-                    ),
-                    sleep=self.sleep,
-                )
-                files.append(_download_record(downloaded, role=role, file_format=file_format))
-            for optional_format in ("mtl",):
-                url = str(model_urls.get(optional_format) or "").strip()
-                if url:
-                    downloaded, _ = _retry_remote_operation(
-                        lambda url=url, optional_format=optional_format: self.transport.download(
-                            url,
-                            destination / f"model.{optional_format}",
-                            headers={},
-                        ),
-                        sleep=self.sleep,
-                    )
-                    files.append(_download_record(downloaded, role="material_dependency", file_format=optional_format))
-            downloaded_names = {Path(str(row["path"])).name for row in files}
-            for texture_index, texture_set in enumerate(task.get("texture_urls") or []):
-                if not isinstance(texture_set, Mapping):
-                    raise RemoteProviderError("provider_response_invalid", "Meshy texture output must be an object")
-                for texture_role, raw_url in sorted(texture_set.items()):
-                    url = str(raw_url or "").strip()
-                    if not url:
-                        continue
-                    name = urllib.parse.unquote(Path(urllib.parse.urlsplit(url).path).name)
-                    if not name or name in downloaded_names or Path(name).name != name:
-                        name = f"texture_{texture_index}_{_safe_id(str(texture_role))}.png"
-                    downloaded_names.add(name)
-                    downloaded, _ = _retry_remote_operation(
-                        lambda url=url, name=name: self.transport.download(url, destination / name, headers={}),
-                        sleep=self.sleep,
-                    )
-                    files.append(
-                        _download_record(
-                            downloaded,
-                            role=f"texture_{texture_role}",
-                            file_format=Path(name).suffix.lstrip(".") or "png",
-                        )
-                    )
-        except RemoteProviderError as exc:
-            exc.details.update(
-                {
-                    "task_id": task_id,
-                    "task_status": str(task.get("status") or checkpoint.get("task_status") or "UNKNOWN").upper(),
-                    "progress": task.get("progress", checkpoint.get("progress")),
-                    "consumed_credits": task.get("consumed_credits", checkpoint.get("consumed_credits")),
-                }
-            )
-            raise
+        task_id, task = self._run_meshy_task(
+            request,
+            stage="multi-image",
+            payload=payload,
+            directory=destination,
+            endpoint=f"{MESHY_API_ROOT}/multi-image-to-3d",
+            headers=headers,
+            allow_submit=self.resume_request is None,
+        )
+        files = self._download_meshy_outputs(task, destination=destination)
         output_digest = stable_digest({"task_id": task_id, "files": [{"format": row["format"], "sha256": row["sha256"]} for row in files]})
         acquisition = RemoteAcquisition(
             provider_id=self.provider_id,
@@ -474,7 +325,15 @@ class MeshyModelGenerationAdapter:
             author="Meshy",
             license="All Rights Reserved",
             license_tier="local_preview",
-            request_parameters={**payload, "image_urls": [f"input:{row['input_id']}" for row in identities]},
+            request_parameters={
+                **payload,
+                "image_urls": [f"input:{row['input_id']}" for row in identities],
+                **(
+                    {"generation_prompt": request.get("generation_prompt"), "generation_prompt_usage": "audit_only"}
+                    if "generation_prompt" in request
+                    else {}
+                ),
+            },
             input_identities=tuple(identities),
             files=tuple(files),
             import_file=destination / "model.obj",
@@ -489,6 +348,350 @@ class MeshyModelGenerationAdapter:
         )
         _write_cached_acquisition(destination, request=request, acquisition=acquisition)
         return acquisition
+
+    def _acquire_text(
+        self,
+        request: Mapping[str, Any],
+        *,
+        destination: Path,
+        api_key: str,
+    ) -> RemoteAcquisition:
+        prompt = request.get("generation_prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise RemoteProviderError(
+                "generation_prompt_required",
+                "Meshy text-to-3D requires a non-empty generation_prompt when no reference images are supplied",
+                status="blocked",
+            )
+        if len(prompt) > 800:
+            raise RemoteProviderError(
+                "generation_prompt_too_long",
+                "Meshy generation_prompt must contain at most 800 characters",
+                status="blocked",
+            )
+        texture_prompt = request.get("texture_prompt")
+        if texture_prompt is not None:
+            if not isinstance(texture_prompt, str):
+                raise RemoteProviderError("texture_prompt_invalid", "Meshy texture_prompt must be a string", status="blocked")
+            if len(texture_prompt) > 800:
+                raise RemoteProviderError(
+                    "texture_prompt_too_long",
+                    "Meshy texture_prompt must contain at most 800 characters",
+                    status="blocked",
+                )
+
+        size = _optional_size(request.get("generation_spec"))
+        headers = {"Authorization": f"Bearer {api_key}"}
+        destination.mkdir(parents=True, exist_ok=True)
+        preview_payload = {
+            "mode": "preview",
+            "prompt": prompt.strip(),
+            "model_type": "standard",
+            "ai_model": "latest",
+            "should_remesh": True,
+            "topology": "triangle",
+            "target_polycount": 30000,
+            "target_formats": ["glb", "obj"],
+            "auto_size": size is None,
+            "origin_at": "bottom",
+        }
+        preview_task_id, preview_task = self._run_meshy_task(
+            request,
+            stage="preview",
+            payload=preview_payload,
+            directory=destination / "preview",
+            endpoint=MESHY_TEXT_TO_3D_ROOT,
+            headers=headers,
+            allow_submit=self.resume_request is None,
+        )
+        self._write_text_checkpoint(
+            destination,
+            request=request,
+            preview_task_id=preview_task_id,
+            preview_task=preview_task,
+        )
+
+        refine_payload = {
+            "mode": "refine",
+            "preview_task_id": preview_task_id,
+            "ai_model": "latest",
+            "enable_pbr": True,
+            "texture_resolution": "2k",
+            "remove_lighting": True,
+            "target_formats": ["glb", "obj"],
+            "auto_size": size is None,
+            "origin_at": "bottom",
+        }
+        if texture_prompt:
+            refine_payload["texture_prompt"] = texture_prompt
+        refine_task_id, refine_task = self._run_meshy_task(
+            request,
+            stage="refine",
+            payload=refine_payload,
+            directory=destination / "refine",
+            endpoint=MESHY_TEXT_TO_3D_ROOT,
+            headers=headers,
+            allow_submit=True,
+        )
+        self._write_text_checkpoint(
+            destination,
+            request=request,
+            preview_task_id=preview_task_id,
+            preview_task=preview_task,
+            refine_task_id=refine_task_id,
+            refine_task=refine_task,
+        )
+
+        files = self._download_meshy_outputs(refine_task, destination=destination)
+        output_digest = stable_digest(
+            {
+                "preview_task_id": preview_task_id,
+                "refine_task_id": refine_task_id,
+                "files": [{"format": row["format"], "sha256": row["sha256"]} for row in files],
+            }
+        )
+        acquisition = RemoteAcquisition(
+            provider_id=self.provider_id,
+            provider_version=self.provider_version,
+            source_kind="model_generation",
+            source_uri=f"meshy://text-to-3d/{refine_task_id}",
+            source_asset_id=refine_task_id,
+            asset_id=f"generated.meshy.{output_digest[:24]}",
+            name=f"Meshy generated asset {refine_task_id[:12]}",
+            description=prompt.strip(),
+            author="Meshy",
+            license="All Rights Reserved",
+            license_tier="local_preview",
+            request_parameters={"preview": preview_payload, "refine": refine_payload},
+            input_identities=(),
+            files=tuple(files),
+            import_file=destination / "model.obj",
+            canonical_file=destination / "model.glb",
+            expected_size_m=size,
+            metadata={
+                "preview_task_id": preview_task_id,
+                "refine_task_id": refine_task_id,
+                "status": "SUCCEEDED",
+                "consumed_credits": sum(
+                    int(task.get("consumed_credits") or 0) for task in (preview_task, refine_task)
+                ),
+            },
+        )
+        _write_cached_acquisition(destination, request=request, acquisition=acquisition)
+        return acquisition
+
+    def _run_meshy_task(
+        self,
+        request: Mapping[str, Any],
+        *,
+        stage: str,
+        payload: Mapping[str, Any],
+        directory: Path,
+        endpoint: str,
+        headers: Mapping[str, str],
+        allow_submit: bool,
+    ) -> tuple[str, dict[str, Any]]:
+        directory.mkdir(parents=True, exist_ok=True)
+        checkpoint = _load_meshy_checkpoint(directory, request=request, provider_id=self.provider_id)
+        if checkpoint is None:
+            submission = _load_meshy_submission_state(directory, request=request, provider_id=self.provider_id)
+            if submission is not None and submission.get("state") in {"attempting", "unknown", "acknowledged"}:
+                raise RemoteProviderError(
+                    "provider_submission_state_unknown",
+                    f"a prior Meshy {stage} POST may have created a paid task without returning its ID",
+                    status="blocked",
+                )
+            if not allow_submit:
+                raise RemoteProviderError(
+                    "provider_resume_checkpoint_missing",
+                    f"saved Meshy request has no matching {stage} checkpoint",
+                    status="blocked",
+                )
+            _write_meshy_submission_state(
+                directory,
+                request=request,
+                provider_id=self.provider_id,
+                state="attempting",
+            )
+            try:
+                submitted = self.transport.request_json(
+                    "POST",
+                    endpoint,
+                    headers=headers,
+                    payload=payload,
+                    timeout_s=30.0,
+                )
+            except RemoteProviderError as exc:
+                state = "unknown" if exc.retriable else "rejected"
+                _write_meshy_submission_state(
+                    directory,
+                    request=request,
+                    provider_id=self.provider_id,
+                    state=state,
+                    failure_code=exc.code,
+                )
+                if state == "unknown":
+                    raise RemoteProviderError(
+                        "provider_submission_state_unknown",
+                        f"Meshy {stage} POST failed before a task ID was received",
+                        status="blocked",
+                        details={"underlying_failure_code": exc.code},
+                    ) from exc
+                raise
+            write_json(directory / "submit_response.json", _redact_signed_urls(submitted))
+            task_id = str(submitted.get("result") or "").strip()
+            if not task_id:
+                _write_meshy_submission_state(
+                    directory,
+                    request=request,
+                    provider_id=self.provider_id,
+                    state="unknown",
+                    failure_code="provider_response_invalid",
+                )
+                raise RemoteProviderError(
+                    "provider_submission_state_unknown",
+                    f"Meshy {stage} response did not contain a task ID",
+                    status="blocked",
+                )
+            checkpoint = _write_meshy_checkpoint(
+                directory,
+                request=request,
+                provider_id=self.provider_id,
+                task_id=task_id,
+                task={"status": "SUBMITTED"},
+            )
+            _write_meshy_submission_state(
+                directory,
+                request=request,
+                provider_id=self.provider_id,
+                state="acknowledged",
+                task_id=task_id,
+            )
+        else:
+            task_id = str(checkpoint["task_id"])
+
+        deadline = time.monotonic() + self.timeout_s
+        task: dict[str, Any] = {}
+        try:
+            while True:
+                task, _ = _retry_remote_operation(
+                    lambda: self.transport.request_json(
+                        "GET",
+                        f"{endpoint}/{urllib.parse.quote(task_id, safe='')}",
+                        headers=headers,
+                        timeout_s=30.0,
+                    ),
+                    sleep=self.sleep,
+                )
+                write_json(directory / "task_response_latest.json", _redact_signed_urls(task))
+                _write_meshy_checkpoint(
+                    directory,
+                    request=request,
+                    provider_id=self.provider_id,
+                    task_id=task_id,
+                    task=task,
+                )
+                status = str(task.get("status") or "").upper()
+                if status == "SUCCEEDED":
+                    return task_id, task
+                if status in {"FAILED", "CANCELED"}:
+                    raise RemoteProviderError(
+                        "provider_task_failed" if status == "FAILED" else "provider_task_canceled",
+                        str(task.get("task_error") or task.get("message") or f"Meshy task {status.casefold()}"),
+                    )
+                if status not in {"PENDING", "IN_PROGRESS"}:
+                    raise RemoteProviderError("provider_response_invalid", f"unknown Meshy task status: {status or '<missing>'}")
+                if time.monotonic() >= deadline:
+                    raise RemoteProviderError("provider_task_timeout", f"Meshy task exceeded {self.timeout_s:g}s", retriable=True)
+                self.sleep(min(self.poll_interval_s, max(0.0, deadline - time.monotonic())))
+        except RemoteProviderError as exc:
+            exc.details.update(
+                {
+                    "task_id": task_id,
+                    "task_stage": stage,
+                    "task_status": str(task.get("status") or checkpoint.get("task_status") or "UNKNOWN").upper(),
+                    "progress": task.get("progress", checkpoint.get("progress")),
+                    "consumed_credits": task.get("consumed_credits", checkpoint.get("consumed_credits")),
+                }
+            )
+            raise
+
+    def _download_meshy_outputs(self, task: Mapping[str, Any], *, destination: Path) -> list[dict[str, Any]]:
+        model_urls = task.get("model_urls") if isinstance(task.get("model_urls"), Mapping) else {}
+        glb_url = str(model_urls.get("glb") or task.get("model_url") or "").strip()
+        obj_url = str(model_urls.get("obj") or "").strip()
+        if not glb_url or not obj_url:
+            raise RemoteProviderError("provider_output_missing", "Meshy task did not return both GLB and OBJ outputs")
+        files: list[dict[str, Any]] = []
+        for role, file_format, url in (("canonical", "glb", glb_url), ("import_source", "obj", obj_url)):
+            downloaded, _ = _retry_remote_operation(
+                lambda url=url, file_format=file_format: self.transport.download(
+                    url,
+                    destination / f"model.{file_format}",
+                    headers={},
+                ),
+                sleep=self.sleep,
+            )
+            files.append(_download_record(downloaded, role=role, file_format=file_format))
+        mtl_url = str(model_urls.get("mtl") or "").strip()
+        if mtl_url:
+            downloaded, _ = _retry_remote_operation(
+                lambda: self.transport.download(mtl_url, destination / "model.mtl", headers={}),
+                sleep=self.sleep,
+            )
+            files.append(_download_record(downloaded, role="material_dependency", file_format="mtl"))
+        downloaded_names = {Path(str(row["path"])).name for row in files}
+        for texture_index, texture_set in enumerate(task.get("texture_urls") or []):
+            if not isinstance(texture_set, Mapping):
+                raise RemoteProviderError("provider_response_invalid", "Meshy texture output must be an object")
+            for texture_role, raw_url in sorted(texture_set.items()):
+                url = str(raw_url or "").strip()
+                if not url:
+                    continue
+                name = urllib.parse.unquote(Path(urllib.parse.urlsplit(url).path).name)
+                if not name or name in downloaded_names or Path(name).name != name:
+                    name = f"texture_{texture_index}_{_safe_id(str(texture_role))}.png"
+                downloaded_names.add(name)
+                downloaded, _ = _retry_remote_operation(
+                    lambda url=url, name=name: self.transport.download(url, destination / name, headers={}),
+                    sleep=self.sleep,
+                )
+                files.append(
+                    _download_record(
+                        downloaded,
+                        role=f"texture_{texture_role}",
+                        file_format=Path(name).suffix.lstrip(".") or "png",
+                    )
+                )
+        return files
+
+    @staticmethod
+    def _write_text_checkpoint(
+        destination: Path,
+        *,
+        request: Mapping[str, Any],
+        preview_task_id: str,
+        preview_task: Mapping[str, Any],
+        refine_task_id: str | None = None,
+        refine_task: Mapping[str, Any] | None = None,
+    ) -> None:
+        payload = {
+            "schema_version": "harness_meshy_text_to_3d_checkpoint_v1",
+            "provider_id": MeshyModelGenerationAdapter.provider_id,
+            "request_identity": _request_identity(request),
+            "preview": {
+                "task_id": preview_task_id,
+                "status": str(preview_task.get("status") or "UNKNOWN").upper(),
+                "consumed_credits": preview_task.get("consumed_credits"),
+            },
+        }
+        if refine_task_id:
+            payload["refine"] = {
+                "task_id": refine_task_id,
+                "status": str((refine_task or {}).get("status") or "UNKNOWN").upper(),
+                "consumed_credits": (refine_task or {}).get("consumed_credits"),
+            }
+        write_json(destination / "task_checkpoint.json", payload)
 
 
 class PolyHavenExternalSiteAdapter:

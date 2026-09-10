@@ -26,8 +26,10 @@ def verify_expected_color_observability(
     if len(expected_rgb) != 3:
         raise ValueError("expected_rgb must contain three channels")
     dominant_channel = max(range(3), key=lambda index: float(expected_rgb[index]))
-    if list(expected_rgb).count(expected_rgb[dominant_channel]) > 1:
-        raise ValueError("expected_rgb must have one dominant channel")
+    use_dominant_channel = list(expected_rgb).count(expected_rgb[dominant_channel]) == 1
+    expected_sum = sum(float(value) for value in expected_rgb)
+    expected_chromaticity = [float(value) / expected_sum for value in expected_rgb] if expected_sum > 0 else [1.0 / 3.0] * 3
+    minimum_luminance = max(32.0, (expected_sum / 3.0) * 255.0 * 0.55)
 
     per_view: dict[str, Any] = {}
     failures: list[dict[str, Any]] = []
@@ -37,14 +39,23 @@ def verify_expected_color_observability(
         visible: list[bool] = []
         pixel_fractions: list[float] = []
         for frame in frames:
-            dominant_pixels = 0
+            matching_pixels = 0
             pixel_count = sample_size * sample_size
             for offset in range(0, len(frame), 3):
                 channels = frame[offset : offset + 3]
-                other_max = max(channels[index] for index in range(3) if index != dominant_channel)
-                if channels[dominant_channel] - other_max >= minimum_channel_margin:
-                    dominant_pixels += 1
-            fraction = dominant_pixels / pixel_count
+                if use_dominant_channel:
+                    other_max = max(channels[index] for index in range(3) if index != dominant_channel)
+                    matches = channels[dominant_channel] - other_max >= minimum_channel_margin
+                else:
+                    channel_sum = sum(channels)
+                    chromaticity = [value / channel_sum for value in channels] if channel_sum else [0.0, 0.0, 0.0]
+                    matches = (
+                        channel_sum / 3.0 >= minimum_luminance
+                        and max(abs(chromaticity[index] - expected_chromaticity[index]) for index in range(3)) <= 0.10
+                    )
+                if matches:
+                    matching_pixels += 1
+            fraction = matching_pixels / pixel_count
             pixel_fractions.append(fraction)
             visible.append(fraction >= minimum_pixel_fraction)
         visible_fraction = sum(visible) / len(visible) if visible else 0.0
@@ -73,7 +84,8 @@ def verify_expected_color_observability(
         "schema_version": "harness_rgb_observability_v1",
         "status": "pass" if not failures else "fail",
         "expected_rgb": [float(value) for value in expected_rgb],
-        "dominant_channel": ("red", "green", "blue")[dominant_channel],
+        "dominant_channel": ("red", "green", "blue")[dominant_channel] if use_dominant_channel else None,
+        "matching_mode": "dominant_channel" if use_dominant_channel else "chromaticity_and_luminance",
         "minimum_channel_margin": minimum_channel_margin,
         "minimum_visible_frame_fraction": minimum_visible_frame_fraction,
         "views": per_view,

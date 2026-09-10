@@ -1,0 +1,166 @@
+{
+  "schema_version": "harness_case_spec_v2",
+  "identity": {
+    "case_id": "smoke_fracture_above_threshold_v1",
+    "title": "Above-threshold impact fractures a Geometry Collection",
+    "source_request": "A rigid steel sphere strikes a real Geometry Collection above its declared energy threshold; native contact must precede fracture and fragment motion."
+  },
+  "capabilities": {
+    "primary": "rigid_body_dynamics",
+    "required": ["rigid_body_dynamics"]
+  },
+  "scene": {
+    "environment_intent": "minimal controlled impact stage",
+    "coordinate_system": "z_up",
+    "duration_s": 2.5,
+    "bounds_hint_m": [3.2, 3.0, 1.5]
+  },
+  "timebase": {
+    "physics_hz": 120,
+    "observation_fps": 24,
+    "deterministic_seed": 760079
+  },
+  "backend_constraints": {
+    "required_solver_capabilities": ["rigid_body", "contact_events", "trajectory", "fracture_events", "geometry_collection"],
+    "allowed_solvers": ["ue"],
+    "render_backend": "ue",
+    "allow_multi_backend": false
+  },
+  "asset_policy": {
+    "allow_local": true,
+    "allow_external": false,
+    "allow_generation": false,
+    "allow_analytic_proxy": true,
+    "required_license_tier": "local_preview"
+  },
+  "objects": [
+    {
+      "id": "steel_ball",
+      "role": "active_striker",
+      "geometry": {"shape_hint": "sphere", "approx_size_m": [0.1, 0.1, 0.1]},
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 4.0,
+        "collision_required": true,
+        "collision_geometry": {"shape": "sphere", "size_m": [0.1, 0.1, 0.1], "local_center_offset_m": [0.0, 0.0, 0.0]},
+        "enable_gravity": false,
+        "use_ccd": true,
+        "material": {"dynamic_friction": 0.12, "restitution": 0.15}
+      },
+      "initial_state": {
+        "position_m": [0.0, -1.2, 0.31],
+        "rotation_deg": [0.0, 0.0, 0.0],
+        "linear_velocity_m_s": [0.0, 3.0, 0.0]
+      },
+      "color_rgb": [0.18, 0.2, 0.23],
+      "fixed_material_color": true,
+      "behavior": {"initial_kinetic_energy_j": 18.0}
+    },
+    {
+      "id": "destructible_board",
+      "role": "brittle_fracture_body",
+      "geometry": {"shape_hint": "thin_box", "approx_size_m": [1.6, 0.02, 0.62], "scale_policy": "preserve_authored"},
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 15.0,
+        "collision_required": true,
+        "enable_gravity": false,
+        "material": {"dynamic_friction": 0.32, "restitution": 0.18}
+      },
+      "initial_state": {
+        "position_m": [0.0, 0.0, 0.31],
+        "rotation_deg": [0.0, 0.0, 0.0],
+        "linear_velocity_m_s": [0.0, 0.0, 0.0]
+      },
+      "asset": {
+        "description": "destructible board",
+        "resource_kind": "geometry_collection",
+        "must": {"asset_type": "geometry_collection", "materialized": true, "runtime_ready": true},
+        "preferences": {},
+        "acquisition": {
+          "route": "local_catalog",
+          "requirement": "preferred",
+          "origin": "llm_inferred",
+          "provider_hint": null,
+          "source_uri_hint": "harness-local://generated/ball-board/GC_BoardRadial",
+          "fallback_order": [],
+          "reference_inputs": []
+        }
+      },
+      "visual_representation": {"source": "asset", "visible": true},
+      "behavior": {
+        "fracture": {
+          "mode": "contact_external_strain",
+          "impactor_id": "steel_ball",
+          "minimum_impact_energy_j": 10.0,
+          "external_strain": 750000.0,
+          "damage_thresholds": [500000.0, 50000.0, 5000.0],
+          "radius_m": 0.5,
+          "propagation_depth": 2,
+          "propagation_factor": 0.5,
+          "release_cluster": true
+        }
+      }
+    },
+    {
+      "id": "impact_floor",
+      "role": "support",
+      "geometry": {"shape_hint": "box", "approx_size_m": [3.2, 2.4, 0.1]},
+      "physics": {
+        "body_type": "static",
+        "mass_kg": 100.0,
+        "collision_required": true,
+        "collision_geometry": {"shape": "box", "size_m": [3.2, 2.4, 0.1], "local_center_offset_m": [0.0, 0.0, 0.0]},
+        "material": {"dynamic_friction": 0.4, "restitution": 0.05}
+      },
+      "initial_state": {
+        "position_m": [0.0, 0.0, -0.05],
+        "rotation_deg": [0.0, 0.0, 0.0],
+        "linear_velocity_m_s": [0.0, 0.0, 0.0]
+      },
+      "visual_representation": {"source": "none", "visible": false},
+      "behavior": {}
+    }
+  ],
+  "relations": [
+    {"type": "collision", "source": "steel_ball", "target": "destructible_board"}
+  ],
+  "events": [],
+  "forces": [],
+  "constraints": [],
+  "expected_behavior": {
+    "expected_fracture": true,
+    "expected_min_fragment_count": 2,
+    "impactor_object_id": "steel_ball",
+    "brittle_object_id": "destructible_board",
+    "minimum_impact_energy_j": 10.0
+  },
+  "observation_requirements": {
+    "cameras": [
+      {
+        "role": "front_static",
+        "coordinate_frame": "world",
+        "position_m": [2.4, -2.6, 1.25],
+        "look_at_m": [0.0, 0.0, 0.32],
+        "fov_deg": 48.0,
+        "framing": "scene",
+        "target_objects": ["steel_ball", "destructible_board"]
+      }
+    ],
+    "modalities": ["rgb"],
+    "signals": ["trajectory", "contact_events", "fracture_events"]
+  },
+  "verification_requirements": {
+    "assertions": [
+      {"id": "trajectory_integrity", "type": "trajectory_integrity"},
+      {"id": "native_impact", "type": "event_exists", "event": "contact", "objects": ["steel_ball", "destructible_board"]}
+    ],
+    "thresholds": {}
+  },
+  "variant": {"should_pass": true},
+  "provenance": {
+    "purpose": "capability_first_isolated_smoke",
+    "core100_cases": ["R077", "R078", "R079"]
+  },
+  "notes": "The local board Geometry Collection is physics evidence only; formal glass, wood-board, and crate appearances remain separate asset choices."
+}

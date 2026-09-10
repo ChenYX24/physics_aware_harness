@@ -12,7 +12,7 @@ from typing import Any, Mapping
 
 from harness.assets.asset_intent_compiler import CompiledAssetIntent
 from harness.assets.asset_registry import AssetRegistry, candidate_matches_search_intent
-from harness.assets.asset_resolver import asset_quality_gate
+from harness.assets.asset_resolver import asset_quality_gate, without_license_requirements
 from harness.assets.providers.backend_importer import (
     IMPORTER_CONTRACT_VERSION,
     BackendImporterAdapter,
@@ -38,6 +38,7 @@ from harness.assets.providers.contracts import (
     stable_digest,
 )
 from harness.assets.providers.local_procedural_mesh import (
+    FRUSTUM_RADIAL_SEGMENTS,
     GENERATOR_SOURCE_VERSION,
     PROVIDER_ID,
     PROVIDER_VERSION,
@@ -193,7 +194,12 @@ class AssetProviderOrchestrator:
                 and adapter.provider_id == "meshy_model_generation_v1"
                 and hint in {"", "meshy", "meshy_v1", adapter.provider_id}
             )
-            if route == "model_generation" and registry.writable and meshy_hint_accepted:
+            if (
+                route == "model_generation"
+                and registry.writable
+                and meshy_hint_accepted
+                and request.get("reference_inputs")
+            ):
                 try:
                     references = bind_provider_reference_inputs(
                         request.get("reference_inputs") or [],
@@ -281,6 +287,8 @@ class AssetProviderOrchestrator:
             "size_m": copy.deepcopy(geometry.get("approx_size_m")),
             "scale_policy": str(geometry.get("scale_policy") or "preserve_authored"),
         }
+        if geometry.get("shape_parameters") is not None:
+            generation_spec["shape_parameters"] = copy.deepcopy(geometry["shape_parameters"])
         identity = {
             "case_id": case_id,
             "object_id": intent.object_id,
@@ -298,6 +306,8 @@ class AssetProviderOrchestrator:
         }
         if "texture_prompt" in intent.acquisition:
             identity["texture_prompt"] = intent.acquisition.get("texture_prompt")
+        if "generation_prompt" in intent.acquisition:
+            identity["generation_prompt"] = intent.acquisition.get("generation_prompt")
         digest = stable_digest(identity)
         return ProviderRequest.from_dict(
             {
@@ -379,6 +389,9 @@ class AssetProviderOrchestrator:
             "provider_version": PROVIDER_VERSION,
             "importer_contract_version": IMPORTER_CONTRACT_VERSION,
         }
+        if normalized["shape"] == "open_conical_frustum":
+            payload["collision_mode"] = "convex_decomposition"
+            payload["convex_hull_count"] = FRUSTUM_RADIAL_SEGMENTS
         return (
             PreparedProviderImport(
                 kind="procedural",
@@ -522,21 +535,34 @@ class AssetProviderOrchestrator:
                 ),
                 None,
             )
+        source_files = [
+            {
+                "role": "provider_import_source",
+                "local_path": str(acquisition.import_file),
+                "format": str(import_record["format"]),
+                "sha256": str(import_record["sha256"]),
+                "byte_size": int(import_record["byte_size"]),
+                "materialized": True,
+            }
+        ]
+        base_color = next((row for row in acquisition.files if row.get("role") == "texture_base_color"), None)
+        if base_color is not None:
+            source_files.append(
+                {
+                    "role": "texture_base_color",
+                    "local_path": str(base_color["path"]),
+                    "format": str(base_color["format"]),
+                    "sha256": str(base_color["sha256"]),
+                    "byte_size": int(base_color["byte_size"]),
+                    "materialized": True,
+                }
+            )
         payload: dict[str, Any] = {
             "schema_version": BACKEND_IMPORT_REQUEST_SCHEMA,
             "asset_id": acquisition.asset_id,
             "target_backend": request["target_backend"],
             "class_name": "StaticMesh",
-            "source_files": [
-                {
-                    "role": "provider_import_source",
-                    "local_path": str(acquisition.import_file),
-                    "format": str(import_record["format"]),
-                    "sha256": str(import_record["sha256"]),
-                    "byte_size": int(import_record["byte_size"]),
-                    "materialized": True,
-                }
-            ],
+            "source_files": source_files,
             "desired_name": acquisition.asset_id.replace(".", "_"),
             "source_kind": acquisition.source_kind,
             "provider_id": acquisition.provider_id,
@@ -923,7 +949,12 @@ class AssetProviderOrchestrator:
             physics_critical=intent.legacy_intent.physics_critical,
             allow_local_preview=request["required_license_tier"] == "local_preview",
         )
-        hard_constraints_match = candidate_matches_search_intent(registered, intent.search_intent)
+        qualification_intent = (
+            without_license_requirements(intent.search_intent)
+            if quality["provenance_and_release_gate_override"]
+            else intent.search_intent
+        )
+        hard_constraints_match = candidate_matches_search_intent(registered, qualification_intent)
         if not hard_constraints_match or not str(quality["status"]).startswith("pass"):
             qualification_failures = [*quality["failure_codes"]]
             if not hard_constraints_match:
@@ -1101,7 +1132,12 @@ class AssetProviderOrchestrator:
             physics_critical=intent.legacy_intent.physics_critical,
             allow_local_preview=request["required_license_tier"] == "local_preview",
         )
-        hard_constraints_match = candidate_matches_search_intent(registered, intent.search_intent)
+        qualification_intent = (
+            without_license_requirements(intent.search_intent)
+            if quality["provenance_and_release_gate_override"]
+            else intent.search_intent
+        )
+        hard_constraints_match = candidate_matches_search_intent(registered, qualification_intent)
         if not hard_constraints_match or not str(quality["status"]).startswith("pass"):
             failures = [*quality["failure_codes"]]
             if not hard_constraints_match:
@@ -1249,6 +1285,8 @@ class AssetProviderOrchestrator:
         }
         if "texture_prompt" in request:
             recipe_parameters["texture_prompt"] = request.get("texture_prompt")
+        if "generation_prompt" in request:
+            recipe_parameters["generation_prompt"] = request.get("generation_prompt")
         receipt = {
             "schema_version": PROVIDER_RECEIPT_SCHEMA,
             "receipt_id": f"provider-receipt.{receipt_digest}",
@@ -1526,7 +1564,10 @@ class AssetProviderOrchestrator:
         dependencies = [dict(row) for row in import_result.get("dependencies") or []]
         size = [float(value) for value in normalized["size_m"]]
         shape = str(normalized["shape"])
-        collision_qualification = _catalog_collision_qualification(import_result, kind=shape)
+        collision_qualification = _catalog_collision_qualification(
+            import_result,
+            kind="compound_convex" if shape == "open_conical_frustum" else shape,
+        )
         portable_collision_files = _portable_collision_files(collision_qualification)
         volume_m3 = _primitive_volume_m3(shape, size)
         mass = volume_m3 * 1000.0
@@ -1788,7 +1829,7 @@ def _is_sha256(value: str) -> bool:
 
 def _string_values(value: Any) -> list[str]:
     values = value if isinstance(value, list) else [value]
-    return [str(item) for item in values if str(item).strip()]
+    return [str(item) for item in values if item is not None and str(item).strip()]
 
 
 def _primitive_volume_m3(shape: str, size: list[float]) -> float:

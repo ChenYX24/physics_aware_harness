@@ -130,12 +130,18 @@ class EvidenceBundleManifest:
             _sha256(value["sha256"], f"technical_gates.{name}.sha256")
         selection = _mapping(data["event_selection"], "event_selection")
         _exact(selection, {"strategy", "reason", "points"}, "event_selection")
-        if selection["strategy"] not in {"event_anchored", "start_mid_end"}:
+        if selection["strategy"] not in {
+            "event_anchored",
+            "event_sequence_transition",
+            "start_mid_end",
+            "uniform_interval",
+        }:
             raise ValueError("event_selection.strategy is invalid")
         _nonempty(selection["reason"], "event_selection.reason")
         points = selection["points"]
-        if not isinstance(points, list) or [row.get("label") for row in points if isinstance(row, Mapping)] != ["before", "during", "after"]:
-            raise ValueError("event_selection.points must contain before/during/after in order")
+        labels = [row.get("label") for row in points if isinstance(row, Mapping)] if isinstance(points, list) else []
+        if not labels or len(labels) > 6 or len(labels) != len(points) or len(set(labels)) != len(labels):
+            raise ValueError("event_selection.points must contain one to six uniquely labeled points")
         for index, point in enumerate(points):
             value = _mapping(point, f"event_selection.points[{index}]")
             _exact(value, {"label", "time_s", "frame_index", "event_refs"}, f"event_selection.points[{index}]")

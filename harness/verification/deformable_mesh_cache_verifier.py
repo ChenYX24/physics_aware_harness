@@ -5,13 +5,14 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from harness.runtime.deformable_surface_adapter import collider_position_m, collider_world_from_local_columns
+
 
 def verify_deformable_mesh_cache(
     arrays: Mapping[str, Any],
     *,
     expected: Mapping[str, Any],
-    sphere_center_m: list[float] | None,
-    sphere_radius_m: float | None,
+    colliders: list[Mapping[str, Any]] | None,
     floor_z_m: float | None,
     collision_thickness_m: float,
     pinned_indices: list[int] | None = None,
@@ -75,19 +76,50 @@ def verify_deformable_mesh_cache(
         failures.append(failure("edge_stretch_exceeded", maximum_stretch))
 
     penetration_tolerance = float(expected.get("penetration_tolerance_m") or 0.0)
-    minimum_clearance = None
-    contact_frames = None
-    if sphere_center_m is not None and sphere_radius_m is not None:
-        center = np.asarray(sphere_center_m, dtype=np.float64)
-        clearances = np.linalg.norm(positions - center[None, None, :], axis=2) - float(sphere_radius_m)
+    collider_checks: list[dict[str, Any]] = []
+    collider_frame_contacts = np.zeros(positions.shape[0], dtype=bool)
+    first_sphere_clearance = None
+    first_sphere_contact_frames = None
+    for collider in colliders or []:
+        clearances = analytic_collider_clearances(positions, times, collider)
         minimum_clearance = float(np.min(clearances))
-        if minimum_clearance < -penetration_tolerance:
-            failures.append(failure("rigid_collider_penetration", minimum_clearance))
         contact_limit = float(collision_thickness_m) + penetration_tolerance
-        contact_frames = int(np.count_nonzero(np.min(clearances, axis=1) <= contact_limit))
-        minimum_contact_frames = int(expected.get("minimum_sphere_contact_frames") or 0)
-        if contact_frames < minimum_contact_frames:
-            failures.append(failure("sphere_contact_missing", contact_frames))
+        frame_contacts = np.min(clearances, axis=1) <= contact_limit
+        contact_frames = int(np.count_nonzero(frame_contacts))
+        collider_frame_contacts |= frame_contacts
+        check = {
+            "object_id": str(collider.get("id") or ""),
+            "shape": str(collider.get("shape") or ""),
+            "minimum_clearance_m": minimum_clearance,
+            "contact_frame_count": contact_frames,
+        }
+        collider_checks.append(check)
+        if minimum_clearance < -penetration_tolerance:
+            failures.append(failure("rigid_collider_penetration", check))
+        if check["shape"] == "sphere" and first_sphere_clearance is None:
+            first_sphere_clearance = minimum_clearance
+            first_sphere_contact_frames = contact_frames
+
+    total_collider_contact_frames = int(np.count_nonzero(collider_frame_contacts))
+    minimum_collider_contact_frames = int(expected.get("minimum_collider_contact_frames") or 0)
+    if total_collider_contact_frames < minimum_collider_contact_frames:
+        failures.append(failure("collider_contact_missing", total_collider_contact_frames))
+    minimum_sphere_contact_frames = int(expected.get("minimum_sphere_contact_frames") or 0)
+    if minimum_sphere_contact_frames > 0 and (first_sphere_contact_frames or 0) < minimum_sphere_contact_frames:
+        failures.append(failure("sphere_contact_missing", first_sphere_contact_frames or 0))
+    minimum_by_collider = expected.get("minimum_contact_frames_by_collider")
+    if isinstance(minimum_by_collider, Mapping):
+        checks_by_id = {str(check["object_id"]): check for check in collider_checks}
+        for object_id, required_count in minimum_by_collider.items():
+            check = checks_by_id.get(str(object_id))
+            if check is None:
+                failures.append(failure("declared_collider_missing", str(object_id)))
+            elif int(check["contact_frame_count"]) < int(required_count):
+                failures.append(failure("collider_contact_missing", {
+                    "object_id": str(object_id),
+                    "required": int(required_count),
+                    "observed": int(check["contact_frame_count"]),
+                }))
 
     floor_clearance = None
     if floor_z_m is not None:
@@ -142,8 +174,10 @@ def verify_deformable_mesh_cache(
             "triangle_count": int(faces.shape[0]),
             "structural_edge_count": int(edges.shape[0]),
             "maximum_structural_edge_stretch_ratio": maximum_stretch,
-            "minimum_sphere_clearance_m": minimum_clearance,
-            "sphere_contact_frame_count": contact_frames,
+            "analytic_colliders": collider_checks,
+            "collider_contact_frame_count": total_collider_contact_frames,
+            "minimum_sphere_clearance_m": first_sphere_clearance,
+            "sphere_contact_frame_count": first_sphere_contact_frames,
             "minimum_floor_clearance_m": floor_clearance,
             "maximum_mean_downward_displacement_m": downward_displacement,
             "final_vertical_span_m": final_vertical_span,
@@ -162,6 +196,43 @@ def verify_deformable_mesh_cache_file(
         return verify_deformable_mesh_cache(arrays, **kwargs)
 
 
+def analytic_collider_clearances(
+    positions: np.ndarray,
+    times: np.ndarray,
+    collider: Mapping[str, Any],
+) -> np.ndarray:
+    centers = np.asarray(
+        [collider_position_m(dict(collider), float(time_s)) for time_s in times],
+        dtype=np.float64,
+    )
+    world_from_local = np.asarray(
+        [collider_world_from_local_columns(dict(collider), float(time_s)) for time_s in times],
+        dtype=np.float64,
+    )
+    local = np.einsum("fvi,fji->fvj", positions - centers[:, None, :], world_from_local)
+    half_size = np.asarray(collider["size_m"], dtype=np.float64) / 2.0
+    shape = str(collider.get("shape") or "")
+    if shape == "sphere":
+        return np.linalg.norm(local, axis=2) - half_size[0]
+    if shape == "box":
+        delta = np.abs(local) - half_size[None, None, :]
+        outside = np.linalg.norm(np.maximum(delta, 0.0), axis=2)
+        inside = np.minimum(np.max(delta, axis=2), 0.0)
+        return outside + inside
+    if shape == "cylinder":
+        delta = np.stack(
+            (
+                np.linalg.norm(local[:, :, :2], axis=2) - half_size[0],
+                np.abs(local[:, :, 2]) - half_size[2],
+            ),
+            axis=2,
+        )
+        outside = np.linalg.norm(np.maximum(delta, 0.0), axis=2)
+        inside = np.minimum(np.max(delta, axis=2), 0.0)
+        return outside + inside
+    raise ValueError(f"unsupported analytic collider shape: {shape}")
+
+
 def verify_deformable_solid_impact(
     arrays: Mapping[str, Any],
     *,
@@ -171,8 +242,7 @@ def verify_deformable_solid_impact(
     base = verify_deformable_mesh_cache(
         arrays,
         expected=expected,
-        sphere_center_m=None,
-        sphere_radius_m=None,
+        colliders=None,
         floor_z_m=floor_z_m,
         collision_thickness_m=0.0,
     )

@@ -11,10 +11,11 @@ from harness.assets.providers.contracts import stable_digest
 
 
 PROVIDER_ID = "local_procedural_mesh_v1"
-PROVIDER_VERSION = "1.1.0"
-GENERATOR_SOURCE_VERSION = "primitive_mesh_v1_obj_writer_v1"
+PROVIDER_VERSION = "1.2.0"
+GENERATOR_SOURCE_VERSION = "primitive_mesh_v1_obj_writer_v2"
 SPHERE_LATITUDE_SEGMENTS = 16
 RADIAL_SEGMENTS = 32
+FRUSTUM_RADIAL_SEGMENTS = 48
 
 SHAPE_ALIASES = {
     "box": "box",
@@ -30,11 +31,15 @@ SHAPE_ALIASES = {
     "column": "cylinder",
     "disc": "cylinder",
     "disk": "cylinder",
+    "open_conical_frustum": "open_conical_frustum",
+    "open_frustum": "open_conical_frustum",
+    "conical_frustum": "open_conical_frustum",
 }
 RECIPE_BY_SHAPE = {
     "box": "box_mesh_v1",
     "sphere": "sphere_mesh_v1",
     "cylinder": "cylinder_mesh_v1",
+    "open_conical_frustum": "open_conical_frustum_mesh_v1",
 }
 GENERIC_PROVIDER_ALIASES = frozenset(
     {
@@ -77,7 +82,8 @@ def normalize_generation_spec(value: Mapping[str, Any]) -> dict[str, Any]:
     if expected_recipe is None or recipe_id != expected_recipe or recipe_version != "v1":
         raise ProceduralGenerationError(
             "unsupported_generation_recipe",
-            "local provider supports box_mesh_v1, sphere_mesh_v1, and cylinder_mesh_v1 at v1; "
+            "local provider supports box_mesh_v1, sphere_mesh_v1, cylinder_mesh_v1, and "
+            "open_conical_frustum_mesh_v1 at v1; "
             f"got {recipe_id or '<none>'}/{recipe_version} shape={raw_shape or '<none>'}",
         )
     size = value.get("size_m")
@@ -103,12 +109,51 @@ def normalize_generation_spec(value: Mapping[str, Any]) -> dict[str, Any]:
             "invalid_generation_spec",
             "cylinder_mesh_v1 requires equal x/y diameters; size_m z is the cylinder length",
         )
-    return {
+    normalized = {
         "recipe_id": recipe_id,
         "recipe_version": recipe_version,
         "shape": shape,
         "size_m": normalized_size,
     }
+    shape_parameters = value.get("shape_parameters")
+    if shape == "open_conical_frustum":
+        if not isinstance(shape_parameters, Mapping):
+            raise ProceduralGenerationError(
+                "invalid_generation_spec",
+                "open_conical_frustum_mesh_v1 requires shape_parameters with top_diameter_m and bottom_diameter_m",
+            )
+        unknown = sorted(set(str(key) for key in shape_parameters) - {"top_diameter_m", "bottom_diameter_m"})
+        if unknown:
+            raise ProceduralGenerationError(
+                "invalid_generation_spec",
+                f"unsupported open-conical-frustum shape_parameters: {', '.join(unknown)}",
+            )
+        diameters = {
+            key: _positive_finite_number(shape_parameters.get(key), key)
+            for key in ("top_diameter_m", "bottom_diameter_m")
+        }
+        if not math.isclose(normalized_size[0], normalized_size[1], rel_tol=1e-9, abs_tol=1e-12):
+            raise ProceduralGenerationError(
+                "invalid_generation_spec",
+                "open_conical_frustum_mesh_v1 requires equal x/y bounding dimensions in size_m",
+            )
+        if not math.isclose(
+            normalized_size[0],
+            max(diameters.values()),
+            rel_tol=1e-9,
+            abs_tol=1e-12,
+        ):
+            raise ProceduralGenerationError(
+                "invalid_generation_spec",
+                "open_conical_frustum size_m x/y must equal the larger declared opening diameter",
+            )
+        normalized["shape_parameters"] = diameters
+    elif shape_parameters not in (None, {}):
+        raise ProceduralGenerationError(
+            "invalid_generation_spec",
+            f"{recipe_id} does not accept shape_parameters",
+        )
+    return normalized
 
 
 def recipe_digest(spec: Mapping[str, Any]) -> str:
@@ -127,8 +172,13 @@ def generate_procedural_obj(spec: Mapping[str, Any], destination: str | Path) ->
         vertices, faces = _box_geometry(normalized["size_m"])
     elif shape == "sphere":
         vertices, faces = _sphere_geometry(normalized["size_m"][0])
-    else:
+    elif shape == "cylinder":
         vertices, faces = _cylinder_geometry(normalized["size_m"])
+    else:
+        vertices, faces = _open_conical_frustum_geometry(
+            normalized["size_m"],
+            normalized["shape_parameters"],
+        )
     lines = [f"# deterministic centered {normalized['recipe_id']}"]
     lines.extend("v " + " ".join(_format_float(value) for value in vertex) for vertex in vertices)
     lines.extend("f " + " ".join(str(index) for index in face) for face in faces)
@@ -216,6 +266,53 @@ def _cylinder_geometry(size: list[float]) -> tuple[list[tuple[float, float, floa
     return vertices, faces
 
 
+def _open_conical_frustum_geometry(
+    size: list[float],
+    shape_parameters: Mapping[str, float],
+) -> tuple[list[tuple[float, float, float]], list[tuple[int, ...]]]:
+    """Closed convex wall sectors forming one open compound frustum.
+
+    Each sector is a thin convex solid.  Adjacent sectors share their radial
+    boundary exactly, so UE can decompose the imported mesh into reliable
+    simple collision hulls without closing either funnel opening.
+    """
+    half_height = size[2] / 2.0
+    bottom_radius = float(shape_parameters["bottom_diameter_m"]) / 2.0
+    top_radius = float(shape_parameters["top_diameter_m"]) / 2.0
+    wall_thickness = min(0.012, bottom_radius * 0.25, size[2] * 0.05)
+    inner_bottom_radius = bottom_radius - wall_thickness
+    inner_top_radius = top_radius - wall_thickness
+    vertices: list[tuple[float, float, float]] = []
+    faces: list[tuple[int, ...]] = []
+    for segment in range(FRUSTUM_RADIAL_SEGMENTS):
+        theta0 = 2.0 * math.pi * segment / FRUSTUM_RADIAL_SEGMENTS
+        theta1 = 2.0 * math.pi * (segment + 1) / FRUSTUM_RADIAL_SEGMENTS
+        base = len(vertices) + 1
+        vertices.extend(
+            [
+                (bottom_radius * math.cos(theta0), bottom_radius * math.sin(theta0), -half_height),
+                (bottom_radius * math.cos(theta1), bottom_radius * math.sin(theta1), -half_height),
+                (top_radius * math.cos(theta0), top_radius * math.sin(theta0), half_height),
+                (top_radius * math.cos(theta1), top_radius * math.sin(theta1), half_height),
+                (inner_bottom_radius * math.cos(theta0), inner_bottom_radius * math.sin(theta0), -half_height),
+                (inner_bottom_radius * math.cos(theta1), inner_bottom_radius * math.sin(theta1), -half_height),
+                (inner_top_radius * math.cos(theta0), inner_top_radius * math.sin(theta0), half_height),
+                (inner_top_radius * math.cos(theta1), inner_top_radius * math.sin(theta1), half_height),
+            ]
+        )
+        faces.extend(
+            [
+                (base, base + 1, base + 3, base + 2),
+                (base + 4, base + 6, base + 7, base + 5),
+                (base, base + 4, base + 5, base + 1),
+                (base + 2, base + 3, base + 7, base + 6),
+                (base, base + 2, base + 6, base + 4),
+                (base + 1, base + 5, base + 7, base + 3),
+            ]
+        )
+    return vertices, faces
+
+
 def _atomic_write(destination: str | Path, payload: bytes) -> Path:
     path = Path(destination)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -236,6 +333,15 @@ def _atomic_write(destination: str | Path, payload: bytes) -> Path:
 
 def _approximately_equal(values: list[float]) -> bool:
     return all(math.isclose(values[0], value, rel_tol=1e-9, abs_tol=1e-12) for value in values[1:])
+
+
+def _positive_finite_number(value: Any, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ProceduralGenerationError("invalid_generation_spec", f"{name} must be a positive finite number")
+    number = float(value)
+    if not math.isfinite(number) or number <= 0.0:
+        raise ProceduralGenerationError("invalid_generation_spec", f"{name} must be a positive finite number")
+    return number
 
 
 def _format_float(value: float) -> str:

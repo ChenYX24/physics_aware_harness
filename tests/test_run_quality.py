@@ -91,8 +91,73 @@ class RunQualityTests(unittest.TestCase):
             self.assertEqual(report["status"], "pass")
             self.assertEqual(failures, [])
 
+            frames[0]["objects"]["person"]["articulated_observed"]["grounding"]["support_gap_m"] = 0.0215
+            self.assertEqual(validate_articulated_execution(run_dir, frames, [])["status"], "pass")
+
             frames[0]["objects"]["person"]["articulated_observed"]["grounding"]["support_gap_m"] = 0.03
             self.assertEqual(validate_articulated_execution(run_dir, frames, [])["status"], "fail")
+
+    def test_gasp_character_requires_motion_matching_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            self.write_json(run_dir / "case_spec.json", {
+                "objects": [{
+                    "id": "person",
+                    "solver": {
+                        "type": "articulated_body",
+                        "model": "harness_ue_gasp_character_v1",
+                        "mode": "kinematic",
+                        "movement_control": {
+                            "type": "character_movement",
+                            "max_speed_m_s": 2.0,
+                            "max_acceleration_m_s2": 4.0,
+                            "keyframes": [{
+                                "time_s": 0.0,
+                                "target_velocity_m_s": [0.0, 0.0, 0.0],
+                                "facing_yaw_deg": 0.0,
+                                "crouched": False,
+                            }],
+                            "events": [],
+                        },
+                        "head_look_target": {"tolerance_deg": 1.0, "keyframes": [{}]},
+                    },
+                }],
+            })
+            observed = {
+                "sample_phase": "post_tick",
+                "sample_time_s": 0.0,
+                "frame_zero_evaluated": True,
+                "pose_source_type": "",
+                "root_transform_source_type": "",
+                "movement_control_type": "character_movement",
+                "actor_transform": {"position_m": [0.0, 0.0, 0.0]},
+                "bones": {
+                    "root": {"position_m": [0.0, 0.0, 0.0]},
+                    "head": {"position_m": [0.0, 0.0, 0.0], "rotation_deg": [0.0, 0.0, 0.0]},
+                },
+                "movement_mode": "Walking",
+                "velocity_m_s": [0.0, 0.0, 0.0],
+                "movement_command": {
+                    "target_velocity_m_s": [0.0, 0.0, 0.0],
+                    "facing_yaw_deg": 0.0,
+                    "crouched": False,
+                },
+                "animation_instance_class": "SandboxCharacter_CMC_ABP_C",
+                "head_look": {
+                    "target_position_m": [0.0, 1.0, 0.0],
+                    "weight": 1.0,
+                    "tolerance_deg": 1.0,
+                },
+                "grounding": {"status": "applied", "support_gap_m": 0.0},
+                "errors": [],
+            }
+            frames = [{"frame": 0, "time": 0.0, "objects": {"person": {"articulated_observed": observed}}}]
+
+            self.assertEqual(validate_articulated_execution(run_dir, frames, [])["status"], "pass")
+            observed["animation_instance_class"] = "AnimInstance"
+            report = validate_articulated_execution(run_dir, frames, [])
+            self.assertEqual(report["status"], "fail")
+            self.assertEqual(report["objects"]["person"]["findings"][0]["metric"], "gasp_motion_matching_observation_missing")
 
     def test_articulated_control_layers_require_same_post_tick_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

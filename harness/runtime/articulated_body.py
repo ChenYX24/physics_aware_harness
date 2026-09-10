@@ -5,37 +5,17 @@ from typing import Any, Mapping
 
 
 ARTICULATED_BODY_MODEL_ID = "harness_ue_mannequin_v1"
+ARTICULATED_CHARACTER_MODEL_ID = "harness_ue_gasp_character_v1"
+ARTICULATED_CHARACTER_CLASS_PATH = "/Game/Blueprints/SandboxCharacter_CMC.SandboxCharacter_CMC_C"
 ARTICULATED_BODY_ASSET_PATH = "/Game/Characters/Mannequins/Meshes/SKM_Manny_Simple.SKM_Manny_Simple"
 ARTICULATED_BODY_PHYSICS_ASSET_PATH = "/Game/Characters/Mannequins/Rigs/PA_Mannequin.PA_Mannequin"
 ARTICULATED_BODY_CONTROL_RIG_PATH = "/Game/Characters/Mannequins/Rigs/CR_Mannequin_Body.CR_Mannequin_Body"
 ARTICULATED_BODY_AUTHORED_SIZE_M = (0.58, 0.36, 1.92)
 ARTICULATED_BODY_MODES = frozenset({"kinematic", "ragdoll"})
-ARTICULATED_POSE_SOURCE_TYPES = frozenset({"pose_keyframes", "animation_sequence"})
-ARTICULATED_ROOT_TRANSFORM_SOURCE_TYPES = frozenset({"root_keyframes", "animation_root_motion", "character_movement"})
+ARTICULATED_POSE_SOURCE_TYPES = frozenset({"pose_keyframes"})
+ARTICULATED_ROOT_TRANSFORM_SOURCE_TYPES = frozenset({"root_keyframes"})
 ARTICULATED_IK_GOALS = frozenset({"hand_l", "hand_r", "foot_l", "foot_r"})
 ARTICULATED_POSE_OVERLAY_TYPE = "bone_local_rotation_offsets"
-ARTICULATED_ANIMATION_ASSETS = {
-    "harness_ue4_mannequin_idle_v1": {
-        "asset_path": "/Game/Characters/Mannequins/Anims/Unarmed/MM_Idle.MM_Idle",
-        "in_place": True,
-        "has_root_motion": False,
-    },
-    "harness_ue4_mannequin_walk_v1": {
-        "asset_path": "/Game/Characters/Mannequins/Anims/Unarmed/Walk/MF_Unarmed_Walk_Fwd.MF_Unarmed_Walk_Fwd",
-        "in_place": True,
-        "has_root_motion": False,
-    },
-    "harness_ue4_mannequin_run_v1": {
-        "asset_path": "/Game/Characters/Mannequins/Anims/Unarmed/Jog/MF_Unarmed_Jog_Fwd.MF_Unarmed_Jog_Fwd",
-        "in_place": True,
-        "has_root_motion": False,
-    },
-    "harness_ue4_mannequin_jump_v1": {
-        "asset_path": "/Game/Characters/Mannequins/Anims/Unarmed/Jump/MM_Jump.MM_Jump",
-        "in_place": True,
-        "has_root_motion": False,
-    },
-}
 ARTICULATED_BODY_BONES = frozenset({
     "root",
     "pelvis",
@@ -109,6 +89,17 @@ def compile_articulated_body_contract(
     known_object_ids: set[str],
     object_id: str,
 ) -> dict[str, Any]:
+    model = str(solver.get("model") or "")
+    duration = _finite_number(duration_s, "scene duration")
+    if duration <= 0.0:
+        raise ArticulatedBodyContractError("scene duration must be positive")
+    if model == ARTICULATED_CHARACTER_MODEL_ID:
+        return _compile_character_movement_contract(
+            solver,
+            duration_s=duration,
+            known_object_ids=known_object_ids,
+            object_id=object_id,
+        )
     unknown = sorted(
         str(key)
         for key in solver
@@ -128,15 +119,13 @@ def compile_articulated_body_contract(
     )
     if unknown:
         raise ArticulatedBodyContractError(f"unsupported articulated_body fields: {', '.join(unknown)}")
-    if solver.get("model") != ARTICULATED_BODY_MODEL_ID:
-        raise ArticulatedBodyContractError(f"model must be {ARTICULATED_BODY_MODEL_ID}")
+    if model != ARTICULATED_BODY_MODEL_ID:
+        raise ArticulatedBodyContractError(
+            f"model must be {ARTICULATED_BODY_MODEL_ID} or {ARTICULATED_CHARACTER_MODEL_ID}"
+        )
     mode = str(solver.get("mode") or "")
     if mode not in ARTICULATED_BODY_MODES:
         raise ArticulatedBodyContractError(f"mode must be one of {sorted(ARTICULATED_BODY_MODES)}")
-    duration = _finite_number(duration_s, "scene duration")
-    if duration <= 0.0:
-        raise ArticulatedBodyContractError("scene duration must be positive")
-
     pose_source = _compile_pose_source(solver.get("pose_source"), duration)
     pose_overlay = _compile_pose_overlay(solver.get("pose_overlay"), duration)
     root_transform_source = _compile_root_transform_source(solver.get("root_transform_source"), duration)
@@ -163,7 +152,7 @@ def compile_articulated_body_contract(
         ragdoll_start_time_s=ragdoll_start if mode == "ragdoll" else None,
     )
     return {
-        "schema_version": "harness_articulated_body_contract_v3",
+        "schema_version": "harness_articulated_body_contract_v4",
         "type": "articulated_body",
         "model": ARTICULATED_BODY_MODEL_ID,
         "asset_path": ARTICULATED_BODY_ASSET_PATH,
@@ -191,6 +180,7 @@ def sample_articulated_body_contract(contract: Mapping[str, Any], time_s: float)
     pose_overlay = contract.get("pose_overlay") if isinstance(contract.get("pose_overlay"), Mapping) else {}
     overlay_keyframes = pose_overlay.get("keyframes") or []
     head_look_target = contract.get("head_look_target") if isinstance(contract.get("head_look_target"), Mapping) else None
+    movement_control = contract.get("movement_control") if isinstance(contract.get("movement_control"), Mapping) else None
     return {
         "root_position_offset_m": _sample_vec_keyframes(
             root_keyframes or [], time_s, "position_offset_m"
@@ -216,6 +206,173 @@ def sample_articulated_body_contract(contract: Mapping[str, Any], time_s: float)
             if isinstance(target, Mapping)
         },
         "head_look_target": _sample_head_look_target(head_look_target, time_s) if head_look_target else None,
+        "movement_control": _sample_movement_control(movement_control, time_s) if movement_control else None,
+    }
+
+
+def _compile_character_movement_contract(
+    solver: Mapping[str, Any],
+    *,
+    duration_s: float,
+    known_object_ids: set[str],
+    object_id: str,
+) -> dict[str, Any]:
+    required_fields = {
+        "type",
+        "model",
+        "mode",
+        "movement_control",
+        "support_object_id",
+        "attachments",
+    }
+    allowed_fields = required_fields | {"head_look_target"}
+    actual_fields = {str(key) for key in solver}
+    if not required_fields.issubset(actual_fields) or not actual_fields.issubset(allowed_fields):
+        raise ArticulatedBodyContractError(
+            "articulated_body GASP contract must contain "
+            f"{sorted(required_fields)} and only optional field head_look_target"
+        )
+    if solver.get("mode") != "kinematic":
+        raise ArticulatedBodyContractError("GASP character movement requires mode=kinematic")
+    support_object_id = solver.get("support_object_id")
+    if support_object_id is not None:
+        support_object_id = str(support_object_id)
+        if support_object_id not in known_object_ids or support_object_id == object_id:
+            raise ArticulatedBodyContractError("support_object_id must reference another declared object")
+    attachments = _compile_attachments(
+        solver.get("attachments"),
+        duration_s,
+        known_object_ids=known_object_ids,
+        object_id=object_id,
+        ragdoll_start_time_s=None,
+    )
+    movement_control = _compile_movement_control(solver.get("movement_control"), duration_s)
+    head_look_target = _compile_head_look_target(solver.get("head_look_target"), duration_s)
+    if (
+        head_look_target
+        and len({keyframe["facing_yaw_deg"] for keyframe in movement_control["keyframes"]}) > 1
+    ):
+        raise ArticulatedBodyContractError(
+            "GASP head_look_target requires fixed facing_yaw_deg"
+        )
+    return {
+        "schema_version": "harness_articulated_body_contract_v4",
+        "type": "articulated_body",
+        "model": ARTICULATED_CHARACTER_MODEL_ID,
+        "asset_path": ARTICULATED_CHARACTER_CLASS_PATH,
+        "authored_size_m": list(ARTICULATED_BODY_AUTHORED_SIZE_M),
+        "mode": "kinematic",
+        "rotation_space": "world_facing_yaw",
+        "movement_control": movement_control,
+        "head_look_target": head_look_target,
+        "support_object_id": support_object_id,
+        "attachments": attachments,
+    }
+
+
+def _compile_movement_control(value: Any, duration_s: float) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ArticulatedBodyContractError("movement_control must be an object")
+    _exact_fields(
+        value,
+        {"type", "keyframes", "events", "max_speed_m_s", "max_acceleration_m_s2", "max_turn_rate_deg_s"},
+        "movement_control",
+    )
+    if value.get("type") != "character_movement":
+        raise ArticulatedBodyContractError("movement_control.type must be character_movement")
+    max_speed = _positive_number(value.get("max_speed_m_s"), "movement_control.max_speed_m_s")
+    max_acceleration = _positive_number(
+        value.get("max_acceleration_m_s2"), "movement_control.max_acceleration_m_s2"
+    )
+    max_turn_rate = _positive_number(
+        value.get("max_turn_rate_deg_s"), "movement_control.max_turn_rate_deg_s"
+    )
+    keyframes = value.get("keyframes")
+    if not isinstance(keyframes, list) or not keyframes:
+        raise ArticulatedBodyContractError("movement_control.keyframes must be a non-empty list")
+    compiled_keyframes: list[dict[str, Any]] = []
+    for index, keyframe in enumerate(keyframes):
+        if not isinstance(keyframe, Mapping):
+            raise ArticulatedBodyContractError(f"movement_control.keyframes[{index}] must be an object")
+        required_fields = {
+            "time_s",
+            "target_velocity_m_s",
+            "facing_yaw_deg",
+            "crouched",
+        }
+        actual_fields = {str(key) for key in keyframe}
+        if actual_fields != required_fields:
+            raise ArticulatedBodyContractError(
+                f"movement_control.keyframes[{index}] must contain exactly {sorted(required_fields)}"
+            )
+        velocity = _vec3(
+            keyframe.get("target_velocity_m_s"),
+            f"movement_control.keyframes[{index}].target_velocity_m_s",
+        )
+        if abs(velocity[2]) > 1e-9:
+            raise ArticulatedBodyContractError("movement_control target velocity must be horizontal; use a jump event for vertical motion")
+        if math.hypot(velocity[0], velocity[1]) > max_speed + 1e-9:
+            raise ArticulatedBodyContractError("movement_control target velocity exceeds max_speed_m_s")
+        crouched = keyframe.get("crouched")
+        if not isinstance(crouched, bool):
+            raise ArticulatedBodyContractError(f"movement_control.keyframes[{index}].crouched must be boolean")
+        yaw = _finite_number(
+            keyframe.get("facing_yaw_deg"),
+            f"movement_control.keyframes[{index}].facing_yaw_deg",
+        )
+        if abs(yaw) > 180.0:
+            raise ArticulatedBodyContractError(f"movement_control.keyframes[{index}].facing_yaw_deg must be within [-180, 180]")
+        compiled_keyframes.append({
+            "time_s": _time(keyframe.get("time_s"), f"movement_control.keyframes[{index}].time_s", duration_s),
+            "target_velocity_m_s": velocity,
+            "facing_yaw_deg": round(yaw, 6),
+            "crouched": crouched,
+        })
+    _strictly_increasing(compiled_keyframes, "movement_control.keyframes")
+    if compiled_keyframes[0]["time_s"] != 0.0:
+        raise ArticulatedBodyContractError("movement_control.keyframes must begin at time 0")
+    events = value.get("events")
+    if events is None:
+        events = []
+    if not isinstance(events, list):
+        raise ArticulatedBodyContractError("movement_control.events must be a list")
+    compiled_events: list[dict[str, Any]] = []
+    for index, event in enumerate(events):
+        if not isinstance(event, Mapping):
+            raise ArticulatedBodyContractError(f"movement_control.events[{index}] must be an object")
+        _exact_fields(event, {"time_s", "type"}, f"movement_control.events[{index}]")
+        if event.get("type") != "jump":
+            raise ArticulatedBodyContractError(f"movement_control.events[{index}].type must be jump")
+        compiled_events.append({
+            "time_s": _time(event.get("time_s"), f"movement_control.events[{index}].time_s", duration_s),
+            "type": "jump",
+        })
+    _strictly_increasing(compiled_events, "movement_control.events")
+    return {
+        "type": "character_movement",
+        "coordinate_space": "world",
+        "max_speed_m_s": round(max_speed, 6),
+        "max_acceleration_m_s2": round(max_acceleration, 6),
+        "max_turn_rate_deg_s": round(max_turn_rate, 6),
+        "keyframes": compiled_keyframes,
+        "events": compiled_events,
+    }
+
+
+def _sample_movement_control(value: Mapping[str, Any], time_s: float) -> dict[str, Any]:
+    keyframes = value.get("keyframes") if isinstance(value.get("keyframes"), list) else []
+    left, right, alpha = _bracket(keyframes, time_s)
+    left_yaw = float(left.get("facing_yaw_deg") or 0.0)
+    right_yaw = float(right.get("facing_yaw_deg") or 0.0)
+    yaw_delta = (right_yaw - left_yaw + 180.0) % 360.0 - 180.0
+    return {
+        "target_velocity_m_s": _lerp_vec(
+            left.get("target_velocity_m_s") or [0.0, 0.0, 0.0],
+            right.get("target_velocity_m_s") or [0.0, 0.0, 0.0],
+            alpha,
+        ),
+        "facing_yaw_deg": round(left_yaw + yaw_delta * alpha, 6),
+        "crouched": bool(right.get("crouched")) if alpha >= 1.0 else bool(left.get("crouched")),
     }
 
 
@@ -225,11 +382,8 @@ def _compile_pose_source(value: Any, duration_s: float) -> dict[str, Any]:
     source_type = str(value.get("type") or "")
     if source_type not in ARTICULATED_POSE_SOURCE_TYPES:
         raise ArticulatedBodyContractError(f"pose_source.type must be one of {sorted(ARTICULATED_POSE_SOURCE_TYPES)}")
-    if source_type == "pose_keyframes":
-        _exact_fields(value, {"type", "keyframes"}, "pose_source")
-        return {"type": source_type, "keyframes": _compile_joint_keyframes(value.get("keyframes"), duration_s)}
-    _exact_fields(value, {"type", "segments"}, "pose_source")
-    return {"type": source_type, "segments": _compile_animation_segments(value.get("segments"), duration_s)}
+    _exact_fields(value, {"type", "keyframes"}, "pose_source")
+    return {"type": source_type, "keyframes": _compile_joint_keyframes(value.get("keyframes"), duration_s)}
 
 
 def _compile_pose_overlay(value: Any, duration_s: float) -> dict[str, Any] | None:
@@ -282,68 +436,8 @@ def _compile_root_transform_source(value: Any, duration_s: float) -> dict[str, A
         raise ArticulatedBodyContractError(
             f"root_transform_source.type must be one of {sorted(ARTICULATED_ROOT_TRANSFORM_SOURCE_TYPES)}"
         )
-    if source_type == "root_keyframes":
-        _exact_fields(value, {"type", "keyframes"}, "root_transform_source")
-        return {"type": source_type, "keyframes": _compile_root_keyframes(value.get("keyframes"), duration_s)}
-    if source_type == "animation_root_motion":
-        _exact_fields(value, {"type"}, "root_transform_source")
-        return {"type": source_type}
-    _exact_fields(
-        value,
-        {"type", "keyframes", "max_speed_m_s", "max_acceleration_m_s2"},
-        "root_transform_source",
-    )
-    max_speed = _positive_number(value.get("max_speed_m_s"), "root_transform_source.max_speed_m_s")
-    max_acceleration = _positive_number(
-        value.get("max_acceleration_m_s2"), "root_transform_source.max_acceleration_m_s2"
-    )
-    return {
-        "type": source_type,
-        "keyframes": _compile_root_keyframes(value.get("keyframes"), duration_s),
-        "max_speed_m_s": round(max_speed, 6),
-        "max_acceleration_m_s2": round(max_acceleration, 6),
-    }
-
-
-def _compile_animation_segments(value: Any, duration_s: float) -> list[dict[str, Any]]:
-    if not isinstance(value, list) or not value:
-        raise ArticulatedBodyContractError("pose_source.segments must be a non-empty list")
-    result: list[dict[str, Any]] = []
-    for index, item in enumerate(value):
-        if not isinstance(item, Mapping):
-            raise ArticulatedBodyContractError(f"pose_source.segments[{index}] must be an object")
-        _exact_fields(
-            item,
-            {"animation_asset_id", "start_time_s", "end_time_s", "play_rate", "loop"},
-            f"pose_source.segments[{index}]",
-        )
-        asset_id = str(item.get("animation_asset_id") or "")
-        metadata = ARTICULATED_ANIMATION_ASSETS.get(asset_id)
-        if metadata is None:
-            raise ArticulatedBodyContractError(f"unknown articulated animation asset: {asset_id}")
-        start = _time(item.get("start_time_s"), f"pose_source.segments[{index}].start_time_s", duration_s)
-        end = _time(item.get("end_time_s"), f"pose_source.segments[{index}].end_time_s", duration_s)
-        if end <= start:
-            raise ArticulatedBodyContractError(f"pose_source.segments[{index}].end_time_s must be after start_time_s")
-        loop = item.get("loop")
-        if not isinstance(loop, bool):
-            raise ArticulatedBodyContractError(f"pose_source.segments[{index}].loop must be boolean")
-        result.append({
-            "animation_asset_id": asset_id,
-            "animation_asset_path": metadata["asset_path"],
-            "in_place": metadata["in_place"],
-            "has_root_motion": metadata["has_root_motion"],
-            "start_time_s": start,
-            "end_time_s": end,
-            "play_rate": round(_positive_number(item.get("play_rate"), f"pose_source.segments[{index}].play_rate"), 6),
-            "loop": loop,
-        })
-    ordered = sorted(result, key=lambda item: float(item["start_time_s"]))
-    if ordered != result:
-        raise ArticulatedBodyContractError("pose_source.segments must be ordered by start_time_s")
-    if any(float(right["start_time_s"]) < float(left["end_time_s"]) for left, right in zip(result, result[1:])):
-        raise ArticulatedBodyContractError("pose_source.segments must not overlap")
-    return result
+    _exact_fields(value, {"type", "keyframes"}, "root_transform_source")
+    return {"type": source_type, "keyframes": _compile_root_keyframes(value.get("keyframes"), duration_s)}
 
 
 def _validate_motion_source_pair(pose_source: Mapping[str, Any], root_source: Mapping[str, Any]) -> None:
@@ -351,16 +445,6 @@ def _validate_motion_source_pair(pose_source: Mapping[str, Any], root_source: Ma
     root_type = str(root_source.get("type") or "")
     if pose_type == "pose_keyframes" and root_type != "root_keyframes":
         raise ArticulatedBodyContractError("pose_keyframes requires root_transform_source.type=root_keyframes")
-    if root_type == "animation_root_motion":
-        if pose_type != "animation_sequence":
-            raise ArticulatedBodyContractError("animation_root_motion requires pose_source.type=animation_sequence")
-        if any(segment.get("has_root_motion") is not True for segment in pose_source.get("segments") or []):
-            raise ArticulatedBodyContractError("animation_root_motion requires qualified root-motion animation assets")
-    if root_type == "character_movement":
-        if pose_type != "animation_sequence":
-            raise ArticulatedBodyContractError("character_movement requires pose_source.type=animation_sequence")
-        if any(segment.get("in_place") is not True for segment in pose_source.get("segments") or []):
-            raise ArticulatedBodyContractError("character_movement requires in-place animation assets")
 
 
 def _compile_ik_targets(value: Any, duration_s: float) -> list[dict[str, Any]]:

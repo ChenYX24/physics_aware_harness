@@ -67,8 +67,10 @@ default / local_catalog / external_site / procedural_generation / model_generati
 `procedural_generation` 当前由统一 Provider Orchestrator 支持 `box_mesh_v1`、
 `sphere_mesh_v1` 和 `cylinder_mesh_v1`；它必须先生成、
 校验 hash/license/provenance、经显式 UE importer 导入、通过 `AssetRegistry` 注册和资格门，
-最后才由单次 Asset Resolve 选择。`external_site` 和 `model_generation` 仍以结构化
-`unsupported_provider_route` 阻断，不会静默改用本地相似素材。Provider 失败后只有
+最后才由单次 Asset Resolve 选择。`external_site` 由 Poly Haven Provider 支持；
+`model_generation` 由 Meshy Provider 支持：有 1–4 张生成参考图时走 Multi-Image-to-3D，
+无参考图时使用 `generation_prompt` 走 Text-to-3D preview/refine。`semantic_text` 仅用于检索，
+`texture_prompt` 仅用于纹理，二者都不替代几何生成描述。Provider 失败后只有
 `fallback_order` 显式包含 `local_catalog` 时才允许本地检索。
 
 本地程序化 Provider 根据 `geometry.shape_hint` 判断 recipe；`acquisition.provider_hint` 可显式
@@ -98,6 +100,7 @@ default / local_catalog / external_site / procedural_generation / model_generati
     "route": "model_generation",
     "requirement": "required",
     "origin": "user_explicit",
+    "generation_prompt": "Photorealistic isolated wooden plank, intact rectangular silhouette, visible layered grain, game-ready PBR, no nails or background.",
     "reference_inputs": [],
     "fallback_order": []
   }

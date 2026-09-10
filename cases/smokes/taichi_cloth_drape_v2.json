@@ -1,0 +1,143 @@
+{
+  "schema_version": "harness_case_spec_v2",
+  "identity": {
+    "case_id": "smoke_taichi_cloth_drape_v2",
+    "title": "Mass-spring cloth drapes over a rigid sphere",
+    "source_request": "Verify a fixed-topology cloth sheet falling under gravity, wrapping around a sphere, and settling above a floor."
+  },
+  "capabilities": {
+    "primary": "deformable_body_dynamics",
+    "required": ["deformable_body_dynamics"]
+  },
+  "scene": {
+    "environment_intent": "minimal controlled cloth stage",
+    "coordinate_system": "z_up",
+    "duration_s": 3.5,
+    "bounds_hint_m": [4.0, 4.0, 2.5]
+  },
+  "timebase": {
+    "physics_hz": 2400,
+    "observation_fps": 24,
+    "deterministic_seed": 20260720
+  },
+  "backend_constraints": {
+    "required_solver_capabilities": ["soft_body", "cloth", "mesh_cache", "trajectory"],
+    "allowed_solvers": ["taichi_cloth"],
+    "render_backend": "ue",
+    "allow_multi_backend": true
+  },
+  "asset_policy": {
+    "allow_local": true,
+    "allow_external": false,
+    "allow_generation": false,
+    "allow_analytic_proxy": true,
+    "required_license_tier": "local_preview"
+  },
+  "objects": [
+    {
+      "id": "cloth",
+      "role": "deformable_cloth",
+      "geometry": {"shape_hint": "cloth_grid", "approx_size_m": [1.5, 1.5, 0.01]},
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.45,
+        "collision_required": false,
+        "material_model": "cloth",
+        "material": {
+          "structural_stiffness_n_m": 90.0,
+          "shear_stiffness_n_m": 55.0,
+          "bending_stiffness_n_m": 10.0,
+          "spring_damping_kg_s": 0.006,
+          "air_damping_1_s": 1.2
+        }
+      },
+      "initial_state": {
+        "position_m": [0.0, 0.0, 1.35],
+        "rotation_deg": [0.0, 0.0, 0.0],
+        "linear_velocity_m_s": [0.0, 0.0, 0.0]
+      },
+      "visual_representation": {"source": "solver_generated", "visible": true},
+      "solver": {
+        "type": "mass_spring_cloth",
+        "grid_resolution": 25,
+        "initial_orientation": "horizontal_xy",
+        "pinned_boundary": "none",
+        "substeps_per_frame": 100,
+        "collision_thickness_m": 0.012
+      },
+      "behavior": {}
+    },
+    {
+      "id": "sphere",
+      "role": "rigid_collider",
+      "geometry": {"shape_hint": "sphere", "approx_size_m": [0.9, 0.9, 0.9]},
+      "physics": {
+        "body_type": "static",
+        "mass_kg": 1.0,
+        "collision_required": false,
+        "material": {"dynamic_friction": 0.12, "restitution": 0.0}
+      },
+      "initial_state": {
+        "position_m": [0.1, -0.04, 0.48],
+        "rotation_deg": [0.0, 0.0, 0.0],
+        "linear_velocity_m_s": [0.0, 0.0, 0.0]
+      },
+      "visual_representation": {"source": "none", "visible": true},
+      "behavior": {}
+    },
+    {
+      "id": "floor",
+      "role": "support_surface",
+      "geometry": {"shape_hint": "plane", "approx_size_m": [4.0, 4.0, 0.05]},
+      "physics": {
+        "body_type": "static",
+        "mass_kg": 1.0,
+        "collision_required": false,
+        "material": {"dynamic_friction": 0.2, "restitution": 0.0}
+      },
+      "initial_state": {
+        "position_m": [0.0, 0.0, 0.0],
+        "rotation_deg": [0.0, 0.0, 0.0],
+        "linear_velocity_m_s": [0.0, 0.0, 0.0]
+      },
+      "visual_representation": {"source": "none", "visible": true},
+      "behavior": {}
+    }
+  ],
+  "relations": [],
+  "events": [],
+  "forces": [],
+  "constraints": [],
+  "expected_behavior": {
+    "minimum_mean_downward_displacement_m": 0.25,
+    "minimum_sphere_contact_frames": 3,
+    "minimum_final_vertical_span_m": 0.35,
+    "maximum_structural_edge_stretch_ratio": 1.2,
+    "maximum_final_mean_speed_m_s": 0.06,
+    "penetration_tolerance_m": 0.002
+  },
+  "observation_requirements": {
+    "cameras": [
+      {
+        "role": "event_closeup",
+        "coordinate_frame": "world",
+        "position_m": [-1.7, -1.7, 1.55],
+        "look_at_m": [0.0, 0.0, 0.75],
+        "fov_deg": 55.0,
+        "framing": "scene",
+        "target_objects": ["cloth", "sphere"]
+      }
+    ],
+    "modalities": ["rgb"],
+    "signals": ["mesh_cache", "trajectory"]
+  },
+  "verification_requirements": {
+    "assertions": [
+      {"id": "trajectory_integrity", "type": "trajectory_integrity"}
+    ],
+    "thresholds": {}
+  },
+  "variant": {"should_pass": true},
+  "provenance": {"purpose": "capability_first_isolated_smoke"},
+  "notes": "Canonical state is a fixed-topology Taichi mass-spring cache. Tearing and self-collision are outside this capability."
+}

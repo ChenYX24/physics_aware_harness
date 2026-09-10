@@ -161,6 +161,21 @@ class FluidBatchVerifierTests(unittest.TestCase):
         native = (ROOT / "scripts" / "native_ue_scene.py").read_text(encoding="utf-8")
 
         self.assertEqual(fluid_visual_parameters({"case_id": "water", "objects": []})["color_rgb"], [0.03, 0.28, 0.48])
+        self.assertEqual(
+            fluid_visual_parameters(
+                {
+                    "objects": [
+                        {
+                            "id": "coffee",
+                            "role": "fluid",
+                            "fixed_material_color": True,
+                            "color_rgb": [0.22, 0.08, 0.03],
+                        }
+                    ]
+                }
+            )["color_rgb"],
+            [0.22, 0.08, 0.03],
+        )
         self.assertIn('"generate_translucent_fluid_material": True', renderer)
         self.assertNotIn('"generate_solid_material": True,\n                    "generated_material_name": fluid_visual', renderer)
         self.assertIn('"generated_material_name": fluid_visual["generated_material_name"]', renderer)
@@ -293,6 +308,8 @@ class FluidBatchVerifierTests(unittest.TestCase):
                 "collision": {"type": "asset", "asset_geometry_match": True},
             },
         ]
+        bodies[0]["asset"]["material_path"] = "/Game/Materials/M_Glass.M_Glass"
+        bodies[1]["visible"] = False
         for body in bodies:
             solver_registration_rotation = [10.0, 20.0, 30.0] if body["id"] == "moving_body" else [0.0, 0.0, 0.0]
             ue_registration_rotation = [-20.0, -30.0, 10.0] if body["id"] == "moving_body" else [0.0, 0.0, 0.0]
@@ -328,13 +345,11 @@ class FluidBatchVerifierTests(unittest.TestCase):
 
         self.assertEqual(dynamic[0]["ue5_path"], bodies[0]["asset"]["ue_path"])
         self.assertEqual(dynamic[1]["ue5_path"], bodies[2]["asset"]["ue_path"])
-        self.assertEqual(static[0]["ue5_path"], bodies[1]["asset"]["ue_path"])
+        self.assertEqual(static, [])
+        self.assertEqual(dynamic[0]["params"]["visual_material_path"], "/Game/Materials/M_Glass.M_Glass")
         self.assertEqual(dynamic[0]["params"]["base_rotation_degrees"], [0.0, 0.0, 0.0])
         self.assertEqual(dynamic[0]["params"]["pose_anchor"], "solver_to_visual")
         self.assertEqual(dynamic[0]["params"]["solver_to_visual"]["ue_rotation_pyr_deg"], [-20.0, -30.0, 10.0])
-        self.assertEqual(static[0]["params"]["pose_anchor"], "solver_to_visual")
-        self.assertEqual(static[0]["scale"], [2.0, 1.0, 0.5])
-        self.assertEqual(static[0]["initial_position_m"], [0.02, 0.0, 0.0])
         self.assertTrue(dynamic[0]["params"]["asset_geometry_match"])
         self.assertEqual(resolution[0]["selected_asset"]["collision_representation"], "axisymmetric_profile")
         self.assertFalse(resolution[0]["selected_asset"]["proxy"])
@@ -346,6 +361,7 @@ class FluidBatchVerifierTests(unittest.TestCase):
         native_source = (ROOT / "scripts" / "native_ue_scene.py").read_text(encoding="utf-8")
         self.assertIn("MathLibrary.compose_rotators", native_source)
         self.assertIn("MathLibrary.transform_direction", native_source)
+        self.assertIn("contract_digest = hashlib.sha256(material_contract.encode", native_source)
 
         trajectory = rigid_body_trajectory_objects(
             {

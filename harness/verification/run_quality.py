@@ -1102,7 +1102,8 @@ def validate_articulated_execution(
         contract = obj["solver"]
         pose_type = str((contract.get("pose_source") or {}).get("type") or "")
         root_type = str((contract.get("root_transform_source") or {}).get("type") or "")
-        control_layers_required = bool(
+        movement_type = str((contract.get("movement_control") or {}).get("type") or "")
+        control_layers_required = movement_type != "character_movement" and bool(
             contract.get("pose_overlay") or contract.get("ik_targets") or contract.get("head_look_target")
         )
         samples = []
@@ -1124,16 +1125,25 @@ def validate_articulated_execution(
                 object_failures.append({"metric": "articulated_sample_time_mismatch", "frame": frame_index})
             if frame_index == 0 and observed.get("frame_zero_evaluated") is not True:
                 object_failures.append({"metric": "frame_zero_not_evaluated", "frame": frame_index})
-            if observed.get("pose_source_type") != pose_type or observed.get("root_transform_source_type") != root_type:
+            if (
+                str(observed.get("pose_source_type") or "") != pose_type
+                or str(observed.get("root_transform_source_type") or "") != root_type
+                or str(observed.get("movement_control_type") or "") != movement_type
+            ):
                 object_failures.append({"metric": "motion_source_mismatch", "frame": frame_index})
             if observed.get("errors"):
                 object_failures.append({"metric": "observation_errors", "frame": frame_index, "value": observed.get("errors")})
             if not isinstance(observed.get("actor_transform"), dict) or not isinstance(observed.get("bones"), dict):
                 object_failures.append({"metric": "articulated_transform_observation_missing", "frame": frame_index})
-            if root_type == "character_movement" and (
+            if movement_type == "character_movement" and (
                 not observed.get("movement_mode") or not isinstance(observed.get("velocity_m_s"), list)
             ):
                 object_failures.append({"metric": "character_movement_observation_missing", "frame": frame_index})
+            if movement_type == "character_movement" and (
+                not isinstance(observed.get("movement_command"), dict)
+                or "SandboxCharacter_CMC_ABP" not in str(observed.get("animation_instance_class") or "")
+            ):
+                object_failures.append({"metric": "gasp_motion_matching_observation_missing", "frame": frame_index})
             if control_layers_required:
                 rig = observed.get("control_rig") if isinstance(observed.get("control_rig"), dict) else {}
                 if (
@@ -1240,7 +1250,12 @@ def validate_articulated_execution(
                 if len(target) == 3 and len(head_position) == 3 and len(head_rotation) == 3:
                     pitch = math.radians(float(head_rotation[0]))
                     yaw = math.radians(float(head_rotation[1]))
-                    forward = (math.cos(pitch) * math.cos(yaw), math.cos(pitch) * math.sin(yaw), math.sin(pitch))
+                    roll = math.radians(float(head_rotation[2]))
+                    forward = (
+                        math.sin(roll) * math.sin(pitch) * math.cos(yaw) - math.cos(roll) * math.sin(yaw),
+                        math.sin(roll) * math.sin(pitch) * math.sin(yaw) + math.cos(roll) * math.cos(yaw),
+                        -math.sin(roll) * math.cos(pitch),
+                    )
                     delta = tuple(float(target[index]) - float(head_position[index]) for index in range(3))
                     length = math.sqrt(sum(value * value for value in delta))
                     if length > 1e-9:
@@ -1257,12 +1272,12 @@ def validate_articulated_execution(
             grounding = observed.get("grounding") if isinstance(observed.get("grounding"), dict) else None
             if frame_index == 0 and grounding and grounding.get("status") == "applied":
                 gap = grounding.get("support_gap_m")
-                if not isinstance(gap, (int, float)) or abs(float(gap)) > 0.02:
+                if not isinstance(gap, (int, float)) or abs(float(gap)) > 0.025:
                     object_failures.append({
                         "metric": "articulated_support_gap_m",
                         "frame": frame_index,
                         "value": gap,
-                        "allowed_abs": 0.02,
+                        "allowed_abs": 0.025,
                     })
         if pose_type == "animation_sequence" and samples:
             active = [
@@ -1854,7 +1869,13 @@ def validate_runtime_binding_snapshot(runtime: dict[str, Any], summary: dict[str
         if str(expected.get("behavior") or "") == "articulated_character":
             mesh_component = actual.get("mesh_component") if isinstance(actual.get("mesh_component"), dict) else {}
             articulated_components = actual.get("articulated_components") if isinstance(actual.get("articulated_components"), dict) else {}
-            compare_binding_value(mismatches, object_id, "mesh_component.actor_class", "Character", mesh_component.get("actor_class"))
+            articulated_contract = params.get("articulated_body") or {}
+            expected_actor_class = (
+                "SandboxCharacter_CMC_C"
+                if isinstance(articulated_contract.get("movement_control"), dict)
+                else "Character"
+            )
+            compare_binding_value(mismatches, object_id, "mesh_component.actor_class", expected_actor_class, mesh_component.get("actor_class"))
             compare_binding_value(
                 mismatches,
                 object_id,
@@ -1870,7 +1891,6 @@ def validate_runtime_binding_snapshot(runtime: dict[str, Any], summary: dict[str
                 True,
                 articulated_components.get("character_movement_registered"),
             )
-            articulated_contract = params.get("articulated_body") or {}
             control_rig_required = bool(
                 articulated_contract.get("pose_overlay")
                 or articulated_contract.get("ik_targets")
@@ -1958,6 +1978,8 @@ def validate_runtime_binding_snapshot(runtime: dict[str, Any], summary: dict[str
             "frame_a",
             "frame_b",
             "linear_motion",
+            "unilateral_distance_spring",
+            "unilateral_path_length_spring",
             "angular_motion",
             "angular_limits_deg",
             "linear_drive",

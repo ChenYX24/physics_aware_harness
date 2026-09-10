@@ -180,7 +180,8 @@ git diff --check
 
 - 暂不新增跨 LLM 输出归一化的“付费任务身份”，也不按图片哈希和 API payload 合并不同 Provider request。现有 request digest/checkpoint 身份继续保留。
 - Multi-Image API 的 `texture_prompt` 作为可选字段，由规划 LLM 根据用户的材质、颜色或风格意图决定是否填写；它只指导纹理，不得被描述成几何生成 prompt。
-- 当用户要求保留照片中的原始纹理/颜色且没有额外风格要求时，LLM 应省略 `texture_prompt`。若填写，必须原样进入 Provider request、Meshy POST payload 和脱敏 receipt，并校验官方 600 字符上限。
+- `generation_prompt` 是 `model_generation` 的通用生成 brief。无参考图时它原样驱动 Text-to-3D 几何；有参考图时由图片驱动几何，该字段只保留为可审计意图，不伪称 Meshy Multi-Image 支持文字几何约束。
+- 当用户要求保留照片中的原始纹理/颜色且没有额外风格要求时，LLM 应省略 `texture_prompt`。若填写，必须原样进入 Provider request、Meshy POST payload 和脱敏 receipt，并校验官方 800 字符上限。
 - 不根据 prompt 中的 `meshy` 等精确字符串注入 `texture_prompt`，也不为椅子或当前 case 添加专用规则。
 
 ### 当前失败状态
@@ -196,7 +197,7 @@ git diff --check
 2. 对已有 task ID 的 GET 轮询，以及任务成功后的模型/贴图下载，增加小规模、有上限的超时、SSL EOF、429 和 5xx 重试；保留同一 task ID，不创建替代任务。不得形成复杂通用网络框架。
 3. POST 前原子记录 submission-attempt 状态；若 POST 超时且未取得 task ID，将该 request 标为 `provider_submission_state_unknown`。同一 request 后续必须 fail closed，除非用户显式处置，禁止自动再次 POST。
 4. 允许来源约束只限制 route 而不限制 Provider：`allowed_providers` 为空/省略表示“未声明 Provider 限制”，不是矛盾；`allowed_routes`、required、no-proxy 和 fallback 仍必须严格贯穿。只有用户明确限定 Provider 时才要求非空 Provider 集合。
-5. 为 CaseSpec/Provider contract 增加最小的可选 `texture_prompt` 贯穿，加入长度、类型、receipt 脱敏和 API payload 测试；不得把它用于改变几何、对象身份或物理参数。
+5. CaseSpec/Provider contract 贯穿 `generation_prompt` 与可选 `texture_prompt`，加入长度、类型、receipt 脱敏和 API payload 测试；两者分别负责几何生成意图和纹理意图。
 
 ### 聚焦验收
 
@@ -204,7 +205,7 @@ git diff --check
 - GET/下载经历可重试 SSL EOF 后仍使用原 task ID；超过上限结构化失败并保留 checkpoint。
 - POST 未知状态再次恢复时拒绝重提，不增加 Meshy 消耗。
 - route-only procedural 约束可通过 Expansion 校验并由已注册 Provider 正常解析；显式 Provider 约束仍不可被扩大。
-- `texture_prompt` 缺省时不出现在 Meshy payload；LLM 明确填写时逐字进入 payload/receipt，超过 600 字符在网络前失败。
+- `texture_prompt` 缺省时不出现在 Meshy payload；LLM 明确填写时逐字进入 payload/receipt，超过 800 字符在网络前失败。
 
 ### 本阶段非目标
 

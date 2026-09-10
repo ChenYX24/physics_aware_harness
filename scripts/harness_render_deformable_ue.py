@@ -3,22 +3,21 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from harness.core.artifact_manager import ArtifactManager
+from harness.core.artifact_manager import ArtifactManager, link_or_copy
 from harness.core.artifact_schema import read_json, write_json
-from harness.core.case_spec import load_case_spec
+from harness.runtime.deformable_surface_adapter import (
+    load_deformable_case_data,
+)
+from harness.runtime.kinematic_motion import sample_linear_kinematic_position, sample_linear_kinematic_rotation
 from harness.runtime.observation_planner import camera_ids_from_observation_plan, render_mode_for_passes, render_passes_from_observation_plan
 from harness.runtime.execution_profile import (
     execution_profile,
@@ -34,6 +33,7 @@ from scripts.harness_local_ue_runner import (
     camera_runtime_from_plan,
     quantize_native_instance_segmentation,
     run_precompiled_ue_scene,
+    runtime_objects_from_actor_placement,
     standardize_native_output,
 )
 from scripts.harness_render_fluid_ue import ensure_ue_surface_assets
@@ -81,7 +81,7 @@ def main() -> int:
     ue_executable = Path(args.ue_executable).expanduser().resolve()
     replay = read_json(replay_path)
     cache_manifest = read_json(cache_manifest_path)
-    case_spec = dict(load_case_spec(case_path).data)
+    case_spec = dict(load_deformable_case_data(case_path))
     from harness.core.physics_contract import infer_scene_domain
 
     if infer_scene_domain(case_spec) != "deformable":
@@ -98,29 +98,45 @@ def main() -> int:
         report_path=logs / "deformable_surface_import.json",
     )
 
-    cache_path = cache_manifest_path.parent / str(cache_manifest["canonical_state"])
-    with np.load(cache_path, allow_pickle=False) as cache:
-        positions = np.asarray(cache["positions_m"])
-    if positions.shape[0] != frame_count:
+    cache_frames = cache_manifest.get("frames") or []
+    if len(cache_frames) != frame_count:
         raise SystemExit("deformable cache and replay frame counts differ")
-    surface_centers = positions.mean(axis=1).tolist()
+    cache_path = cache_manifest_path.parent / str(cache_manifest["canonical_state"])
+    surface_centers: list[list[float]] = []
+    bounds_min = [float("inf")] * 3
+    bounds_max = [float("-inf")] * 3
+    for frame in cache_frames:
+        bounds = frame.get("bounds_m") if isinstance(frame, dict) else None
+        minimum = bounds.get("min") if isinstance(bounds, dict) else None
+        maximum = bounds.get("max") if isinstance(bounds, dict) else None
+        if not (
+            isinstance(minimum, list)
+            and isinstance(maximum, list)
+            and len(minimum) == 3
+            and len(maximum) == 3
+        ):
+            raise SystemExit("deformable cache frame is missing bounds_m")
+        minimum = [float(value) for value in minimum]
+        maximum = [float(value) for value in maximum]
+        surface_centers.append([(minimum[axis] + maximum[axis]) / 2.0 for axis in range(3)])
+        bounds_min = [min(bounds_min[axis], minimum[axis]) for axis in range(3)]
+        bounds_max = [max(bounds_max[axis], maximum[axis]) for axis in range(3)]
     solid = optional_object_with_role(case_spec, "deformable_solid")
     surface_id = "soft_ball_surface" if solid else "cloth_surface"
     surface_color = SOLID_COLOR if solid else CLOTH_COLOR
     solver_backend = str(cache_manifest.get("backend") or "unknown_deformable_solver")
-    sphere = optional_object_with_role(case_spec, "rigid_collider")
-    floor = optional_object_with_role(case_spec, "support_surface")
-    anchor = optional_object_with_role(case_spec, "anchor_support")
-    bounds_min = positions.min(axis=(0, 1))
-    bounds_max = positions.max(axis=(0, 1))
-    bounds_center = (bounds_min + bounds_max) / 2.0
-    bounds_extent = np.maximum((bounds_max - bounds_min) / 2.0 + np.asarray([0.6, 0.6, 0.5]), [1.5, 1.5, 1.2])
+    cloth = required_object_with_role(case_spec, "deformable_cloth")
+    bounds_center = [(bounds_min[axis] + bounds_max[axis]) / 2.0 for axis in range(3)]
+    bounds_extent = [
+        max((bounds_max[axis] - bounds_min[axis]) / 2.0 + margin, minimum)
+        for axis, (margin, minimum) in enumerate(((0.6, 1.5), (0.6, 1.5), (0.5, 1.2)))
+    ]
     duration_s = (frame_count - 1) / fps
     case_spec["scene"] = {
         **(case_spec.get("scene") or {}),
         "duration_s": duration_s,
         "map_preference": args.map,
-        "scene_bounds": {"center": bounds_center.tolist(), "extent": bounds_extent.tolist()},
+        "scene_bounds": {"center": bounds_center, "extent": bounds_extent},
     }
     case_spec["timebase"] = {
         "physics_hz": fps,
@@ -132,6 +148,10 @@ def main() -> int:
         f"{frame['ue_asset_path']}.{str(frame['ue_asset_path']).rsplit('/', 1)[-1]}"
         for frame in replay["frames"]
     ]
+    cloth_material_path = str(cloth.get("visual_material_path") or "")
+    declared_cloth_color = cloth.get("color_rgb")
+    if isinstance(declared_cloth_color, list) and len(declared_cloth_color) == 3:
+        surface_color = [float(value) for value in declared_cloth_color]
     cloth_object = runtime_object(
         surface_id,
         asset_paths[0],
@@ -142,72 +162,47 @@ def main() -> int:
             "preserve_authored_scale": True,
             "disallow_nanite": True,
             "preserve_material": False,
-            "generate_solid_material": True,
+            "generate_solid_material": not bool(cloth_material_path),
             "generated_material_name": "M_Harness_DeformableSolid_V1" if solid else "M_Harness_Cloth_Opaque_TwoSided_V1",
-            "fixed_material_color": True,
+            "fixed_material_color": cloth.get("fixed_material_color") is not False,
             "two_sided_material": not bool(solid),
             "color_rgb": surface_color,
+            **({"visual_material_path": cloth_material_path} if cloth_material_path else {}),
             "roughness": 0.42 if solid else 0.72,
             "metallic": 0.0,
             "emissive": 0.05,
             "segmentation_identity": surface_id,
         },
     )
-    static_objects = []
-    if sphere:
-        static_objects.append(runtime_object(
-            "sphere",
-            "/Engine/BasicShapes/Sphere.Sphere",
-            [float(value) for value in sphere["position_m"]],
-            [2.0 * float(sphere["radius_m"])] * 3,
-            {
-                "preserve_authored_scale": True,
-                "preserve_material": False,
-                "generate_solid_material": True,
-                "generated_material_name": "M_Harness_ClothCollider_V1",
-                "fixed_material_color": True,
-                "color_rgb": [0.12, 0.16, 0.22],
-                "roughness": 0.25,
-                "metallic": 0.55,
-                "segmentation_identity": "sphere",
-            },
-        ))
-    if anchor:
-        static_objects.append(runtime_object(
-            "flagpole",
-            "/Engine/BasicShapes/Cylinder.Cylinder",
-            [float(value) for value in anchor["position_m"]],
-            [2.0 * float(anchor["radius_m"]), 2.0 * float(anchor["radius_m"]), float(anchor["height_m"])],
-            {
-                "preserve_authored_scale": True,
-                "preserve_material": False,
-                "generate_solid_material": True,
-                "generated_material_name": "M_Harness_Flagpole_V1",
-                "fixed_material_color": True,
-                "color_rgb": [0.12, 0.14, 0.17],
-                "roughness": 0.3,
-                "metallic": 0.72,
-                "segmentation_identity": "flagpole",
-            },
-        ))
-    if floor:
-        static_objects.append(runtime_object(
-            "floor",
-            "/Engine/BasicShapes/Cube.Cube",
-            [0.0, 0.0, float(floor.get("z_m") or 0.0) - 0.025],
-            [4.0, 4.0, 0.05],
-            {
-                "preserve_authored_scale": True,
-                "preserve_material": False,
-                "generate_solid_material": True,
-                "generated_material_name": "M_Harness_ClothFloor_V1",
-                "fixed_material_color": True,
-                "color_rgb": [0.22, 0.24, 0.27],
-                "roughness": 0.78,
-                "metallic": 0.0,
-                "segmentation_identity": "floor",
-            },
-        ))
+    placement_path = run_dir / "runtime_actor_placement.json"
+    if not placement_path.is_file():
+        raise SystemExit("deformable UE replay requires compiled runtime_actor_placement.json")
+    actor_placement = read_json(placement_path)
+    placed_dynamic, placed_static = runtime_objects_from_actor_placement(actor_placement, case_spec)
+    case_objects = {
+        str(obj.get("id") or ""): obj
+        for obj in case_spec.get("objects") or []
+        if isinstance(obj, dict) and obj.get("id")
+    }
+    replay_props = []
+    for obj in [*placed_dynamic, *placed_static]:
+        object_id = str(obj.get("id") or "")
+        case_object = case_objects.get(object_id) or {}
+        role = str(case_object.get("role") or "")
+        if role in {"deformable_cloth", "deformable_solid", "wind_field"}:
+            continue
+        configure_analytic_replay_prop(obj, case_object)
+        properties = obj.setdefault("physics_properties", {})
+        properties["simulate_physics"] = "force_off"
+        properties["collision_enabled"] = False
+        replay_props.append(obj)
+    moving_props = [
+        obj
+        for obj in replay_props
+        if isinstance((case_objects.get(str(obj.get("id") or "")) or {}).get("kinematic_motion"), dict)
+    ]
+    moving_ids = {str(obj.get("id") or "") for obj in moving_props}
+    static_objects = [obj for obj in replay_props if str(obj.get("id") or "") not in moving_ids]
     trajectory = [
         {
             "frame": frame,
@@ -220,7 +215,11 @@ def main() -> int:
                     "velocity": [0.0, 0.0, 0.0],
                     "camera_position_m": [float(value) for value in surface_centers[frame]],
                     "source": "deformable_cache_vertex_mean",
-                }
+                },
+                **{
+                    object_id: kinematic_replay_state(case_objects[object_id], frame / fps)
+                    for object_id in sorted(moving_ids)
+                },
             },
             "contacts": [],
         }
@@ -270,7 +269,7 @@ def main() -> int:
             "capture_source": "SCS_FINAL_COLOR_LDR",
             "video_filter": "",
         },
-        "dynamic_objects": [cloth_object],
+        "dynamic_objects": [cloth_object, *moving_props],
         "static_objects": static_objects,
         "validation_targets": [],
         "precomputed_trajectory": trajectory,
@@ -288,15 +287,15 @@ def main() -> int:
     write_json(runtime_path, runtime_scene)
     write_json(studio_path, studio_scene)
     write_json(run_dir / "case_spec.json", case_spec)
-    shutil.copyfile(cache_path, run_dir / "deformable_cache.npz")
-    shutil.copyfile(cache_manifest_path, run_dir / "deformable_cache.json")
-    shutil.copyfile(replay_path, run_dir / "deformable_surface_replay.json")
-    source_verifier = cache_manifest_path.parent / "harness_verifier.json"
-    shutil.copyfile(source_verifier, run_dir / "harness_verifier.json")
+    link_or_copy(cache_path, run_dir / "deformable_cache.npz")
+    link_or_copy(cache_manifest_path, run_dir / "deformable_cache.json")
+    link_or_copy(replay_path, run_dir / "deformable_surface_replay.json")
+    source_verifier = cache_manifest_path.parent / "deformable_solver_verifier.json"
+    link_or_copy(source_verifier, run_dir / "deformable_solver_verifier.json")
     resolved_assets = [
         {"object_id": surface_id, "selected_asset": {"asset_id": "solver_fixed_topology_mesh_sequence", "ue5_path": asset_paths[0], "sequence_frame_count": len(asset_paths), "proxy": True, "provenance": "deformable_cache.npz + deformable_surface_replay.json"}},
     ]
-    for obj in static_objects:
+    for obj in [*static_objects, *moving_props]:
         resolved_assets.append({
             "object_id": obj["id"],
             "selected_asset": {
@@ -372,7 +371,7 @@ def main() -> int:
     write_render_contract_artifacts(run_dir, backend="ue", case_id=case_spec["case_id"], camera_plan=camera_payload, render_passes=render_passes, allow_placeholders=False, source="external_deformable_ue_replay")
     sync = check_render_sync(run_dir, require_depth="depth" in render_passes, require_segmentation="segmentation" in render_passes, write=True)
     observability = verify_expected_color_observability(run_dir, expected_rgb=surface_color, view_ids=requested_views, write=True)
-    solver_verifier = read_json(run_dir / "harness_verifier.json")
+    solver_verifier = read_json(run_dir / "deformable_solver_verifier.json")
     ue_render_real = report.get("rgb_real_ue") is True and (
         sync.get("ue_render_real") is True or not complete_sensor_contract
     )
@@ -433,6 +432,89 @@ def optional_object_with_role(case_spec: dict[str, Any], role: str) -> dict[str,
     if len(matches) > 1:
         raise ValueError(f"case permits at most one object with role {role}")
     return matches[0] if matches else None
+
+
+def required_object_with_role(case_spec: dict[str, Any], role: str) -> dict[str, Any]:
+    matches = [item for item in case_spec.get("objects") or [] if isinstance(item, dict) and item.get("role") == role]
+    if len(matches) != 1:
+        raise ValueError(f"case requires exactly one object with role {role}")
+    return matches[0]
+
+
+def kinematic_replay_state(obj: dict[str, Any], time_s: float) -> dict[str, Any]:
+    motion = obj["kinematic_motion"]
+    position = sample_linear_kinematic_position(motion, time_s)
+    next_time = min(float(motion["keyframes"][-1]["time_s"]), time_s + 1e-4)
+    next_position = sample_linear_kinematic_position(motion, next_time)
+    interval = next_time - time_s
+    velocity = (
+        [(next_position[axis] - position[axis]) / interval for axis in range(3)]
+        if interval > 0.0
+        else [0.0, 0.0, 0.0]
+    )
+    return {
+        "position": position,
+        "rotation_degrees": sample_linear_kinematic_rotation(
+            motion,
+            time_s,
+            [float(value) for value in obj.get("initial_rotation_deg") or [0.0, 0.0, 0.0]],
+        ),
+        "velocity": velocity,
+        "source": "declared_linear_kinematic_transform",
+    }
+
+
+def configure_analytic_replay_prop(runtime_obj: dict[str, Any], case_obj: dict[str, Any]) -> None:
+    representation = case_obj.get("visual_representation") if isinstance(case_obj.get("visual_representation"), dict) else {}
+    if representation.get("source") == "asset":
+        params = runtime_obj.setdefault("params", {})
+        if case_obj.get("visual_material_path"):
+            params["preserve_material"] = False
+            params["visual_material_path"] = str(case_obj["visual_material_path"])
+        elif case_obj.get("fixed_material_color") is True and case_obj.get("color_rgb"):
+            params.update({
+                "preserve_material": False,
+                "generate_solid_material": True,
+                "generated_material_name": f"M_Harness_DeformableProp_{case_obj.get('id')}",
+                "fixed_material_color": True,
+                "color_rgb": case_obj["color_rgb"],
+                "roughness": 0.38,
+                "metallic": 0.45,
+            })
+        return
+    shape = str(case_obj.get("shape") or "").casefold()
+    size = case_obj.get("size_m")
+    if shape not in {"sphere", "box", "cylinder"} or not isinstance(size, list) or len(size) != 3:
+        return
+    mesh_path = {
+        "sphere": "/Engine/BasicShapes/Sphere.Sphere",
+        "box": "/Engine/BasicShapes/Cube.Cube",
+        "cylinder": "/Engine/BasicShapes/Cylinder.Cylinder",
+    }[shape]
+    scale = [float(value) for value in size]
+    position = [float(value) for value in case_obj.get("initial_position_m") or [0.0, 0.0, 0.0]]
+    if case_obj.get("role") == "support_surface":
+        position[2] -= scale[2] / 2.0
+    runtime_obj["ue5_path"] = mesh_path
+    runtime_obj["scale"] = scale
+    runtime_obj["initial_position_m"] = position
+    runtime_obj["rotation_degrees"] = [
+        float(value) for value in case_obj.get("initial_rotation_deg") or [0.0, 0.0, 0.0]
+    ]
+    params = runtime_obj.setdefault("params", {})
+    params.update({
+        "preserve_authored_scale": True,
+        "preserve_material": False,
+        "generate_solid_material": not bool(case_obj.get("visual_material_path")),
+        "generated_material_name": f"M_Harness_DeformableProp_{case_obj.get('id')}",
+        "fixed_material_color": case_obj.get("fixed_material_color") is not False,
+        "color_rgb": case_obj.get("color_rgb") or [0.16, 0.19, 0.24],
+        "roughness": 0.38,
+        "metallic": 0.45,
+        "expected_render_mesh_path": mesh_path,
+    })
+    if case_obj.get("visual_material_path"):
+        params["visual_material_path"] = str(case_obj["visual_material_path"])
 
 
 def runtime_object(object_id: str, asset_path: str, position: list[float], scale: list[float], params: dict[str, Any]) -> dict[str, Any]:

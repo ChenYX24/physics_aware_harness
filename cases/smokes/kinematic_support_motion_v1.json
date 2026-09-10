@@ -1,0 +1,187 @@
+{
+  "schema_version": "harness_case_spec_v2",
+  "identity": {
+    "case_id": "smoke_kinematic_support_motion_v1",
+    "title": "Kinematic supports accelerate and stop beneath passive cargo",
+    "source_request": "Verify generic time-keyed kinematic translation and its native rigid-contact response using one accelerating support and one support that stops abruptly."
+  },
+  "capabilities": {
+    "primary": "rigid_body_dynamics",
+    "required": ["rigid_body_dynamics"]
+  },
+  "scene": {
+    "environment_intent": "minimal controlled translating-support stage",
+    "coordinate_system": "z_up",
+    "duration_s": 3.0,
+    "bounds_hint_m": [4.0, 2.5, 1.5]
+  },
+  "timebase": {
+    "physics_hz": 120,
+    "observation_fps": 24,
+    "deterministic_seed": 660071
+  },
+  "backend_constraints": {
+    "required_solver_capabilities": ["rigid_body", "kinematic_motion", "contact_events", "trajectory"],
+    "allowed_solvers": ["ue"],
+    "render_backend": "ue",
+    "allow_multi_backend": false
+  },
+  "asset_policy": {
+    "allow_local": true,
+    "allow_external": false,
+    "allow_generation": false,
+    "allow_analytic_proxy": true,
+    "required_license_tier": "local_preview"
+  },
+  "objects": [
+    {
+      "id": "catch_floor",
+      "role": "ground_support",
+      "geometry": {"shape_hint": "box", "approx_size_m": [4.0, 2.4, 0.1]},
+      "physics": {
+        "body_type": "static",
+        "mass_kg": 1.0,
+        "collision_required": true,
+        "collision_geometry": {"shape": "box", "size_m": [4.0, 2.4, 0.1], "local_center_offset_m": [0.0, 0.0, 0.0]}
+      },
+      "initial_state": {"position_m": [0.0, 0.0, -0.05], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "visual_representation": {"source": "none", "visible": false},
+      "behavior": {}
+    },
+    {
+      "id": "accelerating_support",
+      "role": "moving_support",
+      "geometry": {"shape_hint": "box", "approx_size_m": [1.8, 0.55, 0.2]},
+      "physics": {
+        "body_type": "kinematic",
+        "mass_kg": 10.0,
+        "collision_required": true,
+        "collision_geometry": {"shape": "box", "size_m": [1.8, 0.55, 0.2], "local_center_offset_m": [0.0, 0.0, 0.0]},
+        "material": {"dynamic_friction": 0.18, "static_friction": 0.2, "restitution": 0.0}
+      },
+      "initial_state": {"position_m": [-1.0, -0.7, 0.12], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "kinematic_motion": {
+        "interpolation": "linear",
+        "keyframes": [
+          {"time_s": 0.0, "position_m": [-1.0, -0.7, 0.12]},
+          {"time_s": 0.5, "position_m": [-1.0, -0.7, 0.12]},
+          {"time_s": 1.0, "position_m": [-0.94, -0.7, 0.12]},
+          {"time_s": 1.5, "position_m": [-0.72, -0.7, 0.12]},
+          {"time_s": 2.0, "position_m": [-0.28, -0.7, 0.12]},
+          {"time_s": 2.5, "position_m": [0.4, -0.7, 0.12]},
+          {"time_s": 3.0, "position_m": [0.4, -0.7, 0.12]}
+        ]
+      },
+      "color_rgb": [0.15, 0.35, 0.82],
+      "fixed_material_color": true,
+      "visual_representation": {"source": "none", "visible": true},
+      "behavior": {}
+    },
+    {
+      "id": "accelerating_cargo",
+      "role": "passive_cargo",
+      "geometry": {"shape_hint": "box", "approx_size_m": [0.24, 0.24, 0.24]},
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.8,
+        "collision_required": true,
+        "collision_geometry": {"shape": "box", "size_m": [0.24, 0.24, 0.24], "local_center_offset_m": [0.0, 0.0, 0.0]},
+        "material": {"dynamic_friction": 0.18, "static_friction": 0.2, "restitution": 0.0},
+        "linear_damping": 0.02,
+        "angular_damping": 0.05
+      },
+      "initial_state": {"position_m": [-1.0, -0.7, 0.34], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "color_rgb": [0.9, 0.38, 0.1],
+      "fixed_material_color": true,
+      "visual_representation": {"source": "none", "visible": true},
+      "behavior": {}
+    },
+    {
+      "id": "stopping_support",
+      "role": "moving_support",
+      "geometry": {"shape_hint": "box", "approx_size_m": [1.8, 0.55, 0.2]},
+      "physics": {
+        "body_type": "kinematic",
+        "mass_kg": 10.0,
+        "collision_required": true,
+        "collision_geometry": {"shape": "box", "size_m": [1.8, 0.55, 0.2], "local_center_offset_m": [0.0, 0.0, 0.0]},
+        "material": {"dynamic_friction": 0.45, "static_friction": 0.55, "restitution": 0.0}
+      },
+      "initial_state": {"position_m": [-1.0, 0.7, 0.12], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "kinematic_motion": {
+        "interpolation": "linear",
+        "keyframes": [
+          {"time_s": 0.0, "position_m": [-1.0, 0.7, 0.12]},
+          {"time_s": 0.5, "position_m": [-1.0, 0.7, 0.12]},
+          {"time_s": 1.5, "position_m": [0.2, 0.7, 0.12]},
+          {"time_s": 3.0, "position_m": [0.2, 0.7, 0.12]}
+        ]
+      },
+      "color_rgb": [0.12, 0.62, 0.36],
+      "fixed_material_color": true,
+      "visual_representation": {"source": "none", "visible": true},
+      "behavior": {}
+    },
+    {
+      "id": "stopping_cargo",
+      "role": "passive_cargo",
+      "geometry": {"shape_hint": "box", "approx_size_m": [0.24, 0.24, 0.24]},
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.8,
+        "collision_required": true,
+        "collision_geometry": {"shape": "box", "size_m": [0.24, 0.24, 0.24], "local_center_offset_m": [0.0, 0.0, 0.0]},
+        "material": {"dynamic_friction": 0.45, "static_friction": 0.55, "restitution": 0.0},
+        "linear_damping": 0.02,
+        "angular_damping": 0.05
+      },
+      "initial_state": {"position_m": [-1.0, 0.7, 0.34], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "color_rgb": [0.95, 0.72, 0.1],
+      "fixed_material_color": true,
+      "visual_representation": {"source": "none", "visible": true},
+      "behavior": {}
+    }
+  ],
+  "relations": [
+    {"type": "supported_by", "source": "accelerating_cargo", "target": "accelerating_support"},
+    {"type": "supported_by", "source": "stopping_cargo", "target": "stopping_support"}
+  ],
+  "events": [],
+  "forces": [],
+  "constraints": [],
+  "expected_behavior": {
+    "declared_kinematic_trajectory_required": true,
+    "native_contact_response_required": true
+  },
+  "observation_requirements": {
+    "cameras": [
+      {
+        "role": "front_static",
+        "coordinate_frame": "world",
+        "position_m": [0.0, -4.2, 1.8],
+        "look_at_m": [0.0, 0.0, 0.25],
+        "fov_deg": 48.0,
+        "framing": "scene",
+        "target_objects": ["accelerating_support", "accelerating_cargo", "stopping_support", "stopping_cargo"]
+      }
+    ],
+    "modalities": ["rgb"],
+    "signals": ["trajectory", "contact_events"]
+  },
+  "verification_requirements": {
+    "assertions": [
+      {"id": "trajectory_integrity", "type": "trajectory_integrity"},
+      {"id": "accelerating_support_translation", "type": "state_delta", "object_id": "accelerating_support", "field": "position_m.x", "operator": ">=", "value": 1.35},
+      {"id": "stopping_support_translation", "type": "state_delta", "object_id": "stopping_support", "field": "position_m.x", "operator": ">=", "value": 1.15},
+      {"id": "accelerating_support_contact", "type": "event_exists", "event": "contact", "objects": ["accelerating_support", "accelerating_cargo"]},
+      {"id": "stopping_support_contact", "type": "event_exists", "event": "contact", "objects": ["stopping_support", "stopping_cargo"]}
+    ],
+    "thresholds": {}
+  },
+  "variant": {"should_pass": true},
+  "provenance": {
+    "purpose": "capability_first_isolated_smoke",
+    "core100_cases": ["R050", "R051"]
+  },
+  "notes": "One general world-position keyframe primitive exercises accelerating and stopping translating supports without Case-ID routing."
+}

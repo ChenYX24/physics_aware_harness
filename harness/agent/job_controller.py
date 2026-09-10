@@ -52,6 +52,7 @@ from harness.agent.evidence_bundle import (
     EvidenceBundleError,
     build_evidence_bundle,
     current_evidence_snapshots,
+    prune_sensor_exr,
     semantic_review_requirements,
     validate_current_evidence_bundle,
 )
@@ -116,6 +117,11 @@ from harness.planning.case_generation import (
 )
 from harness.planning.runtime_compiler import RuntimeCompilation, compile_runtime_case
 from harness.runtime.execution_profile import execution_profile, verified_run_status, write_execution_reports
+from harness.runtime.layout_preview import (
+    execute_layout_preview,
+    layout_preview_request_digest,
+    validate_frozen_compilation,
+)
 from harness.runtime.observation_planner import camera_ids_from_observation_plan, render_passes_from_observation_plan
 from harness.runtime.stage_executor import execute_runtime_plan
 from harness.verification.physics_verifier import PhysicsVerifier
@@ -135,6 +141,7 @@ _NEXT_CONTROLLER_STAGE = {
     "quality_gate": "evidence_bundle",
     "evidence_bundle": "semantic_review",
 }
+ADVANCE_STAGES = tuple(_NEXT_CONTROLLER_STAGE)
 
 _CASE_SPEC_CONTRACT_FAILURE_CODES = frozenset(
     {"unsupported_generation_recipe", "invalid_generation_spec"}
@@ -151,6 +158,7 @@ class ControllerHooks:
     quality: Callable[[Path], Mapping[str, Any]] = lambda run_dir: evaluate_run(run_dir, write=True)
     evidence: Callable[..., Mapping[str, Any]] = build_evidence_bundle
     semantic_review: Callable[..., Mapping[str, Any]] = lambda **kwargs: CodexAppServerReviewer().review(**kwargs)
+    layout_preview: Callable[..., Mapping[str, Any]] = execute_layout_preview
     monotonic: Callable[[], float] = time.monotonic
 
 
@@ -474,6 +482,73 @@ class AgentJobController:
                 "native_generation_ack": str(root / "request" / "native_generation_ack.json") if (root / "request" / "native_generation_ack.json").is_file() else None,
             },
         }
+
+    def run_layout_preview(self, job_id: str, *, time_s: float = 0.0) -> dict[str, Any]:
+        """Render cheap layout images from the immutable compiled attempt.
+
+        This diagnostic action consumes one UE launch but intentionally does
+        not advance or rewrite the Controller stage machine.
+        """
+        if not math.isfinite(time_s) or time_s < 0.0:
+            raise ValueError("layout preview time must be a finite non-negative number")
+        with self.store.lock(job_id):
+            manifest = self.store.load_manifest(job_id)
+            attempt_id = manifest.get("current_attempt_id")
+            if not attempt_id:
+                raise JobStoreError("layout preview requires a current attempt")
+            attempt_dir = self.store.attempt_dir(job_id, str(attempt_id))
+            compilation_dir = attempt_dir / "compilation"
+            compiled = validate_frozen_compilation(compilation_dir)
+            transaction = compiled["compilation_transaction.json"]
+            duration_s = float(
+                ((compiled["runtime_case.json"].get("timebase") or {}).get("duration_s"))
+                or compiled["runtime_case.json"].get("duration_s")
+                or ((compiled["runtime_case.json"].get("scene") or {}).get("duration_s"))
+                or 0.0
+            )
+            if duration_s > 0.0 and time_s > duration_s:
+                raise ValueError(f"layout preview time exceeds Case duration {duration_s:g}s")
+            digest = layout_preview_request_digest(
+                compilation_id=str(transaction["transaction_id"]),
+                compile_config_digest=str(transaction["input_identity"]["compile_config_digest"]),
+                time_s=time_s,
+            )
+            output_dir = attempt_dir / "layout_preview" / digest[:16]
+            receipt_path = output_dir / "layout_preview_receipt.json"
+            if receipt_path.is_file():
+                receipt = read_json(receipt_path)
+                images = [Path(str(row.get("path") or "")) for row in receipt.get("images") or []]
+                if receipt.get("status") == "pass" and images and all(path.is_file() for path in images):
+                    return {**receipt, "mode": "reused"}
+            manifest = self._reconcile_ue_launch_usage(manifest)
+            if int(manifest["usage"]["ue_launches"]) >= int(manifest["budget"]["max_ue_launches"]):
+                raise JobStoreError("UE launch budget is exhausted before layout preview")
+            self._record_controller_ue_launch(manifest, kind="layout_preview", stage="diagnostic")
+            manifest = self._reconcile_ue_launch_usage(manifest)
+            started = self.hooks.monotonic()
+            try:
+                with self._effective_environment(manifest):
+                    report = dict(
+                        self.hooks.layout_preview(
+                            compilation_dir=compilation_dir,
+                            output_dir=output_dir,
+                            config=self.config,
+                            time_s=time_s,
+                        )
+                    )
+                receipt = {
+                    **report,
+                    "job_id": job_id,
+                    "attempt_id": attempt_id,
+                    "request_digest": digest,
+                    "mode": "executed",
+                    "elapsed_seconds": round(max(0.0, self.hooks.monotonic() - started), 3),
+                    "controller_stage_unchanged": manifest["current_stage"],
+                }
+                write_json(receipt_path, receipt)
+                return receipt
+            finally:
+                self._reconcile_ue_launch_usage(self.store.load_manifest(job_id))
 
     def recover_interrupted(self, job_id: str) -> dict[str, Any]:
         """Return a lock-orphaned running stage to the normal resumable boundary."""
@@ -1019,7 +1094,14 @@ class AgentJobController:
                 context_path=self.store.job_dir(job_id) / "request" / "native_generation_context.json",
             )
 
-    def advance_until_blocked(self, job_id: str) -> dict[str, Any]:
+    def advance_until_blocked(
+        self,
+        job_id: str,
+        *,
+        stop_after_stage: str | None = None,
+    ) -> dict[str, Any]:
+        if stop_after_stage is not None and stop_after_stage not in ADVANCE_STAGES:
+            raise ValueError(f"unsupported stop-after stage: {stop_after_stage}")
         with self.store.lock(job_id):
             manifest = self.store.load_manifest(job_id)
             if manifest["state"] in {"cancelled", "completed", "failed", "awaiting_semantic_review"}:
@@ -1120,6 +1202,23 @@ class AgentJobController:
                     result = leaf["result"] if leaf is not None else None
                     blocked_stage = str(result["stage"]) if result is not None else stage
                     self._stage_event(manifest, "stage_blocked", blocked_stage, result=result)
+                if (
+                    structured_failure is None
+                    and manifest["state"] == "running"
+                    and stop_after_stage == stage
+                ):
+                    manifest = self._update_manifest(
+                        manifest,
+                        state="blocked",
+                        blocker={
+                            "code": "requested_stage_boundary_reached",
+                            "message": f"requested stop after completed stage {stage}",
+                            "stage": stage,
+                        },
+                        allowed_next_actions=["advance", "cancel"],
+                    )
+                    self._stage_event(manifest, "stage_boundary_reached", stage)
+                    break
             self._emit_job_terminal_if_terminal(manifest)
             return self.inspect(job_id)
 
@@ -1135,6 +1234,7 @@ class AgentJobController:
         intent_amendment: Mapping[str, Any] | None = None,
         revised_case_spec: Mapping[str, Any] | None = None,
         revision_reason: str | None = None,
+        stop_after_stage: str | None = None,
     ) -> dict[str, Any]:
         resume_to_review_boundary = False
         with self.store.lock(job_id):
@@ -1158,6 +1258,10 @@ class AgentJobController:
                 self._stage_event(manifest, "stage_blocked", "budget", result=budget_result)
                 return self.inspect(job_id)
             contract_revision = revised_case_spec is not None and contract_repair["available"] is True
+            smoke_review_revision = False
+            if revised_case_spec is not None and manifest.get("current_stage") == "candidate":
+                current_attempt = self.store.load_attempt(job_id, manifest["current_attempt_id"])
+                smoke_review_revision = current_attempt.get("status") == "smoke_passed"
             if (
                 manifest["state"] == "failed"
                 and (manifest.get("blocker") or {}).get("code") != "budget_exhausted"
@@ -1188,6 +1292,7 @@ class AgentJobController:
                 requested_action not in manifest["allowed_next_actions"]
                 and not contract_revision
                 and not revision_budget_extension
+                and not smoke_review_revision
             ):
                 raise JobStoreError(f"current job state does not permit {requested_action}")
             prior_authorizations = copy.deepcopy(manifest["authorizations"])
@@ -1296,13 +1401,21 @@ class AgentJobController:
             if intent_amendment is not None:
                 manifest = self._apply_intent_amendment(manifest, intent_amendment)
             if revised_case_spec is not None:
+                trigger_stage = "smoke" if smoke_review_revision else str(
+                    (manifest.get("blocker") or {}).get("stage") or manifest["current_stage"]
+                )
+                trigger_failure_code = (
+                    "user_approved_smoke_revision"
+                    if smoke_review_revision
+                    else str((manifest.get("blocker") or {}).get("code") or "user_approved_revision")
+                )
                 manifest = self._create_revision(
                     manifest,
                     revised_case_spec,
                     revision_reason or "user-approved revision",
                     repair_layer="case_spec_source",
-                    trigger_stage=str((manifest.get("blocker") or {}).get("stage") or manifest["current_stage"]),
-                    trigger_failure_code=str((manifest.get("blocker") or {}).get("code") or "user_approved_revision"),
+                    trigger_stage=trigger_stage,
+                    trigger_failure_code=trigger_failure_code,
                     additional_allowed_adjustments=(
                         contract_repair["allowed_adjustments"] if contract_revision else None
                     ),
@@ -1342,7 +1455,7 @@ class AgentJobController:
                 manifest = self._update_manifest(manifest, state="running", blocker=None, allowed_next_actions=["cancel"])
         if resume_to_review_boundary:
             return self.inspect(job_id)
-        return self.advance_until_blocked(job_id)
+        return self.advance_until_blocked(job_id, stop_after_stage=stop_after_stage)
 
     def run_semantic_review(self, job_id: str) -> dict[str, Any]:
         with self.store.lock(job_id):
@@ -1994,23 +2107,24 @@ class AgentJobController:
         policy = self._generation_policy(job_id)
         if policy["mode"] == "native":
             return self._advance_native_generation(manifest, request=request)
-        decision = planning_image_decision(
-            request,
-            upload_authorized=manifest["authorizations"]["planning_llm_upload"] is True,
-            image_capability=self.config.planning_image_capability,
-        )
-        if decision["status"] != "ready":
-            result = failure_stage_result(
-                stage="generation",
-                failure_code=str(decision["failure_code"]),
-                message=str(decision["message"]),
-                source_status="blocked",
-                job_id=job_id,
-            )
-            self._write_controller_stage_result(manifest, result)
-            return self._apply_stage_result(manifest, result)
-        generation_dir = root / "request" / "generation"
         seed_path = root / "request" / "seed_case_spec.json"
+        if not seed_path.is_file():
+            decision = planning_image_decision(
+                request,
+                upload_authorized=manifest["authorizations"]["planning_llm_upload"] is True,
+                image_capability=self.config.planning_image_capability,
+            )
+            if decision["status"] != "ready":
+                result = failure_stage_result(
+                    stage="generation",
+                    failure_code=str(decision["failure_code"]),
+                    message=str(decision["message"]),
+                    source_status="blocked",
+                    job_id=job_id,
+                )
+                self._write_controller_stage_result(manifest, result)
+                return self._apply_stage_result(manifest, result)
+        generation_dir = root / "request" / "generation"
         if seed_path.is_file():
             case_spec = case_spec_v2_from_dict(
                 read_json(seed_path),
@@ -2691,6 +2805,8 @@ class AgentJobController:
                     )
             except BaseException as exc:
                 self._attach_exception_stage_result(exc, expected_run, "execute")
+                if expected_run.is_dir():
+                    prune_sensor_exr(expected_run, policy="post_execute_stop")
                 raise
         verifier_path = run_dir / "harness_verifier.json"
         verifier_stage_path = run_dir / "stage_results" / "verifier.json"
@@ -2704,6 +2820,7 @@ class AgentJobController:
             )
         except BaseException as exc:
             self._attach_exception_stage_result(exc, run_dir, "verifier")
+            prune_sensor_exr(run_dir, policy="post_verifier_stop")
             raise
         render_path = run_dir / "render_sync_report.json"
         render_stage_path = run_dir / "stage_results" / "render_sync.json"
@@ -2724,6 +2841,7 @@ class AgentJobController:
             )
         except BaseException as exc:
             self._attach_exception_stage_result(exc, run_dir, "render_sync")
+            prune_sensor_exr(run_dir, policy="post_render_sync_stop")
             raise
         write_execution_reports(
             run_dir,
@@ -2751,7 +2869,10 @@ class AgentJobController:
             attempt = self.store.load_attempt(manifest["job_id"], attempt_id)
             attempt.update({"smoke_gate": str(gate_path), "status": "smoke_passed" if passed else "smoke_failed", "updated_at": utc_now()})
             self.store.write_attempt(attempt)
+            prune_sensor_exr(run_dir, policy="post_smoke_validation")
         if not passed:
+            if stage_name != "smoke":
+                prune_sensor_exr(run_dir, policy="post_candidate_validation")
             result_path = run_dir / "stage_results" / ("verifier.json" if verifier.get("status") != "pass" else "render_sync.json")
             result = self._with_identity(read_json(result_path), manifest["job_id"], attempt_id)
             return self._apply_stage_result(manifest, result)
@@ -2773,14 +2894,17 @@ class AgentJobController:
             report = dict(self.hooks.quality(run_dir))
         except BaseException as exc:
             self._attach_exception_stage_result(exc, run_dir, "quality_gate")
+            prune_sensor_exr(run_dir, policy="post_quality_gate_stop")
             raise
         self._adopt_run_stage_results(run_dir, manifest["job_id"], manifest["current_attempt_id"])
         result = read_json(run_dir / "stage_results" / "quality_gate.json")
         if report.get("hard_gate_passed") is not True:
+            prune_sensor_exr(run_dir, policy="post_quality_gate_validation")
             return self._apply_stage_result(manifest, self._with_identity(result, manifest["job_id"], manifest["current_attempt_id"]))
         attempt = self.store.load_attempt(manifest["job_id"], manifest["current_attempt_id"])
         attempt.update({"status": "quality_gate_passed", "updated_at": utc_now()})
         self.store.write_attempt(attempt)
+        prune_sensor_exr(run_dir, policy="post_quality_gate_validation")
         self._checkpoint(manifest, "quality_gate", "completed", stable_digest(report), [str(run_dir / "quality_report.json")])
         return self._update_manifest(manifest, current_stage="evidence_bundle")
 
@@ -2807,18 +2931,23 @@ class AgentJobController:
             attempt_dir=attempt_dir,
             run_dir=Path(str(candidate["run_dir"])),
         )
-        result = dict(
-            self.hooks.evidence(
-                job_id=job_id,
-                attempt=attempt,
-                attempt_dir=attempt_dir,
-                candidate_run_dir=Path(str(candidate["run_dir"])),
-                request=request,
-                intent_contract=intent,
-                result_provenance=result_provenance,
-                intent_amendments=intent_amendments,
+        candidate_run_dir = Path(str(candidate["run_dir"]))
+        try:
+            result = dict(
+                self.hooks.evidence(
+                    job_id=job_id,
+                    attempt=attempt,
+                    attempt_dir=attempt_dir,
+                    candidate_run_dir=candidate_run_dir,
+                    request=request,
+                    intent_contract=intent,
+                    result_provenance=result_provenance,
+                    intent_amendments=intent_amendments,
+                )
             )
-        )
+        except BaseException:
+            prune_sensor_exr(candidate_run_dir, policy="post_evidence_bundle_stop")
+            raise
         stage_result = self._with_identity(result["stage_result"], job_id, attempt_id)
         write_stage_result(attempt_dir, stage_result)
         manifest_path = Path(str(result["manifest_path"]))
@@ -2842,6 +2971,7 @@ class AgentJobController:
             expected_result_provenance=result_provenance,
             expected_manifest_digest=stable_digest(bundle),
         )
+        prune_sensor_exr(candidate_run_dir, policy="post_evidence_bundle_validation")
         attempt.update({"status": "awaiting_semantic_review", "updated_at": utc_now()})
         self.store.write_attempt(attempt)
         self._checkpoint(
@@ -3232,6 +3362,7 @@ class AgentJobController:
             }
         ).to_dict()
         parent_root = self.store.attempt_dir(manifest["job_id"], parent_id)
+        self._prune_attempt_sensor_exr(parent_root)
         sequence = len(list(parent_root.glob("revision_proposal_*.json"))) + 1
         write_json(parent_root / f"revision_proposal_{sequence:03d}.json", proposal)
         revision = int(manifest["usage"]["case_spec_revisions"]) + 1
@@ -3268,6 +3399,19 @@ class AgentJobController:
             current_stage="task_readiness",
             usage=usage,
         )
+
+    @staticmethod
+    def _prune_attempt_sensor_exr(attempt_dir: Path) -> None:
+        run_dirs: set[Path] = set()
+        for receipt_name in ("smoke_gate.json", "candidate_run.json"):
+            receipt_path = attempt_dir / receipt_name
+            if not receipt_path.is_file():
+                continue
+            run_dir = Path(str(read_json(receipt_path).get("run_dir") or ""))
+            if run_dir.is_dir() and run_dir.resolve().is_relative_to((attempt_dir / "runs").resolve()):
+                run_dirs.add(run_dir)
+        for run_dir in sorted(run_dirs):
+            prune_sensor_exr(run_dir, policy="superseded_attempt_validation")
 
     def _apply_intent_amendment(
         self,
@@ -4965,6 +5109,22 @@ class AgentJobController:
                 }
             physics = obj.get("physics") if isinstance(obj.get("physics"), Mapping) else {}
             body_type = str(physics.get("body_type") or "").casefold()
+            collision = (
+                physics.get("collision_geometry")
+                if isinstance(physics.get("collision_geometry"), Mapping)
+                else {}
+            )
+            collision_size = collision.get("size_m")
+            collision_size_path = f"$.objects.{object_id}.physics.collision_geometry.size_m"
+            if collision_size_path not in excluded and cls._finite_numeric_vector(collision_size, length=3):
+                constraints[collision_size_path] = {
+                    "kind": "numeric_vector",
+                    "min": [0.001, 0.001, 0.001],
+                    "max": [
+                        max(scene_bounds[index] * 2.0, float(collision_size[index]))
+                        for index in range(3)
+                    ],
+                }
             if body_type == "dynamic":
                 add_vector_window(
                     f"$.objects.{object_id}.initial_state.linear_velocity_m_s",
@@ -5040,12 +5200,15 @@ class AgentJobController:
                 pose_source = solver.get("pose_source") if isinstance(solver.get("pose_source"), Mapping) else {}
                 pose_overlay = solver.get("pose_overlay") if isinstance(solver.get("pose_overlay"), Mapping) else {}
                 root_source = solver.get("root_transform_source") if isinstance(solver.get("root_transform_source"), Mapping) else {}
+                movement_control = solver.get("movement_control") if isinstance(solver.get("movement_control"), Mapping) else {}
                 head_look = solver.get("head_look_target") if isinstance(solver.get("head_look_target"), Mapping) else {}
                 articulated_lists = (
                     ("pose_source.keyframes", pose_source.get("keyframes")),
                     ("pose_source.segments", pose_source.get("segments")),
                     ("pose_overlay.keyframes", pose_overlay.get("keyframes")),
                     ("root_transform_source.keyframes", root_source.get("keyframes")),
+                    ("movement_control.keyframes", movement_control.get("keyframes")),
+                    ("movement_control.events", movement_control.get("events")),
                     ("ik_targets", solver.get("ik_targets")),
                     ("head_look_target.keyframes", head_look.get("keyframes")),
                     ("attachments", solver.get("attachments")),
@@ -5113,6 +5276,54 @@ class AgentJobController:
                 f"{constraint_path}.linear_limit_m",
                 constraint.get("linear_limit_m"),
                 relative=0.5,
+            )
+            distance_spring = (
+                constraint.get("unilateral_distance_spring")
+                if isinstance(constraint.get("unilateral_distance_spring"), Mapping)
+                else {}
+            )
+            add_numeric_window(
+                f"{constraint_path}.unilateral_distance_spring.rest_length_m",
+                distance_spring.get("rest_length_m"),
+                relative=0.5,
+            )
+            add_numeric_window(
+                f"{constraint_path}.unilateral_distance_spring.stiffness_n_m",
+                distance_spring.get("stiffness_n_m"),
+                relative=0.75,
+            )
+            add_numeric_window(
+                f"{constraint_path}.unilateral_distance_spring.damping_n_s_m",
+                distance_spring.get("damping_n_s_m"),
+                relative=0.75,
+                floor=0.5,
+            )
+            path_spring = (
+                constraint.get("unilateral_path_length_spring")
+                if isinstance(constraint.get("unilateral_path_length_spring"), Mapping)
+                else {}
+            )
+            add_vector_window(
+                f"{constraint_path}.unilateral_path_length_spring.fixed_waypoint_m",
+                path_spring.get("fixed_waypoint_m"),
+                relative=0.5,
+                floor=0.05,
+            )
+            add_numeric_window(
+                f"{constraint_path}.unilateral_path_length_spring.rest_length_m",
+                path_spring.get("rest_length_m"),
+                relative=0.5,
+            )
+            add_numeric_window(
+                f"{constraint_path}.unilateral_path_length_spring.stiffness_n_m",
+                path_spring.get("stiffness_n_m"),
+                relative=0.75,
+            )
+            add_numeric_window(
+                f"{constraint_path}.unilateral_path_length_spring.damping_n_s_m",
+                path_spring.get("damping_n_s_m"),
+                relative=0.75,
+                floor=0.5,
             )
             angular_limits = (
                 constraint.get("angular_limits_deg")

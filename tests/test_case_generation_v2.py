@@ -224,7 +224,12 @@ class CaseGenerationV2Tests(unittest.TestCase):
         contract = client.calls[1]["payload"]["case_spec_contract"]
         self.assertEqual(
             contract["enums"]["local_procedural_recipe"],
-            ["box_mesh_v1", "sphere_mesh_v1", "cylinder_mesh_v1"],
+            [
+                "box_mesh_v1",
+                "sphere_mesh_v1",
+                "cylinder_mesh_v1",
+                "open_conical_frustum_mesh_v1",
+            ],
         )
         self.assertEqual(
             set(contract["enums"]["primary_capability"]),
@@ -258,6 +263,7 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertIn("allow_similarity_search", contract["field_shapes"]["reference_input"])
         self.assertIn("source", contract["field_shapes"]["binary_relation"])
         self.assertIn("surface_gap_m", contract["field_shapes"]["binary_relation"])
+        self.assertIn("activation_distance_m", contract["field_shapes"]["compliant_contact"])
         self.assertIn("thresholds", contract["field_shapes"]["verification_requirements"])
         expansion_contract = client.calls[0]["payload"]["expansion_contract"]
         self.assertEqual(expansion_contract["field_types"]["object_analysis"], "array")
@@ -279,7 +285,11 @@ class CaseGenerationV2Tests(unittest.TestCase):
         self.assertIn("must_not contains hard exclusions", case_prompt)
         self.assertIn("passed unchanged to the selected verifier", case_prompt)
         self.assertIn("fit_uniform_to_approx_size", case_prompt)
-        self.assertIn("shape_hint is\n   exactly box, sphere, or cylinder", case_prompt)
+        self.assertIn(
+            "shape_hint is\n   exactly box, sphere, cylinder, or open_conical_frustum",
+            case_prompt,
+        )
+        self.assertIn("supports static UE collision only", case_prompt)
         self.assertIn("Once declared, collision_geometry is the\n   collision truth", case_prompt)
         self.assertIn("qualified imported asset\n   BodySetup", case_prompt)
         self.assertIn("Never guess local_center_offset_m for an asset whose exact mesh origin is not known", case_prompt)
@@ -329,6 +339,8 @@ class CaseGenerationV2Tests(unittest.TestCase):
         )
         self.assertEqual(container["role"], "rigid_body")
         self.assertEqual(container["visual_representation"], {"source": "asset"})
+        self.assertNotIn("transform", container["solver"])
+        self.assertEqual(container["initial_state"]["position_m"], [0.0, 0.0, 0.1])
         self.assertEqual(liquid["visual_representation"], {"source": "solver_generated"})
         self.assertNotIn("asset", liquid)
         self.assertIn("asset", container)
@@ -362,6 +374,7 @@ class CaseGenerationV2Tests(unittest.TestCase):
                 "origin": "llm_inferred",
                 "provider_hint": "meshy",
                 "fallback_order": [],
+                "generation_prompt": "A realistic isolated generated target with clean game-ready geometry.",
             },
         }
         request = build_case_request(case_id="multiple_source_constraints", text="Use the explicitly requested sources.")

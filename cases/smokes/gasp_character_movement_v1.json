@@ -1,0 +1,119 @@
+{
+  "schema_version": "harness_case_spec_v2",
+  "identity": {
+    "case_id": "smoke_gasp_character_movement_v1",
+    "title": "GASP combined locomotion capability smoke",
+    "source_request": "Verify one high-level character control sequence covering idle, walk, run, turn, jump, crouch, and crouched movement."
+  },
+  "capabilities": {
+    "primary": "articulated_body_motion",
+    "required": ["articulated_body_motion"]
+  },
+  "scene": {
+    "environment_intent": "minimal open motion-matching stage",
+    "coordinate_system": "z_up",
+    "duration_s": 8.0,
+    "bounds_hint_m": [12.0, 8.0, 4.0]
+  },
+  "timebase": {
+    "physics_hz": 120,
+    "observation_fps": 24,
+    "deterministic_seed": 100010
+  },
+  "backend_constraints": {
+    "required_solver_capabilities": ["articulated_body", "trajectory"],
+    "allowed_solvers": ["ue"],
+    "render_backend": "ue",
+    "allow_multi_backend": false
+  },
+  "asset_policy": {
+    "allow_local": true,
+    "allow_external": false,
+    "allow_generation": true,
+    "allow_analytic_proxy": true,
+    "required_license_tier": "local_preview"
+  },
+  "objects": [
+    {
+      "id": "character",
+      "role": "articulated_body",
+      "geometry": {"shape_hint": "humanoid", "approx_size_m": [0.58, 0.36, 1.92]},
+      "physics": {"body_type": "kinematic", "collision_required": false},
+      "initial_state": {
+        "position_m": [-4.0, -1.0, 0.0],
+        "rotation_deg": [0.0, 0.0, 0.0],
+        "linear_velocity_m_s": [0.0, 0.0, 0.0]
+      },
+      "behavior": {},
+      "visual_representation": {"source": "solver_generated", "visible": true},
+      "solver": {
+        "type": "articulated_body",
+        "model": "harness_ue_gasp_character_v1",
+        "mode": "kinematic",
+        "support_object_id": "floor",
+        "movement_control": {
+          "type": "character_movement",
+          "max_speed_m_s": 4.0,
+          "max_acceleration_m_s2": 8.0,
+          "max_turn_rate_deg_s": 120.0,
+          "keyframes": [
+            {"time_s": 0.0, "target_velocity_m_s": [0.0, 0.0, 0.0], "facing_yaw_deg": 0.0, "crouched": false},
+            {"time_s": 1.0, "target_velocity_m_s": [0.0, 0.0, 0.0], "facing_yaw_deg": 0.0, "crouched": false},
+            {"time_s": 2.0, "target_velocity_m_s": [3.2, 0.0, 0.0], "facing_yaw_deg": 0.0, "crouched": false},
+            {"time_s": 3.0, "target_velocity_m_s": [0.0, 0.0, 0.0], "facing_yaw_deg": 0.0, "crouched": false},
+            {"time_s": 4.0, "target_velocity_m_s": [0.0, 0.0, 0.0], "facing_yaw_deg": 90.0, "crouched": false},
+            {"time_s": 4.5, "target_velocity_m_s": [0.0, 1.2, 0.0], "facing_yaw_deg": 90.0, "crouched": false},
+            {"time_s": 5.8, "target_velocity_m_s": [0.0, 0.0, 0.0], "facing_yaw_deg": 90.0, "crouched": false},
+            {"time_s": 6.2, "target_velocity_m_s": [0.0, 0.0, 0.0], "facing_yaw_deg": 90.0, "crouched": true},
+            {"time_s": 6.6, "target_velocity_m_s": [0.0, 0.6, 0.0], "facing_yaw_deg": 90.0, "crouched": true},
+            {"time_s": 7.5, "target_velocity_m_s": [0.0, 0.0, 0.0], "facing_yaw_deg": 90.0, "crouched": true},
+            {"time_s": 8.0, "target_velocity_m_s": [0.0, 0.0, 0.0], "facing_yaw_deg": 90.0, "crouched": false}
+          ],
+          "events": [{"time_s": 5.0, "type": "jump"}]
+        },
+        "attachments": []
+      }
+    },
+    {
+      "id": "floor",
+      "role": "support",
+      "geometry": {"shape_hint": "box", "approx_size_m": [12.0, 8.0, 0.1]},
+      "physics": {
+        "body_type": "static",
+        "mass_kg": 100.0,
+        "collision_required": true,
+        "collision_geometry": {"shape": "box", "size_m": [12.0, 8.0, 0.1], "local_center_offset_m": [0.0, 0.0, 0.0]}
+      },
+      "initial_state": {
+        "position_m": [0.0, 0.0, -0.05],
+        "rotation_deg": [0.0, 0.0, 0.0],
+        "linear_velocity_m_s": [0.0, 0.0, 0.0]
+      },
+      "behavior": {},
+      "visual_representation": {"source": "none", "visible": false}
+    }
+  ],
+  "relations": [{"type": "supported_by", "source": "character", "target": "floor"}],
+  "events": [],
+  "constraints": [],
+  "expected_behavior": {"natural_motion_matching": true, "combined_action_sequence": true},
+  "observation_requirements": {
+    "cameras": [
+      {"role": "tracking_subject", "target_objects": ["character"]}
+    ],
+    "modalities": ["rgb", "segmentation"],
+    "signals": ["trajectory", "articulated_pose"]
+  },
+  "verification_requirements": {
+    "assertions": [
+      {"id": "trajectory_integrity", "type": "trajectory_integrity", "objects": ["character"]},
+      {"id": "forward_motion", "type": "state_delta", "object_id": "character", "field": "position_m.x", "operator": ">=", "value": 1.0},
+      {"id": "turn_observed", "type": "state_delta", "object_id": "character", "field": "rotation_deg.y", "operator": ">=", "value": 60.0},
+      {"id": "jump_observed", "type": "state_value", "object_id": "character", "field": "position_m.z", "reduction": "max", "operator": ">=", "value": 1.1}
+    ],
+    "thresholds": {}
+  },
+  "variant": {"should_pass": true},
+  "provenance": {"purpose": "capability_first_isolated_smoke", "core100_cases": ["A001-A010"]},
+  "notes": "Uses only the generic movement_control contract; no animation clip IDs or case-specific runtime routing."
+}

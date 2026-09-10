@@ -33,8 +33,7 @@ class DeformableMeshCacheVerifierTests(unittest.TestCase):
                 "maximum_structural_edge_stretch_ratio": 1.01,
                 "penetration_tolerance_m": 0.002,
             },
-            sphere_center_m=[0.0, 0.0, 0.0],
-            sphere_radius_m=0.5,
+            colliders=[sphere_collider()],
             floor_z_m=0.0,
             collision_thickness_m=0.025,
         )
@@ -47,8 +46,7 @@ class DeformableMeshCacheVerifierTests(unittest.TestCase):
         report = verify_deformable_mesh_cache(
             arrays,
             expected={"penetration_tolerance_m": 0.002},
-            sphere_center_m=[0.0, 0.0, 0.0],
-            sphere_radius_m=0.5,
+            colliders=[sphere_collider()],
             floor_z_m=0.0,
             collision_thickness_m=0.025,
         )
@@ -60,8 +58,7 @@ class DeformableMeshCacheVerifierTests(unittest.TestCase):
         report = verify_deformable_mesh_cache(
             arrays,
             expected={},
-            sphere_center_m=[0.0, 0.0, 0.0],
-            sphere_radius_m=0.5,
+            colliders=[sphere_collider()],
             floor_z_m=0.0,
             collision_thickness_m=0.025,
         )
@@ -91,8 +88,7 @@ class DeformableMeshCacheVerifierTests(unittest.TestCase):
                 "minimum_mean_wind_axis_displacement_m": 0.2,
                 "minimum_final_vertical_span_m": 0.8,
             },
-            sphere_center_m=None,
-            sphere_radius_m=None,
+            colliders=[],
             floor_z_m=None,
             collision_thickness_m=0.0,
             pinned_indices=[0, 1],
@@ -201,6 +197,17 @@ def cache() -> dict[str, np.ndarray]:
         "faces": np.asarray([[0, 2, 3], [0, 3, 1]], dtype=np.int32),
         "structural_edges": np.asarray([[0, 1], [0, 2], [1, 3], [2, 3]], dtype=np.int32),
         "times_s": np.asarray([0.0, 1.0 / 24.0]),
+    }
+
+
+def sphere_collider() -> dict[str, object]:
+    return {
+        "id": "sphere",
+        "shape": "sphere",
+        "size_m": [1.0, 1.0, 1.0],
+        "initial_position_m": [0.0, 0.0, 0.0],
+        "world_from_local_columns": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        "kinematic_motion": None,
     }
 
 

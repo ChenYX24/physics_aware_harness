@@ -148,6 +148,7 @@ class RigidSPHSceneTests(unittest.TestCase):
         definition = next(row for row in compiled["measurements"] if row["id"] == "body_speed")
         measured = evaluate_measurements(
             [[0.0, 0.0, 0.0]],
+            [[0.0, 0.0, 0.0]],
             {"irregular_body": compiled["rigid_bodies"][1]},
             {
                 "irregular_body": {
@@ -160,6 +161,39 @@ class RigidSPHSceneTests(unittest.TestCase):
         )
         self.assertEqual(measured["body_speed"], 5.0)
 
+    def test_mean_tangential_speed_uses_declared_axis_and_center(self) -> None:
+        measured = evaluate_measurements(
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            [[0.0, 2.0, 0.0], [-4.0, 0.0, 0.0]],
+            {},
+            {},
+            [{"id": "circulation", "type": "mean_tangential_speed", "center_m": [0.0, 0.0, 0.0], "axis": [0.0, 0.0, 1.0]}],
+        )
+
+        self.assertEqual(measured["circulation"], 3.0)
+
+    def test_native_emitter_compiles_without_scenario_routing(self) -> None:
+        case = copy.deepcopy(load_case_spec(COFFEE_CASE).data)
+        fluid = next(item for item in case["objects"] if item.get("role") in {"fluid", "fluid_volume"})
+        fluid["solver"] = {
+            "material_model": "sph_liquid",
+            "emitter": {
+                "shape": "circle",
+                "position_m": [0.0, 0.0, 0.5],
+                "direction": [0.0, 0.0, -1.0],
+                "diameter_m": 0.03,
+                "speed_m_s": 0.8,
+                "start_time_s": 0.0,
+                "end_time_s": 1.0,
+                "max_particles": 4000,
+            },
+        }
+
+        compiled = compile_rigid_sph_scene(case)
+
+        self.assertEqual(compiled["fluid"]["source_type"], "emitter")
+        self.assertEqual(compiled["fluid"]["emitter"]["shape"], "circle")
+
     def test_different_scenarios_compile_to_one_execution_contract(self) -> None:
         transfer = compile_rigid_sph_scene(load_case_spec(TRANSFER_CASE).data)
         coffee = compile_rigid_sph_scene(load_case_spec(COFFEE_CASE).data)
@@ -170,6 +204,15 @@ class RigidSPHSceneTests(unittest.TestCase):
         self.assertEqual(len(coffee["rigid_bodies"]), 2)
         self.assertNotIn("solver_mode", transfer)
         self.assertNotIn("solver_mode", coffee)
+
+    def test_rigid_body_render_visibility_is_preserved_in_handoff(self) -> None:
+        case = copy.deepcopy(load_case_spec(COFFEE_CASE).data)
+        rigid_body = next(item for item in case["objects"] if item.get("role") == "rigid_body")
+        rigid_body["visual_representation"] = {"source": "asset", "visible": False}
+
+        compiled = compile_rigid_sph_scene(case)
+
+        self.assertFalse(compiled["rigid_bodies"][0]["visible"])
 
     def test_declared_settled_initialization_is_compiled(self) -> None:
         case = copy.deepcopy(load_case_spec(COFFEE_CASE).data)

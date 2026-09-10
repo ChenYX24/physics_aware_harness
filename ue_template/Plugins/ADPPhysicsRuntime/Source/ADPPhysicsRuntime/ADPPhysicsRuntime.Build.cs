@@ -11,6 +11,7 @@ public class ADPPhysicsRuntime : ModuleRules
 			"Core",
 			"CoreUObject",
 			"Engine",
+			"EnhancedInput",
 			"GeometryCollectionEngine",
 			"Json",
 			"JsonUtilities",

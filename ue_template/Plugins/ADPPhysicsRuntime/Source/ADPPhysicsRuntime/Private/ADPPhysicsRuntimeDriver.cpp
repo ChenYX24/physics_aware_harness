@@ -10,12 +10,54 @@
 #include "Misc/FileHelper.h"
 #include "PhysicsEngine/PhysicsConstraintActor.h"
 #include "PhysicsEngine/PhysicsConstraintComponent.h"
+#include "PhysicsEngine/PhysicsSettings.h"
+#include "PhysicsEngine/BodyInstance.h"
 #include "Physics/Experimental/PhysInterface_Chaos.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 
 namespace
 {
+constexpr int32 ConstraintVisualSegmentCount = 8;
+
+FTransform ConstraintFrameToWorld(const FTransform& LocalFrame, const UPrimitiveComponent* Body)
+{
+	if (Body == nullptr)
+	{
+		return LocalFrame;
+	}
+	const FTransform ComponentTransform = Body->GetComponentTransform();
+	const FTransform RigidBodyTransform(
+		ComponentTransform.GetRotation(),
+		ComponentTransform.GetTranslation(),
+		FVector::OneVector);
+	return LocalFrame * RigidBodyTransform;
+}
+
+float ConstraintImpulseSampleDurationSeconds(const UWorld* World)
+{
+	const UPhysicsSettings* Settings = GetDefault<UPhysicsSettings>();
+	if (Settings != nullptr && Settings->bSubstepping)
+	{
+		return FMath::Max(Settings->MaxSubstepDeltaTime, SMALL_NUMBER);
+	}
+	return FMath::Max(World != nullptr ? World->GetDeltaSeconds() : (1.0f / 60.0f), SMALL_NUMBER);
+}
+
+void ReadConstraintForceRate(
+	UPhysicsConstraintComponent* Component,
+	const UWorld* World,
+	FVector& OutLinearForceEngineUnits,
+	FVector& OutAngularTorqueEngineUnits)
+{
+	FVector LinearImpulseEngineUnits = FVector::ZeroVector;
+	FVector AngularImpulseEngineUnits = FVector::ZeroVector;
+	Component->GetConstraintForce(LinearImpulseEngineUnits, AngularImpulseEngineUnits);
+	const float SampleDurationSeconds = ConstraintImpulseSampleDurationSeconds(World);
+	OutLinearForceEngineUnits = LinearImpulseEngineUnits / SampleDurationSeconds;
+	OutAngularTorqueEngineUnits = AngularImpulseEngineUnits / SampleDurationSeconds;
+}
+
 TArray<TSharedPtr<FJsonValue>> VectorToJsonArray(const FVector& Vector)
 {
 	TArray<TSharedPtr<FJsonValue>> Values;
@@ -172,6 +214,9 @@ AADPPhysicsRuntimeDriver::AADPPhysicsRuntimeDriver()
 {
 	PrimaryActorTick.bCanEverTick = true;
 	PrimaryActorTick.bStartWithTickEnabled = true;
+	CompliantContactDelegate.BindUObject(this, &AADPPhysicsRuntimeDriver::ApplyCompliantContactSubstep);
+	UnilateralDistanceSpringDelegate.BindUObject(this, &AADPPhysicsRuntimeDriver::ApplyUnilateralDistanceSpringPhysicsStep);
+	UnilateralPathLengthSpringDelegate.BindUObject(this, &AADPPhysicsRuntimeDriver::ApplyUnilateralPathLengthSpringPhysicsStep);
 }
 
 void AADPPhysicsRuntimeDriver::Tick(float DeltaSeconds)
@@ -182,6 +227,12 @@ void AADPPhysicsRuntimeDriver::Tick(float DeltaSeconds)
 	{
 		return;
 	}
+	ApplyContinuousForces(ElapsedSeconds);
+	ApplyRadialForces(ElapsedSeconds);
+	ApplyAerodynamicWinds(ElapsedSeconds);
+	QueueCompliantContactForces();
+	QueueUnilateralDistanceSpringForces();
+	QueueUnilateralPathLengthSpringForces();
 	UpdateConstraintVisuals();
 
 	ElapsedSeconds += DeltaSeconds;
@@ -209,6 +260,16 @@ void AADPPhysicsRuntimeDriver::ResetDriver()
 			Entry.Value->DestroyComponent();
 		}
 	}
+	for (const TPair<FName, TArray<TObjectPtr<USplineMeshComponent>>>& Entry : ConstraintVisualExtraSegments)
+	{
+		for (USplineMeshComponent* Segment : Entry.Value)
+		{
+			if (Segment != nullptr)
+			{
+				Segment->DestroyComponent();
+			}
+		}
+	}
 	for (const TPair<FName, TObjectPtr<UPrimitiveComponent>>& Entry : ConstraintVisualSources)
 	{
 		if (Entry.Value != nullptr)
@@ -217,8 +278,13 @@ void AADPPhysicsRuntimeDriver::ResetDriver()
 		}
 	}
 	ConstraintVisuals.Reset();
+	ConstraintVisualExtraSegments.Reset();
 	ConstraintVisualSources.Reset();
 	ConstraintVisualSourceVisibility.Reset();
+	ConstraintVisualBodyAs.Reset();
+	ConstraintVisualBodyBs.Reset();
+	ConstraintVisualLocalFramesA.Reset();
+	ConstraintVisualLocalFramesB.Reset();
 	for (const TPair<FName, TObjectPtr<APhysicsConstraintActor>>& Entry : ConstraintActors)
 	{
 		if (Entry.Value != nullptr)
@@ -227,7 +293,19 @@ void AADPPhysicsRuntimeDriver::ResetDriver()
 		}
 	}
 	ConstraintActors.Reset();
+	BreakableConstraintIds.Reset();
+	ManagedLinearBreakThresholdsNewton.Reset();
+	ManagedAngularBreakThresholdsNewtonMeter.Reset();
+	ManagedBrokenConstraintIds.Reset();
+	ManagedBreakLinearForceEngineUnits.Reset();
+	ManagedBreakAngularTorqueEngineUnits.Reset();
 	BodyConfigs.Reset();
+	ContinuousForces.Reset();
+	RadialForces.Reset();
+	AerodynamicWinds.Reset();
+	CompliantContacts.Reset();
+	UnilateralDistanceSprings.Reset();
+	UnilateralPathLengthSprings.Reset();
 	CapturedFrames.Reset();
 	PendingNativeContacts.Reset();
 	OutputPath.Reset();
@@ -353,6 +431,163 @@ void AADPPhysicsRuntimeDriver::RegisterStaticBodyWithCollider(FName BodyId, AAct
 	}
 }
 
+bool AADPPhysicsRuntimeDriver::RegisterContinuousForce(
+	FName ForceId,
+	FName BodyId,
+	FVector ForceNewton,
+	float StartTimeSeconds,
+	float EndTimeSeconds)
+{
+	if (ForceId.IsNone() || BodyId.IsNone() || ForceNewton.ContainsNaN() || ForceNewton.IsNearlyZero()
+		|| !FMath::IsFinite(StartTimeSeconds) || !FMath::IsFinite(EndTimeSeconds)
+		|| StartTimeSeconds < 0.0f || EndTimeSeconds <= StartTimeSeconds)
+	{
+		return false;
+	}
+	FADPDrivenBodyConfig* Body = BodyConfigs.FindByPredicate(
+		[BodyId](const FADPDrivenBodyConfig& Config) { return Config.BodyId == BodyId && Config.bDynamic; });
+	if (Body == nullptr || Body->PrimitiveComponent == nullptr
+		|| ContinuousForces.ContainsByPredicate(
+			[ForceId](const FADPContinuousForceConfig& Config) { return Config.ForceId == ForceId; }))
+	{
+		return false;
+	}
+	FADPContinuousForceConfig Config;
+	Config.ForceId = ForceId;
+	Config.BodyId = BodyId;
+	Config.ForceNewton = ForceNewton;
+	Config.StartTimeSeconds = StartTimeSeconds;
+	Config.EndTimeSeconds = EndTimeSeconds;
+	ContinuousForces.Add(Config);
+	Body->bPersistentForceDriven = true;
+	return true;
+}
+
+bool AADPPhysicsRuntimeDriver::RegisterRadialForce(
+	FName ForceId,
+	FName SourceBodyId,
+	FName TargetBodyId,
+	float StrengthNewtonMeterSquared,
+	float SofteningDistanceMeters,
+	float MaxDistanceMeters,
+	float StartTimeSeconds,
+	float EndTimeSeconds)
+{
+	if (ForceId.IsNone() || SourceBodyId.IsNone() || TargetBodyId.IsNone() || SourceBodyId == TargetBodyId
+		|| !FMath::IsFinite(StrengthNewtonMeterSquared) || FMath::IsNearlyZero(StrengthNewtonMeterSquared)
+		|| !FMath::IsFinite(SofteningDistanceMeters) || SofteningDistanceMeters <= 0.0f
+		|| !FMath::IsFinite(MaxDistanceMeters) || MaxDistanceMeters <= SofteningDistanceMeters
+		|| !FMath::IsFinite(StartTimeSeconds) || !FMath::IsFinite(EndTimeSeconds)
+		|| StartTimeSeconds < 0.0f || EndTimeSeconds <= StartTimeSeconds)
+	{
+		return false;
+	}
+	const FADPDrivenBodyConfig* Source = BodyConfigs.FindByPredicate(
+		[SourceBodyId](const FADPDrivenBodyConfig& Config) { return Config.BodyId == SourceBodyId; });
+	FADPDrivenBodyConfig* Target = BodyConfigs.FindByPredicate(
+		[TargetBodyId](const FADPDrivenBodyConfig& Config) { return Config.BodyId == TargetBodyId && Config.bDynamic; });
+	if (Source == nullptr || Source->PrimitiveComponent == nullptr || Target == nullptr || Target->PrimitiveComponent == nullptr
+		|| RadialForces.ContainsByPredicate(
+			[ForceId](const FADPRadialForceConfig& Config) { return Config.ForceId == ForceId; }))
+	{
+		return false;
+	}
+	FADPRadialForceConfig Config;
+	Config.ForceId = ForceId;
+	Config.SourceBodyId = SourceBodyId;
+	Config.TargetBodyId = TargetBodyId;
+	Config.StrengthNewtonMeterSquared = StrengthNewtonMeterSquared;
+	Config.SofteningDistanceMeters = SofteningDistanceMeters;
+	Config.MaxDistanceMeters = MaxDistanceMeters;
+	Config.StartTimeSeconds = StartTimeSeconds;
+	Config.EndTimeSeconds = EndTimeSeconds;
+	RadialForces.Add(Config);
+	Target->bPersistentForceDriven = true;
+	return true;
+}
+
+bool AADPPhysicsRuntimeDriver::RegisterAerodynamicWind(
+	FName FieldId,
+	FName BodyId,
+	FVector VelocityMetersPerSecond,
+	float AirDensityKgPerCubicMeter,
+	float DragCoefficient,
+	float GustAmplitude,
+	float GustFrequencyHz)
+{
+	if (FieldId.IsNone() || BodyId.IsNone() || VelocityMetersPerSecond.ContainsNaN() || VelocityMetersPerSecond.IsNearlyZero()
+		|| !FMath::IsFinite(AirDensityKgPerCubicMeter) || AirDensityKgPerCubicMeter <= 0.0f
+		|| !FMath::IsFinite(DragCoefficient) || DragCoefficient <= 0.0f
+		|| !FMath::IsFinite(GustAmplitude) || GustAmplitude < 0.0f || GustAmplitude > 1.0f
+		|| !FMath::IsFinite(GustFrequencyHz) || GustFrequencyHz < 0.0f)
+	{
+		return false;
+	}
+	FADPDrivenBodyConfig* Body = BodyConfigs.FindByPredicate(
+		[BodyId](const FADPDrivenBodyConfig& Config) { return Config.BodyId == BodyId && Config.bDynamic; });
+	if (Body == nullptr || Body->PrimitiveComponent == nullptr
+		|| AerodynamicWinds.ContainsByPredicate(
+			[FieldId, BodyId](const FADPAerodynamicWindConfig& Config)
+			{
+				return Config.FieldId == FieldId && Config.BodyId == BodyId;
+			}))
+	{
+		return false;
+	}
+	FADPAerodynamicWindConfig Config;
+	Config.FieldId = FieldId;
+	Config.BodyId = BodyId;
+	Config.VelocityMetersPerSecond = VelocityMetersPerSecond;
+	Config.AirDensityKgPerCubicMeter = AirDensityKgPerCubicMeter;
+	Config.DragCoefficient = DragCoefficient;
+	Config.GustAmplitude = GustAmplitude;
+	Config.GustFrequencyHz = GustFrequencyHz;
+	AerodynamicWinds.Add(Config);
+	Body->bPersistentForceDriven = true;
+	return true;
+}
+
+bool AADPPhysicsRuntimeDriver::RegisterCompliantContact(
+	FName ContactId,
+	FName BodyAId,
+	FName BodyBId,
+	float ActivationDistanceMeters,
+	float StiffnessNPerM,
+	float DampingNsPerM)
+{
+	if (ContactId.IsNone() || BodyAId.IsNone() || BodyBId.IsNone() || BodyAId == BodyBId
+		|| !FMath::IsFinite(ActivationDistanceMeters) || ActivationDistanceMeters <= 0.0f
+		|| !FMath::IsFinite(StiffnessNPerM) || StiffnessNPerM <= 0.0f
+		|| !FMath::IsFinite(DampingNsPerM) || DampingNsPerM < 0.0f
+		|| CompliantContacts.ContainsByPredicate(
+			[ContactId](const FADPCompliantContactConfig& Config) { return Config.ContactId == ContactId; }))
+	{
+		return false;
+	}
+	const FADPDrivenBodyConfig* BodyA = BodyConfigs.FindByPredicate(
+		[BodyAId](const FADPDrivenBodyConfig& Config) { return Config.BodyId == BodyAId; });
+	const FADPDrivenBodyConfig* BodyB = BodyConfigs.FindByPredicate(
+		[BodyBId](const FADPDrivenBodyConfig& Config) { return Config.BodyId == BodyBId; });
+	if (BodyA == nullptr || BodyB == nullptr || BodyA->PrimitiveComponent == nullptr || BodyB->PrimitiveComponent == nullptr
+		|| !BodyA->ColliderKind.ToString().Equals(TEXT("sphere"), ESearchCase::IgnoreCase)
+		|| !BodyB->ColliderKind.ToString().Equals(TEXT("sphere"), ESearchCase::IgnoreCase)
+		|| (!BodyA->bDynamic && !BodyB->bDynamic))
+	{
+		return false;
+	}
+	FADPCompliantContactConfig Config;
+	Config.ContactId = ContactId;
+	Config.BodyAId = BodyAId;
+	Config.BodyBId = BodyBId;
+	Config.BodyAComponent = BodyA->PrimitiveComponent;
+	Config.BodyBComponent = BodyB->PrimitiveComponent;
+	Config.ActivationDistanceCm = ActivationDistanceMeters * 100.0f;
+	Config.StiffnessNPerM = StiffnessNPerM;
+	Config.DampingNsPerM = DampingNsPerM;
+	CompliantContacts.Add(Config);
+	return true;
+}
+
 void AADPPhysicsRuntimeDriver::StartCapture(float InSampleIntervalSeconds, int32 InMaxFrames, const FString& InOutputPath)
 {
 	if (PrepareCapture(InSampleIntervalSeconds, InMaxFrames, InOutputPath))
@@ -395,6 +630,15 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 	FName LinearYMotion,
 	FName LinearZMotion,
 	float LinearLimitCm,
+	bool bUnilateralDistanceSpring,
+	float DistanceSpringRestLengthCm,
+	float DistanceSpringStiffnessNPerM,
+	float DistanceSpringDampingNsPerM,
+	bool bUnilateralPathLengthSpring,
+	FVector PathSpringFixedWaypointCm,
+	float PathSpringRestLengthCm,
+	float PathSpringStiffnessNPerM,
+	float PathSpringDampingNsPerM,
 	FName AngularXMotion,
 	FName AngularYMotion,
 	FName AngularZMotion,
@@ -448,7 +692,17 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 		|| !ParseAngularMotion(AngularXMotion, AngularX)
 		|| !ParseAngularMotion(AngularYMotion, AngularY)
 		|| !ParseAngularMotion(AngularZMotion, AngularZ)
-		|| !ParseAngularDriveMode(AngularDriveMode, bAngularDriveConfigured, ParsedAngularDriveMode))
+		|| !ParseAngularDriveMode(AngularDriveMode, bAngularDriveConfigured, ParsedAngularDriveMode)
+		|| (bUnilateralDistanceSpring && (
+			!FMath::IsFinite(DistanceSpringRestLengthCm) || DistanceSpringRestLengthCm <= 0.0f
+			|| !FMath::IsFinite(DistanceSpringStiffnessNPerM) || DistanceSpringStiffnessNPerM <= 0.0f
+			|| !FMath::IsFinite(DistanceSpringDampingNsPerM) || DistanceSpringDampingNsPerM < 0.0f))
+		|| (bUnilateralPathLengthSpring && (
+			bBodyAWorld || bBodyBWorld || bUnilateralDistanceSpring
+			|| PathSpringFixedWaypointCm.ContainsNaN()
+			|| !FMath::IsFinite(PathSpringRestLengthCm) || PathSpringRestLengthCm <= 0.0f
+			|| !FMath::IsFinite(PathSpringStiffnessNPerM) || PathSpringStiffnessNPerM <= 0.0f
+			|| !FMath::IsFinite(PathSpringDampingNsPerM) || PathSpringDampingNsPerM < 0.0f)))
 	{
 		return nullptr;
 	}
@@ -515,8 +769,10 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 		MutableInstance.SetAngularDriveParams(AngularStiffness, AngularDamping, AngularTorqueLimit);
 		MutableInstance.SetAngularDriveAccelerationMode(bAngularAccelerationMode);
 	}
-	MutableInstance.SetLinearBreakable(LinearBreakThreshold >= 0.0f, FMath::Max(0.0f, LinearBreakThreshold));
-	MutableInstance.SetAngularBreakable(AngularBreakThreshold >= 0.0f, FMath::Max(0.0f, AngularBreakThreshold));
+	// The CaseSpec thresholds are SI force/torque values. Keep Chaos's
+	// solver-level break settings disabled and enforce that contract below.
+	MutableInstance.SetLinearBreakable(false, 0.0f);
+	MutableInstance.SetAngularBreakable(false, 0.0f);
 	Component->SetDisableCollision(!bCollisionEnabled);
 
 	UPrimitiveComponent* ActualBodyA = nullptr;
@@ -591,11 +847,7 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 				&& bActualVelocitySwing == (AngularVelocityDriveEnabled.Y > 0.5f);
 		}
 	}
-	const bool bBreakThresholdsVerified =
-		Instance.IsLinearBreakable() == (LinearBreakThreshold >= 0.0f)
-		&& Instance.IsAngularBreakable() == (AngularBreakThreshold >= 0.0f)
-		&& (!Instance.IsLinearBreakable() || FMath::IsNearlyEqual(Instance.GetLinearBreakThreshold(), LinearBreakThreshold, 0.001f))
-		&& (!Instance.IsAngularBreakable() || FMath::IsNearlyEqual(Instance.GetAngularBreakThreshold(), AngularBreakThreshold, 0.001f));
+	const bool bBreakThresholdsVerified = !Instance.IsLinearBreakable() && !Instance.IsAngularBreakable();
 	bool bSolverFramesVerified = false;
 	if (bInstanceVerified)
 	{
@@ -619,11 +871,60 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 		return nullptr;
 	}
 	ConstraintActors.Add(ConstraintId, ConstraintActor);
+	if (LinearBreakThreshold >= 0.0f || AngularBreakThreshold >= 0.0f)
+	{
+		BreakableConstraintIds.Add(ConstraintId);
+		if (LinearBreakThreshold >= 0.0f)
+		{
+			ManagedLinearBreakThresholdsNewton.Add(ConstraintId, LinearBreakThreshold);
+		}
+		if (AngularBreakThreshold >= 0.0f)
+		{
+			ManagedAngularBreakThresholdsNewtonMeter.Add(ConstraintId, AngularBreakThreshold);
+		}
+	}
 	if (!AxialVisualObjectId.IsNone() && !ConfigureAxialVisual(ConstraintId, AxialVisualObjectId, AxialVisualForwardAxis))
 	{
 		ConstraintActors.Remove(ConstraintId);
 		ConstraintActor->Destroy();
 		return nullptr;
+	}
+	if (bUnilateralDistanceSpring)
+	{
+		FADPUnilateralDistanceSpringConfig Spring;
+		Spring.ConstraintId = ConstraintId;
+		Spring.BodyAId = BodyAId;
+		Spring.BodyBId = BodyBId;
+		Spring.BodyAComponent = BodyA;
+		Spring.BodyBComponent = BodyB;
+		Spring.bBodyAWorld = bBodyAWorld;
+		Spring.bBodyBWorld = bBodyBWorld;
+		Spring.FrameAPositionCm = FrameAPositionCm;
+		Spring.FrameBPositionCm = FrameBPositionCm;
+		Spring.RestLengthCm = DistanceSpringRestLengthCm;
+		Spring.StiffnessNPerM = DistanceSpringStiffnessNPerM;
+		Spring.DampingNsPerM = DistanceSpringDampingNsPerM;
+		Spring.EvaluationCount = MakeShared<FThreadSafeCounter, ESPMode::ThreadSafe>();
+		Spring.ActiveEvaluationCount = MakeShared<FThreadSafeCounter, ESPMode::ThreadSafe>();
+		UnilateralDistanceSprings.Add(MoveTemp(Spring));
+	}
+	if (bUnilateralPathLengthSpring)
+	{
+		FADPUnilateralPathLengthSpringConfig Spring;
+		Spring.ConstraintId = ConstraintId;
+		Spring.BodyAId = BodyAId;
+		Spring.BodyBId = BodyBId;
+		Spring.BodyAComponent = BodyA;
+		Spring.BodyBComponent = BodyB;
+		Spring.FrameAPositionCm = FrameAPositionCm;
+		Spring.FrameBPositionCm = FrameBPositionCm;
+		Spring.FixedWaypointCm = PathSpringFixedWaypointCm;
+		Spring.RestLengthCm = PathSpringRestLengthCm;
+		Spring.StiffnessNPerM = PathSpringStiffnessNPerM;
+		Spring.DampingNsPerM = PathSpringDampingNsPerM;
+		Spring.EvaluationCount = MakeShared<FThreadSafeCounter, ESPMode::ThreadSafe>();
+		Spring.ActiveEvaluationCount = MakeShared<FThreadSafeCounter, ESPMode::ThreadSafe>();
+		UnilateralPathLengthSprings.Add(MoveTemp(Spring));
 	}
 	UpdateConstraintVisuals();
 	return ConstraintActor;
@@ -632,6 +933,11 @@ APhysicsConstraintActor* AADPPhysicsRuntimeDriver::BindConstraint(
 USplineMeshComponent* AADPPhysicsRuntimeDriver::GetConstraintVisualComponent(FName ConstraintId) const
 {
 	return ConstraintVisuals.FindRef(ConstraintId);
+}
+
+void AADPPhysicsRuntimeDriver::RefreshConstraintVisuals()
+{
+	UpdateConstraintVisuals();
 }
 
 bool AADPPhysicsRuntimeDriver::ConfigureAxialVisual(FName ConstraintId, FName ObjectId, FName ForwardAxis)
@@ -650,43 +956,75 @@ bool AADPPhysicsRuntimeDriver::ConfigureAxialVisual(FName ConstraintId, FName Ob
 	FName BoneB;
 	ConstraintComponent->GetConstrainedComponents(BodyA, BoneA, BodyB, BoneB);
 	FConstraintInstance& Instance = ConstraintComponent->ConstraintInstance;
-	const FTransform FrameA = BodyA != nullptr
-		? Instance.GetRefFrame(EConstraintFrame::Frame1) * BodyA->GetComponentTransform()
-		: Instance.GetRefFrame(EConstraintFrame::Frame1);
-	const FTransform FrameB = BodyB != nullptr
-		? Instance.GetRefFrame(EConstraintFrame::Frame2) * BodyB->GetComponentTransform()
-		: Instance.GetRefFrame(EConstraintFrame::Frame2);
-	if (FrameA.GetLocation().Equals(FrameB.GetLocation(), KINDA_SMALL_NUMBER))
+	const FTransform LocalFrameA = Instance.GetRefFrame(EConstraintFrame::Frame1);
+	const FTransform LocalFrameB = Instance.GetRefFrame(EConstraintFrame::Frame2);
+	const FTransform WorldFrameA = ConstraintFrameToWorld(LocalFrameA, BodyA);
+	const FTransform WorldFrameB = ConstraintFrameToWorld(LocalFrameB, BodyB);
+	if (WorldFrameA.GetLocation().Equals(WorldFrameB.GetLocation(), KINDA_SMALL_NUMBER))
 	{
 		return false;
 	}
 
-	USplineMeshComponent* Visual = NewObject<USplineMeshComponent>(this);
+	auto CreateSegment = [&]() -> USplineMeshComponent*
+	{
+		USplineMeshComponent* Segment = NewObject<USplineMeshComponent>(this);
+		if (Segment == nullptr)
+		{
+			return nullptr;
+		}
+		AddInstanceComponent(Segment);
+		Segment->SetMobility(EComponentMobility::Movable);
+		Segment->SetStaticMesh(Source->GetStaticMesh());
+		Segment->SetForwardAxis(ParsedAxis, false);
+		Segment->SetSplineUpDir(ParsedAxis == ESplineMeshAxis::Z ? FVector::YAxisVector : FVector::ZAxisVector, false);
+		Segment->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		Segment->SetVisibility(true, true);
+		Segment->SetHiddenInGame(false, true);
+		for (int32 MaterialIndex = 0; MaterialIndex < Source->GetNumMaterials(); ++MaterialIndex)
+		{
+			Segment->SetMaterial(MaterialIndex, Source->GetMaterial(MaterialIndex));
+		}
+		Segment->RegisterComponentWithWorld(GetWorld());
+		Segment->SetWorldTransform(FTransform(
+			FQuat::Identity,
+			FVector::ZeroVector,
+			Source->GetComponentScale()));
+		if (Segment->GetStaticMesh() != Source->GetStaticMesh() || Segment->GetForwardAxis() != ParsedAxis)
+		{
+			Segment->DestroyComponent();
+			return nullptr;
+		}
+		return Segment;
+	};
+
+	USplineMeshComponent* Visual = CreateSegment();
 	if (Visual == nullptr)
 	{
 		return false;
 	}
-	AddInstanceComponent(Visual);
-	Visual->SetMobility(EComponentMobility::Movable);
-	Visual->SetStaticMesh(Source->GetStaticMesh());
-	Visual->SetForwardAxis(ParsedAxis, false);
-	Visual->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	Visual->SetVisibility(true, true);
-	Visual->SetHiddenInGame(false, true);
-	for (int32 MaterialIndex = 0; MaterialIndex < Source->GetNumMaterials(); ++MaterialIndex)
+	TArray<TObjectPtr<USplineMeshComponent>> ExtraSegments;
+	for (int32 SegmentIndex = 1; SegmentIndex < ConstraintVisualSegmentCount; ++SegmentIndex)
 	{
-		Visual->SetMaterial(MaterialIndex, Source->GetMaterial(MaterialIndex));
-	}
-	Visual->RegisterComponentWithWorld(GetWorld());
-	Visual->SetWorldTransform(Source->GetComponentTransform());
-	if (Visual->GetStaticMesh() != Source->GetStaticMesh() || Visual->GetForwardAxis() != ParsedAxis)
-	{
-		Visual->DestroyComponent();
-		return false;
+		USplineMeshComponent* Segment = CreateSegment();
+		if (Segment == nullptr)
+		{
+			Visual->DestroyComponent();
+			for (USplineMeshComponent* Existing : ExtraSegments)
+			{
+				Existing->DestroyComponent();
+			}
+			return false;
+		}
+		ExtraSegments.Add(Segment);
 	}
 	ConstraintVisualSourceVisibility.Add(ConstraintId, Source->IsVisible());
 	ConstraintVisualSources.Add(ConstraintId, Source);
 	ConstraintVisuals.Add(ConstraintId, Visual);
+	ConstraintVisualExtraSegments.Add(ConstraintId, MoveTemp(ExtraSegments));
+	ConstraintVisualBodyAs.Add(ConstraintId, BodyA);
+	ConstraintVisualBodyBs.Add(ConstraintId, BodyB);
+	ConstraintVisualLocalFramesA.Add(ConstraintId, LocalFrameA);
+	ConstraintVisualLocalFramesB.Add(ConstraintId, LocalFrameB);
 	Source->SetVisibility(false, true);
 	return true;
 }
@@ -696,32 +1034,114 @@ void AADPPhysicsRuntimeDriver::UpdateConstraintVisuals()
 	for (const TPair<FName, TObjectPtr<USplineMeshComponent>>& Entry : ConstraintVisuals)
 	{
 		USplineMeshComponent* Visual = Entry.Value.Get();
-		APhysicsConstraintActor* ConstraintActor = ConstraintActors.FindRef(Entry.Key);
-		UPhysicsConstraintComponent* Component = ConstraintActor != nullptr ? ConstraintActor->GetConstraintComp() : nullptr;
-		if (Visual == nullptr || Component == nullptr)
+		if (Visual == nullptr
+			|| !ConstraintVisualLocalFramesA.Contains(Entry.Key)
+			|| !ConstraintVisualLocalFramesB.Contains(Entry.Key))
 		{
 			continue;
 		}
-		FConstraintInstance& Instance = Component->ConstraintInstance;
-		UPrimitiveComponent* BodyA = nullptr;
-		UPrimitiveComponent* BodyB = nullptr;
-		FName BoneA;
-		FName BoneB;
-		Component->GetConstrainedComponents(BodyA, BoneA, BodyB, BoneB);
-		const FTransform LocalFrameA = Instance.GetRefFrame(EConstraintFrame::Frame1);
-		const FTransform LocalFrameB = Instance.GetRefFrame(EConstraintFrame::Frame2);
-		const FTransform WorldFrameA = BodyA != nullptr ? LocalFrameA * BodyA->GetComponentTransform() : LocalFrameA;
-		const FTransform WorldFrameB = BodyB != nullptr ? LocalFrameB * BodyB->GetComponentTransform() : LocalFrameB;
+		UPrimitiveComponent* BodyA = ConstraintVisualBodyAs.FindRef(Entry.Key);
+		UPrimitiveComponent* BodyB = ConstraintVisualBodyBs.FindRef(Entry.Key);
+		const FTransform& LocalFrameA = ConstraintVisualLocalFramesA.FindChecked(Entry.Key);
+		const FTransform& LocalFrameB = ConstraintVisualLocalFramesB.FindChecked(Entry.Key);
+		const FTransform WorldFrameA = ConstraintFrameToWorld(LocalFrameA, BodyA);
+		const FTransform WorldFrameB = ConstraintFrameToWorld(LocalFrameB, BodyB);
 		const FTransform VisualTransform = Visual->GetComponentTransform();
 		const FVector StartWorld = WorldFrameA.GetLocation();
 		const FVector EndWorld = WorldFrameB.GetLocation();
 		const FVector TangentWorld = EndWorld - StartWorld;
 		if (!TangentWorld.IsNearlyZero())
 		{
-			const FVector StartLocal = VisualTransform.InverseTransformPosition(StartWorld);
-			const FVector EndLocal = VisualTransform.InverseTransformPosition(EndWorld);
-			const FVector TangentLocal = VisualTransform.InverseTransformVector(TangentWorld);
-			Visual->SetStartAndEnd(StartLocal, TangentLocal, EndLocal, TangentLocal, true);
+			FVector ControlWorld = 0.5f * (StartWorld + EndWorld);
+			const FADPUnilateralDistanceSpringConfig* DistanceSpring = UnilateralDistanceSprings.FindByPredicate(
+				[&Entry](const FADPUnilateralDistanceSpringConfig& Candidate)
+				{
+					return Candidate.ConstraintId == Entry.Key;
+				});
+			const float DistanceCm = TangentWorld.Size();
+			if (DistanceSpring != nullptr && DistanceSpring->RestLengthCm > DistanceCm)
+			{
+				const FVector ChordDirection = TangentWorld / DistanceCm;
+				FVector SagDirection = FVector::DownVector - FVector::DotProduct(FVector::DownVector, ChordDirection) * ChordDirection;
+				if (!SagDirection.Normalize())
+				{
+					const FVector FramePrimary = WorldFrameA.GetUnitAxis(EAxis::X);
+					SagDirection = FramePrimary - FVector::DotProduct(FramePrimary, ChordDirection) * ChordDirection;
+					SagDirection.Normalize();
+				}
+				const float SagDepthCm = 0.5f * FMath::Sqrt(FMath::Max(
+					0.0f,
+					FMath::Square(DistanceSpring->RestLengthCm) - FMath::Square(DistanceCm)));
+				ControlWorld += 2.0f * SagDepthCm * SagDirection;
+			}
+
+			TArray<USplineMeshComponent*> Segments;
+			Segments.Add(Visual);
+			for (USplineMeshComponent* Segment : ConstraintVisualExtraSegments.FindRef(Entry.Key))
+			{
+				Segments.Add(Segment);
+			}
+			auto CurvePoint = [&](float T)
+			{
+				const float OneMinusT = 1.0f - T;
+				return OneMinusT * OneMinusT * StartWorld + 2.0f * OneMinusT * T * ControlWorld + T * T * EndWorld;
+			};
+			for (int32 SegmentIndex = 0; SegmentIndex < Segments.Num(); ++SegmentIndex)
+			{
+				USplineMeshComponent* Segment = Segments[SegmentIndex];
+				if (Segment == nullptr)
+				{
+					continue;
+				}
+				for (int32 MaterialIndex = 0; MaterialIndex < Visual->GetNumMaterials(); ++MaterialIndex)
+				{
+					Segment->SetMaterial(MaterialIndex, Visual->GetMaterial(MaterialIndex));
+				}
+				const float StartT = static_cast<float>(SegmentIndex) / static_cast<float>(Segments.Num());
+				const float EndT = static_cast<float>(SegmentIndex + 1) / static_cast<float>(Segments.Num());
+				const FVector SegmentStartWorld = CurvePoint(StartT);
+				const FVector SegmentEndWorld = CurvePoint(EndT);
+				const FTransform SegmentTransform = Segment->GetComponentTransform();
+				const FVector SegmentStartLocal = SegmentTransform.InverseTransformPosition(SegmentStartWorld);
+				const FVector SegmentEndLocal = SegmentTransform.InverseTransformPosition(SegmentEndWorld);
+				const FVector SegmentTangentLocal = SegmentTransform.InverseTransformVector(SegmentEndWorld - SegmentStartWorld);
+				Segment->SetStartAndEnd(SegmentStartLocal, SegmentTangentLocal, SegmentEndLocal, SegmentTangentLocal, true);
+			}
+		}
+	}
+}
+
+void AADPPhysicsRuntimeDriver::EvaluateManagedConstraintBreaks()
+{
+	for (const FName ConstraintId : BreakableConstraintIds)
+	{
+		if (ManagedBrokenConstraintIds.Contains(ConstraintId))
+		{
+			continue;
+		}
+		APhysicsConstraintActor* ConstraintActor = ConstraintActors.FindRef(ConstraintId);
+		UPhysicsConstraintComponent* Component = ConstraintActor != nullptr
+			? ConstraintActor->GetConstraintComp()
+			: nullptr;
+		if (Component == nullptr)
+		{
+			continue;
+		}
+
+		FVector LinearForceEngineUnits = FVector::ZeroVector;
+		FVector AngularTorqueEngineUnits = FVector::ZeroVector;
+		ReadConstraintForceRate(Component, GetWorld(), LinearForceEngineUnits, AngularTorqueEngineUnits);
+		const float LinearForceNewton = LinearForceEngineUnits.Size() / 100.0f;
+		const float AngularTorqueNewtonMeter = AngularTorqueEngineUnits.Size() / 10000.0f;
+		const float* LinearThreshold = ManagedLinearBreakThresholdsNewton.Find(ConstraintId);
+		const float* AngularThreshold = ManagedAngularBreakThresholdsNewtonMeter.Find(ConstraintId);
+		if ((LinearThreshold != nullptr && LinearForceNewton >= *LinearThreshold)
+			|| (AngularThreshold != nullptr && AngularTorqueNewtonMeter >= *AngularThreshold))
+		{
+			ManagedBreakLinearForceEngineUnits.Add(ConstraintId, LinearForceEngineUnits);
+			ManagedBreakAngularTorqueEngineUnits.Add(ConstraintId, AngularTorqueEngineUnits);
+			ManagedBrokenConstraintIds.Add(ConstraintId);
+			Component->BreakConstraint();
 		}
 	}
 }
@@ -758,9 +1178,16 @@ void AADPPhysicsRuntimeDriver::AdvanceCapture(float DeltaSeconds, bool bTickWorl
 		UWorld* World = GetWorld();
 		if (World != nullptr && !bTickingWorldFromDriver)
 		{
+			ApplyContinuousForces(ElapsedSeconds);
+			ApplyRadialForces(ElapsedSeconds);
+			ApplyAerodynamicWinds(ElapsedSeconds);
+			QueueCompliantContactForces();
+			QueueUnilateralDistanceSpringForces();
+			QueueUnilateralPathLengthSpringForces();
 			bTickingWorldFromDriver = true;
 			World->Tick(ELevelTick::LEVELTICK_All, ClampedDeltaSeconds);
 			bTickingWorldFromDriver = false;
+			EvaluateManagedConstraintBreaks();
 		}
 	}
 
@@ -844,7 +1271,29 @@ void AADPPhysicsRuntimeDriver::PrepareBody(const FADPDrivenBodyConfig& Config)
 
 	Primitive->SetLinearDamping(Config.LinearDamping);
 	Primitive->SetAngularDamping(Config.AngularDamping);
+	if (Config.bPersistentForceDriven)
+	{
+		if (FBodyInstance* BodyInstance = Primitive->GetBodyInstance())
+		{
+			BodyInstance->SleepFamily = ESleepFamily::Custom;
+			BodyInstance->CustomSleepThresholdMultiplier = 0.0f;
+			BodyInstance->StabilizationThresholdMultiplier = 0.0f;
+		}
+	}
 	Primitive->SetSimulatePhysics(Config.bDynamic && Config.bSimulatePhysics);
+	if (Config.bPersistentForceDriven && Config.bDynamic && Config.bSimulatePhysics)
+	{
+		if (FBodyInstance* BodyInstance = Primitive->GetBodyInstance())
+		{
+			const FPhysicsActorHandle ActorHandle = BodyInstance->GetPhysicsActor();
+			FPhysicsCommand::ExecuteWrite(
+				ActorHandle,
+				[](const FPhysicsActorHandle& Actor)
+				{
+					FPhysicsInterface::SetSleepThresholdMultiplier_AssumesLocked(Actor, 0.0f);
+				});
+		}
+	}
 }
 
 void AADPPhysicsRuntimeDriver::ActivateBody(const FADPDrivenBodyConfig& Config)
@@ -864,6 +1313,336 @@ void AADPPhysicsRuntimeDriver::ActivateBody(const FADPDrivenBodyConfig& Config)
 			Primitive->AddImpulse(Config.InitialImpulseKgCmPerSec, NAME_None, false);
 		}
 		Primitive->WakeAllRigidBodies();
+	}
+}
+
+void AADPPhysicsRuntimeDriver::ApplyContinuousForces(float TimeSeconds)
+{
+	for (const FADPContinuousForceConfig& Force : ContinuousForces)
+	{
+		if (TimeSeconds + KINDA_SMALL_NUMBER < Force.StartTimeSeconds || TimeSeconds >= Force.EndTimeSeconds)
+		{
+			continue;
+		}
+		UPrimitiveComponent* Primitive = FindRegisteredPrimitive(Force.BodyId);
+		if (Primitive == nullptr || !Primitive->IsSimulatingPhysics())
+		{
+			continue;
+		}
+		Primitive->AddForce(Force.ForceNewton * 100.0f, NAME_None, false);
+		Primitive->WakeAllRigidBodies();
+	}
+}
+
+void AADPPhysicsRuntimeDriver::ApplyRadialForces(float TimeSeconds)
+{
+	for (FADPRadialForceConfig& Force : RadialForces)
+	{
+		Force.LastForceNewton = FVector::ZeroVector;
+		Force.bLastApplied = false;
+		if (TimeSeconds + KINDA_SMALL_NUMBER < Force.StartTimeSeconds || TimeSeconds >= Force.EndTimeSeconds)
+		{
+			continue;
+		}
+		UPrimitiveComponent* Source = FindRegisteredPrimitive(Force.SourceBodyId);
+		UPrimitiveComponent* Target = FindRegisteredPrimitive(Force.TargetBodyId);
+		if (Source == nullptr || Target == nullptr || !Target->IsSimulatingPhysics())
+		{
+			continue;
+		}
+		Force.LastSourcePositionMeters = Source->GetComponentLocation() / 100.0f;
+		Force.LastTargetPositionMeters = Target->GetComponentLocation() / 100.0f;
+		const FVector DeltaMeters = Force.LastSourcePositionMeters - Force.LastTargetPositionMeters;
+		Force.LastDistanceMeters = DeltaMeters.Size();
+		if (Force.LastDistanceMeters <= KINDA_SMALL_NUMBER || Force.LastDistanceMeters > Force.MaxDistanceMeters)
+		{
+			continue;
+		}
+		const float Denominator = FMath::Square(Force.LastDistanceMeters) + FMath::Square(Force.SofteningDistanceMeters);
+		Force.LastForceNewton = DeltaMeters / Force.LastDistanceMeters * (Force.StrengthNewtonMeterSquared / Denominator);
+		Target->AddForce(Force.LastForceNewton * 100.0f, NAME_None, false);
+		Target->WakeAllRigidBodies();
+		Force.bLastApplied = true;
+	}
+}
+
+void AADPPhysicsRuntimeDriver::ApplyAerodynamicWinds(float TimeSeconds)
+{
+	for (FADPAerodynamicWindConfig& Wind : AerodynamicWinds)
+	{
+		Wind.LastForceNewton = FVector::ZeroVector;
+		Wind.LastProjectedAreaSquareMeters = 0.0f;
+		Wind.bLastApplied = false;
+		UPrimitiveComponent* Primitive = FindRegisteredPrimitive(Wind.BodyId);
+		if (Primitive == nullptr || !Primitive->IsSimulatingPhysics())
+		{
+			continue;
+		}
+		const float GustScale = 1.0f + Wind.GustAmplitude * FMath::Sin(2.0f * PI * Wind.GustFrequencyHz * TimeSeconds);
+		const FVector WindVelocity = Wind.VelocityMetersPerSecond * GustScale;
+		Wind.LastRelativeVelocityMetersPerSecond = WindVelocity - Primitive->GetPhysicsLinearVelocity(NAME_None) / 100.0f;
+		const float RelativeSpeed = Wind.LastRelativeVelocityMetersPerSecond.Size();
+		if (RelativeSpeed <= KINDA_SMALL_NUMBER)
+		{
+			continue;
+		}
+		const FVector Direction = Wind.LastRelativeVelocityMetersPerSecond / RelativeSpeed;
+		const FVector ExtentMeters = Primitive->Bounds.BoxExtent / 100.0f;
+		Wind.LastProjectedAreaSquareMeters =
+			FMath::Abs(Direction.X) * 4.0f * ExtentMeters.Y * ExtentMeters.Z
+			+ FMath::Abs(Direction.Y) * 4.0f * ExtentMeters.X * ExtentMeters.Z
+			+ FMath::Abs(Direction.Z) * 4.0f * ExtentMeters.X * ExtentMeters.Y;
+		const float ForceMagnitude = 0.5f * Wind.AirDensityKgPerCubicMeter * Wind.DragCoefficient
+			* Wind.LastProjectedAreaSquareMeters * RelativeSpeed * RelativeSpeed;
+		Wind.LastForceNewton = Direction * ForceMagnitude;
+		Primitive->AddForce(Wind.LastForceNewton * 100.0f, NAME_None, false);
+		Primitive->WakeAllRigidBodies();
+		Wind.bLastApplied = true;
+	}
+}
+
+void AADPPhysicsRuntimeDriver::QueueCompliantContactForces()
+{
+	TSet<FBodyInstance*> QueuedBodies;
+	for (const FADPCompliantContactConfig& Contact : CompliantContacts)
+	{
+		UPrimitiveComponent* PrimitiveA = Contact.BodyAComponent.Get();
+		UPrimitiveComponent* PrimitiveB = Contact.BodyBComponent.Get();
+		FBodyInstance* BodyA = PrimitiveA != nullptr ? PrimitiveA->GetBodyInstance() : nullptr;
+		FBodyInstance* BodyB = PrimitiveB != nullptr ? PrimitiveB->GetBodyInstance() : nullptr;
+		FBodyInstance* CallbackBody = BodyA != nullptr && BodyA->IsInstanceSimulatingPhysics() ? BodyA : BodyB;
+		if (CallbackBody == nullptr || !CallbackBody->IsInstanceSimulatingPhysics() || QueuedBodies.Contains(CallbackBody))
+		{
+			continue;
+		}
+		CallbackBody->AddCustomPhysics(CompliantContactDelegate);
+		QueuedBodies.Add(CallbackBody);
+	}
+}
+
+void AADPPhysicsRuntimeDriver::ApplyCompliantContactSubstep(float DeltaSeconds, FBodyInstance* BodyInstance)
+{
+	if (BodyInstance == nullptr || DeltaSeconds <= 0.0f)
+	{
+		return;
+	}
+	for (const FADPCompliantContactConfig& Contact : CompliantContacts)
+	{
+		UPrimitiveComponent* PrimitiveA = Contact.BodyAComponent.Get();
+		UPrimitiveComponent* PrimitiveB = Contact.BodyBComponent.Get();
+		FBodyInstance* BodyA = PrimitiveA != nullptr ? PrimitiveA->GetBodyInstance() : nullptr;
+		FBodyInstance* BodyB = PrimitiveB != nullptr ? PrimitiveB->GetBodyInstance() : nullptr;
+		FBodyInstance* CallbackBody = BodyA != nullptr && BodyA->IsInstanceSimulatingPhysics() ? BodyA : BodyB;
+		if (CallbackBody != BodyInstance || BodyA == nullptr || BodyB == nullptr)
+		{
+			continue;
+		}
+		const FVector CenterA = BodyA->GetUnrealWorldTransform_AssumesLocked(false, false).GetLocation();
+		const FVector CenterB = BodyB->GetUnrealWorldTransform_AssumesLocked(false, false).GetLocation();
+		const FVector Delta = CenterB - CenterA;
+		const float DistanceCm = Delta.Size();
+		const float CompressionCm = Contact.ActivationDistanceCm - DistanceCm;
+		if (CompressionCm <= 0.0f || DistanceCm <= KINDA_SMALL_NUMBER)
+		{
+			continue;
+		}
+		const FVector Normal = Delta / DistanceCm;
+		const FVector RelativeVelocityCmPerSec =
+			BodyB->GetUnrealWorldVelocity_AssumesLocked() - BodyA->GetUnrealWorldVelocity_AssumesLocked();
+		const float SeparationSpeedMPerSec = FVector::DotProduct(RelativeVelocityCmPerSec, Normal) / 100.0f;
+		const float ForceNewton = FMath::Max(
+			0.0f,
+			Contact.StiffnessNPerM * (CompressionCm / 100.0f)
+			- Contact.DampingNsPerM * SeparationSpeedMPerSec);
+		if (ForceNewton <= 0.0f)
+		{
+			continue;
+		}
+		const FVector ImpulseEngineUnits = Normal * (ForceNewton * DeltaSeconds * 100.0f);
+		if (BodyA->IsInstanceSimulatingPhysics())
+		{
+			BodyA->AddImpulse(-ImpulseEngineUnits, false);
+		}
+		if (BodyB->IsInstanceSimulatingPhysics())
+		{
+			BodyB->AddImpulse(ImpulseEngineUnits, false);
+		}
+	}
+}
+
+void AADPPhysicsRuntimeDriver::QueueUnilateralDistanceSpringForces()
+{
+	TSet<FBodyInstance*> QueuedBodies;
+	for (const FADPUnilateralDistanceSpringConfig& Spring : UnilateralDistanceSprings)
+	{
+		UPrimitiveComponent* PrimitiveA = Spring.BodyAComponent.Get();
+		UPrimitiveComponent* PrimitiveB = Spring.BodyBComponent.Get();
+		FBodyInstance* BodyA = PrimitiveA != nullptr ? PrimitiveA->GetBodyInstance() : nullptr;
+		FBodyInstance* BodyB = PrimitiveB != nullptr ? PrimitiveB->GetBodyInstance() : nullptr;
+		FBodyInstance* CallbackBody = BodyA != nullptr && BodyA->IsInstanceSimulatingPhysics() ? BodyA : BodyB;
+		if (CallbackBody == nullptr || !CallbackBody->IsInstanceSimulatingPhysics() || QueuedBodies.Contains(CallbackBody))
+		{
+			continue;
+		}
+		CallbackBody->AddCustomPhysics(UnilateralDistanceSpringDelegate);
+		QueuedBodies.Add(CallbackBody);
+	}
+}
+
+void AADPPhysicsRuntimeDriver::ApplyUnilateralDistanceSpringPhysicsStep(float DeltaSeconds, FBodyInstance* BodyInstance)
+{
+	if (BodyInstance == nullptr || DeltaSeconds <= 0.0f)
+	{
+		return;
+	}
+	for (FADPUnilateralDistanceSpringConfig& Spring : UnilateralDistanceSprings)
+	{
+		UPrimitiveComponent* PrimitiveA = Spring.BodyAComponent.Get();
+		UPrimitiveComponent* PrimitiveB = Spring.BodyBComponent.Get();
+		FBodyInstance* BodyA = PrimitiveA != nullptr ? PrimitiveA->GetBodyInstance() : nullptr;
+		FBodyInstance* BodyB = PrimitiveB != nullptr ? PrimitiveB->GetBodyInstance() : nullptr;
+		FBodyInstance* CallbackBody = BodyA != nullptr && BodyA->IsInstanceSimulatingPhysics() ? BodyA : BodyB;
+		if (CallbackBody != BodyInstance
+			|| (!Spring.bBodyAWorld && BodyA == nullptr)
+			|| (!Spring.bBodyBWorld && BodyB == nullptr))
+		{
+			continue;
+		}
+		if (Spring.EvaluationCount.IsValid())
+		{
+			Spring.EvaluationCount->Increment();
+		}
+		const FVector PointA = Spring.bBodyAWorld
+			? Spring.FrameAPositionCm
+			: BodyA->GetUnrealWorldTransform_AssumesLocked(false, false).TransformPosition(Spring.FrameAPositionCm);
+		const FVector PointB = Spring.bBodyBWorld
+			? Spring.FrameBPositionCm
+			: BodyB->GetUnrealWorldTransform_AssumesLocked(false, false).TransformPosition(Spring.FrameBPositionCm);
+		const FVector Delta = PointB - PointA;
+		const float DistanceCm = Delta.Size();
+		const float ExtensionCm = DistanceCm - Spring.RestLengthCm;
+		Spring.LastDistanceCm = DistanceCm;
+		Spring.LastExtensionCm = FMath::Max(0.0f, ExtensionCm);
+		Spring.LastSeparationSpeedCmPerSec = 0.0f;
+		Spring.LastTensionNewton = 0.0f;
+		Spring.LastDirectionAToB = FVector::ZeroVector;
+		Spring.LastForceOnBodyBNewton = FVector::ZeroVector;
+		if (ExtensionCm <= 0.0f || DistanceCm <= KINDA_SMALL_NUMBER)
+		{
+			continue;
+		}
+		const FVector DirectionAToB = Delta / DistanceCm;
+		Spring.LastDirectionAToB = DirectionAToB;
+		const FVector VelocityA = Spring.bBodyAWorld
+			? FVector::ZeroVector
+			: BodyA->GetUnrealWorldVelocityAtPoint_AssumesLocked(PointA);
+		const FVector VelocityB = Spring.bBodyBWorld
+			? FVector::ZeroVector
+			: BodyB->GetUnrealWorldVelocityAtPoint_AssumesLocked(PointB);
+		const float SeparationSpeedMPerSec = FVector::DotProduct(VelocityB - VelocityA, DirectionAToB) / 100.0f;
+		Spring.LastSeparationSpeedCmPerSec = SeparationSpeedMPerSec * 100.0f;
+		const float TensionNewton = FMath::Max(
+			0.0f,
+			Spring.StiffnessNPerM * (ExtensionCm / 100.0f)
+			+ Spring.DampingNsPerM * SeparationSpeedMPerSec);
+		if (TensionNewton <= 0.0f)
+		{
+			continue;
+		}
+		Spring.LastTensionNewton = TensionNewton;
+		Spring.LastForceOnBodyBNewton = -DirectionAToB * TensionNewton;
+		if (Spring.ActiveEvaluationCount.IsValid())
+		{
+			Spring.ActiveEvaluationCount->Increment();
+		}
+		const FVector ImpulseOnBEngineUnits = -DirectionAToB * (TensionNewton * DeltaSeconds * 100.0f);
+		if (BodyA != nullptr && BodyA->IsInstanceSimulatingPhysics())
+		{
+			BodyA->AddImpulseAtPosition(-ImpulseOnBEngineUnits, PointA);
+		}
+		if (BodyB != nullptr && BodyB->IsInstanceSimulatingPhysics())
+		{
+			BodyB->AddImpulseAtPosition(ImpulseOnBEngineUnits, PointB);
+		}
+	}
+}
+
+void AADPPhysicsRuntimeDriver::QueueUnilateralPathLengthSpringForces()
+{
+	TSet<FBodyInstance*> QueuedBodies;
+	for (const FADPUnilateralPathLengthSpringConfig& Spring : UnilateralPathLengthSprings)
+	{
+		FBodyInstance* BodyA = Spring.BodyAComponent != nullptr ? Spring.BodyAComponent->GetBodyInstance() : nullptr;
+		if (BodyA == nullptr || !BodyA->IsInstanceSimulatingPhysics() || QueuedBodies.Contains(BodyA))
+		{
+			continue;
+		}
+		BodyA->AddCustomPhysics(UnilateralPathLengthSpringDelegate);
+		QueuedBodies.Add(BodyA);
+	}
+}
+
+void AADPPhysicsRuntimeDriver::ApplyUnilateralPathLengthSpringPhysicsStep(float DeltaSeconds, FBodyInstance* BodyInstance)
+{
+	if (BodyInstance == nullptr || DeltaSeconds <= 0.0f)
+	{
+		return;
+	}
+	for (FADPUnilateralPathLengthSpringConfig& Spring : UnilateralPathLengthSprings)
+	{
+		FBodyInstance* BodyA = Spring.BodyAComponent != nullptr ? Spring.BodyAComponent->GetBodyInstance() : nullptr;
+		FBodyInstance* BodyB = Spring.BodyBComponent != nullptr ? Spring.BodyBComponent->GetBodyInstance() : nullptr;
+		if (BodyA != BodyInstance || BodyB == nullptr)
+		{
+			continue;
+		}
+		Spring.EvaluationCount->Increment();
+		const FVector PointA = BodyA->GetUnrealWorldTransform_AssumesLocked(false, false).TransformPosition(Spring.FrameAPositionCm);
+		const FVector PointB = BodyB->GetUnrealWorldTransform_AssumesLocked(false, false).TransformPosition(Spring.FrameBPositionCm);
+		const FVector DeltaA = Spring.FixedWaypointCm - PointA;
+		const FVector DeltaB = Spring.FixedWaypointCm - PointB;
+		const float LengthA = DeltaA.Size();
+		const float LengthB = DeltaB.Size();
+		const float PathLength = LengthA + LengthB;
+		const float Extension = FMath::Max(0.0f, PathLength - Spring.RestLengthCm);
+		Spring.LastSegmentALengthCm = LengthA;
+		Spring.LastSegmentBLengthCm = LengthB;
+		Spring.LastPathLengthCm = PathLength;
+		Spring.LastExtensionCm = Extension;
+		Spring.LastPathSpeedCmPerSec = 0.0f;
+		Spring.LastTensionNewton = 0.0f;
+		Spring.LastPointACm = PointA;
+		Spring.LastPointBCm = PointB;
+		Spring.LastDirectionAToWaypoint = FVector::ZeroVector;
+		Spring.LastDirectionBToWaypoint = FVector::ZeroVector;
+		Spring.LastForceOnBodyANewton = FVector::ZeroVector;
+		Spring.LastForceOnBodyBNewton = FVector::ZeroVector;
+		if (Extension <= 0.0f || LengthA <= KINDA_SMALL_NUMBER || LengthB <= KINDA_SMALL_NUMBER)
+		{
+			continue;
+		}
+		const FVector DirectionA = DeltaA / LengthA;
+		const FVector DirectionB = DeltaB / LengthB;
+		const FVector VelocityA = BodyA->GetUnrealWorldVelocityAtPoint_AssumesLocked(PointA);
+		const FVector VelocityB = BodyB->GetUnrealWorldVelocityAtPoint_AssumesLocked(PointB);
+		const float PathSpeedMPerSec = -(
+			FVector::DotProduct(VelocityA, DirectionA) + FVector::DotProduct(VelocityB, DirectionB)) / 100.0f;
+		const float TensionNewton = FMath::Max(
+			0.0f,
+			Spring.StiffnessNPerM * (Extension / 100.0f) + Spring.DampingNsPerM * PathSpeedMPerSec);
+		Spring.LastPathSpeedCmPerSec = PathSpeedMPerSec * 100.0f;
+		Spring.LastDirectionAToWaypoint = DirectionA;
+		Spring.LastDirectionBToWaypoint = DirectionB;
+		Spring.LastTensionNewton = TensionNewton;
+		Spring.LastForceOnBodyANewton = DirectionA * TensionNewton;
+		Spring.LastForceOnBodyBNewton = DirectionB * TensionNewton;
+		if (TensionNewton <= 0.0f)
+		{
+			continue;
+		}
+		Spring.ActiveEvaluationCount->Increment();
+		BodyA->AddImpulseAtPosition(DirectionA * (TensionNewton * DeltaSeconds * 100.0f), PointA);
+		BodyB->AddImpulseAtPosition(DirectionB * (TensionNewton * DeltaSeconds * 100.0f), PointB);
 	}
 }
 
@@ -958,23 +1737,135 @@ void AADPPhysicsRuntimeDriver::CaptureFrame()
 		Component->GetConstrainedComponents(BodyA, BoneA, BodyB, BoneB);
 		const FTransform LocalFrameA = Instance.GetRefFrame(EConstraintFrame::Frame1);
 		const FTransform LocalFrameB = Instance.GetRefFrame(EConstraintFrame::Frame2);
-		const FTransform WorldFrameA = BodyA != nullptr ? LocalFrameA * BodyA->GetComponentTransform() : LocalFrameA;
-		const FTransform WorldFrameB = BodyB != nullptr ? LocalFrameB * BodyB->GetComponentTransform() : LocalFrameB;
+		const FTransform WorldFrameA = ConstraintFrameToWorld(LocalFrameA, BodyA);
+		const FTransform WorldFrameB = ConstraintFrameToWorld(LocalFrameB, BodyB);
 		Sample.TranslationCm = WorldFrameA.InverseTransformVectorNoScale(WorldFrameB.GetLocation() - WorldFrameA.GetLocation());
 		const FVector VelocityA = BodyA != nullptr ? BodyA->GetPhysicsLinearVelocityAtPoint(WorldFrameA.GetLocation()) : FVector::ZeroVector;
 		const FVector VelocityB = BodyB != nullptr ? BodyB->GetPhysicsLinearVelocityAtPoint(WorldFrameB.GetLocation()) : FVector::ZeroVector;
 		Sample.RelativeVelocityCmPerSec = WorldFrameA.InverseTransformVectorNoScale(VelocityB - VelocityA);
 		FVector LinearForceWorld = FVector::ZeroVector;
 		FVector AngularTorqueWorld = FVector::ZeroVector;
-		Component->GetConstraintForce(LinearForceWorld, AngularTorqueWorld);
+		ReadConstraintForceRate(Component, GetWorld(), LinearForceWorld, AngularTorqueWorld);
+		if (ManagedBrokenConstraintIds.Contains(Entry.Key))
+		{
+			LinearForceWorld = ManagedBreakLinearForceEngineUnits.FindRef(Entry.Key);
+			AngularTorqueWorld = ManagedBreakAngularTorqueEngineUnits.FindRef(Entry.Key);
+		}
 		Sample.LinearForceEngineUnits = WorldFrameA.InverseTransformVectorNoScale(LinearForceWorld);
 		Sample.AngularTorqueEngineUnits = WorldFrameA.InverseTransformVectorNoScale(AngularTorqueWorld);
 		Sample.PositionTargetCm = Instance.GetLinearPositionTarget();
 		FVector DriveDamping;
 		FVector DriveForceLimit;
 		Instance.GetLinearDriveParams(Sample.Stiffness, DriveDamping, DriveForceLimit);
-		Sample.bBroken = Component->IsBroken();
+		const FADPUnilateralDistanceSpringConfig* Spring = UnilateralDistanceSprings.FindByPredicate(
+			[&Entry](const FADPUnilateralDistanceSpringConfig& Candidate)
+			{
+				return Candidate.ConstraintId == Entry.Key;
+			});
+		if (Spring != nullptr)
+		{
+			Sample.bUnilateralDistanceSpring = true;
+			Sample.DistanceSpringRestLengthCm = Spring->RestLengthCm;
+			Sample.DistanceSpringStiffnessNPerM = Spring->StiffnessNPerM;
+			Sample.DistanceSpringDampingNsPerM = Spring->DampingNsPerM;
+			UPrimitiveComponent* SpringBodyA = Spring->BodyAComponent.Get();
+			UPrimitiveComponent* SpringBodyB = Spring->BodyBComponent.Get();
+			const FVector PointA = Spring->bBodyAWorld
+				? Spring->FrameAPositionCm
+				: SpringBodyA->GetComponentTransform().TransformPosition(Spring->FrameAPositionCm);
+			const FVector PointB = Spring->bBodyBWorld
+				? Spring->FrameBPositionCm
+				: SpringBodyB->GetComponentTransform().TransformPosition(Spring->FrameBPositionCm);
+			Sample.DistanceSpringEvaluationCount = Spring->EvaluationCount.IsValid() ? Spring->EvaluationCount->GetValue() : 0;
+			Sample.DistanceSpringActiveEvaluationCount = Spring->ActiveEvaluationCount.IsValid() ? Spring->ActiveEvaluationCount->GetValue() : 0;
+			if (Sample.DistanceSpringEvaluationCount > 0)
+			{
+				Sample.DistanceSpringDistanceCm = Spring->LastDistanceCm;
+				Sample.DistanceSpringExtensionCm = Spring->LastExtensionCm;
+				Sample.DistanceSpringSeparationSpeedCmPerSec = Spring->LastSeparationSpeedCmPerSec;
+				Sample.DistanceSpringTensionNewton = Spring->LastTensionNewton;
+				Sample.DistanceSpringDirectionAToB = Spring->LastDirectionAToB;
+				Sample.DistanceSpringForceOnBodyBNewton = Spring->LastForceOnBodyBNewton;
+			}
+			else
+			{
+				const FVector Delta = PointB - PointA;
+				Sample.DistanceSpringDistanceCm = Delta.Size();
+				Sample.DistanceSpringExtensionCm = FMath::Max(0.0f, Sample.DistanceSpringDistanceCm - Spring->RestLengthCm);
+				Sample.DistanceSpringDirectionAToB = Sample.DistanceSpringDistanceCm > KINDA_SMALL_NUMBER
+					? Delta / Sample.DistanceSpringDistanceCm
+					: FVector::ZeroVector;
+			}
+		}
+		const FADPUnilateralPathLengthSpringConfig* PathSpring = UnilateralPathLengthSprings.FindByPredicate(
+			[&Entry](const FADPUnilateralPathLengthSpringConfig& Candidate)
+			{
+				return Candidate.ConstraintId == Entry.Key;
+			});
+		if (PathSpring != nullptr)
+		{
+			Sample.bUnilateralPathLengthSpring = true;
+			Sample.PathSpringFixedWaypointCm = PathSpring->FixedWaypointCm;
+			Sample.PathSpringRestLengthCm = PathSpring->RestLengthCm;
+			Sample.PathSpringStiffnessNPerM = PathSpring->StiffnessNPerM;
+			Sample.PathSpringDampingNsPerM = PathSpring->DampingNsPerM;
+			Sample.PathSpringEvaluationCount = PathSpring->EvaluationCount.IsValid() ? PathSpring->EvaluationCount->GetValue() : 0;
+			Sample.PathSpringActiveEvaluationCount = PathSpring->ActiveEvaluationCount.IsValid() ? PathSpring->ActiveEvaluationCount->GetValue() : 0;
+			if (Sample.PathSpringEvaluationCount > 0)
+			{
+				Sample.PathSpringSegmentALengthCm = PathSpring->LastSegmentALengthCm;
+				Sample.PathSpringSegmentBLengthCm = PathSpring->LastSegmentBLengthCm;
+				Sample.PathSpringPathLengthCm = PathSpring->LastPathLengthCm;
+				Sample.PathSpringExtensionCm = PathSpring->LastExtensionCm;
+				Sample.PathSpringPathSpeedCmPerSec = PathSpring->LastPathSpeedCmPerSec;
+				Sample.PathSpringTensionNewton = PathSpring->LastTensionNewton;
+				Sample.PathSpringPointACm = PathSpring->LastPointACm;
+				Sample.PathSpringPointBCm = PathSpring->LastPointBCm;
+				Sample.PathSpringDirectionAToWaypoint = PathSpring->LastDirectionAToWaypoint;
+				Sample.PathSpringDirectionBToWaypoint = PathSpring->LastDirectionBToWaypoint;
+				Sample.PathSpringForceOnBodyANewton = PathSpring->LastForceOnBodyANewton;
+				Sample.PathSpringForceOnBodyBNewton = PathSpring->LastForceOnBodyBNewton;
+			}
+			else
+			{
+				const FVector PointA = PathSpring->BodyAComponent->GetComponentTransform().TransformPosition(PathSpring->FrameAPositionCm);
+				const FVector PointB = PathSpring->BodyBComponent->GetComponentTransform().TransformPosition(PathSpring->FrameBPositionCm);
+				const FVector DeltaA = PathSpring->FixedWaypointCm - PointA;
+				const FVector DeltaB = PathSpring->FixedWaypointCm - PointB;
+				Sample.PathSpringSegmentALengthCm = DeltaA.Size();
+				Sample.PathSpringSegmentBLengthCm = DeltaB.Size();
+				Sample.PathSpringPathLengthCm = Sample.PathSpringSegmentALengthCm + Sample.PathSpringSegmentBLengthCm;
+				Sample.PathSpringExtensionCm = FMath::Max(0.0f, Sample.PathSpringPathLengthCm - PathSpring->RestLengthCm);
+				Sample.PathSpringDirectionAToWaypoint = DeltaA.GetSafeNormal();
+				Sample.PathSpringDirectionBToWaypoint = DeltaB.GetSafeNormal();
+				Sample.PathSpringPointACm = PointA;
+				Sample.PathSpringPointBCm = PointB;
+			}
+		}
+		Sample.bTerminated = Instance.IsTerminated() || ManagedBrokenConstraintIds.Contains(Entry.Key);
+		Sample.bValidConstraint = Instance.IsValidConstraintInstance();
+		Sample.bBroken = Component->IsBroken()
+			|| ManagedBrokenConstraintIds.Contains(Entry.Key)
+			|| (BreakableConstraintIds.Contains(Entry.Key) && Sample.bTerminated);
 		Frame.Constraints.Add(Sample);
+	}
+	for (const FADPContinuousForceConfig& Force : ContinuousForces)
+	{
+		if (ElapsedSeconds + KINDA_SMALL_NUMBER >= Force.StartTimeSeconds && ElapsedSeconds <= Force.EndTimeSeconds + KINDA_SMALL_NUMBER)
+		{
+			Frame.ActiveForces.Add(Force);
+		}
+	}
+	for (const FADPRadialForceConfig& Force : RadialForces)
+	{
+		if (ElapsedSeconds + KINDA_SMALL_NUMBER >= Force.StartTimeSeconds && ElapsedSeconds <= Force.EndTimeSeconds + KINDA_SMALL_NUMBER)
+		{
+			Frame.ActiveRadialForces.Add(Force);
+		}
+	}
+	for (const FADPAerodynamicWindConfig& Wind : AerodynamicWinds)
+	{
+		Frame.ActiveWindForces.Add(Wind);
 	}
 
 	CapturedFrames.Add(Frame);
@@ -1168,11 +2059,96 @@ FString AADPPhysicsRuntimeDriver::BuildCaptureJson() const
 			ConstraintObject->SetArrayField(TEXT("angular_torque_engine_units"), VectorToJsonArray(Constraint.AngularTorqueEngineUnits));
 			ConstraintObject->SetArrayField(TEXT("position_target_cm"), VectorToJsonArray(Constraint.PositionTargetCm));
 			ConstraintObject->SetArrayField(TEXT("stiffness_n_m"), VectorToJsonArray(Constraint.Stiffness));
+			ConstraintObject->SetBoolField(TEXT("unilateral_distance_spring_enabled"), Constraint.bUnilateralDistanceSpring);
+			ConstraintObject->SetNumberField(TEXT("distance_spring_rest_length_cm"), Constraint.DistanceSpringRestLengthCm);
+			ConstraintObject->SetNumberField(TEXT("distance_spring_stiffness_n_m"), Constraint.DistanceSpringStiffnessNPerM);
+			ConstraintObject->SetNumberField(TEXT("distance_spring_damping_n_s_m"), Constraint.DistanceSpringDampingNsPerM);
+			ConstraintObject->SetNumberField(TEXT("distance_spring_distance_cm"), Constraint.DistanceSpringDistanceCm);
+			ConstraintObject->SetNumberField(TEXT("distance_spring_extension_cm"), Constraint.DistanceSpringExtensionCm);
+			ConstraintObject->SetNumberField(TEXT("distance_spring_separation_speed_cm_s"), Constraint.DistanceSpringSeparationSpeedCmPerSec);
+			ConstraintObject->SetNumberField(TEXT("distance_spring_tension_n"), Constraint.DistanceSpringTensionNewton);
+			ConstraintObject->SetArrayField(TEXT("distance_spring_direction_a_to_b"), VectorToJsonArray(Constraint.DistanceSpringDirectionAToB));
+			ConstraintObject->SetArrayField(TEXT("distance_spring_force_on_body_b_n"), VectorToJsonArray(Constraint.DistanceSpringForceOnBodyBNewton));
+			ConstraintObject->SetNumberField(TEXT("distance_spring_evaluation_count"), Constraint.DistanceSpringEvaluationCount);
+			ConstraintObject->SetNumberField(TEXT("distance_spring_active_evaluation_count"), Constraint.DistanceSpringActiveEvaluationCount);
+			ConstraintObject->SetBoolField(TEXT("unilateral_path_length_spring_enabled"), Constraint.bUnilateralPathLengthSpring);
+			ConstraintObject->SetArrayField(TEXT("path_spring_fixed_waypoint_cm"), VectorToJsonArray(Constraint.PathSpringFixedWaypointCm));
+			ConstraintObject->SetNumberField(TEXT("path_spring_rest_length_cm"), Constraint.PathSpringRestLengthCm);
+			ConstraintObject->SetNumberField(TEXT("path_spring_stiffness_n_m"), Constraint.PathSpringStiffnessNPerM);
+			ConstraintObject->SetNumberField(TEXT("path_spring_damping_n_s_m"), Constraint.PathSpringDampingNsPerM);
+			ConstraintObject->SetNumberField(TEXT("path_spring_segment_a_length_cm"), Constraint.PathSpringSegmentALengthCm);
+			ConstraintObject->SetNumberField(TEXT("path_spring_segment_b_length_cm"), Constraint.PathSpringSegmentBLengthCm);
+			ConstraintObject->SetNumberField(TEXT("path_spring_path_length_cm"), Constraint.PathSpringPathLengthCm);
+			ConstraintObject->SetNumberField(TEXT("path_spring_extension_cm"), Constraint.PathSpringExtensionCm);
+			ConstraintObject->SetNumberField(TEXT("path_spring_path_speed_cm_s"), Constraint.PathSpringPathSpeedCmPerSec);
+			ConstraintObject->SetNumberField(TEXT("path_spring_tension_n"), Constraint.PathSpringTensionNewton);
+			ConstraintObject->SetArrayField(TEXT("path_spring_point_a_cm"), VectorToJsonArray(Constraint.PathSpringPointACm));
+			ConstraintObject->SetArrayField(TEXT("path_spring_point_b_cm"), VectorToJsonArray(Constraint.PathSpringPointBCm));
+			ConstraintObject->SetArrayField(TEXT("path_spring_direction_a_to_waypoint"), VectorToJsonArray(Constraint.PathSpringDirectionAToWaypoint));
+			ConstraintObject->SetArrayField(TEXT("path_spring_direction_b_to_waypoint"), VectorToJsonArray(Constraint.PathSpringDirectionBToWaypoint));
+			ConstraintObject->SetArrayField(TEXT("path_spring_force_on_body_a_n"), VectorToJsonArray(Constraint.PathSpringForceOnBodyANewton));
+			ConstraintObject->SetArrayField(TEXT("path_spring_force_on_body_b_n"), VectorToJsonArray(Constraint.PathSpringForceOnBodyBNewton));
+			ConstraintObject->SetNumberField(TEXT("path_spring_evaluation_count"), Constraint.PathSpringEvaluationCount);
+			ConstraintObject->SetNumberField(TEXT("path_spring_active_evaluation_count"), Constraint.PathSpringActiveEvaluationCount);
 			ConstraintObject->SetBoolField(TEXT("broken"), Constraint.bBroken);
+			ConstraintObject->SetBoolField(TEXT("terminated"), Constraint.bTerminated);
+			ConstraintObject->SetBoolField(TEXT("valid_constraint"), Constraint.bValidConstraint);
 			ConstraintObject->SetStringField(TEXT("source"), TEXT("adp_cpp_runtime_driver"));
 			ConstraintsJson.Add(MakeShared<FJsonValueObject>(ConstraintObject));
 		}
 		FrameObject->SetArrayField(TEXT("constraints"), ConstraintsJson);
+
+		TArray<TSharedPtr<FJsonValue>> ForcesJson;
+		for (const FADPContinuousForceConfig& Force : Frame.ActiveForces)
+		{
+			TSharedRef<FJsonObject> ForceObject = MakeShared<FJsonObject>();
+			ForceObject->SetStringField(TEXT("force_id"), Force.ForceId.ToString());
+			ForceObject->SetStringField(TEXT("object"), Force.BodyId.ToString());
+			ForceObject->SetArrayField(TEXT("vector_n"), VectorToJsonArray(Force.ForceNewton));
+			ForceObject->SetNumberField(TEXT("start_time_s"), Force.StartTimeSeconds);
+			ForceObject->SetNumberField(TEXT("end_time_s"), Force.EndTimeSeconds);
+			ForceObject->SetStringField(TEXT("source"), TEXT("adp_cpp_runtime_driver"));
+			ForcesJson.Add(MakeShared<FJsonValueObject>(ForceObject));
+		}
+		for (const FADPRadialForceConfig& Force : Frame.ActiveRadialForces)
+		{
+			TSharedRef<FJsonObject> ForceObject = MakeShared<FJsonObject>();
+			ForceObject->SetStringField(TEXT("force_id"), Force.ForceId.ToString());
+			ForceObject->SetStringField(TEXT("force_type"), TEXT("radial_force"));
+			ForceObject->SetStringField(TEXT("source_object"), Force.SourceBodyId.ToString());
+			ForceObject->SetStringField(TEXT("object"), Force.TargetBodyId.ToString());
+			ForceObject->SetNumberField(TEXT("strength_n_m2"), Force.StrengthNewtonMeterSquared);
+			ForceObject->SetNumberField(TEXT("softening_distance_m"), Force.SofteningDistanceMeters);
+			ForceObject->SetNumberField(TEXT("max_distance_m"), Force.MaxDistanceMeters);
+			ForceObject->SetNumberField(TEXT("distance_m"), Force.LastDistanceMeters);
+			ForceObject->SetArrayField(TEXT("source_position_m"), VectorToJsonArray(Force.LastSourcePositionMeters));
+			ForceObject->SetArrayField(TEXT("target_position_m"), VectorToJsonArray(Force.LastTargetPositionMeters));
+			ForceObject->SetArrayField(TEXT("vector_n"), VectorToJsonArray(Force.LastForceNewton));
+			ForceObject->SetBoolField(TEXT("applied"), Force.bLastApplied);
+			ForceObject->SetNumberField(TEXT("start_time_s"), Force.StartTimeSeconds);
+			ForceObject->SetNumberField(TEXT("end_time_s"), Force.EndTimeSeconds);
+			ForceObject->SetStringField(TEXT("source"), TEXT("adp_cpp_runtime_driver"));
+			ForcesJson.Add(MakeShared<FJsonValueObject>(ForceObject));
+		}
+		for (const FADPAerodynamicWindConfig& Wind : Frame.ActiveWindForces)
+		{
+			TSharedRef<FJsonObject> ForceObject = MakeShared<FJsonObject>();
+			ForceObject->SetStringField(TEXT("force_id"), Wind.FieldId.ToString());
+			ForceObject->SetStringField(TEXT("force_type"), TEXT("aerodynamic_wind"));
+			ForceObject->SetStringField(TEXT("object"), Wind.BodyId.ToString());
+			ForceObject->SetArrayField(TEXT("wind_velocity_m_s"), VectorToJsonArray(Wind.VelocityMetersPerSecond));
+			ForceObject->SetArrayField(TEXT("relative_velocity_m_s"), VectorToJsonArray(Wind.LastRelativeVelocityMetersPerSecond));
+			ForceObject->SetArrayField(TEXT("vector_n"), VectorToJsonArray(Wind.LastForceNewton));
+			ForceObject->SetNumberField(TEXT("projected_area_m2"), Wind.LastProjectedAreaSquareMeters);
+			ForceObject->SetNumberField(TEXT("air_density_kg_m3"), Wind.AirDensityKgPerCubicMeter);
+			ForceObject->SetNumberField(TEXT("drag_coefficient"), Wind.DragCoefficient);
+			ForceObject->SetNumberField(TEXT("gust_amplitude"), Wind.GustAmplitude);
+			ForceObject->SetNumberField(TEXT("gust_frequency_hz"), Wind.GustFrequencyHz);
+			ForceObject->SetBoolField(TEXT("applied"), Wind.bLastApplied);
+			ForceObject->SetStringField(TEXT("source"), TEXT("adp_cpp_runtime_driver"));
+			ForcesJson.Add(MakeShared<FJsonValueObject>(ForceObject));
+		}
+		FrameObject->SetArrayField(TEXT("forces"), ForcesJson);
 		FramesJson.Add(MakeShared<FJsonValueObject>(FrameObject));
 	}
 	Root->SetArrayField(TEXT("frames"), FramesJson);

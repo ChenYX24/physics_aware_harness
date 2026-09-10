@@ -161,6 +161,7 @@ class StageExecutorTests(unittest.TestCase):
 
         self.assertIsNotNone(handoff)
         self.assertEqual(handoff["contract_id"], "deformable_mesh_cache_v1")
+        self.assertIn("deformable_solver_verifier.json", handoff["required_artifacts"])
 
         particle_handoff = stage_handoff_contract("genesis_sph", "ue")
         self.assertEqual(

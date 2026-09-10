@@ -51,6 +51,28 @@ class RGBObservabilityTests(unittest.TestCase):
         self.assertEqual(report["enforcement"], "advisory")
         self.assertEqual(report["failure_codes"], ["F_RGB_EXPECTED_SUBJECT_NOT_OBSERVABLE"])
 
+    def test_neutral_subject_color_uses_chromaticity_and_luminance(self) -> None:
+        white = bytes([225, 225, 210])
+        dark = bytes([50, 50, 50])
+        pixels = 64 * 64
+        visible_frame = white * 16 + dark * (pixels - 16)
+        output = visible_frame * 4
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "views" / "event_closeup" / "rgb.mp4"
+            video.parent.mkdir(parents=True)
+            video.write_bytes(b"mp4")
+            completed = subprocess.CompletedProcess([], 0, output, b"")
+            with patch("harness.verification.rgb_observability.subprocess.run", return_value=completed):
+                report = verify_expected_color_observability(
+                    tmp,
+                    expected_rgb=[0.92, 0.92, 0.86],
+                    view_ids=["event_closeup"],
+                    write=False,
+                )
+        self.assertEqual(report["status"], "pass")
+        self.assertEqual(report["matching_mode"], "chromaticity_and_luminance")
+        self.assertIsNone(report["dominant_channel"])
+
     def test_failed_diagnostic_does_not_mutate_readiness(self) -> None:
         gray_frames = bytes([80, 80, 80]) * (64 * 64 * 4)
         with tempfile.TemporaryDirectory() as tmp:

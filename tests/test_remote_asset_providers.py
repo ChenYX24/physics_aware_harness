@@ -646,7 +646,7 @@ class RemoteAssetProviderTests(unittest.TestCase):
                 "upload_authorized": True,
             }]
         )
-        request["texture_prompt"] = "x" * 601
+        request["texture_prompt"] = "x" * 801
         transport = FakeTransport(json_responses=[], downloads={})
         with self.assertRaises(RemoteProviderError) as context:
             MeshyModelGenerationAdapter(transport=transport, api_key="test").acquire(
@@ -656,6 +656,108 @@ class RemoteAssetProviderTests(unittest.TestCase):
             )
         self.assertEqual(context.exception.code, "texture_prompt_too_long")
         self.assertEqual(transport.requests, [])
+
+    def test_meshy_text_to_3d_runs_preview_then_refine_and_materializes_outputs(self) -> None:
+        transport = FakeTransport(
+            json_responses=[
+                {"result": "preview-task"},
+                {"id": "preview-task", "status": "SUCCEEDED", "consumed_credits": 20},
+                {"result": "refine-task"},
+                {
+                    "id": "refine-task",
+                    "status": "SUCCEEDED",
+                    "consumed_credits": 10,
+                    "model_urls": {
+                        "glb": "https://signed.example/text.glb",
+                        "obj": "https://signed.example/text.obj",
+                    },
+                    "texture_urls": [{"base_color": "https://signed.example/base.png"}],
+                },
+            ],
+            downloads={
+                "https://signed.example/text.glb": b"glb",
+                "https://signed.example/text.obj": b"v 0 0 0\n",
+                "https://signed.example/base.png": b"png",
+            },
+        )
+        request = self._meshy_request([])
+        request["generation_prompt"] = "A realistic isolated open wire basket with an empty interior."
+        request["texture_prompt"] = "brushed steel with subtle wear"
+
+        acquisition = MeshyModelGenerationAdapter(
+            transport=transport,
+            api_key="test",
+            poll_interval_s=0,
+            sleep=lambda _: None,
+        ).acquire(request, destination=self.workspace / "text-to-3d", workspace=self.workspace)
+
+        self.assertEqual(acquisition.source_uri, "meshy://text-to-3d/refine-task")
+        self.assertEqual(acquisition.metadata["consumed_credits"], 30)
+        self.assertTrue(acquisition.canonical_file.is_file())
+        self.assertTrue(acquisition.import_file.is_file())
+        self.assertEqual(
+            [(row["method"], row["url"]) for row in transport.requests],
+            [
+                ("POST", "https://api.meshy.ai/openapi/v2/text-to-3d"),
+                ("GET", "https://api.meshy.ai/openapi/v2/text-to-3d/preview-task"),
+                ("POST", "https://api.meshy.ai/openapi/v2/text-to-3d"),
+                ("GET", "https://api.meshy.ai/openapi/v2/text-to-3d/refine-task"),
+            ],
+        )
+        self.assertEqual(transport.requests[0]["payload"]["mode"], "preview")
+        self.assertEqual(transport.requests[0]["payload"]["prompt"], request["generation_prompt"])
+        self.assertEqual(transport.requests[2]["payload"]["mode"], "refine")
+        self.assertEqual(transport.requests[2]["payload"]["preview_task_id"], "preview-task")
+        self.assertEqual(transport.requests[2]["payload"]["texture_prompt"], request["texture_prompt"])
+
+    def test_meshy_text_to_3d_requires_generation_prompt_before_network(self) -> None:
+        transport = FakeTransport(json_responses=[], downloads={})
+        with self.assertRaises(RemoteProviderError) as context:
+            MeshyModelGenerationAdapter(transport=transport, api_key="test").acquire(
+                self._meshy_request([]),
+                destination=self.workspace / "text-missing-prompt",
+                workspace=self.workspace,
+            )
+        self.assertEqual(context.exception.code, "generation_prompt_required")
+        self.assertEqual(transport.requests, [])
+
+    def test_meshy_text_to_3d_compiles_without_an_image_manifest(self) -> None:
+        transport = FakeTransport(
+            json_responses=[
+                {"result": "preview-task"},
+                {"status": "SUCCEEDED"},
+                {"result": "refine-task"},
+                {
+                    "status": "SUCCEEDED",
+                    "model_urls": {"glb": "https://d/text.glb", "obj": "https://d/text.obj"},
+                },
+            ],
+            downloads={"https://d/text.glb": b"glb", "https://d/text.obj": b"v 0 0 0\n"},
+        )
+        case = self._case(route="model_generation", provider_hint="meshy")
+        case.data["objects"][0]["asset"]["acquisition"]["generation_prompt"] = (
+            "A realistic isolated ball with clean game-ready geometry."
+        )
+
+        compilation = compile_runtime_case(
+            case_spec_v2_from_dict(case.data),
+            requested_backend="ue",
+            registry=self.registry,
+            provider_orchestrator=AssetProviderOrchestrator(
+                workspace=self.workspace,
+                importer=StubImporter(),
+                remote_providers={
+                    "model_generation": MeshyModelGenerationAdapter(
+                        transport=transport,
+                        api_key="test",
+                        poll_interval_s=0,
+                    )
+                },
+            ),
+        )
+
+        self.assertEqual(compilation.artifacts["asset_provider_batch"]["results"][0]["status"], "fulfilled")
+        self.assertEqual([row["method"] for row in transport.requests], ["POST", "GET", "POST", "GET"])
 
     def test_meshy_failure_timeout_and_missing_outputs_are_structured(self) -> None:
         image = self.workspace / "input.png"
@@ -1128,6 +1230,9 @@ class RemoteAssetProviderTests(unittest.TestCase):
                 }
             ],
         ).data
+        model_case_data["objects"][0]["asset"]["acquisition"]["generation_prompt"] = (
+            "A realistic isolated ball reconstructed from the supplied views."
+        )
         model_case_data["objects"][0]["asset"]["acquisition"]["texture_prompt"] = "matte red painted wood"
         model_compilation = compile_runtime_case(
             case_spec_v2_from_dict(model_case_data, available_input_ids=["front"]),
@@ -1151,8 +1256,17 @@ class RemoteAssetProviderTests(unittest.TestCase):
         provider_reference = model_compilation.artifacts["asset_provider_batch"]["requests"][0]["reference_inputs"][0]
         self.assertEqual(provider_reference["sha256"], image_sha)
         self.assertTrue(provider_reference["upload_authorized"])
+        self.assertEqual(
+            model_compilation.artifacts["asset_provider_batch"]["requests"][0]["generation_prompt"],
+            model_case_data["objects"][0]["asset"]["acquisition"]["generation_prompt"],
+        )
         self.assertEqual(meshy_transport.requests[0]["payload"]["texture_prompt"], "matte red painted wood")
+        self.assertNotIn("generation_prompt", meshy_transport.requests[0]["payload"])
         self.assertEqual(model_compilation.provider_receipts[0]["recipe_parameters"]["texture_prompt"], "matte red painted wood")
+        self.assertEqual(
+            model_compilation.provider_receipts[0]["recipe_parameters"]["generation_prompt_usage"],
+            "audit_only",
+        )
         saved_request = self.workspace / "providers" / meshy.provider_id / model_result["request_digest"] / "provider_request.json"
         self.assertEqual(json.loads(saved_request.read_text(encoding="utf-8"))["request_digest"], model_result["request_digest"])
 

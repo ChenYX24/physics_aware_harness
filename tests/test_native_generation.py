@@ -148,7 +148,10 @@ class NativeGenerationTests(unittest.TestCase):
             rejected["submission_stage_result"]["failure_code"],
             "native_generation_case_spec_invalid",
         )
-        self.assertIn("shape_hint box, sphere, or cylinder", rejected["submission_stage_result"]["message"])
+        self.assertIn(
+            "shape_hint box, sphere, cylinder, or open_conical_frustum",
+            rejected["submission_stage_result"]["message"],
+        )
         request_root = Path(rejected["paths"]["job_root"]) / "request"
         self.assertFalse((request_root / "native_generation_submission.json").exists())
         self.assertFalse((request_root / "native_generation_ack.json").exists())

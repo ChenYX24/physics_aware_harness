@@ -1,0 +1,156 @@
+{
+  "schema_version": "harness_case_spec_v2",
+  "identity": {
+    "case_id": "smoke_fixed_waypoint_path_length_spring_v1",
+    "title": "Two masses exchange rope length through a fixed eyelet",
+    "source_request": "Verify a tabletop mass orbiting a fixed eyelet and a hanging mass joined by one rope path: as the hanging mass descends, the tabletop radius contracts and its angular speed rises."
+  },
+  "capabilities": {"primary": "rigid_body_dynamics", "required": ["rigid_body_dynamics"]},
+  "scene": {
+    "environment_intent": "minimal controlled tabletop eyelet stage",
+    "coordinate_system": "z_up",
+    "duration_s": 5.0,
+    "bounds_hint_m": [3.2, 3.2, 2.8]
+  },
+  "timebase": {"physics_hz": 120, "observation_fps": 24, "deterministic_seed": 860186},
+  "backend_constraints": {
+    "required_solver_capabilities": ["rigid_body", "rigid_constraints", "trajectory"],
+    "allowed_solvers": ["ue"],
+    "render_backend": "ue",
+    "allow_multi_backend": false
+  },
+  "asset_policy": {
+    "allow_local": true,
+    "allow_external": false,
+    "allow_generation": false,
+    "allow_analytic_proxy": true,
+    "required_license_tier": "local_preview"
+  },
+  "objects": [
+    {
+      "id": "tabletop",
+      "role": "tabletop",
+      "geometry": {"shape_hint": "box", "approx_size_m": [2.5, 2.5, 0.10]},
+      "physics": {"body_type": "static", "mass_kg": 1.0, "collision_required": false},
+      "initial_state": {"position_m": [0.0, 0.0, 0.95], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "color_rgb": [0.30, 0.16, 0.08],
+      "fixed_material_color": true,
+      "visual_representation": {"source": "none", "visible": true},
+      "behavior": {}
+    },
+    {
+      "id": "eyelet",
+      "role": "fixed_rope_guide",
+      "geometry": {"shape_hint": "cylinder", "approx_size_m": [0.18, 0.18, 0.06]},
+      "physics": {"body_type": "static", "mass_kg": 1.0, "collision_required": false},
+      "initial_state": {"position_m": [0.0, 0.0, 1.10], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "color_rgb": [0.10, 0.11, 0.13],
+      "fixed_material_color": true,
+      "visual_representation": {"source": "none", "visible": true},
+      "behavior": {}
+    },
+    {
+      "id": "orbit_ball",
+      "role": "tabletop_orbiting_mass",
+      "geometry": {"shape_hint": "sphere", "approx_size_m": [0.18, 0.18, 0.18]},
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.35,
+        "collision_required": true,
+        "collision_geometry": {"shape": "sphere", "size_m": [0.18, 0.18, 0.18], "local_center_offset_m": [0.0, 0.0, 0.0]},
+        "enable_gravity": false,
+        "linear_damping": 0.0,
+        "angular_damping": 0.02,
+        "material": {"dynamic_friction": 0.02, "static_friction": 0.02, "restitution": 0.0}
+      },
+      "initial_state": {"position_m": [0.80, 0.0, 1.10], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 1.60, 0.0]},
+      "color_rgb": [0.86, 0.12, 0.08],
+      "fixed_material_color": true,
+      "visual_representation": {"source": "none", "visible": true},
+      "behavior": {}
+    },
+    {
+      "id": "hanging_ball",
+      "role": "hanging_mass",
+      "geometry": {"shape_hint": "sphere", "approx_size_m": [0.22, 0.22, 0.22]},
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.70,
+        "collision_required": true,
+        "collision_geometry": {"shape": "sphere", "size_m": [0.22, 0.22, 0.22], "local_center_offset_m": [0.0, 0.0, 0.0]},
+        "enable_gravity": true,
+        "linear_damping": 0.02,
+        "angular_damping": 0.02,
+        "material": {"dynamic_friction": 0.1, "static_friction": 0.1, "restitution": 0.0}
+      },
+      "initial_state": {"position_m": [0.0, 0.0, 0.20], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "color_rgb": [0.10, 0.32, 0.78],
+      "fixed_material_color": true,
+      "visual_representation": {"source": "none", "visible": true},
+      "behavior": {}
+    }
+  ],
+  "relations": [],
+  "events": [],
+  "forces": [],
+  "constraints": [
+    {
+      "id": "rope_through_eyelet",
+      "body_a": "orbit_ball",
+      "body_b": "hanging_ball",
+      "frame_a": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+      "frame_b": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+      "linear_motion": {"x": "free", "y": "free", "z": "free"},
+      "unilateral_path_length_spring": {
+        "fixed_waypoint_m": [0.0, 0.0, 1.10],
+        "rest_length_m": 1.70,
+        "stiffness_n_m": 150.0,
+        "damping_n_s_m": 3.0
+      },
+      "angular_motion": {"x": "free", "y": "free", "z": "free"},
+      "angular_limits_deg": {},
+      "collision_enabled": false
+    }
+  ],
+  "expected_behavior": {
+    "native_constraint_trace_required": true,
+    "path_length_exchange_required": true,
+    "hanging_mass_descends": true,
+    "orbit_radius_contracts": true,
+    "orbital_angular_speed_increases": true
+  },
+  "observation_requirements": {
+    "cameras": [
+      {
+        "role": "overview",
+        "coordinate_frame": "world",
+        "position_m": [2.5, -3.2, 2.25],
+        "look_at_m": [0.0, 0.0, 0.72],
+        "fov_deg": 48.0,
+        "framing": "scene",
+        "target_objects": ["tabletop", "eyelet", "orbit_ball", "hanging_ball"]
+      },
+      {
+        "role": "top",
+        "coordinate_frame": "world",
+        "position_m": [0.0, 0.0, 3.6],
+        "look_at_m": [0.0, 0.0, 0.85],
+        "fov_deg": 42.0,
+        "framing": "scene",
+        "target_objects": ["tabletop", "eyelet", "orbit_ball"]
+      }
+    ],
+    "modalities": ["rgb"],
+    "signals": ["trajectory"]
+  },
+  "verification_requirements": {
+    "assertions": [
+      {"id": "trajectory_integrity", "type": "trajectory_integrity"},
+      {"id": "hanging_ball_descends", "type": "state_delta", "object_id": "hanging_ball", "field": "position_m.z", "operator": "<=", "value": -0.20}
+    ],
+    "thresholds": {}
+  },
+  "variant": {"should_pass": true},
+  "provenance": {"purpose": "capability_first_compound_smoke", "core80_cases": ["R086"]},
+  "notes": "The rope is a generic unilateral compliant path-length constraint L=|x_a-p|+|x_b-p| through one fixed world waypoint p. It applies equal tension toward p at both dynamic endpoints; it is not routed by case id."
+}

@@ -106,7 +106,14 @@ def failed_reviewer_receipt(kwargs: dict, code: str, *, status: str = "failed") 
 
 
 class SuccessfulHarness:
-    def __init__(self, *, selected_backend: str = "fallback", fail_verifier: bool = False, semantic_status: str = "pass") -> None:
+    def __init__(
+        self,
+        *,
+        selected_backend: str = "fallback",
+        fail_verifier: bool = False,
+        semantic_status: str = "pass",
+        write_sensor_exr: bool = False,
+    ) -> None:
         self.selected_backend = selected_backend
         self.fail_verifier = fail_verifier
         self.compile_calls: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
@@ -116,6 +123,7 @@ class SuccessfulHarness:
         self.generation_requests: list[dict] = []
         self.semantic_status = semantic_status
         self.semantic_calls = 0
+        self.write_sensor_exr = write_sensor_exr
 
     def generate(self, request: dict, *, artifact_dir: Path, job_id: str, attempt_id: str):
         self.generation_calls += 1
@@ -260,6 +268,23 @@ class SuccessfulHarness:
         write_json(run_dir / "camera_plan.json", compilation.artifacts["camera_plan"])
         write_json(run_dir / "trajectory.json", [{"frame": 0, "time": 0.0, "objects": {}}])
         write_json(run_dir / "stage_execution_report.json", {"status": "completed"})
+        if self.write_sensor_exr:
+            view_dir = run_dir / "views" / "front_static"
+            (view_dir / "depth_frames").mkdir(parents=True)
+            (view_dir / "segmentation_frames").mkdir()
+            (view_dir / "depth_frames" / "frame_0000.exr").write_bytes(b"depth")
+            (view_dir / "segmentation_frames" / "frame_0000.exr").write_bytes(b"mask")
+            (view_dir / "depth.exr").write_bytes(b"depth")
+            (view_dir / "segmentation.exr").write_bytes(b"mask")
+            (view_dir / "depth_preview.mp4").write_bytes(b"preview")
+            (view_dir / "segmentation_preview.mp4").write_bytes(b"preview")
+            write_json(
+                view_dir / "meta.json",
+                {
+                    "depth_frames": ["views/front_static/depth_frames/frame_0000.exr"],
+                    "segmentation_frames": ["views/front_static/segmentation_frames/frame_0000.exr"],
+                },
+            )
         write_stage_result(run_dir, build_stage_result(stage="execute", status="completed"))
         return run_dir
 
@@ -756,6 +781,27 @@ class AgentJobControllerTests(unittest.TestCase):
             {"before": False, "after": True},
         )
 
+    def test_required_text_image_seed_does_not_require_planning_upload(self) -> None:
+        controller, fake = self.controller()
+        request = self._image_request(
+            text="use the pictured geometry as the simulated object",
+            required=True,
+        )
+        controller.create(
+            request,
+            job_id="job_planning_image_seed",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+
+        inspection = controller.advance_until_blocked("job_planning_image_seed")
+
+        self.assertEqual(inspection["job"]["state"], "awaiting_semantic_review")
+        self.assertEqual(inspection["job"]["current_stage"], "semantic_review")
+        self.assertFalse(inspection["job"]["authorizations"]["planning_llm_upload"])
+        self.assertEqual(inspection["job"]["usage"]["generation_invocations"], 0)
+        self.assertEqual(fake.generation_calls, 0)
+
     def test_full_technical_chain_stops_before_explicit_semantic_review(self) -> None:
         controller, fake = self.controller()
         controller.create(
@@ -794,6 +840,129 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertEqual(Path(leaf["path"]), attempt_root / "stage_results" / "evidence_bundle.json")
         events = [read_json(path) for path in sorted((Path(inspection["paths"]["job_root"]) / "events").glob("*.json"))]
         self.assertNotIn("job_terminal", [row["event"] for row in events])
+
+    def test_requested_smoke_boundary_stops_before_candidate_and_can_advance(self) -> None:
+        controller, fake = self.controller()
+        controller.create(
+            self.request,
+            job_id="job_requested_smoke_boundary",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+
+        boundary = controller.advance_until_blocked(
+            "job_requested_smoke_boundary",
+            stop_after_stage="smoke",
+        )
+
+        self.assertEqual(boundary["job"]["state"], "blocked")
+        self.assertEqual(boundary["job"]["current_stage"], "candidate")
+        self.assertEqual(
+            boundary["job"]["blocker"],
+            {
+                "code": "requested_stage_boundary_reached",
+                "message": "requested stop after completed stage smoke",
+                "stage": "smoke",
+            },
+        )
+        self.assertEqual(boundary["job"]["allowed_next_actions"], ["advance", "cancel"])
+        self.assertEqual(fake.execute_calls, ["smoke"])
+        attempt_root = Path(boundary["paths"]["job_root"]) / "attempts" / "attempt_001"
+        self.assertEqual(read_json(attempt_root / "smoke_gate.json")["status"], "pass")
+        self.assertFalse((attempt_root / "candidate_run.json").exists())
+
+        completed = controller.advance_until_blocked("job_requested_smoke_boundary")
+
+        self.assertEqual(completed["job"]["state"], "awaiting_semantic_review")
+        self.assertEqual(fake.execute_calls, ["smoke", "local_preview"])
+
+    def test_completed_smoke_prunes_sensor_exr_and_retains_preview_videos(self) -> None:
+        fake = SuccessfulHarness(write_sensor_exr=True)
+        controller = AgentJobController(self.workspace, hooks=fake.hooks())
+        controller.create(
+            self.request,
+            job_id="job_smoke_sensor_retention",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+
+        boundary = controller.advance_until_blocked(
+            "job_smoke_sensor_retention",
+            stop_after_stage="smoke",
+        )
+
+        attempt_root = Path(boundary["paths"]["job_root"]) / "attempts" / "attempt_001"
+        run_dir = Path(read_json(attempt_root / "smoke_gate.json")["run_dir"])
+        view_dir = run_dir / "views" / "front_static"
+        self.assertFalse((view_dir / "depth_frames").exists())
+        self.assertFalse((view_dir / "segmentation_frames").exists())
+        self.assertFalse((view_dir / "depth.exr").exists())
+        self.assertFalse((view_dir / "segmentation.exr").exists())
+        self.assertTrue((view_dir / "depth_preview.mp4").is_file())
+        self.assertTrue((view_dir / "segmentation_preview.mp4").is_file())
+        retention = read_json(run_dir / "sensor_artifact_retention.json")
+        self.assertEqual(retention["policy"], "post_smoke_validation")
+
+    def test_completed_quality_gate_boundary_prunes_sensor_exr_and_retains_preview_videos(self) -> None:
+        fake = SuccessfulHarness(write_sensor_exr=True)
+        controller = AgentJobController(self.workspace, hooks=fake.hooks())
+        controller.create(
+            self.request,
+            job_id="job_candidate_sensor_retention",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+
+        boundary = controller.advance_until_blocked(
+            "job_candidate_sensor_retention",
+            stop_after_stage="quality_gate",
+        )
+
+        attempt_root = Path(boundary["paths"]["job_root"]) / "attempts" / "attempt_001"
+        run_dir = Path(read_json(attempt_root / "candidate_run.json")["run_dir"])
+        view_dir = run_dir / "views" / "front_static"
+        self.assertFalse((view_dir / "depth_frames").exists())
+        self.assertFalse((view_dir / "segmentation_frames").exists())
+        self.assertFalse((view_dir / "depth.exr").exists())
+        self.assertFalse((view_dir / "segmentation.exr").exists())
+        self.assertTrue((view_dir / "depth_preview.mp4").is_file())
+        self.assertTrue((view_dir / "segmentation_preview.mp4").is_file())
+        retention = read_json(run_dir / "sensor_artifact_retention.json")
+        self.assertEqual(retention["policy"], "post_quality_gate_validation")
+
+    def test_human_smoke_review_can_create_a_bounded_revision(self) -> None:
+        controller, fake = self.controller()
+        controller.create(
+            self.request,
+            job_id="job_smoke_review_revision",
+            publication_tier="local_preview",
+            seed_case_spec=case_spec_v2_fixture(),
+        )
+        boundary = controller.advance_until_blocked(
+            "job_smoke_review_revision",
+            stop_after_stage="smoke",
+        )
+        revised = copy.deepcopy(case_spec_v2_fixture())
+        revised["scene"]["duration_s"] = 2.5
+
+        resumed = controller.resume(
+            "job_smoke_review_revision",
+            revised_case_spec=revised,
+            revision_reason="human Smoke review requested a longer physical sequence",
+            stop_after_stage="smoke",
+        )
+
+        self.assertEqual(resumed["job"]["state"], "blocked")
+        self.assertEqual(resumed["job"]["current_attempt_id"], "attempt_002")
+        self.assertEqual(resumed["attempts"][-1]["parent_attempt_id"], "attempt_001")
+        proposal = read_json(
+            Path(boundary["paths"]["job_root"])
+            / "attempts"
+            / "attempt_001"
+            / "revision_proposal_001.json"
+        )
+        self.assertEqual(proposal["trigger_stage"], "smoke")
+        self.assertEqual(proposal["trigger_failure_code"], "user_approved_smoke_revision")
 
     def test_inspect_returns_the_current_nested_candidate_leaf_stage_result(self) -> None:
         fake = SuccessfulHarness()
@@ -2824,13 +2993,20 @@ class AgentJobControllerTests(unittest.TestCase):
             "job_revision_history",
             revised_case_spec=revised,
             revision_reason="adjust unlocked duration",
+            stop_after_stage="smoke",
         )
 
-        self.assertEqual(resumed["job"]["state"], "awaiting_semantic_review")
+        self.assertEqual(resumed["job"]["state"], "blocked")
+        self.assertEqual(resumed["job"]["current_stage"], "candidate")
+        self.assertEqual(resumed["job"]["blocker"]["code"], "requested_stage_boundary_reached")
         self.assertEqual([row["attempt_id"] for row in resumed["attempts"]], ["attempt_001", "attempt_002"])
         self.assertEqual(first_path.read_bytes(), first_bytes)
         second_root = Path(resumed["paths"]["job_root"]) / "attempts" / "attempt_002"
         self.assertTrue(read_json(second_root / "case_spec_diff.json")["changes"])
+
+        completed = controller.advance_until_blocked("job_revision_history")
+
+        self.assertEqual(completed["job"]["state"], "awaiting_semantic_review")
 
     def test_observation_only_revision_records_executed_smoke_without_replay_evidence(self) -> None:
         fake = SuccessfulHarness(fail_verifier=True)
@@ -2999,6 +3175,7 @@ class AgentJobControllerTests(unittest.TestCase):
                 "angular_damping": 0.24,
                 "enable_gravity": True,
                 "use_ccd": False,
+                "collision_geometry": {"shape": "sphere", "size_m": [0.2, 0.2, 0.2]},
             }
         )
         cue["physics"]["material"]["static_friction"] = 0.04
@@ -3026,6 +3203,7 @@ class AgentJobControllerTests(unittest.TestCase):
                     "secondary_axis": [0.0, 1.0, 0.0],
                 },
                 "linear_limit_m": 0.1,
+                "unilateral_distance_spring": {"rest_length_m": 0.8, "stiffness_n_m": 45.0, "damping_n_s_m": 3.0},
                 "angular_limits_deg": {"x": 45.0},
                 "axial_visual": {"object_id": "floor", "mesh_forward_axis": "x"},
             }
@@ -3048,6 +3226,7 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertIn("$.objects.cue_ball.physics.material.dynamic_friction", policy["paths"])
         self.assertIn("$.objects.cue_ball.physics.material.restitution", policy["paths"])
         self.assertIn("$.objects.cue_ball.physics.material.density_kg_m3", policy["paths"])
+        self.assertIn("$.objects.cue_ball.physics.collision_geometry.size_m", policy["paths"])
         self.assertIn("$.objects.floor.geometry.approx_size_m", policy["paths"])
         self.assertIn("$.objects.cue_ball.geometry.approx_size_m", policy["paths"])
         self.assertIn("$.objects.cue_ball.solver.motion.start_time_s", policy["paths"])
@@ -3059,6 +3238,9 @@ class AgentJobControllerTests(unittest.TestCase):
         self.assertIn("$.constraints.cue_hinge.frame_a.primary_axis", policy["paths"])
         self.assertIn("$.constraints.cue_hinge.frame_b.secondary_axis", policy["paths"])
         self.assertIn("$.constraints.cue_hinge.linear_limit_m", policy["paths"])
+        self.assertIn("$.constraints.cue_hinge.unilateral_distance_spring.rest_length_m", policy["paths"])
+        self.assertIn("$.constraints.cue_hinge.unilateral_distance_spring.stiffness_n_m", policy["paths"])
+        self.assertIn("$.constraints.cue_hinge.unilateral_distance_spring.damping_n_s_m", policy["paths"])
         self.assertIn("$.constraints.cue_hinge.angular_limits_deg.x", policy["paths"])
         self.assertIn("$.constraints.cue_hinge.axial_visual.mesh_forward_axis", policy["paths"])
         self.assertNotIn("$.objects.cue_ball.physics.body_type", policy["paths"])
@@ -3623,6 +3805,19 @@ class AgentJobCliTests(unittest.TestCase):
         self.assertIn("--max-case-spec-revisions", completed.stdout)
         self.assertIn("--allow-planning-image-upload", completed.stdout)
         self.assertIn("--allow-semantic-reviewer-image-upload", completed.stdout)
+        self.assertIn("--stop-after-stage", completed.stdout)
+
+    def test_advance_cli_exposes_stop_after_stage(self) -> None:
+        script = Path(__file__).resolve().parents[1] / "scripts" / "harness_agent_job.py"
+        completed = subprocess.run(
+            [sys.executable, str(script), "advance-until-blocked", "--help"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("--stop-after-stage", completed.stdout)
+        self.assertIn("smoke", completed.stdout)
 
     def test_m4_cli_exposes_explicit_review_and_revision_actions(self) -> None:
         script = Path(__file__).resolve().parents[1] / "scripts" / "harness_agent_job.py"

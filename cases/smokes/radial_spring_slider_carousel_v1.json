@@ -1,0 +1,200 @@
+{
+  "schema_version": "harness_case_spec_v2",
+  "identity": {
+    "case_id": "smoke_radial_spring_slider_carousel_v1",
+    "title": "Six spring-driven sliders converge on rotating radial guides",
+    "source_request": "Verify six differently displaced rigid sliders constrained to six rotating radial axes, driven toward one common radius while the central hub rotates."
+  },
+  "capabilities": {
+    "primary": "rigid_body_dynamics",
+    "required": ["rigid_body_dynamics"]
+  },
+  "scene": {
+    "environment_intent": "minimal controlled radial constraint stage",
+    "coordinate_system": "z_up",
+    "duration_s": 4.0,
+    "bounds_hint_m": [3.2, 3.2, 1.8]
+  },
+  "timebase": {
+    "physics_hz": 120,
+    "observation_fps": 24,
+    "deterministic_seed": 850085
+  },
+  "backend_constraints": {
+    "required_solver_capabilities": ["rigid_body", "rigid_constraints", "trajectory"],
+    "allowed_solvers": ["ue"],
+    "render_backend": "ue",
+    "allow_multi_backend": false
+  },
+  "asset_policy": {
+    "allow_local": true,
+    "allow_external": false,
+    "allow_generation": false,
+    "allow_analytic_proxy": true,
+    "required_license_tier": "local_preview"
+  },
+  "objects": [
+    {
+      "id": "hub_anchor",
+      "role": "constraint_anchor",
+      "geometry": {"shape_hint": "fixed_point", "approx_size_m": [0.05, 0.05, 0.05]},
+      "physics": {"body_type": "static", "mass_kg": 1.0, "collision_required": false},
+      "initial_state": {"position_m": [0.0, 0.0, 0.7], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "visual_representation": {"source": "none", "visible": false},
+      "behavior": {}
+    },
+    {
+      "id": "rotating_hub",
+      "role": "driven_carousel_hub",
+      "geometry": {"shape_hint": "cylinder", "approx_size_m": [0.34, 0.34, 0.12]},
+      "physics": {"body_type": "dynamic", "mass_kg": 2.5, "collision_required": true, "enable_gravity": false, "angular_damping": 0.03, "material": {"dynamic_friction": 0.2, "restitution": 0.05}},
+      "initial_state": {"position_m": [0.0, 0.0, 0.7], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "color_rgb": [0.18, 0.2, 0.24],
+      "fixed_material_color": true,
+      "behavior": {}
+    },
+    {
+      "id": "slider_0",
+      "role": "radial_spring_slider",
+      "geometry": {"shape_hint": "box", "approx_size_m": [0.18, 0.13, 0.1]},
+      "physics": {"body_type": "dynamic", "mass_kg": 0.35, "collision_required": true, "enable_gravity": false, "linear_damping": 0.02, "angular_damping": 0.05, "material": {"dynamic_friction": 0.08, "restitution": 0.02}},
+      "initial_state": {"position_m": [0.46, 0.0, 0.7], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "color_rgb": [0.82, 0.18, 0.12], "fixed_material_color": true, "behavior": {}
+    },
+    {
+      "id": "slider_1",
+      "role": "radial_spring_slider",
+      "geometry": {"shape_hint": "box", "approx_size_m": [0.18, 0.13, 0.1]},
+      "physics": {"body_type": "dynamic", "mass_kg": 0.35, "collision_required": true, "enable_gravity": false, "linear_damping": 0.02, "angular_damping": 0.05, "material": {"dynamic_friction": 0.08, "restitution": 0.02}},
+      "initial_state": {"position_m": [0.29, 0.502295, 0.7], "rotation_deg": [0.0, 60.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "color_rgb": [0.92, 0.48, 0.08], "fixed_material_color": true, "behavior": {}
+    },
+    {
+      "id": "slider_2",
+      "role": "radial_spring_slider",
+      "geometry": {"shape_hint": "box", "approx_size_m": [0.18, 0.13, 0.1]},
+      "physics": {"body_type": "dynamic", "mass_kg": 0.35, "collision_required": true, "enable_gravity": false, "linear_damping": 0.02, "angular_damping": 0.05, "material": {"dynamic_friction": 0.08, "restitution": 0.02}},
+      "initial_state": {"position_m": [-0.35, 0.606218, 0.7], "rotation_deg": [0.0, 120.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "color_rgb": [0.75, 0.75, 0.08], "fixed_material_color": true, "behavior": {}
+    },
+    {
+      "id": "slider_3",
+      "role": "radial_spring_slider",
+      "geometry": {"shape_hint": "box", "approx_size_m": [0.18, 0.13, 0.1]},
+      "physics": {"body_type": "dynamic", "mass_kg": 0.35, "collision_required": true, "enable_gravity": false, "linear_damping": 0.02, "angular_damping": 0.05, "material": {"dynamic_friction": 0.08, "restitution": 0.02}},
+      "initial_state": {"position_m": [-0.86, 0.0, 0.7], "rotation_deg": [0.0, 180.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "color_rgb": [0.12, 0.68, 0.34], "fixed_material_color": true, "behavior": {}
+    },
+    {
+      "id": "slider_4",
+      "role": "radial_spring_slider",
+      "geometry": {"shape_hint": "box", "approx_size_m": [0.18, 0.13, 0.1]},
+      "physics": {"body_type": "dynamic", "mass_kg": 0.35, "collision_required": true, "enable_gravity": false, "linear_damping": 0.02, "angular_damping": 0.05, "material": {"dynamic_friction": 0.08, "restitution": 0.02}},
+      "initial_state": {"position_m": [-0.49, -0.848705, 0.7], "rotation_deg": [0.0, 240.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "color_rgb": [0.1, 0.48, 0.82], "fixed_material_color": true, "behavior": {}
+    },
+    {
+      "id": "slider_5",
+      "role": "radial_spring_slider",
+      "geometry": {"shape_hint": "box", "approx_size_m": [0.18, 0.13, 0.1]},
+      "physics": {"body_type": "dynamic", "mass_kg": 0.35, "collision_required": true, "enable_gravity": false, "linear_damping": 0.02, "angular_damping": 0.05, "material": {"dynamic_friction": 0.08, "restitution": 0.02}},
+      "initial_state": {"position_m": [0.54, -0.935307, 0.7], "rotation_deg": [0.0, 300.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "color_rgb": [0.48, 0.22, 0.76], "fixed_material_color": true, "behavior": {}
+    }
+  ],
+  "relations": [],
+  "events": [],
+  "forces": [],
+  "constraints": [
+    {
+      "id": "hub_spin_drive", "body_a": "hub_anchor", "body_b": "rotating_hub",
+      "frame_a": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [0.0, 0.0, 1.0], "secondary_axis": [1.0, 0.0, 0.0]},
+      "frame_b": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [0.0, 0.0, 1.0], "secondary_axis": [1.0, 0.0, 0.0]},
+      "linear_motion": {"x": "locked", "y": "locked", "z": "locked"},
+      "angular_motion": {"x": "free", "y": "locked", "z": "locked"},
+      "angular_limits_deg": {},
+      "angular_drive": {
+        "mode": "twist_and_swing",
+        "position_enabled": {"twist": false, "swing": false, "slerp": false},
+        "velocity_enabled": {"twist": true, "swing": false, "slerp": false},
+        "velocity_target_rad_s": [1.2, 0.0, 0.0],
+        "damping_n_m_s_per_rad": 0.8,
+        "max_torque_n_m": 35.0,
+        "acceleration_mode": false
+      },
+      "collision_enabled": false
+    },
+    {
+      "id": "radial_drive_0", "body_a": "rotating_hub", "body_b": "slider_0",
+      "frame_a": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+      "frame_b": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+      "linear_motion": {"x": "free", "y": "locked", "z": "locked"}, "angular_motion": {"x": "locked", "y": "locked", "z": "locked"}, "angular_limits_deg": {},
+      "linear_drive": {"position_enabled": {"x": true, "y": false, "z": false}, "velocity_enabled": {"x": true, "y": false, "z": false}, "position_target_m": [0.78, 0.0, 0.0], "velocity_target_m_s": [0.0, 0.0, 0.0], "stiffness_n_m": [30.0, 0.0, 0.0], "damping_n_s_m": [2.2, 0.0, 0.0], "max_force_n": [35.0, 0.0, 0.0], "acceleration_mode": false},
+      "collision_enabled": false
+    },
+    {
+      "id": "radial_drive_1", "body_a": "rotating_hub", "body_b": "slider_1",
+      "frame_a": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [0.5, 0.8660254, 0.0], "secondary_axis": [-0.8660254, 0.5, 0.0]},
+      "frame_b": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+      "linear_motion": {"x": "free", "y": "locked", "z": "locked"}, "angular_motion": {"x": "locked", "y": "locked", "z": "locked"}, "angular_limits_deg": {},
+      "linear_drive": {"position_enabled": {"x": true, "y": false, "z": false}, "velocity_enabled": {"x": true, "y": false, "z": false}, "position_target_m": [0.78, 0.0, 0.0], "velocity_target_m_s": [0.0, 0.0, 0.0], "stiffness_n_m": [30.0, 0.0, 0.0], "damping_n_s_m": [2.2, 0.0, 0.0], "max_force_n": [35.0, 0.0, 0.0], "acceleration_mode": false},
+      "collision_enabled": false
+    },
+    {
+      "id": "radial_drive_2", "body_a": "rotating_hub", "body_b": "slider_2",
+      "frame_a": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [-0.5, 0.8660254, 0.0], "secondary_axis": [-0.8660254, -0.5, 0.0]},
+      "frame_b": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+      "linear_motion": {"x": "free", "y": "locked", "z": "locked"}, "angular_motion": {"x": "locked", "y": "locked", "z": "locked"}, "angular_limits_deg": {},
+      "linear_drive": {"position_enabled": {"x": true, "y": false, "z": false}, "velocity_enabled": {"x": true, "y": false, "z": false}, "position_target_m": [0.78, 0.0, 0.0], "velocity_target_m_s": [0.0, 0.0, 0.0], "stiffness_n_m": [30.0, 0.0, 0.0], "damping_n_s_m": [2.2, 0.0, 0.0], "max_force_n": [35.0, 0.0, 0.0], "acceleration_mode": false},
+      "collision_enabled": false
+    },
+    {
+      "id": "radial_drive_3", "body_a": "rotating_hub", "body_b": "slider_3",
+      "frame_a": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [-1.0, 0.0, 0.0], "secondary_axis": [0.0, -1.0, 0.0]},
+      "frame_b": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+      "linear_motion": {"x": "free", "y": "locked", "z": "locked"}, "angular_motion": {"x": "locked", "y": "locked", "z": "locked"}, "angular_limits_deg": {},
+      "linear_drive": {"position_enabled": {"x": true, "y": false, "z": false}, "velocity_enabled": {"x": true, "y": false, "z": false}, "position_target_m": [0.78, 0.0, 0.0], "velocity_target_m_s": [0.0, 0.0, 0.0], "stiffness_n_m": [30.0, 0.0, 0.0], "damping_n_s_m": [2.2, 0.0, 0.0], "max_force_n": [35.0, 0.0, 0.0], "acceleration_mode": false},
+      "collision_enabled": false
+    },
+    {
+      "id": "radial_drive_4", "body_a": "rotating_hub", "body_b": "slider_4",
+      "frame_a": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [-0.5, -0.8660254, 0.0], "secondary_axis": [0.8660254, -0.5, 0.0]},
+      "frame_b": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+      "linear_motion": {"x": "free", "y": "locked", "z": "locked"}, "angular_motion": {"x": "locked", "y": "locked", "z": "locked"}, "angular_limits_deg": {},
+      "linear_drive": {"position_enabled": {"x": true, "y": false, "z": false}, "velocity_enabled": {"x": true, "y": false, "z": false}, "position_target_m": [0.78, 0.0, 0.0], "velocity_target_m_s": [0.0, 0.0, 0.0], "stiffness_n_m": [30.0, 0.0, 0.0], "damping_n_s_m": [2.2, 0.0, 0.0], "max_force_n": [35.0, 0.0, 0.0], "acceleration_mode": false},
+      "collision_enabled": false
+    },
+    {
+      "id": "radial_drive_5", "body_a": "rotating_hub", "body_b": "slider_5",
+      "frame_a": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [0.5, -0.8660254, 0.0], "secondary_axis": [0.8660254, 0.5, 0.0]},
+      "frame_b": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+      "linear_motion": {"x": "free", "y": "locked", "z": "locked"}, "angular_motion": {"x": "locked", "y": "locked", "z": "locked"}, "angular_limits_deg": {},
+      "linear_drive": {"position_enabled": {"x": true, "y": false, "z": false}, "velocity_enabled": {"x": true, "y": false, "z": false}, "position_target_m": [0.78, 0.0, 0.0], "velocity_target_m_s": [0.0, 0.0, 0.0], "stiffness_n_m": [30.0, 0.0, 0.0], "damping_n_s_m": [2.2, 0.0, 0.0], "max_force_n": [35.0, 0.0, 0.0], "acceleration_mode": false},
+      "collision_enabled": false
+    }
+  ],
+  "expected_behavior": {
+    "native_constraint_trace_required": true,
+    "six_radial_drives_required": true,
+    "hub_rotation_required": true,
+    "common_final_radius_m": 0.78
+  },
+  "observation_requirements": {
+    "cameras": [
+      {"role": "overview", "coordinate_frame": "world", "position_m": [2.4, -2.8, 2.5], "look_at_m": [0.0, 0.0, 0.7], "fov_deg": 47.0, "framing": "scene", "target_objects": ["rotating_hub", "slider_0", "slider_1", "slider_2", "slider_3", "slider_4", "slider_5"]},
+      {"role": "top", "coordinate_frame": "world", "position_m": [0.0, 0.0, 3.9], "look_at_m": [0.0, 0.0, 0.7], "fov_deg": 42.0, "framing": "scene", "target_objects": ["rotating_hub", "slider_0", "slider_1", "slider_2", "slider_3", "slider_4", "slider_5"]}
+    ],
+    "modalities": ["rgb"],
+    "signals": ["trajectory"]
+  },
+  "verification_requirements": {
+    "assertions": [
+      {"id": "trajectory_integrity", "type": "trajectory_integrity"},
+      {"id": "hub_rotates", "type": "state_value", "object_id": "rotating_hub", "field": "rotation_deg.y", "reduction": "max", "operator": ">=", "value": 60.0}
+    ],
+    "thresholds": {}
+  },
+  "variant": {"should_pass": true},
+  "provenance": {"purpose": "supplementary_compound_smoke", "supplementary_cases": ["R087"]},
+  "notes": "One generic compound scene exercises one angular velocity drive and six simultaneously rotated linear spring-damper guide constraints without selecting behavior by Case ID."
+}

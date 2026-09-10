@@ -19,6 +19,60 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class UEAssetImporterLauncherTests(unittest.TestCase):
+    def test_local_inputs_import_material_dependencies(self) -> None:
+        source = Path(__file__).resolve().parents[1] / "scripts" / "native_ue_asset_importer.py"
+        text = source.read_text(encoding="utf-8")
+
+        self.assertIn(
+            'source_kind in {"external_site", "local_input", "model_generation", "user_file"}',
+            text,
+        )
+
+    def test_native_importer_selects_explicit_base_color_source(self) -> None:
+        source = Path(__file__).resolve().parents[1] / "scripts" / "native_ue_asset_importer.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_base_color_file"
+        )
+        namespace = {
+            "Any": object,
+            "Path": Path,
+            "BASE_COLOR_IMAGE_SUFFIXES": {".jpeg", ".jpg", ".png", ".tif", ".tiff"},
+        }
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base_color = root / "base.PNG"
+            base_color.touch()
+            normal = root / "normal.png"
+            normal.touch()
+            request = {
+                "source_files": [
+                    {"role": "texture_normal", "local_path": str(normal)},
+                    {"role": "texture_base_color", "local_path": str(base_color)},
+                ]
+            }
+            self.assertEqual(namespace["_base_color_file"](request), base_color.resolve())
+
+    def test_native_importer_uses_double_sided_complex_collision_when_requested(self) -> None:
+        source = Path(__file__).resolve().parents[1] / "scripts" / "native_ue_asset_importer.py"
+        text = source.read_text(encoding="utf-8")
+
+        self.assertIn('"convex_decomposition"', text)
+        self.assertIn("unreal.CollisionTraceFlag.CTF_USE_COMPLEX_AS_SIMPLE", text)
+        self.assertIn('body_setup.set_editor_property("double_sided_geometry", True)', text)
+        self.assertIn('portable_collision_error = "complex triangle collision is UE-static-only"', text)
+
+    def test_native_importer_supports_requested_convex_decomposition(self) -> None:
+        source = Path(__file__).resolve().parents[1] / "scripts" / "native_ue_asset_importer.py"
+        text = source.read_text(encoding="utf-8")
+
+        self.assertIn('request.get("convex_hull_count")', text)
+        self.assertIn("set_convex_decomposition_collisions", text)
+
     def test_native_geometry_analysis_uses_python_exposed_static_mesh_export(self) -> None:
         source = Path(__file__).resolve().parents[1] / "scripts" / "native_ue_asset_importer.py"
         text = source.read_text(encoding="utf-8")
@@ -207,6 +261,39 @@ class UEAssetImporterLauncherTests(unittest.TestCase):
                 if line.startswith("vn ")
             )
             self.assertEqual(normal, [0.0, 0.0, 1.0])
+            for path in temporary_paths:
+                path.unlink(missing_ok=True)
+
+    def test_prepare_meshy_obj_places_verified_base_color_beside_normalized_mesh(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "remote.obj"
+            source.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nv 0 0 1\nf 1 2 3\nf 1 2 4\n", encoding="utf-8")
+            base_color = root / "albedo.png"
+            base_color.write_bytes(b"fixture-png")
+            request = {
+                "request_id": "backend-import.remote-textured",
+                "request_digest": "d" * 64,
+                "asset_id": "generated.meshy.textured-fixture",
+                "source_kind": "model_generation",
+                "provider_id": "meshy_model_generation_v1",
+                "expected_size_m": [0.3, 0.3, 0.3],
+                "source_files": [
+                    {"role": "provider_import_source", "local_path": str(source), "materialized": True},
+                    {"role": "texture_base_color", "local_path": str(base_color), "materialized": True},
+                ],
+            }
+            request_path = root / "request.json"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+
+            ue_request_path, temporary_paths = _prepare_ue_request(request_path, request)
+            ue_request = json.loads(ue_request_path.read_text(encoding="utf-8"))
+            copied = Path(next(row for row in ue_request["source_files"] if row["role"] == "texture_base_color")["local_path"])
+            normalized = Path(next(row for row in ue_request["source_files"] if row["role"] == "provider_import_source")["local_path"])
+
+            self.assertEqual(copied.parent, normalized.parent)
+            self.assertEqual(copied.read_bytes(), base_color.read_bytes())
+            self.assertIn(copied, temporary_paths)
             for path in temporary_paths:
                 path.unlink(missing_ok=True)
 

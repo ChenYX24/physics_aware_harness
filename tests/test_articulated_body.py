@@ -107,27 +107,25 @@ def articulated_case() -> dict:
 
 def animated_character_case() -> dict:
     data = articulated_case()
-    solver = data["objects"][0]["solver"]
-    solver["pose_source"] = {
-        "type": "animation_sequence",
-        "segments": [
-            {
-                "animation_asset_id": "harness_ue4_mannequin_walk_v1",
-                "start_time_s": 0.0,
-                "end_time_s": 2.0,
-                "play_rate": 1.0,
-                "loop": True,
-            }
-        ],
-    }
-    solver["root_transform_source"] = {
+    data["objects"][0]["solver"] = {
+        "type": "articulated_body",
+        "model": "harness_ue_gasp_character_v1",
+        "mode": "kinematic",
+        "support_object_id": None,
+        "attachments": data["objects"][0]["solver"]["attachments"],
+        "head_look_target": None,
+        "movement_control": {
         "type": "character_movement",
         "keyframes": [
-            {"time_s": 0.0, "position_offset_m": [0.0, 0.0, 0.0], "rotation_offset_deg": [0.0, 0.0, 0.0]},
-            {"time_s": 2.0, "position_offset_m": [1.2, 0.0, 0.0], "rotation_offset_deg": [0.0, 0.0, 0.0]},
+                {"time_s": 0.0, "target_velocity_m_s": [0.0, 0.0, 0.0], "facing_yaw_deg": 0.0, "crouched": False},
+                {"time_s": 1.0, "target_velocity_m_s": [1.2, 0.0, 0.0], "facing_yaw_deg": 45.0, "crouched": False},
+                {"time_s": 2.0, "target_velocity_m_s": [0.0, 0.0, 0.0], "facing_yaw_deg": 90.0, "crouched": True},
         ],
-        "max_speed_m_s": 1.0,
-        "max_acceleration_m_s2": 2.0,
+            "events": [{"time_s": 1.25, "type": "jump"}],
+            "max_speed_m_s": 2.0,
+            "max_acceleration_m_s2": 4.0,
+            "max_turn_rate_deg_s": 120.0,
+        },
     }
     return data
 
@@ -156,7 +154,7 @@ class ArticulatedBodyTests(unittest.TestCase):
         self.assertEqual(report["failure_type"], "F_ARTICULATED_EXECUTION_FAILED")
         self.assertEqual(report["first_failure"]["metric"], "post_tick_observation_missing")
 
-    def test_animation_and_character_movement_compile_as_orthogonal_sources(self) -> None:
+    def test_gasp_character_compiles_from_high_level_movement_control(self) -> None:
         case = case_spec_v2_from_dict(animated_character_case())
         runtime = compile_case_spec_v2_runtime(case)
         contract = runtime.data["objects"][0]["solver"]
@@ -165,9 +163,10 @@ class ArticulatedBodyTests(unittest.TestCase):
         dynamic, _ = runtime_objects_from_actor_placement(placement, runtime.data)
         human = next(item for item in dynamic if item["id"] == "cue_ball")
 
-        self.assertEqual(contract["schema_version"], "harness_articulated_body_contract_v3")
-        self.assertEqual(contract["pose_source"]["segments"][0]["animation_asset_path"], "/Game/Characters/Mannequins/Anims/Unarmed/Walk/MF_Unarmed_Walk_Fwd.MF_Unarmed_Walk_Fwd")
-        self.assertEqual(contract["root_transform_source"]["type"], "character_movement")
+        self.assertEqual(contract["schema_version"], "harness_articulated_body_contract_v4")
+        self.assertEqual(contract["asset_path"], "/Game/Blueprints/SandboxCharacter_CMC.SandboxCharacter_CMC_C")
+        self.assertEqual(contract["movement_control"]["type"], "character_movement")
+        self.assertNotIn("pose_source", contract)
         self.assertEqual(human["behavior"], "articulated_character")
         self.assertEqual(human["asset_kind"], "articulated_character")
 
@@ -196,105 +195,98 @@ class ArticulatedBodyTests(unittest.TestCase):
         ambiguous["objects"][0]["solver"]["support_object_id"] = "floor"
         case_spec_v2_from_dict(ambiguous)
 
-    def test_in_place_animation_cannot_claim_root_motion(self) -> None:
+    def test_legacy_clip_selection_is_not_part_of_natural_motion_contract(self) -> None:
         data = animated_character_case()
-        data["objects"][0]["solver"]["root_transform_source"] = {"type": "animation_root_motion"}
+        data["objects"][0]["solver"]["pose_source"] = {"type": "animation_sequence", "segments": []}
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("invalid_articulated_body_contract", {issue.code for issue in context.exception.issues})
+
+    def test_movement_control_interpolates_velocity_facing_and_crouch_state(self) -> None:
+        runtime = compile_case_spec_v2_runtime(case_spec_v2_from_dict(animated_character_case()))
+        pose = sample_articulated_body_contract(runtime.data["objects"][0]["solver"], 0.5)
+        self.assertEqual(pose["movement_control"]["target_velocity_m_s"], [0.6, 0.0, 0.0])
+        self.assertEqual(pose["movement_control"]["facing_yaw_deg"], 22.5)
+        self.assertFalse(pose["movement_control"]["crouched"])
+
+    def test_movement_control_rejects_independent_look_fields(self) -> None:
+        data = animated_character_case()
+        keyframes = data["objects"][0]["solver"]["movement_control"]["keyframes"]
+        keyframes[1]["look_yaw_deg"] = 120.0
 
         with self.assertRaises(CaseSpecV2ValidationError) as context:
             case_spec_v2_from_dict(data)
-
         self.assertIn("invalid_articulated_body_contract", {issue.code for issue in context.exception.issues})
 
-    def test_ik_targets_are_sampled_independently_of_base_pose(self) -> None:
+    def test_gasp_character_compiles_world_space_head_look_target(self) -> None:
         data = animated_character_case()
-        data["objects"][0]["solver"]["ik_targets"] = [
-            {
-                "goal": "hand_r",
-                "tolerance_m": 0.03,
-                "keyframes": [
-                    {"time_s": 0.0, "position_m": [0.0, 0.0, 1.0], "rotation_deg": [0.0, 0.0, 0.0], "weight": 0.0},
-                    {"time_s": 2.0, "position_m": [0.4, 0.0, 1.2], "rotation_deg": [0.0, 45.0, 0.0], "weight": 1.0},
-                ],
-            }
-        ]
+        for keyframe in data["objects"][0]["solver"]["movement_control"]["keyframes"]:
+            keyframe["facing_yaw_deg"] = 0.0
+        data["objects"][0]["solver"]["head_look_target"] = {
+            "tolerance_deg": 8.0,
+            "keyframes": [
+                {"time_s": 0.0, "position_m": [2.0, 0.0, 1.6], "weight": 0.0},
+                {"time_s": 1.0, "position_m": [0.0, -2.0, 1.6], "weight": 1.0},
+            ],
+        }
+
         runtime = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data))
+        contract = runtime.data["objects"][0]["solver"]
+        sampled = sample_articulated_body_contract(contract, 0.5)
 
-        pose = sample_articulated_body_contract(runtime.data["objects"][0]["solver"], 1.0)
-
-        self.assertEqual(pose["ik_targets"]["hand_r"]["position_m"], [0.2, 0.0, 1.1])
-        self.assertEqual(pose["ik_targets"]["hand_r"]["rotation_deg"], [0.0, 22.5, 0.0])
-        self.assertEqual(pose["ik_targets"]["hand_r"]["weight"], 0.5)
-
-    def test_animation_pose_overlay_is_weighted_local_rotation_without_root_ownership(self) -> None:
-        data = animated_character_case()
-        data["objects"][0]["solver"]["pose_overlay"] = {
-            "type": "bone_local_rotation_offsets",
-            "keyframes": [
-                {"time_s": 0.0, "rotations_deg": {"head": [0.0, 0.0, 0.0]}, "weight": 0.0},
-                {"time_s": 2.0, "rotations_deg": {"head": [0.0, 60.0, 0.0]}, "weight": 1.0},
-            ],
-        }
-        contract = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data)).data["objects"][0]["solver"]
-
-        sampled = sample_articulated_body_contract(contract, 1.0)
-
-        self.assertEqual(sampled["pose_overlay"]["rotation_space"], "bone_local_offset")
-        self.assertEqual(sampled["pose_overlay"]["blend_mode"], "weighted_additive")
-        self.assertEqual(sampled["pose_overlay"]["rotations_deg"]["head"], [0.0, 30.0, 0.0])
-        self.assertEqual(sampled["pose_overlay"]["weight"], 0.5)
-        self.assertEqual(contract["root_transform_source"]["type"], "character_movement")
-
-    def test_pose_overlay_rejects_root(self) -> None:
-        data = animated_character_case()
-        data["objects"][0]["solver"]["pose_overlay"] = {
-            "type": "bone_local_rotation_offsets",
-            "keyframes": [{"time_s": 0.0, "rotations_deg": {"root": [0.0, 10.0, 0.0]}, "weight": 1.0}],
-        }
-
-        with self.assertRaises(CaseSpecV2ValidationError) as context:
-            case_spec_v2_from_dict(data)
-
-        self.assertIn("invalid_articulated_body_contract", {issue.code for issue in context.exception.issues})
-
-    def test_ik_pole_and_head_look_are_sampled_as_chain_layers(self) -> None:
-        data = animated_character_case()
-        solver = data["objects"][0]["solver"]
-        solver["ik_targets"] = [{
-            "goal": "hand_l",
-            "tolerance_m": 0.03,
-            "keyframes": [
-                {"time_s": 0.0, "position_m": [0.0, 0.0, 1.0], "rotation_deg": [0.0, 0.0, 0.0], "pole_position_m": [0.0, -0.4, 1.2], "weight": 0.0},
-                {"time_s": 2.0, "position_m": [0.4, 0.0, 1.2], "rotation_deg": [0.0, 40.0, 0.0], "pole_position_m": [0.2, -0.4, 1.3], "weight": 1.0},
-            ],
-        }]
-        solver["head_look_target"] = {
-            "tolerance_deg": 4.0,
-            "keyframes": [
-                {"time_s": 0.0, "position_m": [1.0, 0.0, 1.7], "weight": 0.0},
-                {"time_s": 2.0, "position_m": [1.0, 1.0, 1.7], "weight": 1.0},
-            ],
-        }
-        contract = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data)).data["objects"][0]["solver"]
-
-        sampled = sample_articulated_body_contract(contract, 1.0)
-
-        self.assertEqual(sampled["ik_targets"]["hand_l"]["pole_position_m"], [0.1, -0.4, 1.25])
-        self.assertEqual(sampled["head_look_target"]["position_m"], [1.0, 0.5, 1.7])
+        self.assertEqual(sampled["head_look_target"]["position_m"], [1.0, -1.0, 1.6])
         self.assertEqual(sampled["head_look_target"]["weight"], 0.5)
 
-    def test_ik_compiles_to_the_fixed_control_rig(self) -> None:
+    def test_gasp_head_look_rejects_a_simultaneous_body_facing_trajectory(self) -> None:
         data = animated_character_case()
-        data["objects"][0]["solver"]["ik_targets"] = [{
-            "goal": "hand_r",
-            "tolerance_m": 0.03,
+        for keyframe in data["objects"][0]["solver"]["movement_control"]["keyframes"]:
+            keyframe["target_velocity_m_s"] = [0.0, 0.0, 0.0]
+        data["objects"][0]["solver"]["head_look_target"] = {
+            "tolerance_deg": 8.0,
             "keyframes": [
-                {"time_s": 0.0, "position_m": [0.0, 0.0, 1.0], "rotation_deg": [0.0, 0.0, 0.0], "weight": 1.0},
-                {"time_s": 2.0, "position_m": [0.4, 0.0, 1.2], "rotation_deg": [0.0, 45.0, 0.0], "weight": 1.0},
+                {"time_s": 0.0, "position_m": [2.0, 0.0, 1.6], "weight": 1.0},
+                {"time_s": 2.0, "position_m": [0.0, -2.0, 1.6], "weight": 1.0},
             ],
-        }]
-        runtime = compile_case_spec_v2_runtime(case_spec_v2_from_dict(data))
+        }
 
-        self.assertEqual(runtime.data["objects"][0]["solver"]["control_rig_path"], ARTICULATED_BODY_CONTROL_RIG_PATH)
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("invalid_articulated_body_contract", {issue.code for issue in context.exception.issues})
+
+    def test_gasp_head_look_rejects_a_moving_body_turn(self) -> None:
+        data = animated_character_case()
+        data["objects"][0]["solver"]["movement_control"]["keyframes"][1]["target_velocity_m_s"] = [
+            0.0,
+            -0.2,
+            0.0,
+        ]
+        data["objects"][0]["solver"]["head_look_target"] = {
+            "tolerance_deg": 20.0,
+            "keyframes": [
+                {"time_s": 0.0, "position_m": [-2.0, 0.0, 1.6], "weight": 0.0},
+                {"time_s": 2.0, "position_m": [-2.0, 0.0, 1.6], "weight": 1.0},
+            ],
+        }
+
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(data)
+        self.assertIn("invalid_articulated_body_contract", {issue.code for issue in context.exception.issues})
+
+    def test_natural_motion_rejects_low_level_pose_controls(self) -> None:
+        data = animated_character_case()
+        data["objects"][0]["solver"]["pose_overlay"] = {"type": "bone_local_rotation_offsets", "keyframes": []}
+        with self.assertRaises(CaseSpecV2ValidationError):
+            case_spec_v2_from_dict(data)
+
+    def test_movement_control_rejects_vertical_velocity_and_overspeed(self) -> None:
+        data = animated_character_case()
+        data["objects"][0]["solver"]["movement_control"]["keyframes"][1]["target_velocity_m_s"] = [0.0, 0.0, 0.1]
+        with self.assertRaises(CaseSpecV2ValidationError):
+            case_spec_v2_from_dict(data)
+        data = animated_character_case()
+        data["objects"][0]["solver"]["movement_control"]["keyframes"][1]["target_velocity_m_s"] = [2.1, 0.0, 0.0]
+        with self.assertRaises(CaseSpecV2ValidationError):
+            case_spec_v2_from_dict(data)
 
     def test_fixed_mannequin_materializes_at_its_authored_package_root(self) -> None:
         runtime = compile_case_spec_v2_runtime(case_spec_v2_from_dict(articulated_case()))
@@ -334,39 +326,23 @@ class ArticulatedBodyTests(unittest.TestCase):
             self.assertTrue((project.parent / "Content/Characters/Mannequins/Rigs/CR_Mannequin_Body.uasset").is_file())
             self.assertFalse((project.parent / "Content/Mannequin/Character/Mesh/SK_Mannequin.uasset").exists())
 
-    def test_declared_animation_is_materialized_from_fixed_bundle(self) -> None:
+    def test_gasp_character_does_not_copy_legacy_template_clips(self) -> None:
         runtime = compile_case_spec_v2_runtime(case_spec_v2_from_dict(animated_character_case()))
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
             executable = root / "UE_5.7/Engine/Binaries/Mac/UnrealEditor-Cmd"
             project = root / "Project/SimulatorWorkspace.uproject"
-            character_source = root / "UE_5.7/Templates/TemplateResources/High/Characters/Content/Mannequins"
-            animation_source = root / "UE_5.7/Templates/TemplateResources/High/Characters/Content/Mannequins/Anims/Unarmed/Walk"
             executable.parent.mkdir(parents=True)
             executable.touch()
             project.parent.mkdir(parents=True)
             project.touch()
-            for relative in (
-                "Meshes/SKM_Manny_Simple.uasset",
-                "Meshes/SK_Mannequin.uasset",
-                "Rigs/PA_Mannequin.uasset",
-                "Rigs/CR_Mannequin_Body.uasset",
-            ):
-                path = character_source / relative
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(relative.encode("utf-8"))
-            animation_source.mkdir(parents=True)
-            (animation_source / "MF_Unarmed_Walk_Fwd.uasset").write_bytes(b"walk")
 
             materialize_articulated_body_assets(
                 runtime,
                 {"resolved_paths": {"SIM_STUDIO_UE_EXECUTABLE": str(executable), "SIM_STUDIO_UE_PROJECT": str(project)}},
             )
 
-            self.assertEqual(
-                (project.parent / "Content/Characters/Mannequins/Anims/Unarmed/Walk/MF_Unarmed_Walk_Fwd.uasset").read_bytes(),
-                b"walk",
-            )
+            self.assertFalse((project.parent / "Content/Characters/Mannequins").exists())
 
     def test_contract_compiles_and_interpolates_root_and_joint_pose(self) -> None:
         solver = articulated_case()["objects"][0]["solver"]

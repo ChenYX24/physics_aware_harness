@@ -20,10 +20,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from harness.core.case_spec import fracture_center_from_contact, fracture_response_for_energy
 from harness.core.timebase import build_timebase
+from harness.runtime.kinematic_motion import sample_linear_kinematic_position, sample_linear_kinematic_rotation
 from harness.runtime.articulated_body import (
     ARTICULATED_BODY_BONES,
     ARTICULATED_BODY_CONTROL_RIG_PATH,
     ARTICULATED_BODY_PHYSICS_ASSET_PATH,
+    ARTICULATED_CHARACTER_CLASS_PATH,
     ARTICULATED_HEAD_LOOK_CONTROLS,
     ARTICULATED_IK_CONTROLS,
     sample_articulated_body_contract,
@@ -52,6 +54,8 @@ SURFACE_REPLAY_MATERIALS = {}
 # mapping and command state.
 ARTICULATED_CONTROL_RIG_CONTEXTS = {}
 ARTICULATED_ANIMATION_SOURCE_TAG = "HarnessArticulatedAnimationSource"
+GASP_IDLE_WARMUP_SECONDS = 0.5
+GASP_POST_GROUND_SETTLE_SECONDS = 1.0
 
 
 def env_int(name: str, default: int, min_value: int | None = None, max_value: int | None = None) -> int:
@@ -86,6 +90,11 @@ WIDTH = env_int("WIDTH", 1920, 64, 7680)
 HEIGHT = env_int("HEIGHT", 1080, 64, 4320)
 FPS = env_int("FPS", 24, 1, 120)
 DURATION = float(os.environ.get("DURATION", "6.0"))
+LAYOUT_PREVIEW_TIME_S = (
+    float(os.environ["LAYOUT_PREVIEW_TIME_S"])
+    if "LAYOUT_PREVIEW_TIME_S" in os.environ
+    else None
+)
 ASSET_ROOT = Path(os.environ.get("ASSET_ROOT", str(Path(__file__).resolve().parents[1] / "assets")))
 VISUAL_REALISM_PROFILE = os.environ.get("VISUAL_REALISM_PROFILE", "editor_parity").strip().lower()
 EDITOR_VIEWPORT_MATCH_REALISM = VISUAL_REALISM_PROFILE in {"editor_viewport_match", "viewport_match", "editor_lit_match", "lit_viewport_match"}
@@ -129,6 +138,10 @@ GITLAB_ONLY_ASSETS = os.environ.get("ASSET_DATABASE_ONLY_ASSETS", os.environ.get
 MULTI_VIEW = os.environ.get("MULTI_VIEW", "1") != "0"
 CANONICAL_MULTI_VIEW = os.environ.get("CANONICAL_MULTI_VIEW", "1") != "0"
 RENDER_DATA_PASSES = os.environ.get("RENDER_DATA_PASSES", "1") != "0"
+RENDER_DEPTH_PASSES = os.environ.get("RENDER_DEPTH_PASSES", "1") != "0"
+RENDER_SEGMENTATION_PASSES = os.environ.get("RENDER_SEGMENTATION_PASSES", "1") != "0"
+RENDER_PASS_MODE = os.environ.get("WORLD_MODEL_RENDER_PASS_MODE", "both").strip().lower()
+RENDER_DATA_SAMPLE_COUNT = env_int("RENDER_DATA_SAMPLE_COUNT", 0, 0, 120)
 AUDIO_PASS_ENABLED = os.environ.get("AUDIO_PASS_ENABLED", "1") != "0"
 STAGE_HELPERS = os.environ.get("STAGE_HELPERS", "1") != "0"
 EXTRA_STAGE_MARKERS = os.environ.get("EXTRA_STAGE_MARKERS", "0") == "1"
@@ -389,6 +402,21 @@ def resolve_runtime_asset_path(obj: dict) -> str:
         if not raw_path:
             raise RuntimeError(f"runtime blueprint {obj.get('id')} missing ue5_path")
         return normalize_object_path(raw_path)
+    asset_key = obj.get("asset_key")
+    assets = manifest_assets()
+    manifest_asset = assets.get(asset_key) if asset_key else None
+    raw_path = obj.get("ue5_path") or (manifest_asset or {}).get("ue5_path")
+    if raw_path:
+        path = normalize_object_path(str(raw_path))
+        if unreal.load_asset(path):
+            ASSET_SELECTION_METADATA[asset_key or obj.get("id", "runtime_asset")] = {
+                "path": path,
+                "source": (manifest_asset or {}).get("source", "runtime_scene"),
+                "asset_id": asset_key,
+                "name": obj.get("asset_name"),
+                "fallback_reason": None,
+            }
+            return path
     if obj.get("behavior") == "third_person_runner" and not keep_material_mesh:
         path = normalize_object_path(ASSETS["cube"])
         ASSET_SELECTION_METADATA[obj.get("asset_key") or obj.get("id", "character_proxy")] = {
@@ -509,22 +537,9 @@ def resolve_runtime_asset_path(obj: dict) -> str:
             "fallback_reason": "material-library floor meshes were too thin for stable gravity contact support",
         }
         return path
-    asset_key = obj.get("asset_key")
-    assets = manifest_assets()
-    manifest_asset = assets.get(asset_key) if asset_key else None
-    raw_path = obj.get("ue5_path") or (manifest_asset or {}).get("ue5_path")
     if not raw_path:
         raise RuntimeError(f"runtime object {obj.get('id')} missing material-library ue5_path")
     path = normalize_object_path(str(raw_path))
-    if unreal.load_asset(path):
-        ASSET_SELECTION_METADATA[asset_key or obj.get("id", "runtime_asset")] = {
-            "path": path,
-            "source": (manifest_asset or {}).get("source", "runtime_scene"),
-            "asset_id": asset_key,
-            "name": obj.get("asset_name"),
-            "fallback_reason": None,
-        }
-        return path
     raise RuntimeError(f"failed to load runtime material-library asset for {obj.get('id')}: {path}")
 
 
@@ -2936,7 +2951,82 @@ def spawn_static_mesh(label: str, mesh_path: str, location: unreal.Vector, scale
     return actor
 
 
+def authoritative_character_mesh_component(actor):
+    movement_class = getattr(unreal, "CharacterMovementComponent", None)
+    skeletal_class = getattr(unreal, "SkeletalMeshComponent", None)
+    if not actor or not movement_class or not skeletal_class:
+        return None
+    try:
+        if not actor.get_component_by_class(movement_class):
+            return None
+        components = actor.get_components_by_class(skeletal_class) or []
+    except Exception:
+        return None
+    for component in components:
+        try:
+            if component.component_has_tag(unreal.Name(ARTICULATED_ANIMATION_SOURCE_TAG)):
+                continue
+        except Exception:
+            pass
+        return component
+    return None
+
+
+def sanitize_articulated_character_rendering(actor) -> dict:
+    render_component = authoritative_character_mesh_component(actor)
+    detail = {
+        "render_component": None,
+        "hidden_primitive_components": [],
+        "sanitized": False,
+    }
+    if not render_component:
+        return detail
+    try:
+        detail["render_component"] = render_component.get_name()
+    except Exception:
+        detail["render_component"] = str(render_component)
+    primitive_class = getattr(unreal, "PrimitiveComponent", None)
+    try:
+        primitive_components = actor.get_components_by_class(primitive_class) if primitive_class else []
+    except Exception:
+        primitive_components = []
+    for component in primitive_components:
+        if component == render_component:
+            component.set_visibility(True, False)
+            component.set_hidden_in_game(False, False)
+            continue
+        component.set_visibility(False, False)
+        component.set_hidden_in_game(True, False)
+        try:
+            detail["hidden_primitive_components"].append(component.get_name())
+        except Exception:
+            detail["hidden_primitive_components"].append(str(component))
+    detail["sanitized"] = True
+    return detail
+
+
+def sanitize_articulated_character_cameras(actor, controller) -> dict:
+    controller.set_editor_property("auto_manage_active_camera_target", False)
+    actor_component_class = getattr(unreal, "ActorComponent", None)
+    components = actor.get_components_by_class(actor_component_class) if actor_component_class else []
+    deactivated = []
+    for component in components or []:
+        class_name = component.get_class().get_name()
+        if class_name not in {"CameraComponent", "CineCameraComponent", "GameplayCameraComponent"}:
+            continue
+        component.set_editor_property("auto_activate", False)
+        component.deactivate()
+        deactivated.append(component.get_name())
+    return {
+        "controller_auto_camera_management": False,
+        "deactivated_components": deactivated,
+    }
+
+
 def actor_runtime_component(actor):
+    character_mesh = authoritative_character_mesh_component(actor)
+    if character_mesh:
+        return character_mesh
     for attr in ("static_mesh_component", "skeletal_mesh_component"):
         component = getattr(actor, attr, None)
         if component:
@@ -3016,6 +3106,8 @@ def runtime_constraint_binding_details(runtime_scene: dict) -> dict:
             "frame_b": binding["frame_b"],
             "linear_motion": binding["linear_motion"],
             **({"linear_limit_m": binding["linear_limit_m"]} if binding.get("linear_limit_m") is not None else {}),
+            **({"unilateral_distance_spring": binding["unilateral_distance_spring"]} if binding.get("unilateral_distance_spring") is not None else {}),
+            **({"unilateral_path_length_spring": binding["unilateral_path_length_spring"]} if binding.get("unilateral_path_length_spring") is not None else {}),
             "angular_motion": binding["angular_motion"],
             "angular_limits_deg": binding["angular_limits_deg"],
             **({"linear_drive": binding["linear_drive"]} if binding.get("linear_drive") is not None else {}),
@@ -3042,6 +3134,7 @@ def spawn_runtime_constraints_in_game_world(actors: dict, runtime_scene: dict, s
 
     constraint_actors = {}
     details = actors.get("constraint_binding_details") or {}
+    scene_origin = unreal.Vector(*actors.get("scene_origin", [0.0, 0.0, 0.0]))
     configured = []
     failures = []
     for binding in bindings:
@@ -3059,6 +3152,8 @@ def spawn_runtime_constraints_in_game_world(actors: dict, runtime_scene: dict, s
             frame_a = binding["frame_a"]
             frame_b = binding["frame_b"]
             angular_limits = binding.get("angular_limits_deg") or {}
+            distance_spring = binding.get("unilateral_distance_spring") or {}
+            path_spring = binding.get("unilateral_path_length_spring") or {}
             linear_drive = binding.get("linear_drive") or {}
             linear_position_enabled = linear_drive.get("position_enabled") or {}
             linear_velocity_enabled = linear_drive.get("velocity_enabled") or {}
@@ -3081,6 +3176,15 @@ def spawn_runtime_constraints_in_game_world(actors: dict, runtime_scene: dict, s
                 ue_name(binding["linear_motion"]["y"]),
                 ue_name(binding["linear_motion"]["z"]),
                 float(binding.get("linear_limit_m") or 0.0) * 100.0,
+                bool(distance_spring),
+                float(distance_spring.get("rest_length_m") or 0.0) * 100.0,
+                float(distance_spring.get("stiffness_n_m") or 0.0),
+                float(distance_spring.get("damping_n_s_m") or 0.0),
+                bool(path_spring),
+                scene_origin + unreal.Vector(*[float(value) * 100.0 for value in (path_spring.get("fixed_waypoint_m") or [0.0, 0.0, 0.0])]),
+                float(path_spring.get("rest_length_m") or 0.0) * 100.0,
+                float(path_spring.get("stiffness_n_m") or 0.0),
+                float(path_spring.get("damping_n_s_m") or 0.0),
                 ue_name(binding["angular_motion"]["x"]),
                 ue_name(binding["angular_motion"]["y"]),
                 ue_name(binding["angular_motion"]["z"]),
@@ -3114,8 +3218,8 @@ def spawn_runtime_constraints_in_game_world(actors: dict, runtime_scene: dict, s
                 float(angular_drive.get("damping_n_m_s_per_rad") or 0.0) * 10000.0,
                 float(angular_drive.get("max_torque_n_m") or 0.0) * 10000.0,
                 bool(angular_drive.get("acceleration_mode", False)),
-                float(break_thresholds.get("linear_force_n") or -0.01) * 100.0,
-                float(break_thresholds.get("angular_torque_n_m") or -0.0001) * 10000.0,
+                float(break_thresholds.get("linear_force_n") or -0.01),
+                float(break_thresholds.get("angular_torque_n_m") or -0.0001),
                 ue_name(axial_visual.get("object_id") or "None"),
                 ue_name(axial_visual.get("mesh_forward_axis") or "x"),
                 bool(binding["collision_enabled"]),
@@ -3129,7 +3233,20 @@ def spawn_runtime_constraints_in_game_world(actors: dict, runtime_scene: dict, s
                 visual_component = getter(ue_name(constraint_id))
                 if not visual_component:
                     raise RuntimeError("Driver did not expose the configured constraint visual")
-                actors.setdefault("constraint_visual_components", {})[str(axial_visual["object_id"])] = visual_component
+                visual_object_id = str(axial_visual["object_id"])
+                separate_visual_actor = (actors.get("visual_actors") or {}).get(visual_object_id)
+                separate_visual_component = actor_runtime_component(separate_visual_actor) if separate_visual_actor else None
+                if separate_visual_component:
+                    for material_index in range(separate_visual_component.get_num_materials()):
+                        visual_component.set_material(material_index, separate_visual_component.get_material(material_index))
+                    separate_visual_actor.set_actor_hidden_in_game(True)
+                    try:
+                        separate_visual_actor.set_is_temporarily_hidden_in_editor(True)
+                    except Exception:
+                        pass
+                    separate_visual_component.set_visibility(False, True)
+                    separate_visual_component.set_hidden_in_game(True, True)
+                actors.setdefault("constraint_visual_components", {})[visual_object_id] = visual_component
             constraint_actors[constraint_id] = actor
             configured.append(constraint_id)
             if isinstance(detail, dict):
@@ -3163,6 +3280,9 @@ def component_scale(component):
 
 
 def actor_skeletal_component_with_socket(actor, socket_name: str):
+    character_mesh = authoritative_character_mesh_component(actor)
+    if character_mesh:
+        return character_mesh
     try:
         components = actor.get_components_by_class(unreal.SkeletalMeshComponent)
     except Exception:
@@ -3271,6 +3391,22 @@ def sync_runtime_visuals(actors: dict) -> None:
             visual.set_actor_location(visual.get_actor_location() + center_delta, False, False)
         except Exception:
             pass
+    for object_id in (actors.get("constraint_visual_components") or {}):
+        separate_visual_actor = (actors.get("visual_actors") or {}).get(object_id)
+        separate_visual_component = actor_runtime_component(separate_visual_actor) if separate_visual_actor else None
+        if separate_visual_actor:
+            separate_visual_actor.set_actor_hidden_in_game(True)
+            try:
+                separate_visual_actor.set_is_temporarily_hidden_in_editor(True)
+            except Exception:
+                pass
+        if separate_visual_component:
+            separate_visual_component.set_visibility(False, True)
+            separate_visual_component.set_hidden_in_game(True, True)
+    driver = actors.get("adp_physics_runtime_driver")
+    refresh_constraint_visuals = getattr(driver, "refresh_constraint_visuals", None) if driver else None
+    if callable(refresh_constraint_visuals):
+        refresh_constraint_visuals()
 
 
 def apply_surface_mesh_sequence_replay(
@@ -3442,17 +3578,23 @@ def apply_geometry_collection_fracture_response(
         impactor = actors.get(impactor_id)
         if not impactor:
             continue
-        impactor_component = actor_runtime_component(impactor)
+        static_ids = {
+            str(item.get("id") or "")
+            for item in (runtime_scene.get("static_objects") or [])
+        }
+        energy_body_id = target_id if impactor_id in static_ids else impactor_id
+        energy_actor = actors.get(energy_body_id)
+        energy_component = actor_runtime_component(energy_actor) if energy_actor else None
         try:
-            mass_kg = float(impactor_component.get_mass())
-            impactor_velocity = impactor_component.get_physics_linear_velocity()
+            mass_kg = float(energy_component.get_mass())
+            impactor_velocity = energy_component.get_physics_linear_velocity()
         except Exception as exc:
             if contact:
                 status["energy_checks"].append({"frame": frame_index, "target_id": target_id, "impactor_id": impactor_id, "passed": False, "error": f"native_impactor_energy_unavailable:{exc}"})
             continue
         velocity_m_s = [float(impactor_velocity.x) / 100.0, float(impactor_velocity.y) / 100.0, float(impactor_velocity.z) / 100.0]
         sample_key = f"{impactor_id}:{target_id}"
-        current_sample = {"frame": frame_index, "mass_kg": mass_kg, "velocity_m_s": velocity_m_s}
+        current_sample = {"frame": frame_index, "mass_kg": mass_kg, "velocity_m_s": velocity_m_s, "energy_body_id": energy_body_id}
         energy_sample = kinematics.get(sample_key)
         kinematics[sample_key] = current_sample
         if not contact:
@@ -3489,6 +3631,7 @@ def apply_geometry_collection_fracture_response(
             energy_gate_passed = impact_energy_j >= minimum_impact_energy_j
         damage_state = str((selected_response or {}).get("damage_state") or "") or None
         contact["impactor_mass_kg"] = round(mass_kg, 6)
+        contact["energy_body_id"] = energy_sample.get("energy_body_id") or impactor_id
         contact["impact_speed_m_s"] = round(impact_speed_m_s, 6)
         contact["impact_energy_j"] = round(impact_energy_j, 6)
         contact["minimum_impact_energy_j"] = minimum_impact_energy_j
@@ -3503,6 +3646,7 @@ def apply_geometry_collection_fracture_response(
             "target_id": target_id,
             "impactor_id": impactor_id,
             "impactor_mass_kg": round(mass_kg, 6),
+            "energy_body_id": energy_sample.get("energy_body_id") or impactor_id,
             "impact_speed_m_s": round(impact_speed_m_s, 6),
             "impact_energy_j": round(impact_energy_j, 6),
             "minimum_impact_energy_j": minimum_impact_energy_j,
@@ -4155,8 +4299,10 @@ def spawn_runtime_actor(
     subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     asset_kind = str(asset_kind or "").lower()
     if asset_kind == "articulated_character":
-        asset = load_asset(asset_path)
-        actor = subsystem.spawn_actor_from_class(unreal.Character, location)
+        character_class = unreal.load_class(None, asset_path or ARTICULATED_CHARACTER_CLASS_PATH)
+        if not character_class:
+            raise RuntimeError(f"failed to load articulated character class: {asset_path}")
+        actor = subsystem.spawn_actor_from_class(character_class, location)
         if not actor:
             raise RuntimeError(f"failed to spawn articulated character: {asset_path}")
         actor.set_actor_label(label)
@@ -4165,32 +4311,12 @@ def spawn_runtime_actor(
         movement = actor.get_component_by_class(unreal.CharacterMovementComponent)
         if not component or not capsule or not movement:
             raise RuntimeError(f"articulated character components are incomplete: {asset_path}")
-        component.set_skeletal_mesh(asset)
         component.set_mobility(unreal.ComponentMobility.MOVABLE)
         component.set_collision_enabled(unreal.CollisionEnabled.NO_COLLISION)
-        component.set_relative_location(unreal.Vector(0.0, 0.0, -96.0), False, False)
-        component.set_relative_rotation(runtime_rotator([0.0, -90.0, 0.0]), False, False)
-        actor.cache_initial_mesh_offset(
-            component.get_editor_property("relative_location"),
-            component.get_editor_property("relative_rotation"),
-        )
-        component.set_world_scale3d(scale)
-        capsule.set_capsule_size(29.0, 96.0, True)
+        actor.set_actor_scale3d(scale)
         capsule.set_collision_profile_name("Pawn")
-        movement.set_editor_property("max_walk_speed", 100.0)
-        movement.set_editor_property("max_acceleration", 200.0)
-        white = create_generated_material(
-            "M_Harness_ArticulatedBodyWhite",
-            unreal.LinearColor(0.82, 0.82, 0.82, 1.0),
-            0.72,
-            0.0,
-            0.0,
-        )
-        for material_index in range(max(1, int(component.get_num_materials()))):
-            component.set_material(material_index, white)
-        if enable_control_rig:
-            animation_source = add_articulated_animation_source(actor, component, asset)
-            add_articulated_control_rig(actor, component, animation_source, asset)
+        movement.set_editor_property("run_physics_with_no_controller", True)
+        sanitize_articulated_character_rendering(actor)
         if rotation:
             actor.set_actor_rotation(rotation, False)
         return actor
@@ -4576,8 +4702,252 @@ def runtime_gasp_objects(runtime_scene: dict | None) -> list[dict]:
     return [
         obj
         for obj in runtime_scene.get("dynamic_objects") or []
-        if str((obj.get("params") or {}).get("humanoid_adapter") or "").strip().lower() in {"gasp", "ddv"}
+        if str(obj.get("behavior") or "") == "articulated_character"
+        and isinstance(((obj.get("params") or {}).get("articulated_body") or {}).get("movement_control"), dict)
     ]
+
+
+def reset_gasp_idle_state(actor) -> dict:
+    movement = actor.get_component_by_class(unreal.CharacterMovementComponent) if actor else None
+    if not movement:
+        raise RuntimeError("GASP CharacterMovementComponent is missing")
+    actor.stop_jumping()
+    movement.stop_movement_immediately()
+    try:
+        movement.clear_accumulated_forces()
+    except Exception:
+        pass
+    movement.velocity = unreal.Vector(0.0, 0.0, 0.0)
+    movement.set_movement_mode(unreal.MovementMode.MOVE_WALKING)
+    return {
+        "movement_mode": "MOVE_WALKING",
+        "velocity_cm_s": [0.0, 0.0, 0.0],
+    }
+
+
+def set_gasp_aim_intent(actor, enabled: bool) -> None:
+    setter = getattr(unreal.ADPPhysicsRuntimeLibrary, "set_character_aim_intent", None)
+    if not setter or not setter(actor, bool(enabled)):
+        raise RuntimeError("GASP Aim input is unavailable")
+
+
+def gasp_visible_root_yaw(actor) -> float:
+    component = actor_skeletal_component_with_socket(actor, "root")
+    if not component:
+        raise RuntimeError("GASP visible root is unavailable")
+    return float(component.get_socket_rotation(unreal.Name("root")).yaw)
+
+
+def gasp_world_look_rotation(actor, target_position_m: list[float], scene_origin) -> tuple[float, float]:
+    component = actor_skeletal_component_with_socket(actor, "head")
+    if not component:
+        raise RuntimeError("GASP head socket is unavailable")
+    head = component.get_socket_location(unreal.Name("head"))
+    origin = (
+        scene_origin
+        if hasattr(scene_origin, "x")
+        else unreal.Vector(*[float(value) for value in (scene_origin or [0.0, 0.0, 0.0])])
+    )
+    target = ue_vec_from_meters(target_position_m, z_offset_cm=0.0, origin=origin)
+    dx = float(target.x - head.x)
+    dy = float(target.y - head.y)
+    dz = float(target.z - head.z)
+    horizontal = math.hypot(dx, dy)
+    if horizontal <= 1e-6 and abs(dz) <= 1e-6:
+        raise RuntimeError("GASP head look target coincides with the head socket")
+    return math.degrees(math.atan2(dy, dx)), math.degrees(math.atan2(dz, horizontal))
+
+
+def configure_runtime_fixed_frame_step(runtime_scene: dict | None, status: dict) -> bool:
+    fixed_delta_s = float(runtime_timebase(runtime_scene)["render_dt_s"])
+    setter = getattr(unreal.ADPPhysicsRuntimeLibrary, "configure_fixed_frame_step", None)
+    enabled = bool(setter and setter(fixed_delta_s))
+    status["fixed_frame_step"] = {
+        "enabled": enabled,
+        "fixed_delta_s": round(fixed_delta_s, 9),
+    }
+    if not enabled:
+        raise RuntimeError("fixed frame step is unavailable")
+    return True
+
+
+def begin_gasp_idle_warmup(actors: dict, runtime_scene: dict | None, status: dict) -> bool:
+    gasp_objects = runtime_gasp_objects(runtime_scene)
+    state = actors.get("gasp_locomotion") or {}
+    world = actors.get("physics_game_world")
+    if not gasp_objects or not state or not world:
+        return False
+    obj = gasp_objects[0]
+    actor = actors.get(str(obj.get("id") or ""))
+    if not actor:
+        return False
+    movement_control = (obj.get("params") or {}).get("articulated_body") or {}
+    command = sample_articulated_body_contract(movement_control, 0.0).get("movement_control") or {}
+    state["initial_facing_yaw_deg"] = float(command.get("facing_yaw_deg") or 0.0)
+    state["controller"].set_control_rotation(
+        runtime_rotator([
+            0.0,
+            float(command.get("facing_yaw_deg") or 0.0),
+            0.0,
+        ])
+    )
+    crouched = bool(command.get("crouched"))
+    actor.crouch(False) if crouched else actor.un_crouch(False)
+    state["crouched"] = crouched
+    reset_gasp_idle_state(actor)
+    start_location = actor.get_actor_location()
+    start_time_s = float(unreal.GameplayStatics.get_time_seconds(world))
+    actors["gasp_idle_warmup"] = {
+        "active": True,
+        "phase": "animation_warmup",
+        "duration_s": GASP_IDLE_WARMUP_SECONDS,
+        "game_time_start_s": start_time_s,
+        "wall_time_start_s": time.perf_counter(),
+        "start_location_cm": [start_location.x, start_location.y, start_location.z],
+    }
+    set_simulation_world_paused(actors, status, False)
+    return True
+
+
+def begin_gasp_grounding_settle(actors: dict, runtime_scene: dict | None, status: dict) -> dict:
+    warmup = actors.get("gasp_idle_warmup") or {}
+    state = actors.get("gasp_locomotion") or {}
+    actor = actors.get(str(state.get("actor_id") or ""))
+    world = actors.get("physics_game_world")
+    if not warmup.get("active") or not actor or not world:
+        raise RuntimeError("GASP idle warmup state is incomplete")
+    movement = actor.get_component_by_class(unreal.CharacterMovementComponent)
+    if not movement:
+        raise RuntimeError("GASP CharacterMovement is unavailable for grounding settle")
+    set_simulation_world_paused(actors, status, True)
+    before_reset = actor.get_actor_location()
+    restore_articulated_frame_zero_roots(actors, runtime_scene)
+    target = actor.get_actor_location()
+    try:
+        actor.stop_jumping()
+    except Exception:
+        pass
+    try:
+        movement.stop_movement_immediately()
+    except Exception:
+        pass
+    try:
+        movement.clear_accumulated_forces()
+    except Exception:
+        pass
+    movement.velocity = unreal.Vector(0.0, 0.0, 0.0)
+    movement.set_movement_mode(unreal.MovementMode.MOVE_FALLING)
+    start = warmup.get("start_location_cm") or [before_reset.x, before_reset.y, before_reset.z]
+    warmup.update({
+        "phase": "grounding_settle",
+        "target_xy_cm": [float(target.x), float(target.y)],
+        "last_z_cm": float(target.z),
+        "last_sample_game_s": float(unreal.GameplayStatics.get_time_seconds(world)),
+        "grounding_stable_samples": 0,
+        "settle_wall_time_start_s": time.perf_counter(),
+        "settle_game_time_start_s": float(unreal.GameplayStatics.get_time_seconds(world)),
+        "pre_reset_displacement_cm": round(
+            math.sqrt(
+                (before_reset.x - float(start[0])) ** 2
+                + (before_reset.y - float(start[1])) ** 2
+                + (before_reset.z - float(start[2])) ** 2
+            ),
+            4,
+        ),
+    })
+    actors["gasp_idle_warmup"] = warmup
+    set_simulation_world_paused(actors, status, False)
+    return dict(warmup)
+
+
+def poll_gasp_grounding_settle(actors: dict, runtime_scene: dict | None, status: dict) -> dict | None:
+    warmup = actors.get("gasp_idle_warmup") or {}
+    state = actors.get("gasp_locomotion") or {}
+    actor_id = str(state.get("actor_id") or "")
+    actor = actors.get(actor_id)
+    world = actors.get("physics_game_world")
+    if warmup.get("phase") != "grounding_settle" or not actor or not world:
+        raise RuntimeError("GASP grounding settle state is incomplete")
+    movement = actor.get_component_by_class(unreal.CharacterMovementComponent)
+    if not movement:
+        raise RuntimeError("GASP CharacterMovement is unavailable during grounding settle")
+    current_game_s = float(unreal.GameplayStatics.get_time_seconds(world))
+    if current_game_s <= float(warmup.get("last_sample_game_s") or 0.0) + 1e-4:
+        return None
+    location = actor.get_actor_location()
+    target_xy = warmup.get("target_xy_cm") or [location.x, location.y]
+    xy_error_cm = math.hypot(location.x - float(target_xy[0]), location.y - float(target_xy[1]))
+    if xy_error_cm > 1e-4:
+        actor.set_actor_location(
+            unreal.Vector(float(target_xy[0]), float(target_xy[1]), float(location.z)),
+            False,
+            True,
+        )
+        location = actor.get_actor_location()
+    velocity = movement.velocity
+    movement.velocity = unreal.Vector(0.0, 0.0, float(velocity.z))
+    z_delta_cm = abs(float(location.z) - float(warmup.get("last_z_cm") or location.z))
+    grounded = bool(movement.is_moving_on_ground())
+    stable_samples = int(warmup.get("grounding_stable_samples") or 0)
+    grounded_stable = grounded and z_delta_cm <= 0.05
+    stable_samples = stable_samples + 1 if grounded_stable else 0
+    stable_start_game_s = warmup.get("grounded_stable_start_game_s") if grounded_stable else None
+    if grounded_stable and stable_start_game_s is None:
+        stable_start_game_s = current_game_s
+    stable_duration_s = current_game_s - float(stable_start_game_s) if stable_start_game_s is not None else 0.0
+    warmup.update({
+        "last_sample_game_s": current_game_s,
+        "last_z_cm": float(location.z),
+        "grounding_stable_samples": stable_samples,
+        "last_xy_error_cm": round(float(xy_error_cm), 6),
+        "last_z_delta_cm": round(float(z_delta_cm), 6),
+        "last_grounded": grounded,
+        "grounded_stable_start_game_s": stable_start_game_s,
+        "grounded_stable_duration_s": round(float(stable_duration_s), 6),
+    })
+    actors["gasp_idle_warmup"] = warmup
+    if stable_samples < 3 or stable_duration_s + 1e-4 < GASP_POST_GROUND_SETTLE_SECONDS:
+        return None
+    set_simulation_world_paused(actors, status, True)
+    final_location = actor.get_actor_location()
+    actor.set_actor_location(
+        unreal.Vector(float(target_xy[0]), float(target_xy[1]), float(final_location.z)),
+        False,
+        True,
+    )
+    reset_detail = reset_gasp_idle_state(actor)
+    actors.setdefault("articulated_capture_start_z_cm", {})[actor_id] = float(final_location.z)
+    state["last_frame"] = None
+    state["last_safe_location"] = actor.get_actor_location()
+    state["moving"] = False
+    state["jump_pressed"] = False
+    state["fired_events"] = set()
+    initial_facing_yaw = state.get("initial_facing_yaw_deg")
+    if initial_facing_yaw is None:
+        raise RuntimeError("GASP initial facing calibration is unavailable")
+    visible_root_yaw = gasp_visible_root_yaw(actor)
+    state["root_facing_offset_deg"] = ((visible_root_yaw - float(initial_facing_yaw) + 180.0) % 360.0) - 180.0
+    elapsed_game_s = current_game_s - float(warmup["game_time_start_s"])
+    detail = {
+        "active": False,
+        "completed": True,
+        "phase": "complete",
+        "duration_s": float(warmup["duration_s"]),
+        "elapsed_game_s": round(elapsed_game_s, 6),
+        "grounding_settle_s": round(current_game_s - float(warmup["settle_game_time_start_s"]), 6),
+        "pre_reset_displacement_cm": warmup.get("pre_reset_displacement_cm"),
+        "capture_start_reset": reset_detail,
+        "capture_start_grounded": grounded,
+        "grounding_stable_samples": stable_samples,
+        "post_ground_animation_settle_s": round(float(stable_duration_s), 6),
+        "settled_capture_z_cm": round(float(final_location.z), 4),
+        "target_xy_cm": [round(float(target_xy[0]), 4), round(float(target_xy[1]), 4)],
+        "final_xy_error_cm": 0.0,
+        "root_facing_offset_deg": round(float(state["root_facing_offset_deg"]), 4),
+    }
+    actors["gasp_idle_warmup"] = detail
+    (state.get("detail") or {})["idle_warmup"] = detail
+    return detail
 
 
 def initialize_gasp_locomotion(actors: dict, runtime_scene: dict | None, status: dict) -> bool:
@@ -4590,70 +4960,47 @@ def initialize_gasp_locomotion(actors: dict, runtime_scene: dict | None, status:
     world = actors.get("physics_game_world")
     if not actor or not world:
         return False
-    detail = {"actor_id": actor_id, "possessed": False, "input_ready": False, "errors": []}
+    contract = ((obj.get("params") or {}).get("articulated_body") or {}).get("movement_control") or {}
+    detail = {"actor_id": actor_id, "possessed": False, "control_ready": False, "errors": []}
     try:
         controller = unreal.GameplayStatics.get_player_controller(world, 0)
         controller.possess(actor)
         detail["possessed"] = True
-        action_path = str((obj.get("params") or {}).get("movement_input_action") or "/Game/Input/IA_Move.IA_Move")
-        action = unreal.load_object(None, action_path)
-        walk_action = unreal.load_object(None, "/Game/Input/IA_Walk.IA_Walk")
-        carry_obj = next(
-            (item for item in (runtime_scene.get("dynamic_objects") or []) if (item.get("params") or {}).get("native_grabbable_blueprint")),
-            {},
-        )
-        carry_params = carry_obj.get("params") or {}
-        grab_action = unreal.load_object(None, str(carry_params.get("native_grab_input_action") or "")) if carry_params else None
-        subsystem = next(
-            item
-            for item in unreal.ObjectIterator(unreal.EnhancedInputLocalPlayerSubsystem)
-            if not item.get_name().startswith("Default__")
-        )
-        waypoints = [
-            item
-            for item in (obj.get("params") or {}).get("movement_waypoints") or []
-            if isinstance(item, dict) and isinstance(item.get("position_m"), list)
-        ]
-        segment_speeds = [
-            math.dist(left["position_m"][:3], right["position_m"][:3])
-            / max(1e-3, float(right.get("time_s") or 0.0) - float(left.get("time_s") or 0.0))
-            for left, right in zip(waypoints, waypoints[1:])
-            if float(right.get("time_s") or 0.0) > float(left.get("time_s") or 0.0)
-        ]
-        target_speed_cm_s = max(segment_speeds, default=0.85) * 100.0
-        input_scale = 1.0
+        target_speed_cm_s = float(contract.get("max_speed_m_s") or 5.0) * 100.0
+        acceleration_cm_s2 = float(contract.get("max_acceleration_m_s2") or 5.0) * 100.0
+        turn_rate_deg_s = float(contract["max_turn_rate_deg_s"])
         movement = actor.get_component_by_class(unreal.CharacterMovementComponent)
-        if movement:
-            movement.set_editor_property("max_walk_speed", target_speed_cm_s)
-            detail["max_walk_speed_cm_s"] = round(target_speed_cm_s, 3)
-            for property_name, value in (
-                ("max_depenetration_with_geometry", 12.0),
-                ("max_depenetration_with_geometry_as_proxy", 12.0),
-                ("max_depenetration_with_pawn", 8.0),
-                ("max_depenetration_with_pawn_as_proxy", 8.0),
-            ):
-                try:
-                    movement.set_editor_property(property_name, value)
-                except Exception as exc:
-                    detail.setdefault("movement_calibration_errors", []).append(f"{property_name}:{exc}")
+        if not movement:
+            raise RuntimeError("GASP CharacterMovementComponent is missing")
+        movement.set_editor_property("max_walk_speed", target_speed_cm_s)
+        movement.set_editor_property("max_walk_speed_crouched", target_speed_cm_s)
+        movement.set_editor_property("max_acceleration", acceleration_cm_s2)
+        movement.set_editor_property(
+            "rotation_rate",
+            runtime_rotator([0.0, turn_rate_deg_s, 0.0]),
+        )
+        movement.set_editor_property("use_controller_desired_rotation", True)
+        detail["render_sanitation"] = sanitize_articulated_character_rendering(actor)
+        detail["camera_sanitation"] = sanitize_articulated_character_cameras(actor, controller)
+        detail["idle_state_reset"] = reset_gasp_idle_state(actor)
+        detail["max_walk_speed_cm_s"] = round(target_speed_cm_s, 3)
+        detail["max_acceleration_cm_s2"] = round(acceleration_cm_s2, 3)
+        detail["turn_rate_deg_s"] = turn_rate_deg_s
         actors["gasp_locomotion"] = {
             "actor_id": actor_id,
             "controller": controller,
-            "input_subsystem": subsystem,
-            "move_action": action,
-            "walk_action": walk_action,
-            "grab_action": grab_action,
-            "carry_actor_id": str(carry_obj.get("id") or ""),
-            "grab_time_s": float(carry_params.get("grasp_time_s") or 0.0),
-            "release_time_s": float(carry_params.get("release_time_s") or 0.0),
-            "input_scale": input_scale,
+            "movement_control": contract,
             "last_safe_location": actor.get_actor_location(),
             "detail": detail,
             "last_frame": None,
-            "walk_pressed": False,
+            "fired_events": set(),
+            "crouched": False,
+            "jump_pressed": False,
+            "turn_in_place_active": False,
+            "initial_facing_yaw_deg": None,
+            "root_facing_offset_deg": None,
         }
-        detail["input_ready"] = bool(action)
-        detail["input_scale"] = round(input_scale, 4)
+        detail["control_ready"] = True
     except Exception as exc:
         detail["errors"].append(str(exc))
     status["gasp_locomotion"] = detail
@@ -4674,24 +5021,6 @@ def bound_gasp_post_tick_displacement(actors: dict, obj: dict, frame_index: int)
             max(float(detail.get("max_observed_frame_displacement_cm") or 0.0), displacement_cm),
             3,
         )
-        max_displacement_cm = float_control(
-            (obj.get("params") or {}).get("gasp_max_frame_displacement_cm"),
-            12.0,
-            1.0,
-            100.0,
-        )
-        if displacement_cm > max_displacement_cm:
-            scale = max_displacement_cm / displacement_cm
-            current = unreal.Vector(
-                previous.x + (current.x - previous.x) * scale,
-                previous.y + (current.y - previous.y) * scale,
-                current.z,
-            )
-            actor.set_actor_location(current, False, False)
-            detail["bounded_displacement_corrections"] = int(detail.get("bounded_displacement_corrections") or 0) + 1
-            detail["last_bounded_displacement_frame"] = frame_index
-    if not state.get("moving"):
-        actor.set_actor_rotation(runtime_rotator([0.0, float(state.get("yaw") or 0.0), 0.0]), False)
     state["last_safe_location"] = current
 
 
@@ -4703,97 +5032,80 @@ def apply_gasp_locomotion_frame(actors: dict, obj: dict, frame: dict) -> bool:
     if state.get("last_frame") == frame_index:
         return True
     time_s = float(frame.get("time") or 0.0)
-    waypoints = [
-        item
-        for item in (obj.get("params") or {}).get("movement_waypoints") or []
-        if isinstance(item, dict) and isinstance(item.get("position_m"), list)
-    ]
-    moving = False
-    yaw = float(waypoints[-1].get("yaw_degrees", 0.0)) if waypoints else 0.0
-    direction_x = 0.0
-    direction_y = 0.0
     actor = actors.get(str(obj.get("id") or ""))
-    current = actor.get_actor_location() if actor else None
-    for left, right in zip(waypoints, waypoints[1:]):
-        left_t = float(left.get("time_s") or 0.0)
-        right_t = float(right.get("time_s") or left_t)
-        if left_t <= time_s <= right_t:
-            delta_x = float(right["position_m"][0]) - float(left["position_m"][0])
-            delta_y = float(right["position_m"][1]) - float(left["position_m"][1])
-            if actor:
-                scene_origin = unreal.Vector(*actors.get("scene_origin", [0.0, 0.0, 0.0]))
-                target = ue_vec_from_meters(right["position_m"], origin=scene_origin)
-                delta_x = (target.x - current.x) / 100.0
-                delta_y = (target.y - current.y) / 100.0
-            moving = math.hypot(delta_x, delta_y) > 1e-4
-            if moving:
-                yaw = math.degrees(math.atan2(-delta_x, delta_y))
-                length = math.hypot(delta_x, delta_y)
-                direction_x = delta_x / length
-                direction_y = delta_y / length
-            else:
-                yaw = float(right.get("yaw_degrees", left.get("yaw_degrees", 0.0)))
-            break
+    contract = (obj.get("params") or {}).get("articulated_body") or {}
+    sampled = sample_articulated_body_contract(contract, time_s)
+    command = sampled.get("movement_control") or {}
+    velocity = command.get("target_velocity_m_s") or [0.0, 0.0, 0.0]
+    speed = math.hypot(float(velocity[0]), float(velocity[1]))
+    max_speed = float((state.get("movement_control") or {}).get("max_speed_m_s") or 1.0)
+    moving = speed > 1e-4
+    yaw = float(command.get("facing_yaw_deg") or 0.0)
+    head_look = sampled.get("head_look_target") or {}
+    look_weight = float(head_look.get("weight") or 0.0)
+    explicit_look = look_weight > 1e-4
+    angle_delta = lambda target, current: ((float(target) - float(current) + 180.0) % 360.0) - 180.0
     try:
-        for phase, threshold in (
-            ("grab", float(state.get("grab_time_s") or 0.0)),
-            ("release", float(state.get("release_time_s") or 0.0)),
-        ):
-            if state.get("grab_action") and time_s >= threshold and not state.get(f"{phase}_input_sent"):
-                state["input_subsystem"].inject_input_vector_for_action(
-                    state["grab_action"],
-                    unreal.Vector(1.0, 0.0, 0.0),
-                    [],
-                    [],
-                )
-                state[f"{phase}_input_sent"] = True
-                (state.get("detail") or {})[f"{phase}_input_frame"] = frame_index
-                package = actors.get(str(state.get("carry_actor_id") or ""))
-                mesh = actor.get_component_by_class(unreal.SkeletalMeshComponent) if actor else None
-                anim_instance = mesh.get_anim_instance() if mesh else None
-                updates = (
-                    (("grabbable_object", package), ("is_grabbing", True), ("is_dropping", False))
-                    if phase == "grab"
-                    else (("is_grabbing", False), ("is_dropping", True))
-                )
-                for target_name, target in (("character", actor), ("anim_instance", anim_instance)):
-                    for property_name, value in updates:
-                        if target is None or value is None:
-                            continue
-                        method = getattr(target, f"set_{property_name}", None)
-                        if method:
-                            try:
-                                method(value)
-                                (state.get("detail") or {}).setdefault("native_anim_interfaces", []).append(
-                                    f"{phase}:{target_name}.set_{property_name}"
-                                )
-                                continue
-                            except Exception as exc:
-                                (state.get("detail") or {}).setdefault("native_anim_interface_errors", []).append(
-                                    f"{phase}:{target_name}.set_{property_name}:{exc}"
-                                )
-                        try:
-                            target.set_editor_property(property_name, value)
-                            (state.get("detail") or {}).setdefault("native_anim_properties", []).append(
-                                f"{phase}:{target_name}.{property_name}"
-                            )
-                        except Exception as exc:
-                            (state.get("detail") or {}).setdefault("native_anim_property_errors", []).append(
-                                f"{phase}:{target_name}.{property_name}:{exc}"
-                            )
-        if not state.get("walk_pressed") and state.get("walk_action"):
-            state["input_subsystem"].inject_input_vector_for_action(
-                state["walk_action"],
-                unreal.Vector(1.0, 0.0, 0.0),
-                [],
-                [],
+        if state.get("jump_pressed"):
+            actor.stop_jumping()
+            state["jump_pressed"] = False
+        crouched = bool(command.get("crouched"))
+        if crouched != bool(state.get("crouched")):
+            actor.crouch(False) if crouched else actor.un_crouch(False)
+            state["crouched"] = crouched
+        for event_index, event in enumerate((state.get("movement_control") or {}).get("events") or []):
+            if event_index not in state["fired_events"] and time_s >= float(event.get("time_s") or 0.0):
+                actor.jump()
+                state["jump_pressed"] = True
+                state["fired_events"].add(event_index)
+                (state.get("detail") or {}).setdefault("jump_event_frames", []).append(frame_index)
+        movement = actor.get_component_by_class(unreal.CharacterMovementComponent)
+        if not movement:
+            raise RuntimeError("GASP CharacterMovementComponent is missing")
+        actor_rotation = actor.get_actor_rotation()
+        actor_yaw = float(actor_rotation.yaw)
+        controller_yaw = yaw
+        controller_pitch = 0.0
+        if explicit_look:
+            look_yaw, look_pitch = gasp_world_look_rotation(
+                actor,
+                head_look.get("position_m") or [0.0, 0.0, 0.0],
+                actors.get("scene_origin") or unreal.Vector(0.0, 0.0, 0.0),
             )
-            state["walk_pressed"] = True
-        state["controller"].set_control_rotation(runtime_rotator([0.0, yaw, 0.0]))
+            controller_yaw = actor_yaw + angle_delta(look_yaw, actor_yaw) * look_weight
+            controller_pitch = look_pitch * look_weight
+            movement.set_editor_property("use_controller_desired_rotation", False)
+            movement.set_editor_property("orient_rotation_to_movement", moving)
+        else:
+            movement.set_editor_property("use_controller_desired_rotation", True)
+            movement.set_editor_property("orient_rotation_to_movement", False)
+        facing_error_deg = abs(angle_delta(yaw, actor_yaw))
+        root_facing_offset_deg = state.get("root_facing_offset_deg")
+        if root_facing_offset_deg is None:
+            raise RuntimeError("GASP visible-root facing calibration is unavailable")
+        visible_root_yaw = gasp_visible_root_yaw(actor)
+        target_root_yaw = yaw + float(root_facing_offset_deg)
+        visible_root_error_deg = abs(angle_delta(target_root_yaw, visible_root_yaw))
+        turn_in_place_active = not moving and (facing_error_deg > 1.0 or visible_root_error_deg > 5.0)
+        state["controller"].set_control_rotation(runtime_rotator([controller_pitch, controller_yaw, 0.0]))
+        set_gasp_aim_intent(actor, explicit_look or turn_in_place_active)
+        if turn_in_place_active != bool(state.get("turn_in_place_active")):
+            state["turn_in_place_active"] = turn_in_place_active
+            detail = state.get("detail") or {}
+            detail.setdefault("turn_in_place_transitions", []).append(
+                {
+                    "frame": frame_index,
+                    "enabled": turn_in_place_active,
+                    "facing_yaw_deg": yaw,
+                    "facing_error_deg": round(facing_error_deg, 4),
+                    "visible_root_error_deg": round(visible_root_error_deg, 4),
+                    "explicit_look": explicit_look,
+                }
+            )
         if actor and moving:
             actor.add_movement_input(
-                unreal.Vector(direction_x, direction_y, 0.0),
-                float(state.get("input_scale") or 1.0),
+                unreal.Vector(float(velocity[0]) / speed, float(velocity[1]) / speed, 0.0),
+                min(1.0, speed / max_speed),
                 True,
             )
         state["last_frame"] = frame_index
@@ -4801,6 +5113,7 @@ def apply_gasp_locomotion_frame(actors: dict, obj: dict, frame: dict) -> bool:
         state["yaw"] = yaw
     except Exception as exc:
         state.setdefault("errors", []).append(str(exc))
+        (state.get("detail") or {}).setdefault("errors", []).append(str(exc))
     return True
 
 
@@ -5396,6 +5709,9 @@ def spawn_market_day_gas_station_context(editor, scene_origin: unreal.Vector, ma
 
 
 def actor_bounds(actor) -> tuple[unreal.Vector, unreal.Vector]:
+    character_mesh = authoritative_character_mesh_component(actor)
+    if character_mesh:
+        return component_bounds(character_mesh)
     try:
         return actor.get_actor_bounds(False)
     except Exception:
@@ -5521,14 +5837,6 @@ def ensure_map_actors_visible(editor, selected_map: dict) -> dict:
         except Exception:
             components = []
         for component in components or []:
-            try:
-                component.set_visibility(True, True)
-            except Exception:
-                pass
-            try:
-                component.set_hidden_in_game(False, True)
-            except Exception:
-                pass
             component_count += 1
     return {"actors": actor_count, "components": component_count}
 
@@ -5847,15 +6155,23 @@ def align_runtime_actor_to_pose_anchor(
         return actor_bounds(actor)
     if pose_anchor != "bounds_center":
         return actor_bounds(actor)
+    target_position = desired_position
+    local_offset_m = params.get("visual_local_bounds_center_from_collision_m")
+    if isinstance(local_offset_m, list) and len(local_offset_m) >= 3:
+        local_offset_cm = unreal.Vector(*[float(value) * 100.0 for value in local_offset_m[:3]])
+        target_position = desired_position + unreal.MathLibrary.transform_direction(
+            actor.get_actor_transform(),
+            local_offset_cm,
+        )
     before_origin, extent = actor_bounds(actor)
     before_location = actor.get_actor_location()
-    correction = desired_position - before_origin
+    correction = target_position - before_origin
     actor.set_actor_location(before_location + correction, False, False)
     after_origin, after_extent = actor_bounds(actor)
     residual = math.sqrt(
-        (after_origin.x - desired_position.x) ** 2
-        + (after_origin.y - desired_position.y) ** 2
-        + (after_origin.z - desired_position.z) ** 2
+        (after_origin.x - target_position.x) ** 2
+        + (after_origin.y - target_position.y) ** 2
+        + (after_origin.z - target_position.z) ** 2
     )
     if residual > 0.1:
         raise RuntimeError(
@@ -5868,7 +6184,7 @@ def align_runtime_actor_to_pose_anchor(
         correction_length = math.sqrt(correction.x ** 2 + correction.y ** 2 + correction.z ** 2)
         registrations[object_id] = {
             "anchor": "bounds_center",
-            "desired_position_cm": [desired_position.x, desired_position.y, desired_position.z],
+            "desired_position_cm": [target_position.x, target_position.y, target_position.z],
             "bounds_center_before_cm": [before_origin.x, before_origin.y, before_origin.z],
             "bounds_center_after_cm": [after_origin.x, after_origin.y, after_origin.z],
             "actor_location_before_cm": [before_location.x, before_location.y, before_location.z],
@@ -6336,7 +6652,20 @@ def create_generated_material(
     two_sided: bool = False,
 ):
     package_path = "/Game/AgenticGenerated/Materials"
-    versioned_name = f"{name}_{GENERATED_MATERIAL_VERSION}"
+    material_contract = json.dumps(
+        {
+            "color_rgb": [round(float(color.r), 8), round(float(color.g), 8), round(float(color.b), 8)],
+            "emissive": round(float(emissive), 8),
+            "fixed_color": bool(fixed_color),
+            "metallic": round(float(metallic), 8),
+            "roughness": round(float(roughness), 8),
+            "two_sided": bool(two_sided),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    contract_digest = hashlib.sha256(material_contract.encode("utf-8")).hexdigest()[:16]
+    versioned_name = f"{name}_{GENERATED_MATERIAL_VERSION}_{contract_digest}"
     asset_path = f"{package_path}/{versioned_name}.{versioned_name}"
     existing = unreal.load_asset(asset_path)
     if existing:
@@ -6413,7 +6742,18 @@ def create_generated_material(
 
 def create_translucent_fluid_material(color, roughness: float, opacity: float, refraction: float):
     package_path = "/Game/AgenticGenerated/Materials"
-    asset_name = f"M_Harness_UnifiedFluidTranslucent_V1_{GENERATED_MATERIAL_VERSION}"
+    material_contract = json.dumps(
+        {
+            "color_rgb": [round(float(color.r), 8), round(float(color.g), 8), round(float(color.b), 8)],
+            "opacity": round(float(opacity), 8),
+            "refraction": round(float(refraction), 8),
+            "roughness": round(float(roughness), 8),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    contract_digest = hashlib.sha256(material_contract.encode("utf-8")).hexdigest()[:16]
+    asset_name = f"M_Harness_UnifiedFluidTranslucent_V1_{GENERATED_MATERIAL_VERSION}_{contract_digest}"
     asset_path = f"{package_path}/{asset_name}.{asset_name}"
     existing = unreal.load_asset(asset_path)
     if existing:
@@ -6565,6 +6905,24 @@ def disable_runtime_stage_helper_collision(actor) -> dict:
         raise RuntimeError(f"readability stage helper collision remained enabled: {actor.get_actor_label()}")
     return {
         "actor_collision_enabled": False,
+        "component_collision": str(component.get_collision_enabled()),
+        "collision_profile": str(component.get_collision_profile_name()),
+    }
+
+
+def disable_prepared_map_mesh_collision(actor) -> dict | None:
+    if actor.get_actor_label().startswith("native_phenomena_demo_"):
+        return None
+    component = actor.get_component_by_class(unreal.StaticMeshComponent)
+    if not component:
+        return None
+    actor.set_actor_enable_collision(False)
+    component.set_collision_enabled(unreal.CollisionEnabled.NO_COLLISION)
+    component.set_collision_profile_name("NoCollision")
+    component.set_simulate_physics(False)
+    set_editor_property_if_available(component, "generate_overlap_events", False)
+    return {
+        "actor": actor.get_actor_label(),
         "component_collision": str(component.get_collision_enabled()),
         "collision_profile": str(component.get_collision_profile_name()),
     }
@@ -6724,6 +7082,12 @@ def setup_scene(runtime_scene: dict | None = None):
     write_progress_marker("setup_scene_removed_conflicting_map_actors", str(len(removed_map_actors)))
     visible_map_actors = ensure_map_actors_visible(editor, selected_map)
     write_progress_marker("setup_scene_visible_map_actors", str(len(visible_map_actors)))
+    prepared_map_collision_audit = [
+        audit
+        for actor in editor.get_all_level_actors()
+        if (audit := disable_prepared_map_mesh_collision(actor)) is not None
+    ]
+    write_progress_marker("setup_scene_prepared_map_collision_disabled", str(len(prepared_map_collision_audit)))
     loaded_map_actor_count = count_non_demo_actors(editor)
     if selected_map.get("name") == "MarketEnvironment_Day" and loaded_map_actor_count >= 10:
         selected_map["suppress_camera_backdrop"] = True
@@ -7450,6 +7814,11 @@ def setup_scene(runtime_scene: dict | None = None):
                 visual.set_actor_enable_collision(False)
                 component = actor_runtime_component(visual)
                 if component:
+                    if (obj.get("params") or {}).get("intact_visual_material_source") == "fracture_body":
+                        collision_component = actor_runtime_component(physics_actor)
+                        if collision_component:
+                            for material_index in range(max(1, int(collision_component.get_num_materials()))):
+                                component.set_material(material_index, collision_component.get_material(material_index))
                     try:
                         visual.set_is_temporarily_hidden_in_editor(False)
                     except Exception:
@@ -8016,6 +8385,7 @@ def setup_scene(runtime_scene: dict | None = None):
             "selected_map": selected_map,
             "loaded_map_actor_count": loaded_map_actor_count,
             "visible_map_actors": visible_map_actors,
+            "prepared_map_collision_audit": prepared_map_collision_audit,
             "removed_map_actors": removed_map_actors,
             "background_stage_actors": background_stage_actors,
             "stage_helper_actors": stage_helper_actors,
@@ -8420,17 +8790,20 @@ def restore_actor_materials(actor, materials: list) -> None:
 def assign_instance_mask_materials(actors: dict, runtime_scene: dict | None) -> dict:
     restore_state = {}
     mapping = []
-    mask_actors = []
+    mask_components = []
     for index, actor_id in enumerate(runtime_actor_ids_for_segmentation(runtime_scene), start=1):
         actor = (actors.get("visual_actors") or {}).get(actor_id) or actors.get(actor_id)
         if not actor:
+            continue
+        component = actor_runtime_component(actor)
+        if not component:
             continue
         restore_state[actor_id] = snapshot_actor_materials(actor)
         material = instance_mask_material(index)
         if material:
             set_actor_material(actor, material)
             color = instance_color_from_index(index)
-            mask_actors.append(actor)
+            mask_components.append(component)
             mapping.append(
                 {
                     "object_id": actor_id,
@@ -8439,7 +8812,7 @@ def assign_instance_mask_materials(actors: dict, runtime_scene: dict | None) -> 
                 }
             )
     flush_editor_rendering()
-    return {"restore_state": restore_state, "mapping": mapping, "actors": mask_actors}
+    return {"restore_state": restore_state, "mapping": mapping, "components": mask_components}
 
 
 def restore_instance_mask_materials(actors: dict, restore_state: dict) -> None:
@@ -8447,6 +8820,21 @@ def restore_instance_mask_materials(actors: dict, restore_state: dict) -> None:
         actor = (actors.get("visual_actors") or {}).get(actor_id) or actors.get(actor_id)
         if actor:
             restore_actor_materials(actor, materials)
+
+
+def data_capture_frame_indices(frame_count: int) -> set[int]:
+    if frame_count <= 0:
+        return set()
+    if RENDER_DATA_SAMPLE_COUNT <= 0 or RENDER_DATA_SAMPLE_COUNT >= frame_count:
+        return set(range(frame_count))
+    return {
+        round(slot * (frame_count - 1) / max(1, RENDER_DATA_SAMPLE_COUNT - 1))
+        for slot in range(RENDER_DATA_SAMPLE_COUNT)
+    }
+
+
+def should_capture_data_frame(frame_index: int, frame_count: int) -> bool:
+    return frame_index in data_capture_frame_indices(frame_count)
 
 
 def export_depth_and_segmentation_frame(
@@ -8466,11 +8854,23 @@ def export_depth_and_segmentation_frame(
     capture_comp = actors["capture_comp"]
     original_source = capture_comp.get_editor_property("capture_source")
     original_target = capture_comp.get_editor_property("texture_target")
-    original_render_mode = capture_comp.get_editor_property("primitive_render_mode")
-    original_show_flags = list(capture_comp.get_editor_property("show_flag_settings"))
     original_post_process_weight = float(capture_comp.get_editor_property("post_process_blend_weight"))
     original_post_process_settings = capture_comp.get_editor_property("post_process_settings")
     original_render_in_main_renderer = bool(capture_comp.get_editor_property("render_in_main_renderer"))
+
+    if not RENDER_DEPTH_PASSES:
+        result["depth"] = {"status": "disabled", "path": None, "source_type": None}
+        segmentation = export_instance_segmentation_frame(
+            actors,
+            runtime_scene,
+            view_id,
+            frame_index,
+            data_dirs,
+        )
+        result["segmentation"] = segmentation
+        if segmentation.get("status") != "available" and RENDER_SEGMENTATION_PASSES:
+            result["errors"].append("segmentation_capture_failed")
+        return result
 
     depth_path = data_dirs["depth"] / view_id / f"frame_{int(frame_index):04d}.exr"
     depth_target = actors.get("depth_render_target")
@@ -8540,6 +8940,34 @@ def export_depth_and_segmentation_frame(
     if not depth_ok:
         result["errors"].append("depth_capture_failed")
 
+    result["segmentation"] = export_instance_segmentation_frame(
+        actors,
+        runtime_scene,
+        view_id,
+        frame_index,
+        data_dirs,
+    )
+    if result["segmentation"].get("status") != "available" and RENDER_SEGMENTATION_PASSES:
+        result["errors"].append("segmentation_capture_failed")
+
+    return result
+
+
+def export_instance_segmentation_frame(
+    actors: dict,
+    runtime_scene: dict | None,
+    view_id: str,
+    frame_index: int,
+    data_dirs: dict[str, Path],
+) -> dict:
+    if not RENDER_SEGMENTATION_PASSES:
+        return {"status": "disabled", "path": None, "source_type": None, "instance_count": 0}
+    capture_comp = actors["capture_comp"]
+    original_source = capture_comp.get_editor_property("capture_source")
+    original_target = capture_comp.get_editor_property("texture_target")
+    original_render_mode = capture_comp.get_editor_property("primitive_render_mode")
+    original_show_flags = list(capture_comp.get_editor_property("show_flag_settings"))
+    original_post_process_weight = float(capture_comp.get_editor_property("post_process_blend_weight"))
     mask_path = data_dirs["segmentation"] / view_id / f"frame_{int(frame_index):04d}.exr"
     mask_target = actors.get("mask_render_target")
     if not mask_target:
@@ -8559,8 +8987,8 @@ def export_depth_and_segmentation_frame(
             "primitive_render_mode",
             unreal.SceneCapturePrimitiveRenderMode.PRM_USE_SHOW_ONLY_LIST,
         )
-        for mask_actor in mask_state.get("actors") or []:
-            capture_comp.show_only_actor_components(mask_actor, True)
+        for mask_component in mask_state.get("components") or []:
+            capture_comp.show_only_component(mask_component)
         disabled_flags = []
         for flag_name in (
             "AntiAliasing",
@@ -8591,7 +9019,7 @@ def export_depth_and_segmentation_frame(
         set_editor_property_if_available(capture_comp, "capture_source", original_source)
         set_editor_property_if_available(capture_comp, "post_process_blend_weight", original_post_process_weight)
     if mask_ok:
-        result["segmentation"] = {
+        return {
             "status": "available",
             "path": str(mask_path),
             "source_type": "ue_instance_material_mask",
@@ -8603,10 +9031,7 @@ def export_depth_and_segmentation_frame(
             "anti_aliasing": "quantized_in_local_runner",
             "size": mask_path.stat().st_size,
         }
-    else:
-        result["errors"].append("segmentation_capture_failed")
-
-    return result
+    return {"status": "missing", "path": None, "source_type": None, "instance_count": 0}
 
 
 def initialize_data_pass_dirs(output_dir: Path) -> dict[str, Path]:
@@ -8975,6 +9400,13 @@ def articulated_runtime_ids(runtime_scene: dict | None) -> list[str]:
     ]
 
 
+def articulated_frame_zero_needs_post_tick(runtime_scene: dict | None) -> bool:
+    return any(
+        str(obj.get("behavior") or "") == "articulated_character"
+        for obj in (runtime_scene or {}).get("dynamic_objects") or []
+    )
+
+
 def apply_articulated_character_command(actors: dict, actor, obj: dict, frame_obj: dict) -> None:
     contract = (obj.get("params") or {}).get("articulated_body") or {}
     root_source = contract.get("root_transform_source") or {}
@@ -9148,6 +9580,8 @@ def apply_articulated_control_layers(actors: dict, obj: dict, time_s: float) -> 
     if not actor:
         raise RuntimeError(f"articulated Control Rig actor is missing: {object_id}")
     contract = (obj.get("params") or {}).get("articulated_body") or {}
+    if isinstance(contract.get("movement_control"), dict):
+        return
     sampled = sample_articulated_body_contract(contract, time_s)
     overlay = sampled.get("pose_overlay")
     ik_targets = sampled.get("ik_targets") or {}
@@ -9219,6 +9653,15 @@ def support_surface_height_cm(
     return float(height), "explicit_inclined_box_plane"
 
 
+def grounded_actor_z_cm(
+    support_height_cm: float,
+    capsule_half_height_cm: float,
+    capsule_world_z_cm: float,
+    actor_world_z_cm: float,
+) -> float:
+    return support_height_cm + capsule_half_height_cm - (capsule_world_z_cm - actor_world_z_cm)
+
+
 def calibrate_articulated_grounding(actors: dict, runtime_scene: dict | None) -> None:
     objects = {
         str(obj.get("id") or ""): obj
@@ -9252,7 +9695,16 @@ def calibrate_articulated_grounding(actors: dict, runtime_scene: dict | None) ->
         if not skeletal or not capsule or not movement:
             raise RuntimeError(f"articulated grounding components are incomplete: {object_id}")
         capsule_half_height = float(capsule.get_scaled_capsule_half_height())
-        final_location = unreal.Vector(location.x, location.y, support_height + capsule_half_height)
+        final_location = unreal.Vector(
+            location.x,
+            location.y,
+            grounded_actor_z_cm(
+                support_height,
+                capsule_half_height,
+                float(capsule.get_world_location().z),
+                float(location.z),
+            ),
+        )
         actor.set_actor_location(final_location, False, True)
         movement.set_movement_mode(unreal.MovementMode.MOVE_WALKING)
         actor.set_actor_location(final_location, False, True)
@@ -9300,7 +9752,11 @@ def calibrate_articulated_grounding(actors: dict, runtime_scene: dict | None) ->
             "status": "applied",
             "support_object_id": support_id,
             "support_binding_source": (obj.get("params") or {}).get("support_binding_source"),
-            "measurement_source": "evaluated_skeletal_mesh_bounds",
+            "measurement_source": (
+                "character_capsule"
+                if isinstance((((obj.get("params") or {}).get("articulated_body") or {}).get("movement_control")), dict)
+                else "evaluated_skeletal_mesh_bounds"
+            ),
             "surface_source": surface_source,
             "vertical_offset_m": round(actor_offset_cm / 100.0, 6),
             "mesh_vertical_offset_m": round(mesh_offset_cm / 100.0, 6),
@@ -9383,7 +9839,8 @@ def apply_trajectory_frame(actors: dict, dynamic_ids: list[str], frame: dict, sc
         if runtime_scene:
             z_offset_cm = float((actors.get("runtime_ground_offsets") or {}).get(oid, z_offset_cm))
         params = (obj_by_id.get(oid) or {}).get("params") or {}
-        if str(params.get("humanoid_adapter") or "").strip().lower() in {"gasp", "ddv"}:
+        articulated_contract = params.get("articulated_body") if isinstance(params.get("articulated_body"), dict) else {}
+        if isinstance(articulated_contract.get("movement_control"), dict):
             apply_gasp_locomotion_frame(actors, obj_by_id.get(oid) or {}, frame)
             continue
         articulated_obj = obj_by_id.get(oid) or {}
@@ -9533,6 +9990,62 @@ def set_component_angular_velocity_deg(component, raw_velocity, actor_id: str, s
             except Exception as exc:
                 errors.append(f"{method_name}:{exc}")
     status.setdefault("errors", []).append(f"delayed_release_angular_velocity:{actor_id}:{errors[-3:]}")
+
+
+def rebind_constraints_after_body_physics_state_change(
+    actors: dict,
+    body_id: str,
+    status: dict,
+) -> list[str]:
+    """Recreate solver handles invalidated by a constrained body's physics-state change."""
+    details = actors.get("constraint_binding_details") or {}
+    constraint_actors = actors.get("constraint_actors") or {}
+    rebound = []
+    for constraint_id, detail in details.items():
+        endpoints = [detail.get("body_a") or {}, detail.get("body_b") or {}]
+        if body_id not in {str(endpoint.get("object_id") or "") for endpoint in endpoints}:
+            continue
+        linear_motion = detail.get("linear_motion") or {}
+        angular_motion = detail.get("angular_motion") or {}
+        if detail.get("axial_visual") and all(
+            str(motion.get(axis) or "free") == "free"
+            for motion in (linear_motion, angular_motion)
+            for axis in ("x", "y", "z")
+        ):
+            continue
+        constraint_actor = constraint_actors.get(constraint_id)
+        constraint_component = physics_constraint_component(constraint_actor)
+        if constraint_component is None:
+            raise RuntimeError(f"constraint rebind component is missing: {constraint_id}")
+        components = []
+        for endpoint in endpoints:
+            if endpoint.get("endpoint_type") == "world_anchor":
+                components.append(None)
+                continue
+            endpoint_id = str(endpoint.get("object_id") or "")
+            endpoint_component = actor_runtime_component(actors.get(endpoint_id))
+            if endpoint_component is None:
+                raise RuntimeError(f"constraint rebind body is missing: {constraint_id}:{endpoint_id}")
+            components.append(endpoint_component)
+        try:
+            constraint_component.set_constrained_components(
+                components[0],
+                ue_name("None"),
+                components[1],
+                ue_name("None"),
+            )
+        except Exception as exc:
+            raise RuntimeError(f"constraint rebind failed: {constraint_id}:{exc}") from exc
+        actual = constrained_runtime_components(constraint_component)
+        expected = [component for component in components if component is not None]
+        if len(actual) != len(expected) or any(component not in actual for component in expected):
+            raise RuntimeError(f"constraint rebind readback mismatch: {constraint_id}")
+        rebound.append(str(constraint_id))
+    if rebound:
+        status.setdefault("delayed_release_constraint_rebinds", []).append(
+            {"body_id": body_id, "constraint_ids": sorted(rebound)}
+        )
+    return sorted(rebound)
 
 
 def apply_delayed_release_projectiles(
@@ -9792,6 +10305,7 @@ def apply_delayed_release_projectiles(
             component.wake_all_rigid_bodies()
         except Exception as exc:
             status.setdefault("errors", []).append(f"delayed_release_enable:{actor_id}:{exc}")
+        rebind_constraints_after_body_physics_state_change(actors, str(actor_id), status)
         default_velocity = (
             (3.0, 0.0, 1.0)
             if obj.get("behavior") == "character_throw_projectile"
@@ -9905,6 +10419,7 @@ def observed_articulated_state(
         "actor_transform": actor_transform,
         "pose_source_type": str((contract.get("pose_source") or {}).get("type") or ""),
         "root_transform_source_type": str((contract.get("root_transform_source") or {}).get("type") or ""),
+        "movement_control_type": str((contract.get("movement_control") or {}).get("type") or ""),
         "bones": {},
         "ik": {},
         "errors": [],
@@ -9928,6 +10443,8 @@ def observed_articulated_state(
             round(float(velocity.z) / 100.0, 5),
         ]
     if component:
+        anim_instance = component.get_anim_instance()
+        observed["animation_instance_class"] = anim_instance.get_class().get_name() if anim_instance else None
         for bone in sorted(ARTICULATED_BODY_BONES):
             try:
                 location = component.get_socket_location(unreal.Name(bone))
@@ -9964,6 +10481,8 @@ def observed_articulated_state(
         observed["root_motion_delta"] = {"translation_m": [0.0, 0.0, 0.0], "rotation_deg": [0.0, 0.0, 0.0]}
     actors["articulated_observed_previous"][actor_id] = actor_transform
     sampled = sample_articulated_body_contract(contract, elapsed_s)
+    observed["movement_command"] = sampled.get("movement_control")
+    observed["crouched"] = bool(actor.get_editor_property("is_crouched"))
     rig = actor.get_component_by_class(unreal.ControlRigComponent)
     control_state = (actors.get("articulated_control_state") or {}).get(actor_id) or {}
     observed["control_rig"] = {
@@ -10044,7 +10563,7 @@ def observed_articulated_state(
         target = head_look.get("position_m") or [0.0, 0.0, 0.0]
         head = component.get_socket_location(unreal.Name("head"))
         rotation = component.get_socket_rotation(unreal.Name("head"))
-        forward = unreal.MathLibrary.get_forward_vector(rotation)
+        forward = unreal.MathLibrary.get_right_vector(rotation)
         target_world = ue_vec_from_meters(target, z_offset_cm=0.0, origin=scene_origin)
         delta = unreal.Vector(target_world.x - head.x, target_world.y - head.y, target_world.z - head.z)
         length = max(1e-9, math.sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z))
@@ -10076,9 +10595,13 @@ def observed_articulated_state(
                 location.y,
                 str(grounding.get("support_binding_source") or ""),
             )
-            bounds_origin, bounds_extent = component_bounds(component)
+            if grounding.get("measurement_source") == "character_capsule" and capsule:
+                bottom_z = float(capsule.get_world_location().z) - float(capsule.get_scaled_capsule_half_height())
+            else:
+                bounds_origin, bounds_extent = component_bounds(component)
+                bottom_z = float(bounds_origin.z - bounds_extent.z)
             observed["grounding"]["support_gap_m"] = round(
-                ((bounds_origin.z - bounds_extent.z) - support_height) / 100.0,
+                (bottom_z - support_height) / 100.0,
                 6,
             )
     observed["ragdoll_active"] = bool((actors.get("articulated_ragdoll_state") or {}).get(actor_id))
@@ -10245,6 +10768,8 @@ def start_editor_physics_capture(actors: dict, runtime_scene: dict | None, expec
     if not status["enabled"]:
         return status
     configure_runtime_physics_substepping(runtime_scene, status)
+    if requires_gameplay_input:
+        configure_runtime_fixed_frame_step(runtime_scene, status)
     try:
         unreal.SystemLibrary.execute_console_command(None, f"t.MaxFPS {max(1, FPS)}")
     except Exception as exc:
@@ -10512,6 +11037,126 @@ def prepare_cpp_runtime_driver(actors: dict, runtime_scene: dict | None, status:
         except Exception as exc:
             cpp_status["errors"].append(f"register_dynamic:{actor_id}:{exc}")
 
+    for force in runtime_scene.get("forces") or []:
+        force_id = str(force.get("id") or "")
+        object_id = str(force.get("object") or "")
+        force_type = str(force.get("type") or "")
+        if force_type == "continuous_force":
+            vector_n = vector_from_sequence(force.get("vector_n"), 1.0)
+            try:
+                registered = bool(
+                    driver.register_continuous_force(
+                        ue_name(force_id),
+                        ue_name(object_id),
+                        vector_n,
+                        float(force.get("start_time_s")),
+                        float(force.get("end_time_s")),
+                    )
+                )
+            except Exception as exc:
+                cpp_status["errors"].append(f"register_continuous_force:{force_id}:{exc}")
+                registered = False
+            registration = {
+                "force_id": force_id,
+                "type": force_type,
+                "object": object_id,
+                "vector_n": [float(vector_n.x), float(vector_n.y), float(vector_n.z)],
+                "start_time_s": float(force.get("start_time_s")),
+                "end_time_s": float(force.get("end_time_s")),
+            }
+        elif force_type == "radial_force":
+            try:
+                registered = bool(
+                    driver.register_radial_force(
+                        ue_name(force_id),
+                        ue_name(str(force.get("source") or "")),
+                        ue_name(object_id),
+                        float(force.get("strength_n_m2")),
+                        float(force.get("softening_distance_m")),
+                        float(force.get("max_distance_m")),
+                        float(force.get("start_time_s")),
+                        float(force.get("end_time_s")),
+                    )
+                )
+            except Exception as exc:
+                cpp_status["errors"].append(f"register_radial_force:{force_id}:{exc}")
+                registered = False
+            registration = {"force_id": force_id, **dict(force)}
+        else:
+            cpp_status["errors"].append(f"register_force:{force_id}:unsupported_type:{force_type}")
+            return False
+        if not registered:
+            cpp_status["errors"].append(f"register_{force_type}:{force_id}:false")
+            return False
+        cpp_status.setdefault("registered_forces", []).append(registration)
+
+    for wind in runtime_scene.get("wind_fields") or []:
+        field_id = str(wind.get("id") or "")
+        velocity_m_s = vector_from_sequence(wind.get("velocity_m_s"), 1.0)
+        for target in wind.get("targets") or []:
+            object_id = str(target.get("object") or "")
+            try:
+                registered = bool(
+                    driver.register_aerodynamic_wind(
+                        ue_name(field_id),
+                        ue_name(object_id),
+                        velocity_m_s,
+                        float(wind.get("air_density_kg_m3")),
+                        float(target.get("drag_coefficient")),
+                        float(wind.get("gust_amplitude")),
+                        float(wind.get("gust_frequency_hz")),
+                    )
+                )
+            except Exception as exc:
+                cpp_status["errors"].append(f"register_aerodynamic_wind:{field_id}:{object_id}:{exc}")
+                registered = False
+            if not registered:
+                cpp_status["errors"].append(f"register_aerodynamic_wind:{field_id}:{object_id}:false")
+                return False
+            cpp_status.setdefault("registered_wind_fields", []).append(
+                {
+                    "field_id": field_id,
+                    "object": object_id,
+                    "velocity_m_s": [float(velocity_m_s.x), float(velocity_m_s.y), float(velocity_m_s.z)],
+                    "air_density_kg_m3": float(wind.get("air_density_kg_m3")),
+                    "drag_coefficient": float(target.get("drag_coefficient")),
+                    "gust_amplitude": float(wind.get("gust_amplitude")),
+                    "gust_frequency_hz": float(wind.get("gust_frequency_hz")),
+                }
+            )
+
+    for contact in runtime_scene.get("compliant_contacts") or []:
+        contact_id = str(contact.get("id") or "")
+        body_a = str(contact.get("body_a") or "")
+        body_b = str(contact.get("body_b") or "")
+        try:
+            registered = bool(
+                driver.register_compliant_contact(
+                    ue_name(contact_id),
+                    ue_name(body_a),
+                    ue_name(body_b),
+                    float(contact.get("activation_distance_m")),
+                    float(contact.get("stiffness_n_m")),
+                    float(contact.get("damping_n_s_m")),
+                )
+            )
+        except Exception as exc:
+            cpp_status["errors"].append(f"register_compliant_contact:{contact_id}:{exc}")
+            registered = False
+        if not registered:
+            cpp_status["errors"].append(f"register_compliant_contact:{contact_id}:false")
+            return False
+        cpp_status.setdefault("registered_compliant_contacts", []).append(
+            {
+                "contact_id": contact_id,
+                "body_a": body_a,
+                "body_b": body_b,
+                "activation_distance_m": float(contact.get("activation_distance_m")),
+                "stiffness_n_m": float(contact.get("stiffness_n_m")),
+                "damping_n_s_m": float(contact.get("damping_n_s_m")),
+            }
+        )
+
     try:
         timebase = runtime_timebase(runtime_scene)
         sample_interval = float(timebase["render_dt_s"])
@@ -10603,6 +11248,13 @@ def start_cpp_runtime_driver(actors: dict, runtime_scene: dict | None, status: d
 
 def cpp_capture_to_runtime_trajectory(capture: dict, actors: dict, runtime_scene: dict | None, scene_origin: unreal.Vector) -> tuple[list[dict], list[dict], list[dict], dict]:
     dynamic_ids, _static_ids = runtime_object_ids(runtime_scene)
+    kinematic_ids = [
+        str(obj.get("id"))
+        for obj in (runtime_scene.get("static_objects") if runtime_scene else []) or []
+        if obj.get("id")
+        and isinstance((obj.get("physics_properties") or {}).get("kinematic_motion"), dict)
+    ]
+    tracked_ids = list(dict.fromkeys([*dynamic_ids, *kinematic_ids]))
     declared_angular_velocity_ids = {
         str(obj.get("id"))
         for obj in (runtime_scene.get("dynamic_objects") if runtime_scene else []) or []
@@ -10643,6 +11295,7 @@ def cpp_capture_to_runtime_trajectory(capture: dict, actors: dict, runtime_scene
             "objects": {},
             "contacts": derived_contacts,
             "constraints": [],
+            "forces": [dict(force) for force in frame.get("forces") or [] if isinstance(force, dict)],
         }
         for raw_constraint in frame.get("constraints") or []:
             if not isinstance(raw_constraint, dict) or not raw_constraint.get("constraint_id"):
@@ -10663,6 +11316,68 @@ def cpp_capture_to_runtime_trajectory(capture: dict, actors: dict, runtime_scene
                 float(value)
                 for value in (raw_constraint.get("stiffness_n_m") or [0.0, 0.0, 0.0])[:3]
             ]
+            distance_spring = (
+                {
+                    "rest_length_m": float(raw_constraint.get("distance_spring_rest_length_cm") or 0.0) / 100.0,
+                    "stiffness_n_m": float(raw_constraint.get("distance_spring_stiffness_n_m") or 0.0),
+                    "damping_n_s_m": float(raw_constraint.get("distance_spring_damping_n_s_m") or 0.0),
+                    "distance_m": float(raw_constraint.get("distance_spring_distance_cm") or 0.0) / 100.0,
+                    "extension_m": float(raw_constraint.get("distance_spring_extension_cm") or 0.0) / 100.0,
+                    "separation_speed_m_s": float(raw_constraint.get("distance_spring_separation_speed_cm_s") or 0.0) / 100.0,
+                    "tension_n": float(raw_constraint.get("distance_spring_tension_n") or 0.0),
+                    "direction_a_to_b": [float(value) for value in (raw_constraint.get("distance_spring_direction_a_to_b") or [0.0, 0.0, 0.0])[:3]],
+                    "force_on_body_b_n": [float(value) for value in (raw_constraint.get("distance_spring_force_on_body_b_n") or [0.0, 0.0, 0.0])[:3]],
+                    "cumulative_evaluation_count": int(raw_constraint.get("distance_spring_evaluation_count") or 0),
+                    "cumulative_active_evaluation_count": int(raw_constraint.get("distance_spring_active_evaluation_count") or 0),
+                }
+                if raw_constraint.get("unilateral_distance_spring_enabled") is True
+                else None
+            )
+            path_spring = (
+                {
+                    "fixed_waypoint_m": [
+                        (float(value) - origin_value) / 100.0
+                        for value, origin_value in zip(
+                            (raw_constraint.get("path_spring_fixed_waypoint_cm") or [0.0, 0.0, 0.0])[:3],
+                            (scene_origin.x, scene_origin.y, scene_origin.z),
+                            strict=True,
+                        )
+                    ],
+                    "rest_length_m": float(raw_constraint.get("path_spring_rest_length_cm") or 0.0) / 100.0,
+                    "stiffness_n_m": float(raw_constraint.get("path_spring_stiffness_n_m") or 0.0),
+                    "damping_n_s_m": float(raw_constraint.get("path_spring_damping_n_s_m") or 0.0),
+                    "segment_a_length_m": float(raw_constraint.get("path_spring_segment_a_length_cm") or 0.0) / 100.0,
+                    "segment_b_length_m": float(raw_constraint.get("path_spring_segment_b_length_cm") or 0.0) / 100.0,
+                    "path_length_m": float(raw_constraint.get("path_spring_path_length_cm") or 0.0) / 100.0,
+                    "extension_m": float(raw_constraint.get("path_spring_extension_cm") or 0.0) / 100.0,
+                    "path_speed_m_s": float(raw_constraint.get("path_spring_path_speed_cm_s") or 0.0) / 100.0,
+                    "tension_n": float(raw_constraint.get("path_spring_tension_n") or 0.0),
+                    "point_a_m": [
+                        (float(value) - origin_value) / 100.0
+                        for value, origin_value in zip(
+                            (raw_constraint.get("path_spring_point_a_cm") or [0.0, 0.0, 0.0])[:3],
+                            (scene_origin.x, scene_origin.y, scene_origin.z),
+                            strict=True,
+                        )
+                    ],
+                    "point_b_m": [
+                        (float(value) - origin_value) / 100.0
+                        for value, origin_value in zip(
+                            (raw_constraint.get("path_spring_point_b_cm") or [0.0, 0.0, 0.0])[:3],
+                            (scene_origin.x, scene_origin.y, scene_origin.z),
+                            strict=True,
+                        )
+                    ],
+                    "direction_a_to_waypoint": [float(value) for value in (raw_constraint.get("path_spring_direction_a_to_waypoint") or [0.0, 0.0, 0.0])[:3]],
+                    "direction_b_to_waypoint": [float(value) for value in (raw_constraint.get("path_spring_direction_b_to_waypoint") or [0.0, 0.0, 0.0])[:3]],
+                    "force_on_body_a_n": [float(value) for value in (raw_constraint.get("path_spring_force_on_body_a_n") or [0.0, 0.0, 0.0])[:3]],
+                    "force_on_body_b_n": [float(value) for value in (raw_constraint.get("path_spring_force_on_body_b_n") or [0.0, 0.0, 0.0])[:3]],
+                    "cumulative_evaluation_count": int(raw_constraint.get("path_spring_evaluation_count") or 0),
+                    "cumulative_active_evaluation_count": int(raw_constraint.get("path_spring_active_evaluation_count") or 0),
+                }
+                if raw_constraint.get("unilateral_path_length_spring_enabled") is True
+                else None
+            )
             deformation_m = [
                 round(translation_m[index] - position_target_m[index], 7)
                 for index in range(3)
@@ -10683,20 +11398,30 @@ def cpp_capture_to_runtime_trajectory(capture: dict, actors: dict, runtime_scene
                         for value in (raw_constraint.get("angular_torque_engine_units") or [0.0, 0.0, 0.0])[:3]
                     ],
                     "stiffness_n_m": stiffness_n_m,
+                    **({"unilateral_distance_spring": distance_spring} if distance_spring is not None else {}),
+                    **({"unilateral_path_length_spring": path_spring} if path_spring is not None else {}),
                     "elastic_potential_j": round(
                         sum(
                             0.5 * stiffness_n_m[index] * deformation_m[index] * deformation_m[index]
                             for index in range(3)
+                        ) + (
+                            0.5 * float(distance_spring["stiffness_n_m"]) * float(distance_spring["extension_m"]) ** 2
+                            if distance_spring is not None else 0.0
+                        ) + (
+                            0.5 * float(path_spring["stiffness_n_m"]) * float(path_spring["extension_m"]) ** 2
+                            if path_spring is not None else 0.0
                         ),
                         8,
                     ),
                     "broken": bool(raw_constraint.get("broken")),
+                    "terminated": bool(raw_constraint.get("terminated")),
+                    "valid_constraint": bool(raw_constraint.get("valid_constraint")),
                     "frame": frame_index,
                     "time_s": round(elapsed, 6),
                     "source": "adp_cpp_runtime_driver",
                 }
             )
-        for actor_id in dynamic_ids:
+        for actor_id in tracked_ids:
             raw = frame_objects.get(actor_id)
             if not isinstance(raw, dict):
                 continue
@@ -10945,6 +11670,11 @@ def rebind_runtime_actors_to_simulation_world(
         for actor_label, actor in label_map.items():
             if actor_label.startswith("native_phenomena_demo_stage_"):
                 stage_collision_audit[actor_label] = disable_runtime_stage_helper_collision(actor)
+        map_collision_audit = status.setdefault("prepared_map_collision_audit", {})
+        for actor_label, actor in label_map.items():
+            audit = disable_prepared_map_mesh_collision(actor)
+            if audit is not None:
+                map_collision_audit[actor_label] = audit
         for actor_id, label in wanted.items():
             match = label_map.get(label)
             if not match:
@@ -11075,9 +11805,59 @@ def reset_runtime_actors_to_initial_state(actors: dict, runtime_scene: dict | No
     status["initial_state_reset_ids"] = sorted(reset_ids)
 
 
-def advance_cpp_runtime_driver(cpp_driver, actors: dict, status: dict, runtime_scene: dict | None, frame_index: int) -> int:
+def apply_runtime_kinematic_motions(
+    actors: dict,
+    runtime_scene: dict | None,
+    scene_origin,
+    frame_index: int,
+    status: dict,
+) -> None:
+    if not runtime_scene:
+        return
+    time_s = float(frame_index) * float(runtime_timebase(runtime_scene)["render_dt_s"])
+    ground_offsets = actors.get("runtime_ground_offsets") or {}
+    applied = []
+    for obj in runtime_scene.get("static_objects") or []:
+        properties = obj.get("physics_properties") if isinstance(obj.get("physics_properties"), dict) else {}
+        motion = properties.get("kinematic_motion")
+        actor_id = str(obj.get("id") or "")
+        actor = actors.get(actor_id)
+        if not isinstance(motion, dict) or not actor:
+            continue
+        position_m = sample_linear_kinematic_position(motion, time_s)
+        actor.set_actor_location(
+            ue_vec_from_meters(
+                position_m,
+                z_offset_cm=float(ground_offsets.get(actor_id) or 0.0),
+                origin=scene_origin,
+            ),
+            False,
+            False,
+        )
+        rotation_deg = sample_linear_kinematic_rotation(
+            motion,
+            time_s,
+            [float(value) for value in obj.get("initial_rotation_deg") or [0.0, 0.0, 0.0]],
+        )
+        actor.set_actor_rotation(runtime_rotator(rotation_deg), False)
+        applied.append({"id": actor_id, "time_s": round(time_s, 6), "position_m": position_m, "rotation_deg": rotation_deg})
+    if applied:
+        motion_status = status.setdefault("kinematic_motion", {})
+        motion_status["applied_frame_count"] = int(motion_status.get("applied_frame_count") or 0) + 1
+        motion_status["last_frame"] = applied
+
+
+def advance_cpp_runtime_driver(
+    cpp_driver,
+    actors: dict,
+    status: dict,
+    runtime_scene: dict | None,
+    scene_origin,
+    frame_index: int,
+) -> int:
     timebase = runtime_timebase(runtime_scene)
     step_s = 0.0 if int(frame_index) <= 0 else float(timebase["render_dt_s"])
+    apply_runtime_kinematic_motions(actors, runtime_scene, scene_origin, frame_index, status)
     if step_s > 0:
         set_simulation_world_paused(actors, status, False)
     try:
@@ -11140,16 +11920,20 @@ def sampled_frame_hashes(frames_dir: Path, frame_count: int, extension: str = "e
     return {"samples": samples, "unique": len({sample["sha256"] for sample in samples})}
 
 
+def video_filter_chain(video_filter: str | None) -> str:
+    chosen_filter = video_filter if video_filter is not None else VIDEO_FILTER
+    filters = [chosen_filter] if chosen_filter else []
+    if VIDEO_SHARPEN and VIDEO_SHARPEN_FILTER:
+        filters.append(VIDEO_SHARPEN_FILTER)
+    return ",".join(filters)
+
+
 def encode_video(frames_dir: Path, preview_path: Path, video_filter: str | None = None, extension: str = "exr"):
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return {"encoded": False, "reason": "ffmpeg not found"}
     cmd = [ffmpeg, "-y", "-framerate", str(FPS), "-i", str(frames_dir / f"frame_%04d.{extension}")]
-    chosen_filter = video_filter if video_filter is not None else VIDEO_FILTER
-    filters = [chosen_filter] if chosen_filter else []
-    if VIDEO_SHARPEN and VIDEO_SHARPEN_FILTER:
-        filters.append(VIDEO_SHARPEN_FILTER)
-    chosen_filter = ",".join(filters)
+    chosen_filter = video_filter_chain(video_filter)
     if chosen_filter:
         cmd.extend(["-vf", chosen_filter])
     cmd.extend(["-c:v", "libx264", "-crf", str(VIDEO_CRF), "-preset", str(VIDEO_PRESET), "-pix_fmt", "yuv420p", str(preview_path)])
@@ -11162,6 +11946,266 @@ def encode_video(frames_dir: Path, preview_path: Path, video_filter: str | None 
         "preset": str(VIDEO_PRESET),
         "stderr_tail": proc.stderr[-2000:],
     }
+
+
+def start_image_stream_encoder(
+    preview_path: Path,
+    *,
+    input_codec: str,
+    video_filter: str = "",
+    crf: str | int = VIDEO_CRF,
+    preset: str = VIDEO_PRESET,
+) -> dict:
+    """Start one bounded FFmpeg image-pipe encoder."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg not found")
+    stderr_path = preview_path.with_suffix(".ffmpeg.log")
+    stderr_handle = stderr_path.open("wb")
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-f",
+        f"{input_codec}_pipe",
+        "-framerate",
+        str(FPS),
+        "-i",
+        "pipe:0",
+    ]
+    if video_filter:
+        cmd.extend(["-vf", video_filter])
+    cmd.extend(
+        [
+            "-c:v",
+            "libx264",
+            "-crf",
+            str(crf),
+            "-preset",
+            str(preset),
+            "-pix_fmt",
+            "yuv420p",
+            str(preview_path),
+        ]
+    )
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_handle,
+            bufsize=0,
+        )
+    except Exception:
+        stderr_handle.close()
+        raise
+    return {
+        "process": process,
+        "preview_path": preview_path,
+        "stderr_handle": stderr_handle,
+        "stderr_path": stderr_path,
+        "video_filter": video_filter,
+        "crf": str(crf),
+        "preset": str(preset),
+        "sample_indexes": set(),
+        "samples": [],
+        "frame_count": 0,
+        "peak_pending_frame_files": 0,
+    }
+
+
+def start_png_stream_encoder(preview_path: Path, video_filter: str | None = None) -> dict:
+    """Start one bounded image-pipe encoder for a HighResViewport view."""
+    return start_image_stream_encoder(
+        preview_path,
+        input_codec="png",
+        video_filter=video_filter_chain(video_filter),
+    )
+
+
+def stream_png_frame(
+    encoder: dict,
+    frame_path: Path,
+    frame_index: int,
+    *,
+    delete_after: bool = True,
+) -> None:
+    process = encoder["process"]
+    if process.poll() is not None or process.stdin is None:
+        raise RuntimeError(f"stream encoder exited before frame {frame_index}")
+    sample = frame_index in encoder["sample_indexes"]
+    digest = hashlib.sha256() if sample else None
+    size = 0
+    with frame_path.open("rb") as source:
+        while True:
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                break
+            process.stdin.write(chunk)
+            size += len(chunk)
+            if digest is not None:
+                digest.update(chunk)
+    if digest is not None:
+        encoder["samples"].append(
+            {"frame": frame_index, "sha256": digest.hexdigest(), "size": size}
+        )
+    encoder["frame_count"] += 1
+    if delete_after:
+        frame_path.unlink()
+
+
+def stream_png_bytes(encoder: dict, payload: bytes, frame_index: int) -> None:
+    process = encoder["process"]
+    if process.poll() is not None or process.stdin is None:
+        raise RuntimeError(f"stream encoder exited before frame {frame_index}")
+    process.stdin.write(payload)
+    if frame_index in encoder["sample_indexes"]:
+        encoder["samples"].append(
+            {
+                "frame": frame_index,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size": len(payload),
+            }
+        )
+    encoder["frame_count"] += 1
+
+
+def exr_preview_png(path: Path, video_filter: str) -> bytes:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg not found")
+    command = [ffmpeg, "-v", "error", "-i", str(path), "-frames:v", "1"]
+    if video_filter:
+        command.extend(["-vf", video_filter])
+    command.extend(["-f", "image2pipe", "-vcodec", "png", "pipe:1"])
+    completed = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if completed.returncode != 0 or not completed.stdout:
+        stderr = completed.stderr.decode("utf-8", errors="replace") if isinstance(completed.stderr, bytes) else str(completed.stderr)
+        raise RuntimeError(f"depth preview conversion failed: {stderr[-500:]}")
+    return completed.stdout
+
+
+def finish_png_stream_encoder(encoder: dict, *, timeout_s: float = 180.0) -> tuple[dict, dict]:
+    process = encoder["process"]
+    stdin = process.stdin
+    if stdin is not None and not stdin.closed:
+        try:
+            stdin.close()
+        except BrokenPipeError:
+            pass
+    try:
+        returncode = process.wait(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            returncode = process.wait(timeout=8.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            returncode = process.wait()
+    stderr_handle = encoder["stderr_handle"]
+    if not stderr_handle.closed:
+        stderr_handle.close()
+    stderr_path = Path(encoder["stderr_path"])
+    stderr_tail = ""
+    if stderr_path.exists():
+        stderr_tail = stderr_path.read_text(encoding="utf-8", errors="replace")[-2000:]
+        stderr_path.unlink()
+    samples = list(encoder["samples"])
+    hashes = {"samples": samples, "unique": len({row["sha256"] for row in samples})}
+    encode = {
+        "encoded": returncode == 0,
+        "returncode": returncode,
+        "video_filter": encoder["video_filter"],
+        "crf": encoder["crf"],
+        "preset": encoder["preset"],
+        "streamed_frame_count": int(encoder["frame_count"]),
+        "stderr_tail": stderr_tail,
+    }
+    return hashes, encode
+
+
+def evenly_spaced_frame_indices(frame_count: int, sample_count: int) -> set[int]:
+    if frame_count <= 0 or sample_count <= 0:
+        return set()
+    count = min(frame_count, sample_count)
+    return {
+        round(slot * (frame_count - 1) / max(1, count - 1))
+        for slot in range(count)
+    }
+
+
+def start_data_pass_streams(view_outputs: list[dict], frame_count: int) -> dict[str, dict]:
+    retained_indices = evenly_spaced_frame_indices(frame_count, 10)
+    streams = {}
+    for output in view_outputs:
+        view_id = str(output.get("view_id") or output.get("id"))
+        suffix = str(output.get("suffix") or "")
+        view_streams = {"retained_indices": set(retained_indices)}
+        if RENDER_DEPTH_PASSES:
+            view_streams["depth"] = start_image_stream_encoder(
+                OUTPUT_DIR / f"depth_preview{suffix}.mp4",
+                input_codec="png",
+                video_filter="format=yuv420p",
+                crf="23",
+            )
+        if RENDER_SEGMENTATION_PASSES:
+            view_streams["segmentation"] = start_image_stream_encoder(
+                OUTPUT_DIR / f"segmentation_preview{suffix}.mp4",
+                input_codec="png",
+                video_filter="format=yuv420p",
+                crf="23",
+            )
+        for encoder in (view_streams.get("depth"), view_streams.get("segmentation")):
+            if not encoder:
+                continue
+            encoder["sample_indexes"] = set(retained_indices)
+        streams[view_id] = view_streams
+    return streams
+
+
+def stream_data_pass_frame(streams: dict[str, dict], payload: dict) -> None:
+    view_id = str(payload.get("view_id") or "")
+    frame_index = int(payload.get("frame") or 0)
+    view_streams = streams.get(view_id) or {}
+    retained_indices = view_streams.get("retained_indices") or set()
+    for modality in ("depth", "segmentation"):
+        result = payload.get(modality) or {}
+        path_value = result.get("path")
+        encoder = view_streams.get(modality)
+        if result.get("status") != "available" or not path_value or not encoder:
+            continue
+        path = Path(str(path_value))
+        if modality == "depth":
+            preview = exr_preview_png(
+                path,
+                "colorlevels=rimax=0.08:gimax=0.08:bimax=0.08,"
+                "pseudocolor=preset=viridis",
+            )
+            stream_png_bytes(encoder, preview, frame_index)
+            if frame_index not in retained_indices:
+                path.unlink()
+        else:
+            preview = exr_preview_png(path, "")
+            stream_png_bytes(encoder, preview, frame_index)
+            if frame_index not in retained_indices:
+                path.unlink()
+
+
+def finish_data_pass_streams(streams: dict[str, dict]) -> dict[str, dict]:
+    results = {}
+    for view_id, view_streams in streams.items():
+        results[view_id] = {}
+        for modality in ("depth", "segmentation"):
+            encoder = view_streams.get(modality)
+            if not encoder:
+                continue
+            frame_hashes, encode = finish_png_stream_encoder(encoder)
+            results[view_id][modality] = {
+                "preview": str(encoder["preview_path"]),
+                "frame_hashes": frame_hashes,
+                "encode": encode,
+                "retained_frame_indices": sorted(view_streams["retained_indices"]),
+            }
+    return results
 
 
 def frame_time_s(frame: dict, fallback_index: int) -> float:
@@ -11319,6 +12363,7 @@ def write_render_pass_manifest(
     trajectory: list[dict],
     duration_s: float,
     data_pass_frames: dict[str, list[dict]] | None = None,
+    data_stream_results: dict[str, dict] | None = None,
 ) -> dict:
     manifest_path = output_dir / "render_pass_manifest.json"
     passes = {
@@ -11336,7 +12381,9 @@ def write_render_pass_manifest(
         }
     }
     if RENDER_DATA_PASSES:
-        depth_views, segmentation_views = summarize_real_data_passes(data_pass_frames or {})
+        depth_views, segmentation_views = summarize_real_data_passes(
+            data_pass_frames or {}, data_stream_results or {}
+        )
         passes["depth"] = {
             "status": "available" if depth_views else "missing",
             "source_type": "ue_depth_buffer" if depth_views else None,
@@ -11374,19 +12421,36 @@ def write_render_pass_manifest(
     return {"path": str(manifest_path), "passes": payload["passes"]}
 
 
-def summarize_real_data_passes(data_pass_frames: dict[str, list[dict]]) -> tuple[list[dict], list[dict]]:
+def summarize_real_data_passes(
+    data_pass_frames: dict[str, list[dict]],
+    data_stream_results: dict[str, dict] | None = None,
+) -> tuple[list[dict], list[dict]]:
     depth_views = []
     segmentation_views = []
+    stream_results = data_stream_results or {}
     for view_id, frames in sorted(data_pass_frames.items()):
         depth_frames = [frame.get("depth") or {} for frame in frames if (frame.get("depth") or {}).get("status") == "available"]
         segmentation_frames = [frame.get("segmentation") or {} for frame in frames if (frame.get("segmentation") or {}).get("status") == "available"]
         if depth_frames:
+            depth_frame_indices = [
+                int(frame.get("frame") or 0)
+                for frame in frames
+                if (frame.get("depth") or {}).get("status") == "available"
+            ]
+            retained_depth_frames = [
+                frame for frame in depth_frames if frame.get("path") and Path(str(frame["path"])).is_file()
+            ]
+            depth_stream = (stream_results.get(view_id) or {}).get("depth") or {}
             depth_views.append(
                 {
                     "view_id": view_id,
-                    "path": depth_frames[0].get("path"),
-                    "frames": [frame.get("path") for frame in depth_frames],
+                    "path": retained_depth_frames[0].get("path") if retained_depth_frames else None,
+                    "frames": [frame.get("path") for frame in retained_depth_frames],
                     "frame_count": len(depth_frames),
+                    "frame_indices": depth_frame_indices,
+                    "sample_frame_indices": depth_stream.get("retained_frame_indices") or depth_frame_indices,
+                    "video_path": depth_stream.get("preview"),
+                    "video_encoded": bool((depth_stream.get("encode") or {}).get("encoded")),
                     "source_type": "ue_depth_buffer",
                     "capture_source": depth_frames[0].get("capture_source"),
                     "render_target_format": depth_frames[0].get("render_target_format"),
@@ -11399,12 +12463,27 @@ def summarize_real_data_passes(data_pass_frames: dict[str, list[dict]]) -> tuple
                 }
             )
         if segmentation_frames:
+            segmentation_frame_indices = [
+                int(frame.get("frame") or 0)
+                for frame in frames
+                if (frame.get("segmentation") or {}).get("status") == "available"
+            ]
+            retained_segmentation_frames = [
+                frame
+                for frame in segmentation_frames
+                if frame.get("path") and Path(str(frame["path"])).is_file()
+            ]
+            segmentation_stream = (stream_results.get(view_id) or {}).get("segmentation") or {}
             segmentation_views.append(
                 {
                     "view_id": view_id,
-                    "path": segmentation_frames[0].get("path"),
-                    "frames": [frame.get("path") for frame in segmentation_frames],
+                    "path": retained_segmentation_frames[0].get("path") if retained_segmentation_frames else None,
+                    "frames": [frame.get("path") for frame in retained_segmentation_frames],
                     "frame_count": len(segmentation_frames),
+                    "frame_indices": segmentation_frame_indices,
+                    "sample_frame_indices": segmentation_stream.get("retained_frame_indices") or segmentation_frame_indices,
+                    "video_path": segmentation_stream.get("preview"),
+                    "video_encoded": bool((segmentation_stream.get("encode") or {}).get("encoded")),
                     "source_type": "ue_instance_material_mask",
                     "segmentation_type": "instance",
                     "instance_level": True,
@@ -11560,6 +12639,7 @@ def evaluate_articulated_frame_zero(
 
 def restore_articulated_frame_zero_roots(actors: dict, runtime_scene: dict | None) -> None:
     initial_transforms = actors.get("runtime_initial_transforms") or {}
+    capture_start_z = actors.get("articulated_capture_start_z_cm") or {}
     for obj in (runtime_scene or {}).get("dynamic_objects") or []:
         if str(obj.get("behavior") or "") != "articulated_character":
             continue
@@ -11568,12 +12648,36 @@ def restore_articulated_frame_zero_roots(actors: dict, runtime_scene: dict | Non
         initial = initial_transforms.get(object_id)
         if not actor or not isinstance(initial, dict):
             raise RuntimeError(f"articulated frame-zero root transform is missing: {object_id}")
-        actor.set_actor_location(
-            unreal.Vector(*[float(value) for value in initial["position_cm"][:3]]),
-            False,
-            True,
-        )
+        position_cm = [float(value) for value in initial["position_cm"][:3]]
+        if object_id in capture_start_z:
+            position_cm[2] = float(capture_start_z[object_id])
+        actor.set_actor_location(unreal.Vector(*position_cm), False, True)
         actor.set_actor_rotation(runtime_rotator(initial["rotation_degrees"]), False)
+
+
+def capture_backend_requires_async_pie(capture_backend: str, runtime_scene: dict | None) -> bool:
+    backend = str(capture_backend or "scene_capture")
+    return backend == "highres_viewport" or (
+        backend == "scene_capture" and bool(runtime_gasp_objects(runtime_scene))
+    )
+
+
+def submit_async_rgb_frame(actors: dict, path: Path, capture_backend: str, camera):
+    if capture_backend == "scene_capture":
+        return capture_render_target_to_file(actors, path, force_exr=True), None
+    task = unreal.AutomationLibrary.take_high_res_screenshot(
+        WIDTH,
+        HEIGHT,
+        str(path),
+        actors.get("highres_camera") or camera,
+        False,
+        False,
+        unreal.ComparisonTolerance.LOW,
+        "Simulator Studio viewport capture",
+        0.08,
+        False,
+    )
+    return True, task
 
 
 def start_highres_viewport_capture(
@@ -11597,7 +12701,21 @@ def start_highres_viewport_capture(
         view_frames_dir.mkdir(exist_ok=True)
         view_outputs.append({**view, "frames_dir": view_frames_dir, "preview": OUTPUT_DIR / f"preview{suffix}.mp4"})
     render_data_passes = bool(globals().get("RENDER_DATA_PASSES", False))
+    capture_backend = str((actors.get("lighting") or {}).get("capture_backend") or "highres_viewport")
+    frame_extension = "exr" if capture_backend == "scene_capture" else "png"
+    stream_png_frames = capture_backend == "highres_viewport" and not KEEP_RENDER_FRAMES
+    if stream_png_frames:
+        sample_indexes = sorted({0, len(trajectory) // 2, max(0, len(trajectory) - 1)})
+        for output in view_outputs:
+            encoder = start_png_stream_encoder(output["preview"], actors.get("video_filter", ""))
+            encoder["sample_indexes"] = set(sample_indexes)
+            output["stream_encoder"] = encoder
     data_pass_dirs = initialize_data_pass_dirs(OUTPUT_DIR) if render_data_passes else {}
+    data_pass_streams = (
+        start_data_pass_streams(view_outputs, len(trajectory))
+        if render_data_passes and not KEEP_RENDER_FRAMES
+        else {}
+    )
     data_pass_frames = {
         str(output.get("view_id") or output.get("id")): []
         for output in view_outputs
@@ -11606,12 +12724,15 @@ def start_highres_viewport_capture(
     scene_origin = unreal.Vector(*actors.get("scene_origin", [0.0, 0.0, 0.0]))
     dynamic_ids = [obj.get("id") for obj in (runtime_scene.get("dynamic_objects") if runtime_scene else [])] if runtime_scene else ["rubber_ball", "lead_ball", "steel_ball"]
     physics_enabled = physics_capture_enabled(actors, runtime_scene)
-    physics_status = start_editor_physics_capture(actors, runtime_scene, DURATION) if physics_enabled else {"enabled": False}
-    physics_controls = actors.get("physics_controls") or runtime_physics_controls(runtime_scene)
-    initial_impulse_start_frame = int_control(physics_controls.get("initial_impulse_start_frame"), 0, 0, max(0, len(trajectory) - 1))
     camera = unreal.EditorLevelLibrary.spawn_actor_from_class(unreal.CameraActor, view["location"])
     camera.set_actor_label("native_phenomena_demo_highres_capture_camera")
     camera.camera_component.set_editor_property("field_of_view", float(view["fov"]))
+    # PIE duplicates actors that already exist in the editor world.  Create the
+    # Harness camera first so the normal simulation-world rebind can supply the
+    # same-world CameraActor required by a possessed gameplay controller.
+    physics_status = start_editor_physics_capture(actors, runtime_scene, DURATION) if physics_enabled else {"enabled": False}
+    physics_controls = actors.get("physics_controls") or runtime_physics_controls(runtime_scene)
+    initial_impulse_start_frame = int_control(physics_controls.get("initial_impulse_start_frame"), 0, 0, max(0, len(trajectory) - 1))
 
     editor_subsystem = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem)
     state = {
@@ -11639,6 +12760,7 @@ def start_highres_viewport_capture(
         "waiting_kind": None,
         "data_capture_in_progress": False,
         "capture_request_in_progress": False,
+        "finishing": False,
         "character_tick_pending": None,
         "character_tick_target_time": None,
         "character_advanced_frame": None,
@@ -11652,7 +12774,7 @@ def start_highres_viewport_capture(
     summary = {
         "output_dir": str(OUTPUT_DIR),
         "native_ue": True,
-        "capture_backend": "highres_viewport",
+        "capture_backend": capture_backend,
         "uses_adp_probe_link": False,
         "uses_tmp": str(OUTPUT_DIR).startswith("/tmp/"),
         "project": "AgenticSimNative",
@@ -11719,19 +12841,33 @@ def start_highres_viewport_capture(
         },
         "frame_cleanup": {
             "keep_render_frames": KEEP_RENDER_FRAMES,
+            "stream_png_frames": stream_png_frames,
+            "stream_data_passes": bool(data_pass_streams),
+            "retained_data_samples_per_view": 10 if data_pass_streams else 0,
+            "peak_pending_frame_files": 0,
             "removed_frame_dirs": [],
         },
     }
-    viewport_hygiene = configure_clean_highres_viewport()
-    summary["lighting"]["highres_viewport"] = {
-        "force_game_view": viewport_hygiene.get("game_view_after") is True,
-        "frame_extension": "png",
-        **viewport_hygiene,
-    }
+    viewport_hygiene = configure_clean_highres_viewport() if capture_backend == "highres_viewport" else {}
+    if capture_backend == "highres_viewport":
+        summary["lighting"]["highres_viewport"] = {
+            "force_game_view": viewport_hygiene.get("game_view_after") is True,
+            "frame_extension": frame_extension,
+            **viewport_hygiene,
+        }
+    else:
+        summary["lighting"]["async_scene_capture"] = {
+            "enabled": True,
+            "frame_extension": frame_extension,
+        }
     runtime_light_audit = summary["lighting"].get("runtime_light_audit") or {}
     summary["lighting"]["preview_shadow_safe"] = bool(
         runtime_light_audit.get("preview_shadow_safe") is True
-        and viewport_hygiene.get("preview_shadow_safe") is True
+        and (
+            viewport_hygiene.get("preview_shadow_safe") is True
+            if capture_backend == "highres_viewport"
+            else True
+        )
     )
     summary["capture_readiness"] = {
         "schema_version": "capture_readiness_v1",
@@ -11802,6 +12938,9 @@ def start_highres_viewport_capture(
         write_summary(summary)
 
     def finish():
+        if state["finishing"]:
+            return
+        state["finishing"] = True
         try:
             if state["handle"] is not None:
                 unreal.unregister_slate_post_tick_callback(state["handle"])
@@ -11837,14 +12976,17 @@ def start_highres_viewport_capture(
         summary["timing"]["capture_seconds"] = round(state["encode_started"] - state["capture_started"], 2)
         encode_results = []
         for output in view_outputs:
-            if actors.get("gasp_locomotion"):
-                first_frame = output["frames_dir"] / "frame_0000.png"
-                stable_frame = output["frames_dir"] / "frame_0001.png"
+            if actors.get("gasp_locomotion") and not stream_png_frames:
+                first_frame = output["frames_dir"] / f"frame_0000.{frame_extension}"
+                stable_frame = output["frames_dir"] / f"frame_0001.{frame_extension}"
                 if first_frame.exists() and stable_frame.exists():
                     shutil.copyfile(stable_frame, first_frame)
                     summary["capture_readiness"]["gasp_first_frame_camera_stabilized"] = True
-            frame_hashes = sampled_frame_hashes(output["frames_dir"], len(trajectory), "png")
-            encode = encode_video(output["frames_dir"], output["preview"], actors.get("video_filter", ""), "png")
+            if stream_png_frames:
+                frame_hashes, encode = finish_png_stream_encoder(output["stream_encoder"])
+            else:
+                frame_hashes = sampled_frame_hashes(output["frames_dir"], len(trajectory), frame_extension)
+                encode = encode_video(output["frames_dir"], output["preview"], actors.get("video_filter", ""), frame_extension)
             encode_results.append({
                 "id": output["id"],
                 "view_id": str(output.get("view_id") or output.get("id")),
@@ -11887,6 +13029,17 @@ def start_highres_viewport_capture(
             "views": [str(output.get("view_id") or output.get("id")) for output in view_outputs],
         }
         final_trajectory = state["actual_trajectory"] if state["actual_trajectory"] else trajectory
+        data_stream_results = finish_data_pass_streams(data_pass_streams) if data_pass_streams else {}
+        failed_data_encoders = [
+            f"{view_id}:{modality}"
+            for view_id, modalities in data_stream_results.items()
+            for modality, result in modalities.items()
+            if not (result.get("encode") or {}).get("encoded")
+        ]
+        if failed_data_encoders:
+            state["errors"].append(
+                {"frame": state.get("frame_index"), "error": f"data pass stream encoding failed: {failed_data_encoders}"}
+            )
         summary["render_pass_manifest"] = write_render_pass_manifest(
             OUTPUT_DIR,
             summary["multi_view"],
@@ -11894,6 +13047,7 @@ def start_highres_viewport_capture(
             final_trajectory,
             DURATION,
             data_pass_frames,
+            data_stream_results,
         )
         summary["timing"]["encode_seconds"] = round(time.perf_counter() - state["encode_started"], 2)
         summary["timing"]["total_seconds"] = round(time.perf_counter() - script_started, 2)
@@ -11910,23 +13064,16 @@ def start_highres_viewport_capture(
         print(json.dumps(summary, indent=2), flush=True)
         request_editor_exit()
 
-    def submit_highres_screenshot(path: Path, kind: str) -> None:
+    def submit_rgb_frame(path: Path, kind: str) -> None:
         if path.exists():
             path.unlink()
         state["capture_request_in_progress"] = True
         try:
-            state["task"] = unreal.AutomationLibrary.take_high_res_screenshot(
-                WIDTH,
-                HEIGHT,
-                str(path),
-                actors.get("highres_camera") or camera,
-                False,
-                False,
-                unreal.ComparisonTolerance.LOW,
-                "Simulator Studio viewport capture",
-                0.08,
-                False,
+            captured, state["task"] = submit_async_rgb_frame(
+                actors, path, capture_backend, camera
             )
+            if not captured:
+                raise RuntimeError(f"RGB capture failed: {path}")
             state["waiting_path"] = path
             state["waiting_kind"] = kind
             state["last_size"] = -1
@@ -11936,6 +13083,12 @@ def start_highres_viewport_capture(
             state["capture_request_in_progress"] = False
 
     def set_highres_camera_view(location, target, fov: float) -> None:
+        if capture_backend == "scene_capture":
+            set_capture_view(actors, location, target, fov)
+            summary["capture_component_audit"] = capture_component_audit(
+                actors["capture_comp"], actors, runtime_scene
+            )
+            return
         capture_camera = actors.get("highres_camera") or camera
         rotation = look_at_rotation(location, target)
         for active_camera in dict.fromkeys((camera, capture_camera)):
@@ -11958,11 +13111,12 @@ def start_highres_viewport_capture(
             editor_subsystem.set_level_viewport_camera_info(frame_view["location"], look_at_rotation(frame_view["location"], frame_view["target"]))
         except Exception:
             pass
-        configure_clean_highres_viewport()
+        if capture_backend == "highres_viewport":
+            configure_clean_highres_viewport()
         settle = settle_highres_viewport(0.0, max(1, RENDER_PER_FRAME_SETTLE_TICKS))
         summary["capture_readiness"].setdefault("probe_settles", []).append(settle)
-        path = view["frames_dir"] / f"warmup_probe_{state['probe_index']:04d}.png"
-        submit_highres_screenshot(path, "probe")
+        path = view["frames_dir"] / f"warmup_probe_{state['probe_index']:04d}.{frame_extension}"
+        submit_rgb_frame(path, "probe")
 
     def handle_probe_complete(path: Path) -> None:
         fingerprint = file_fingerprint(path)
@@ -12040,7 +13194,7 @@ def start_highres_viewport_capture(
             apply_delayed_release_projectiles(actors, runtime_scene, frame, scene_origin, physics_status)
             if cpp_status.get("started") and cpp_driver:
                 try:
-                    steps = advance_cpp_runtime_driver(cpp_driver, actors, physics_status, runtime_scene, frame_index)
+                    steps = advance_cpp_runtime_driver(cpp_driver, actors, physics_status, runtime_scene, scene_origin, frame_index)
                     cpp_status["manual_step_count"] = int(cpp_status.get("manual_step_count") or 0) + steps
                 except Exception as exc:
                     cpp_status.setdefault("errors", []).append(f"advance_capture:{exc}")
@@ -12106,31 +13260,34 @@ def start_highres_viewport_capture(
             }
         )
         set_highres_camera_view(frame_view["location"], frame_view["target"], frame_view["fov"])
-        if render_data_passes:
+        capture_data_frame = render_data_passes and should_capture_data_frame(frame_index, len(trajectory))
+        if capture_data_frame:
             state["data_capture_in_progress"] = True
         try:
-            if render_data_passes:
+            if capture_data_frame:
                 set_capture_view(actors, frame_view["location"], frame_view["target"], frame_view["fov"])
-                data_pass_frames.setdefault(view_id, []).append(
-                    export_depth_and_segmentation_frame(
-                        actors,
-                        runtime_scene,
-                        view_id,
-                        frame_index,
-                        data_pass_dirs,
-                    )
+                data_payload = export_depth_and_segmentation_frame(
+                    actors,
+                    runtime_scene,
+                    view_id,
+                    frame_index,
+                    data_pass_dirs,
                 )
+                if data_pass_streams:
+                    stream_data_pass_frame(data_pass_streams, data_payload)
+                data_pass_frames.setdefault(view_id, []).append(data_payload)
             try:
                 editor_subsystem.set_level_viewport_camera_info(frame_view["location"], look_at_rotation(frame_view["location"], frame_view["target"]))
             except Exception:
                 pass
-            configure_clean_highres_viewport()
+            if capture_backend == "highres_viewport":
+                configure_clean_highres_viewport()
             settle = settle_highres_viewport(0.0, RENDER_PER_FRAME_SETTLE_TICKS)
             summary.setdefault("capture_readiness", {}).setdefault("per_frame_settles", []).append({"frame": frame_index, "view_id": view_id, **settle})
-            path = view["frames_dir"] / f"frame_{frame_index:04d}.png"
-            submit_highres_screenshot(path, "frame")
+            path = view["frames_dir"] / f"frame_{frame_index:04d}.{frame_extension}"
+            submit_rgb_frame(path, "frame")
         finally:
-            if render_data_passes:
+            if capture_data_frame:
                 state["data_capture_in_progress"] = False
 
     def advance_capture_cursor() -> None:
@@ -12169,6 +13326,20 @@ def start_highres_viewport_capture(
                         if waiting_kind == "probe":
                             handle_probe_complete(waiting_path)
                         else:
+                            if stream_png_frames:
+                                pending_count = sum(
+                                    len(list(output["frames_dir"].glob("frame_*.png")))
+                                    for output in view_outputs
+                                )
+                                summary["frame_cleanup"]["peak_pending_frame_files"] = max(
+                                    int(summary["frame_cleanup"]["peak_pending_frame_files"]),
+                                    pending_count,
+                                )
+                                stream_png_frame(
+                                    view_outputs[state["view_index"]]["stream_encoder"],
+                                    waiting_path,
+                                    int(state["frame_index"]),
+                                )
                             advance_capture_cursor()
                 elif time.perf_counter() - state.get("requested_at", state["capture_started"]) > 20.0:
                     waiting_kind = state.get("waiting_kind") or "frame"
@@ -12191,7 +13362,11 @@ def start_highres_viewport_capture(
                         reset_runtime_actors_to_initial_state(actors, runtime_scene, physics_status)
                         if update_runtime_binding_snapshot():
                             state["physics_ready"] = True
-                            start_visible_physics_input()
+                            if actors.get("gasp_locomotion"):
+                                if not begin_gasp_idle_warmup(actors, runtime_scene, physics_status):
+                                    raise RuntimeError("GASP idle warmup could not start")
+                            else:
+                                start_visible_physics_input()
                         summary["physics_capture"].update(physics_status)
                         write_summary(summary)
                 if not state["physics_ready"] and now - state["physics_wait_started"] > 12.0:
@@ -12212,13 +13387,43 @@ def start_highres_viewport_capture(
                     write_summary(summary)
                     finish()
                 return
+            gasp_warmup = actors.get("gasp_idle_warmup") or {}
+            if gasp_warmup.get("active"):
+                world = actors.get("physics_game_world")
+                current_game_s = float(unreal.GameplayStatics.get_time_seconds(world)) if world else 0.0
+                elapsed_game_s = current_game_s - float(gasp_warmup.get("game_time_start_s") or 0.0)
+                if gasp_warmup.get("phase") == "animation_warmup":
+                    if elapsed_game_s + 1e-4 >= float(gasp_warmup.get("duration_s") or 0.0):
+                        detail = begin_gasp_grounding_settle(actors, runtime_scene, physics_status)
+                        summary["physics_capture"]["gasp_idle_warmup"] = detail
+                        summary["physics_capture"].update(physics_status)
+                        write_summary(summary)
+                    elif time.perf_counter() - float(gasp_warmup.get("wall_time_start_s") or 0.0) > 8.0:
+                        raise RuntimeError(
+                            f"GASP idle warmup did not advance: elapsed_game_s={elapsed_game_s:.6f}"
+                        )
+                elif gasp_warmup.get("phase") == "grounding_settle":
+                    detail = poll_gasp_grounding_settle(actors, runtime_scene, physics_status)
+                    if detail:
+                        summary["physics_capture"]["gasp_idle_warmup"] = detail
+                        start_visible_physics_input()
+                        summary["physics_capture"].update(physics_status)
+                        write_summary(summary)
+                    elif time.perf_counter() - float(gasp_warmup.get("settle_wall_time_start_s") or 0.0) > 8.0:
+                        raise RuntimeError(
+                            "GASP character did not settle grounded at the declared capture position"
+                        )
+                else:
+                    raise RuntimeError(f"unknown GASP warmup phase: {gasp_warmup.get('phase')}")
+                return
             if not state["articulated_frame_zero_ready"]:
                 evaluate_articulated_frame_zero(actors, runtime_scene, trajectory, physics_status)
                 state["articulated_frame_zero_ready"] = True
-                actors.setdefault("articulated_frame_zero_evaluation", {}).update({
-                    "status": "pending_post_tick",
-                    "sample_phase": "pre_tick",
-                })
+                if articulated_frame_zero_needs_post_tick(runtime_scene):
+                    actors.setdefault("articulated_frame_zero_evaluation", {}).update({
+                        "status": "pending_post_tick",
+                        "sample_phase": "pre_tick",
+                    })
                 summary["articulated_frame_zero_evaluation"] = actors.get("articulated_frame_zero_evaluation")
                 summary["articulated_grounding"] = actors.get("articulated_grounding")
                 state["runtime_binding_snapshot_ready"] = update_runtime_binding_snapshot()
@@ -12314,11 +13519,74 @@ def start_highres_viewport_capture(
     state["handle"] = unreal.register_slate_post_tick_callback(tick)
 
 
+def render_layout_preview(actors: dict, runtime_scene: dict, trajectory: list[dict], script_started: float) -> None:
+    """Capture the compiled layout only; this is not a physics qualification pass."""
+    target_time_s = max(0.0, min(float(LAYOUT_PREVIEW_TIME_S or 0.0), float(DURATION)))
+    frame_index = min(
+        max(0, int(round(target_time_s * FPS))),
+        max(0, len(trajectory) - 1),
+    )
+    frame = trajectory[frame_index]
+    scene_origin = unreal.Vector(*actors.get("scene_origin", [0.0, 0.0, 0.0]))
+    dynamic_ids = [
+        obj.get("id")
+        for obj in runtime_scene.get("dynamic_objects") or []
+        if obj.get("id")
+    ]
+    # At t=0 this is the exact compiled placement.  A later requested time is
+    # a cheap authored/analytic pose preview, not evidence of Chaos behavior.
+    apply_trajectory_frame(actors, dynamic_ids, frame, scene_origin, runtime_scene)
+    apply_surface_mesh_sequence_replay(actors, runtime_scene, frame_index, {})
+    sync_runtime_visuals(actors)
+    material_warmup = warm_up_surface_replay_materials(runtime_scene)
+    actors.setdefault("lighting", {})["surface_replay_material_warmup"] = material_warmup
+    warm_up_scene_capture(actors)
+
+    images = []
+    for view in camera_view_specs(actors, runtime_scene):
+        frame_view = camera_view_for_frame(view, runtime_scene, frame_index, len(trajectory), [])
+        set_capture_view(actors, frame_view["location"], frame_view["target"], frame_view["fov"])
+        view_id = str(view.get("view_id") or view.get("id"))
+        path = OUTPUT_DIR / f"layout_{view_id}.png"
+        transient = OUTPUT_DIR / f".layout_{view_id}.exr"
+        if not capture_render_target_to_file(actors, transient, force_exr=True):
+            raise RuntimeError(f"layout preview capture failed for {view_id}")
+        try:
+            path.write_bytes(exr_preview_png(transient, ""))
+        finally:
+            transient.unlink(missing_ok=True)
+        images.append(
+            {
+                "view_id": view_id,
+                "path": str(path),
+                "camera": {
+                    "location_cm": vector_payload(frame_view["location"]),
+                    "target_cm": vector_payload(frame_view["target"]),
+                    "fov": round(float(frame_view["fov"]), 4),
+                },
+            }
+        )
+    manifest = {
+        "schema_version": "harness_native_layout_preview_v1",
+        "status": "pass" if images else "fail",
+        "time_s": target_time_s,
+        "frame_index": frame_index,
+        "width": WIDTH,
+        "height": HEIGHT,
+        "physics_qualification": False,
+        "images": images,
+        "timing_seconds": round(time.perf_counter() - script_started, 2),
+    }
+    (OUTPUT_DIR / "layout_preview_manifest.json").write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8"
+    )
+    write_progress_marker("layout_preview_complete", f"views={len(images)}")
+    request_editor_exit()
+
+
 def main():
     script_started = time.perf_counter()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    frames_dir = OUTPUT_DIR / "frames"
-    frames_dir.mkdir(exist_ok=True)
     write_progress_marker("main_start", str(OUTPUT_DIR))
     runtime_scene = STUDIO_RUNTIME_SCENE if STUDIO_RUNTIME_SCENE and not STUDIO_RUNTIME_SCENE.get("load_error") else None
     if not runtime_scene:
@@ -12339,13 +13607,18 @@ def main():
     actors = setup_scene(runtime_scene)
     setup_seconds = round(time.perf_counter() - setup_started, 2)
     write_progress_marker("setup_complete", f"setup_seconds={setup_seconds}")
+    if LAYOUT_PREVIEW_TIME_S is not None:
+        render_layout_preview(actors, runtime_scene, trajectory, script_started)
+        return
+    frames_dir = OUTPUT_DIR / "frames"
+    frames_dir.mkdir(exist_ok=True)
     scene_origin = unreal.Vector(*actors.get("scene_origin", [0.0, 0.0, 0.0]))
     dynamic_ids = [obj.get("id") for obj in (runtime_scene.get("dynamic_objects") if runtime_scene else [])] if runtime_scene else ["rubber_ball", "lead_ball", "steel_ball"]
     capture_backend = str((actors.get("lighting") or {}).get("capture_backend") or "scene_capture")
     write_progress_marker("capture_backend", capture_backend)
-    if capture_backend == "highres_viewport":
+    if capture_backend_requires_async_pie(capture_backend, runtime_scene):
         start_highres_viewport_capture(actors, runtime_scene, trajectory, validation, setup_seconds, script_started, frames_dir)
-        write_progress_marker("highres_capture_started")
+        write_progress_marker("async_capture_started", capture_backend)
         return
     physics_enabled = physics_capture_enabled(actors, runtime_scene)
     write_progress_marker("physics_enabled", str(physics_enabled))
@@ -12366,6 +13639,19 @@ def main():
         view_frames_dir = frames_dir if view.get("suffix") == "" else OUTPUT_DIR / f"frames{view['suffix']}"
         view_frames_dir.mkdir(exist_ok=True)
         view_outputs.append({**view, "frames_dir": view_frames_dir, "preview": OUTPUT_DIR / f"preview{view['suffix']}.mp4"})
+    capture_rgb_frames = RENDER_PASS_MODE != "data"
+    stream_rgb_frames = capture_rgb_frames and not KEEP_RENDER_FRAMES
+    if stream_rgb_frames:
+        sample_indexes = sorted({0, len(trajectory) // 2, max(0, len(trajectory) - 1)})
+        for view in view_outputs:
+            encoder = start_image_stream_encoder(
+                view["preview"],
+                input_codec="png",
+                video_filter=video_filter_chain(actors.get("video_filter")),
+            )
+            encoder["sample_indexes"] = set(sample_indexes)
+            view["stream_encoder"] = encoder
+    data_pass_streams = start_data_pass_streams(view_outputs, len(trajectory)) if RENDER_DATA_PASSES and not KEEP_RENDER_FRAMES else {}
     camera_tracks: dict[str, list[dict]] = {
         str(view.get("view_id") or view.get("id")): [] for view in view_outputs
     }
@@ -12394,7 +13680,7 @@ def main():
             apply_delayed_release_projectiles(actors, runtime_scene, frame, scene_origin, physics_status)
             if cpp_status.get("started") and cpp_driver:
                 try:
-                    steps = advance_cpp_runtime_driver(cpp_driver, actors, physics_status, runtime_scene, frame_index)
+                    steps = advance_cpp_runtime_driver(cpp_driver, actors, physics_status, runtime_scene, scene_origin, frame_index)
                     cpp_status["manual_step_count"] = int(cpp_status.get("manual_step_count") or 0) + steps
                 except Exception as exc:
                     cpp_status.setdefault("errors", []).append(f"advance_capture:{exc}")
@@ -12451,12 +13737,24 @@ def main():
             set_capture_view(actors, frame_view["location"], frame_view["target"], frame_view["fov"])
             if frame_index == 0:
                 first_frame_views[view_id] = frame_view
-            capture_frame(actors, view["frames_dir"] / f"frame_{frame['frame']:04d}.exr")
-            if RENDER_DATA_PASSES:
-                data_pass_frames.setdefault(view_id, []).append(
-                    export_depth_and_segmentation_frame(actors, runtime_scene, view_id, frame_index, data_pass_dirs)
+            if capture_rgb_frames:
+                rgb_frame_path = view["frames_dir"] / f"frame_{frame['frame']:04d}.exr"
+                capture_frame(actors, rgb_frame_path)
+                if stream_rgb_frames:
+                    stream_png_bytes(
+                        view["stream_encoder"],
+                        exr_preview_png(rgb_frame_path, ""),
+                        frame_index,
+                    )
+                    rgb_frame_path.unlink()
+            if RENDER_DATA_PASSES and should_capture_data_frame(frame_index, len(trajectory)):
+                data_payload = export_depth_and_segmentation_frame(
+                    actors, runtime_scene, view_id, frame_index, data_pass_dirs
                 )
-        if frame_index == 0 and RENDER_DATA_PASSES:
+                if data_pass_streams and frame_index != 0:
+                    stream_data_pass_frame(data_pass_streams, data_payload)
+                data_pass_frames.setdefault(view_id, []).append(data_payload)
+        if frame_index == 0 and RENDER_DATA_PASSES and should_capture_data_frame(frame_index, len(trajectory)):
             recaptured = recapture_first_data_frame(
                 actors,
                 runtime_scene,
@@ -12467,6 +13765,8 @@ def main():
             )
             for view_id, payload in recaptured.items():
                 data_pass_frames[view_id][-1] = payload
+                if data_pass_streams:
+                    stream_data_pass_frame(data_pass_streams, payload)
     write_progress_marker("capture_loop_complete", f"frames={len(trajectory)}")
     capture_seconds = round(time.perf_counter() - capture_started, 2)
     if physics_enabled:
@@ -12488,10 +13788,14 @@ def main():
             (OUTPUT_DIR / "trajectory.json").write_text(json.dumps(trajectory, indent=2), encoding="utf-8")
             (OUTPUT_DIR / "validation.json").write_text(json.dumps(validation, indent=2), encoding="utf-8")
 
-    frame_hashes = sampled_frame_hashes(frames_dir, len(trajectory))
     encode_started = time.perf_counter()
     encode_results = []
-    for view in view_outputs:
+    for view in view_outputs if capture_rgb_frames else []:
+        if stream_rgb_frames:
+            view_frame_hashes, view_encode = finish_png_stream_encoder(view["stream_encoder"])
+        else:
+            view_frame_hashes = sampled_frame_hashes(view["frames_dir"], len(trajectory))
+            view_encode = encode_video(view["frames_dir"], view["preview"], actors.get("video_filter"))
         encode_results.append({
             "id": view["id"],
             "view_id": view.get("view_id") or view["id"],
@@ -12499,14 +13803,24 @@ def main():
             "camera_mode": view.get("camera_mode") or "fixed",
             "lock_policy": view.get("lock_policy"),
             "preview": str(view["preview"]),
-            "frame_hashes": sampled_frame_hashes(view["frames_dir"], len(trajectory)),
-            "encode": encode_video(view["frames_dir"], view["preview"], actors.get("video_filter")),
+            "frame_hashes": view_frame_hashes,
+            "encode": view_encode,
             "camera": {
                 "location": [view["location"].x, view["location"].y, view["location"].z],
                 "target": [view["target"].x, view["target"].y, view["target"].z],
                 "fov": view["fov"],
             },
         })
+    frame_hashes = encode_results[0]["frame_hashes"] if encode_results else {"samples": [], "unique": 0}
+    data_stream_results = finish_data_pass_streams(data_pass_streams) if data_pass_streams else {}
+    failed_data_encoders = [
+        f"{view_id}:{modality}"
+        for view_id, modalities in data_stream_results.items()
+        for modality, result in modalities.items()
+        if not (result.get("encode") or {}).get("encoded")
+    ]
+    if failed_data_encoders:
+        raise RuntimeError(f"data pass stream encoding failed: {failed_data_encoders}")
     encode = encode_results[0]["encode"] if encode_results else {"encoded": False, "reason": "no views"}
     encode_seconds = round(time.perf_counter() - encode_started, 2)
     camera_trajectory_payload = {
@@ -12527,7 +13841,15 @@ def main():
     }
     camera_trajectories_path = OUTPUT_DIR / "camera_trajectories.json"
     camera_trajectories_path.write_text(json.dumps(camera_trajectory_payload, indent=2), encoding="utf-8")
-    render_pass_manifest = write_render_pass_manifest(OUTPUT_DIR, encode_results, camera_tracks, trajectory, DURATION, data_pass_frames)
+    render_pass_manifest = write_render_pass_manifest(
+        OUTPUT_DIR,
+        encode_results,
+        camera_tracks,
+        trajectory,
+        DURATION,
+        data_pass_frames,
+        data_stream_results,
+    )
     summary = {
         "output_dir": str(OUTPUT_DIR),
         "native_ue": True,
@@ -12604,6 +13926,9 @@ def main():
         },
         "frame_cleanup": {
             "keep_render_frames": KEEP_RENDER_FRAMES,
+            "stream_rgb_frames": stream_rgb_frames,
+            "stream_data_passes": bool(data_pass_streams),
+            "retained_data_samples_per_view": 10 if data_pass_streams else 0,
             "removed_frame_dirs": [],
         },
     }

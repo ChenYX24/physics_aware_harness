@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -286,10 +287,16 @@ def _main_batch(args: argparse.Namespace) -> int:
 
 def _prepare_ue_request(request_path: Path, request: dict[str, Any]) -> tuple[Path, tuple[Path, ...]]:
     sources = request.get("source_files") or []
-    if len(sources) != 1:
-        raise ValueError("Unreal static-mesh import requires exactly one source file")
-    source = Path(str(sources[0].get("local_path") or "")).expanduser().resolve()
-    if source.suffix.casefold() not in {".obj", ".fbx"} or not source.is_file():
+    geometry_sources = [
+        row
+        for row in sources
+        if Path(str(row.get("local_path") or "")).suffix.casefold() in {".obj", ".fbx"}
+    ]
+    if len(geometry_sources) != 1:
+        raise ValueError("Unreal static-mesh import requires exactly one materialized OBJ or FBX")
+    geometry_source = geometry_sources[0]
+    source = Path(str(geometry_source.get("local_path") or "")).expanduser().resolve()
+    if not source.is_file():
         raise ValueError(f"Unreal static-mesh import requires a materialized OBJ or FBX: {source}")
     if source.suffix.casefold() == ".fbx":
         ue_request = json.loads(json.dumps(request))
@@ -321,7 +328,12 @@ def _prepare_ue_request(request_path: Path, request: dict[str, Any]) -> tuple[Pa
     if fitted_size_m is not None:
         ue_request["expected_size_m"] = fitted_size_m
     payload = normalized_obj.read_bytes()
-    ue_request["source_files"][0].update(
+    normalized_source = next(
+        row
+        for row in ue_request["source_files"]
+        if row.get("local_path") == geometry_source.get("local_path")
+    )
+    normalized_source.update(
         {
             "local_path": str(normalized_obj),
             "sha256": hashlib.sha256(payload).hexdigest(),
@@ -329,9 +341,32 @@ def _prepare_ue_request(request_path: Path, request: dict[str, Any]) -> tuple[Pa
             "materialized": True,
         }
     )
+    temporary_paths: list[Path] = [normalized_obj]
+    base_colors = [row for row in ue_request["source_files"] if row.get("role") == "texture_base_color"]
+    if len(base_colors) > 1:
+        raise ValueError("Unreal static-mesh import accepts at most one base-color sidecar")
+    if base_colors:
+        base_color = base_colors[0]
+        base_color_source = Path(str(base_color.get("local_path") or "")).expanduser().resolve()
+        if base_color_source.suffix.casefold() not in {".jpeg", ".jpg", ".png", ".tif", ".tiff"} or not base_color_source.is_file():
+            raise ValueError(f"Unreal static-mesh import requires a materialized base-color image: {base_color_source}")
+        copied_base_color = request_path.with_name(
+            f"{request_path.stem}.ue_base_color{base_color_source.suffix.casefold()}"
+        )
+        shutil.copyfile(base_color_source, copied_base_color)
+        texture_payload = copied_base_color.read_bytes()
+        base_color.update(
+            {
+                "local_path": str(copied_base_color),
+                "sha256": hashlib.sha256(texture_payload).hexdigest(),
+                "byte_size": len(texture_payload),
+                "materialized": True,
+            }
+        )
+        temporary_paths.append(copied_base_color)
     ue_request_path = request_path.with_name(f"{request_path.stem}.ue_import.json")
     _write_json(ue_request_path, ue_request)
-    return ue_request_path, (normalized_obj, ue_request_path)
+    return ue_request_path, (*temporary_paths, ue_request_path)
 
 
 def _write_fitted_obj(

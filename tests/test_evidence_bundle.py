@@ -5,7 +5,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness.agent.evidence_bundle import EvidenceBundleError, build_evidence_bundle, semantic_review_requirements
+from harness.agent.evidence_bundle import (
+    EvidenceBundleError,
+    build_evidence_bundle,
+    prune_sensor_exr,
+    prune_validated_sensor_exr,
+    semantic_review_requirements,
+)
 from harness.agent.job_schema import stable_digest
 from harness.agent.review_schema import EvidenceBundleManifest
 from harness.core.artifact_schema import read_json, write_json
@@ -92,7 +98,7 @@ class EvidenceBundleTests(unittest.TestCase):
         destination.write_bytes(b"\x89PNG\r\n\x1a\nfixture")
         return subprocess.CompletedProcess(command, 0, "", "")
 
-    def test_event_anchored_bundle_has_locatable_hashed_multiview_evidence(self) -> None:
+    def test_uniform_bundle_has_locatable_hashed_multiview_evidence(self) -> None:
         result = build_evidence_bundle(
             job_id="job_evidence_bundle",
             attempt=self.attempt,
@@ -106,12 +112,12 @@ class EvidenceBundleTests(unittest.TestCase):
         )
 
         manifest = EvidenceBundleManifest.from_dict(result["manifest"]).to_dict()
-        self.assertEqual(manifest["event_selection"]["strategy"], "event_anchored")
+        self.assertEqual(manifest["event_selection"]["strategy"], "uniform_interval")
         self.assertEqual([row["time_s"] for row in manifest["event_selection"]["points"]], [0.0, 0.5, 1.0])
         self.assertEqual([row["view_id"] for row in manifest["artifacts"] if row["kind"] == "keyframe"], [
             "front", "side", "front", "side", "front", "side"
         ])
-        self.assertEqual(len([row for row in manifest["artifacts"] if row["kind"] == "multi_view_montage"]), 3)
+        self.assertEqual([row for row in manifest["artifacts"] if row["kind"] == "multi_view_montage"], [])
         trajectory = manifest["trajectory_summary"]
         self.assertEqual(len(trajectory["sampled_frames"]), 3)
         ball = trajectory["sampled_frames"][1]["objects"][0]
@@ -146,6 +152,47 @@ class EvidenceBundleTests(unittest.TestCase):
         artifacts = result["manifest"]["artifacts"]
         self.assertEqual(len([row for row in artifacts if row["kind"] == "keyframe"]), 3)
         self.assertEqual([row for row in artifacts if row["kind"] == "multi_view_montage"], [])
+
+    def test_validated_sensor_exr_is_pruned_but_metrics_and_previews_remain(self) -> None:
+        view_dir = self.run_dir / "views" / "front"
+        (view_dir / "segmentation_frames").mkdir()
+        (view_dir / "segmentation_frames" / "frame_0000.exr").write_bytes(b"mask")
+        (view_dir / "segmentation.exr").write_bytes(b"mask")
+        (view_dir / "segmentation_preview.mp4").write_bytes(b"preview")
+        write_json(
+            view_dir / "meta.json",
+            {"frame_count_segmentation": 1, "segmentation_frames": ["views/front/segmentation_frames/frame_0000.exr"]},
+        )
+
+        report = prune_validated_sensor_exr(self.run_dir)
+
+        self.assertEqual(report["status"], "pass")
+        self.assertFalse((view_dir / "segmentation_frames").exists())
+        self.assertFalse((view_dir / "segmentation.exr").exists())
+        self.assertTrue((view_dir / "segmentation_preview.mp4").is_file())
+        meta = read_json(view_dir / "meta.json")
+        self.assertEqual(meta["frame_count_segmentation"], 1)
+        self.assertEqual(meta["segmentation_frames"], [])
+
+    def test_sensor_exr_can_be_pruned_at_an_earlier_validation_boundary(self) -> None:
+        view_dir = self.run_dir / "views" / "front"
+        (view_dir / "depth_frames").mkdir()
+        (view_dir / "depth_frames" / "frame_0000.exr").write_bytes(b"depth")
+        (view_dir / "depth_preview.mp4").write_bytes(b"preview")
+        (self.run_dir / "passes" / "data").mkdir(parents=True)
+        (self.run_dir / "passes" / "data" / "depth.exr").write_bytes(b"alias")
+        write_json(
+            view_dir / "meta.json",
+            {"frame_count_depth": 1, "depth_frames": ["views/front/depth_frames/frame_0000.exr"]},
+        )
+
+        report = prune_sensor_exr(self.run_dir, policy="post_smoke_validation")
+
+        self.assertEqual(report["policy"], "post_smoke_validation")
+        self.assertFalse((view_dir / "depth_frames").exists())
+        self.assertFalse((self.run_dir / "passes" / "data" / "depth.exr").exists())
+        self.assertTrue((view_dir / "depth_preview.mp4").is_file())
+        self.assertEqual(read_json(view_dir / "meta.json")["depth_frames"], [])
 
     def test_bundle_uses_particle_state_for_deforming_surface_evidence(self) -> None:
         write_json(
@@ -345,14 +392,130 @@ class EvidenceBundleTests(unittest.TestCase):
         )
 
         selection = result["manifest"]["event_selection"]
-        self.assertEqual(selection["reason"], "anchored to verification assertion declared_contact")
-        self.assertEqual([point["frame_index"] for point in selection["points"]], [1, 2, 4])
-        self.assertEqual(selection["points"][1]["event_refs"], ["contact_001"])
+        self.assertEqual(selection["strategy"], "uniform_interval")
+        self.assertEqual([point["frame_index"] for point in selection["points"]], [0, 1, 2, 3, 4])
+        self.assertTrue(all(not point["event_refs"] for point in selection["points"]))
         summary = read_json(self.attempt_dir / "evidence_bundle" / "evidence_summary.json")
         self.assertEqual(summary["constraint_states"]["constraint_ids"], ["constraint_a"])
         first_state = summary["constraint_states"]["sampled_frames"][0]["constraints"][0]
         self.assertEqual(first_state["stiffness_n_m"], [20.0, 0.0, 0.0])
         self.assertEqual(first_state["source"], "runtime_driver")
+
+    def test_event_sequence_drives_temporally_distributed_visual_evidence(self) -> None:
+        write_json(
+            self.run_dir / "trajectory.json",
+            [
+                {
+                    "frame": index,
+                    "time_s": index * 0.5,
+                    "objects": {"ball": {"position": [float(index), 0, 0]}},
+                }
+                for index in range(10)
+            ],
+        )
+        write_json(
+            self.run_dir / "contact_events.json",
+            {
+                "events": [
+                    {"frame": 1, "time_s": 0.5, "objects": ["ball", "noise"]},
+                    {"frame": 2, "time_s": 1.0, "objects": ["ball", "step_3"]},
+                    {"frame": 5, "time_s": 2.5, "objects": ["ball", "step_2"]},
+                    {"frame": 8, "time_s": 4.0, "objects": ["ball", "step_1"]},
+                    {"frame": 9, "time_s": 4.5, "objects": ["ball", "ground"]},
+                ]
+            },
+        )
+        self.case_spec["verification_requirements"] = {
+            "assertions": [
+                {
+                    "id": "ordered_contacts",
+                    "type": "event_sequence",
+                    "pairs": [["ball", "step_3"], ["ball", "step_2"], ["ball", "step_1"]],
+                },
+                {
+                    "id": "ball_reaches_ground",
+                    "type": "event_exists",
+                    "event": "contact",
+                    "objects": ["ball", "ground"],
+                },
+            ]
+        }
+        write_json(self.attempt_dir / "case_spec.json", self.case_spec)
+        self.attempt["case_spec_digest"] = stable_digest(self.case_spec)
+
+        result = build_evidence_bundle(
+            job_id="job_event_sequence_evidence",
+            attempt=self.attempt,
+            attempt_dir=self.attempt_dir,
+            candidate_run_dir=self.run_dir,
+            request=self.request,
+            intent_contract=self.intent,
+            result_provenance=self.result_provenance,
+            ffmpeg="/usr/bin/true",
+            command_runner=self.fake_ffmpeg,
+        )
+
+        selection = result["manifest"]["event_selection"]
+        self.assertEqual(selection["strategy"], "event_anchored")
+        self.assertEqual(selection["reason"], "anchored to verification assertion ordered_contacts")
+        self.assertEqual([point["frame_index"] for point in selection["points"]], [1, 5, 9])
+        self.assertEqual(selection["points"][1]["event_refs"], ["contact_002"])
+
+    def test_two_contact_sequence_selects_support_loss_transition(self) -> None:
+        write_json(
+            self.run_dir / "trajectory.json",
+            [
+                {"frame": index, "time_s": index / 24.0, "objects": {"barrel": {"position": [0, 0, 1]}}}
+                for index in range(105)
+            ],
+        )
+        write_json(
+            self.run_dir / "contact_events.json",
+            {
+                "events": [
+                    *[
+                        {"frame": index, "objects": ["barrel", "table"], "kind": "support"}
+                        for index in range(1, 94)
+                    ],
+                    {"frame": 99, "objects": ["barrel", "ground"], "kind": "contact"},
+                ]
+            },
+        )
+        self.case_spec["verification_requirements"] = {
+            "assertions": [
+                {
+                    "id": "table_to_ground",
+                    "type": "event_sequence",
+                    "pairs": [["barrel", "table"], ["barrel", "ground"]],
+                }
+            ]
+        }
+        write_json(self.attempt_dir / "case_spec.json", self.case_spec)
+        self.attempt["case_spec_digest"] = stable_digest(self.case_spec)
+
+        result = build_evidence_bundle(
+            job_id="job_two_contact_transition",
+            attempt=self.attempt,
+            attempt_dir=self.attempt_dir,
+            candidate_run_dir=self.run_dir,
+            request=self.request,
+            intent_contract=self.intent,
+            result_provenance=self.result_provenance,
+            ffmpeg="/usr/bin/true",
+            command_runner=self.fake_ffmpeg,
+        )
+
+        selection = result["manifest"]["event_selection"]
+        self.assertEqual(selection["strategy"], "event_sequence_transition")
+        self.assertEqual([point["frame_index"] for point in selection["points"]], [47, 93, 96, 99])
+        self.assertEqual(
+            [point["label"] for point in selection["points"]],
+            ["supported_motion", "support_end", "unsupported_midpoint", "new_contact"],
+        )
+        self.assertEqual(
+            len([artifact for artifact in result["manifest"]["artifacts"] if artifact["kind"] == "keyframe"]),
+            8,
+        )
 
     def test_ambiguity_decision_projects_to_stable_semantic_requirement(self) -> None:
         ambiguity_id = "ambiguity_001_fixture"

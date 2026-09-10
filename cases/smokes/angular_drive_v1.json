@@ -1,0 +1,214 @@
+{
+  "schema_version": "harness_case_spec_v2",
+  "identity": {
+    "case_id": "smoke_angular_drive_v1",
+    "title": "Angular position and velocity drives rotate constrained rigid bodies",
+    "source_request": "Verify one position-driven angular constraint and one velocity-driven angular constraint in the same controlled rigid-body scene."
+  },
+  "capabilities": {
+    "primary": "rigid_body_dynamics",
+    "required": ["rigid_body_dynamics"]
+  },
+  "scene": {
+    "environment_intent": "minimal controlled rigid-body constraint stage",
+    "coordinate_system": "z_up",
+    "duration_s": 2.5,
+    "bounds_hint_m": [3.0, 2.0, 1.5]
+  },
+  "timebase": {
+    "physics_hz": 120,
+    "observation_fps": 24,
+    "deterministic_seed": 660070
+  },
+  "backend_constraints": {
+    "required_solver_capabilities": ["rigid_body", "rigid_constraints", "trajectory"],
+    "allowed_solvers": ["ue"],
+    "render_backend": "ue",
+    "allow_multi_backend": false
+  },
+  "asset_policy": {
+    "allow_local": true,
+    "allow_external": false,
+    "allow_generation": false,
+    "allow_analytic_proxy": true,
+    "required_license_tier": "local_preview"
+  },
+  "objects": [
+    {
+      "id": "position_anchor",
+      "role": "constraint_anchor",
+      "geometry": {"shape_hint": "box", "approx_size_m": [0.12, 0.12, 0.12]},
+      "physics": {
+        "body_type": "static",
+        "mass_kg": 1.0,
+        "collision_required": true,
+        "collision_geometry": {"shape": "box", "size_m": [0.12, 0.12, 0.12], "local_center_offset_m": [0.0, 0.0, 0.0]}
+      },
+      "initial_state": {
+        "position_m": [-0.75, 0.0, 0.65],
+        "rotation_deg": [0.0, 0.0, 0.0],
+        "linear_velocity_m_s": [0.0, 0.0, 0.0]
+      },
+      "color_rgb": [0.2, 0.2, 0.2],
+      "fixed_material_color": true,
+      "behavior": {}
+    },
+    {
+      "id": "position_arm",
+      "role": "angular_position_driven_body",
+      "geometry": {"shape_hint": "box", "approx_size_m": [0.65, 0.12, 0.12]},
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 1.0,
+        "collision_required": true,
+        "enable_gravity": false,
+        "angular_damping": 0.05,
+        "material": {"dynamic_friction": 0.2, "restitution": 0.1}
+      },
+      "initial_state": {
+        "position_m": [-0.75, 0.0, 0.65],
+        "rotation_deg": [0.0, 0.0, 0.0],
+        "linear_velocity_m_s": [0.0, 0.0, 0.0]
+      },
+      "color_rgb": [0.82, 0.24, 0.12],
+      "fixed_material_color": true,
+      "behavior": {}
+    },
+    {
+      "id": "velocity_anchor",
+      "role": "constraint_anchor",
+      "geometry": {"shape_hint": "box", "approx_size_m": [0.12, 0.12, 0.12]},
+      "physics": {
+        "body_type": "static",
+        "mass_kg": 1.0,
+        "collision_required": true,
+        "collision_geometry": {"shape": "box", "size_m": [0.12, 0.12, 0.12], "local_center_offset_m": [0.0, 0.0, 0.0]}
+      },
+      "initial_state": {
+        "position_m": [0.75, 0.0, 0.65],
+        "rotation_deg": [0.0, 0.0, 0.0],
+        "linear_velocity_m_s": [0.0, 0.0, 0.0]
+      },
+      "color_rgb": [0.2, 0.2, 0.2],
+      "fixed_material_color": true,
+      "behavior": {}
+    },
+    {
+      "id": "velocity_rotor",
+      "role": "angular_velocity_driven_body",
+      "geometry": {"shape_hint": "box", "approx_size_m": [0.55, 0.2, 0.08]},
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 1.2,
+        "collision_required": true,
+        "enable_gravity": false,
+        "angular_damping": 0.02,
+        "material": {"dynamic_friction": 0.25, "restitution": 0.1}
+      },
+      "initial_state": {
+        "position_m": [0.75, 0.0, 0.65],
+        "rotation_deg": [0.0, 0.0, 0.0],
+        "linear_velocity_m_s": [0.0, 0.0, 0.0]
+      },
+      "color_rgb": [0.12, 0.35, 0.84],
+      "fixed_material_color": true,
+      "behavior": {}
+    }
+  ],
+  "relations": [],
+  "events": [],
+  "forces": [],
+  "constraints": [
+    {
+      "id": "position_drive",
+      "body_a": "position_anchor",
+      "body_b": "position_arm",
+      "frame_a": {
+        "position_m": [0.0, 0.0, 0.0],
+        "primary_axis": [0.0, 0.0, 1.0],
+        "secondary_axis": [1.0, 0.0, 0.0]
+      },
+      "frame_b": {
+        "position_m": [0.0, 0.0, 0.0],
+        "primary_axis": [0.0, 0.0, 1.0],
+        "secondary_axis": [1.0, 0.0, 0.0]
+      },
+      "linear_motion": {"x": "locked", "y": "locked", "z": "locked"},
+      "angular_motion": {"x": "free", "y": "free", "z": "free"},
+      "angular_limits_deg": {},
+      "angular_drive": {
+        "mode": "slerp",
+        "position_enabled": {"twist": false, "swing": false, "slerp": true},
+        "velocity_enabled": {"twist": false, "swing": false, "slerp": false},
+        "orientation_target_deg": [0.0, 0.0, 60.0],
+        "stiffness_n_m_per_rad": 4.0,
+        "damping_n_m_s_per_rad": 0.8,
+        "max_torque_n_m": 20.0,
+        "acceleration_mode": false
+      },
+      "collision_enabled": false
+    },
+    {
+      "id": "velocity_drive",
+      "body_a": "velocity_anchor",
+      "body_b": "velocity_rotor",
+      "frame_a": {
+        "position_m": [0.0, 0.0, 0.0],
+        "primary_axis": [0.0, 0.0, 1.0],
+        "secondary_axis": [1.0, 0.0, 0.0]
+      },
+      "frame_b": {
+        "position_m": [0.0, 0.0, 0.0],
+        "primary_axis": [0.0, 0.0, 1.0],
+        "secondary_axis": [1.0, 0.0, 0.0]
+      },
+      "linear_motion": {"x": "locked", "y": "locked", "z": "locked"},
+      "angular_motion": {"x": "free", "y": "locked", "z": "locked"},
+      "angular_limits_deg": {},
+      "angular_drive": {
+        "mode": "twist_and_swing",
+        "position_enabled": {"twist": false, "swing": false, "slerp": false},
+        "velocity_enabled": {"twist": true, "swing": false, "slerp": false},
+        "velocity_target_rad_s": [2.0, 0.0, 0.0],
+        "damping_n_m_s_per_rad": 0.5,
+        "max_torque_n_m": 20.0,
+        "acceleration_mode": false
+      },
+      "collision_enabled": false
+    }
+  ],
+  "expected_behavior": {
+    "native_constraint_trace_required": true,
+    "position_drive_rotation_required": true,
+    "velocity_drive_rotation_required": true
+  },
+  "observation_requirements": {
+    "cameras": [
+      {
+        "role": "front_static",
+        "coordinate_frame": "world",
+        "position_m": [0.0, -3.3, 1.4],
+        "look_at_m": [0.0, 0.0, 0.65],
+        "fov_deg": 48.0,
+        "framing": "scene",
+        "target_objects": ["position_arm", "velocity_rotor"]
+      }
+    ],
+    "modalities": ["rgb"],
+    "signals": ["trajectory"]
+  },
+  "verification_requirements": {
+    "assertions": [
+      {"id": "trajectory_integrity", "type": "trajectory_integrity"},
+      {"id": "position_arm_turns", "type": "state_delta", "object_id": "position_arm", "field": "rotation_deg.x", "operator": ">=", "value": 30.0},
+      {"id": "velocity_rotor_turns", "type": "state_value", "object_id": "velocity_rotor", "field": "rotation_deg.y", "reduction": "max", "operator": ">=", "value": 30.0}
+    ],
+    "thresholds": {}
+  },
+  "variant": {"should_pass": true},
+  "provenance": {
+    "purpose": "capability_first_isolated_smoke",
+    "core100_cases": ["R066", "R070"]
+  },
+  "notes": "One generic scene exercises both registered angular-drive modes without selecting behavior by Case ID."
+}

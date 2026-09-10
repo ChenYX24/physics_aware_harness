@@ -18,6 +18,8 @@ CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 _MAX_TRAJECTORY_SAMPLE_FRAMES = 24
 _MAX_STATE_TRANSITIONS = 100
 _MAX_EVENT_WINDOWS = 8
+_MAX_EVIDENCE_VIEWS = 2
+_MAX_EVIDENCE_IMAGES = 12
 
 
 class EvidenceBundleError(RuntimeError):
@@ -71,6 +73,7 @@ def build_evidence_bundle(
             expected_snapshots=snapshots,
             expected_result_provenance=result_provenance,
         )
+        prune_validated_sensor_exr(run_dir)
         return {
             "manifest": manifest,
             "manifest_path": str(manifest_path),
@@ -88,16 +91,14 @@ def build_evidence_bundle(
     trajectory_path, _, frames = _trajectory(run_dir)
     timeline = _contact_timeline(run_dir, frames)
     selection = _select_event_points(frames, timeline, snapshots["case_spec"])
-    views = _canonical_views(run_dir)
+    views = _canonical_views(run_dir, snapshots["case_spec"])
     if not views:
         raise EvidenceBundleError("evidence_canonical_view_missing", "Candidate contains no canonical RGB views")
 
     inputs_dir = bundle_dir / "inputs"
     keyframes_dir = bundle_dir / "keyframes"
-    montages_dir = bundle_dir / "montages"
     inputs_dir.mkdir(parents=True, exist_ok=True)
     keyframes_dir.mkdir(parents=True, exist_ok=True)
-    montages_dir.mkdir(parents=True, exist_ok=True)
 
     artifacts: list[dict[str, Any]] = []
     for name, value in snapshots.items():
@@ -160,7 +161,6 @@ def build_evidence_bundle(
     for point in selection["points"]:
         label = str(point["label"])
         time_s = float(point["time_s"])
-        point_images: list[Path] = []
         for view_id in views:
             raw_video = run_dir / "views" / view_id / "rgb.mp4"
             if _path_chain_has_symlink(raw_video, run_dir):
@@ -170,7 +170,6 @@ def build_evidence_bundle(
                 raise EvidenceBundleError("evidence_video_path_invalid", "Canonical RGB video path is not a regular in-run file")
             destination = keyframes_dir / f"{label}__{_safe_id(view_id)}.png"
             _extract_frame(ffmpeg_path, video, time_s, destination, runner)
-            point_images.append(destination)
             artifacts.append(
                 _bundle_artifact(
                     bundle_dir,
@@ -183,21 +182,6 @@ def build_evidence_bundle(
                     mime_type="image/png",
                 )
             )
-        if len(point_images) > 1:
-            montage = montages_dir / f"{label}.png"
-            _render_montage(ffmpeg_path, point_images, montage, runner)
-            artifacts.append(
-                _bundle_artifact(
-                    bundle_dir,
-                    f"montage_{label}",
-                    "multi_view_montage",
-                    montage,
-                    source_ref=None,
-                    time_s=time_s,
-                    mime_type="image/png",
-                )
-            )
-
     manifest = EvidenceBundleManifest.from_dict(
         {
             "schema_version": EVIDENCE_BUNDLE_SCHEMA_VERSION,
@@ -229,6 +213,7 @@ def build_evidence_bundle(
         expected_result_provenance=result_provenance,
         expected_manifest_digest=stable_digest(manifest),
     )
+    prune_validated_sensor_exr(run_dir)
     return {
         "manifest": manifest,
         "manifest_path": str(manifest_path),
@@ -240,6 +225,86 @@ def build_evidence_bundle(
             artifact_refs=[artifact_ref("evidence_bundle", manifest_path, EVIDENCE_BUNDLE_SCHEMA_VERSION)],
         ),
     }
+
+
+def prune_validated_sensor_exr(run_dir: str | Path) -> dict[str, Any]:
+    run_dir = Path(run_dir).resolve(strict=True)
+    quality = read_json(run_dir / "quality_report.json")
+    if quality.get("hard_gate_passed") is not True:
+        raise EvidenceBundleError("sensor_retention_before_quality", "Sensor EXR retention requires a passed quality gate")
+
+    return prune_sensor_exr(
+        run_dir,
+        policy="retain_rgb_reports_metrics_and_previews_prune_validated_exr",
+    )
+
+
+def prune_sensor_exr(run_dir: str | Path, *, policy: str) -> dict[str, Any]:
+    """Remove canonical sensor-frame EXRs after their current validation boundary."""
+
+    run_dir = Path(run_dir).resolve(strict=True)
+    if not policy.strip():
+        raise ValueError("sensor EXR retention policy must be non-empty")
+
+    removed: list[dict[str, Any]] = []
+    for view_dir in sorted((run_dir / "views").glob("*")):
+        if not view_dir.is_dir() or view_dir.is_symlink():
+            continue
+        for name in ("depth_frames", "segmentation_frames"):
+            path = view_dir / name
+            if not path.is_dir() or path.is_symlink():
+                continue
+            files = [item for item in path.rglob("*") if item.is_file() and not item.is_symlink()]
+            size_bytes = sum(item.stat().st_size for item in files)
+            shutil.rmtree(path)
+            removed.append(
+                {
+                    "path": path.relative_to(run_dir).as_posix(),
+                    "file_count": len(files),
+                    "size_bytes": size_bytes,
+                }
+            )
+        for name in ("depth.exr", "segmentation.exr"):
+            path = view_dir / name
+            if not path.is_file() or path.is_symlink():
+                continue
+            size_bytes = path.stat().st_size
+            path.unlink()
+            removed.append({"path": path.relative_to(run_dir).as_posix(), "file_count": 1, "size_bytes": size_bytes})
+        meta_path = view_dir / "meta.json"
+        if meta_path.is_file():
+            meta = read_json(meta_path)
+            meta["depth_frames"] = []
+            meta["segmentation_frames"] = []
+            meta["validated_sensor_exr_retained"] = False
+            write_json(meta_path, meta)
+
+    for path in sorted(run_dir.rglob("*")):
+        if (
+            path.suffix.casefold() != ".exr"
+            or not path.is_file()
+            or path.is_symlink()
+            or not path.resolve().is_relative_to(run_dir)
+        ):
+            continue
+        size_bytes = path.stat().st_size
+        path.unlink()
+        removed.append({"path": path.relative_to(run_dir).as_posix(), "file_count": 1, "size_bytes": size_bytes})
+
+    report_path = run_dir / "sensor_artifact_retention.json"
+    if not removed and report_path.is_file():
+        return read_json(report_path)
+
+    report = {
+        "schema_version": "harness_sensor_artifact_retention_v1",
+        "status": "pass",
+        "policy": policy,
+        "removed": removed,
+        "removed_size_bytes": sum(int(row["size_bytes"]) for row in removed),
+        "updated_at": utc_now(),
+    }
+    write_json(run_dir / "sensor_artifact_retention.json", report)
+    return report
 
 
 def validate_current_evidence_bundle(
@@ -597,49 +662,111 @@ def _select_event_points(
     timeline: list[dict[str, Any]],
     case_spec: Mapping[str, Any],
 ) -> dict[str, Any]:
-    selected_events: list[dict[str, Any]] = []
-    selected_assertion_id = ""
     verification = case_spec.get("verification_requirements")
     assertions = verification.get("assertions") if isinstance(verification, Mapping) else []
     for assertion in assertions or []:
-        if (
-            not isinstance(assertion, Mapping)
-            or assertion.get("type") != "event_exists"
-            or assertion.get("event") != "contact"
-        ):
+        if not isinstance(assertion, Mapping) or assertion.get("type") != "event_sequence":
             continue
-        objects = assertion.get("objects")
-        if not isinstance(objects, list) or len(objects) != 2 or any(not isinstance(value, str) for value in objects):
+        raw_pairs = assertion.get("pairs")
+        if isinstance(raw_pairs, list):
+            pairs = [pair for pair in raw_pairs if isinstance(pair, list) and len(pair) == 2]
+        else:
+            objects = assertion.get("objects")
+            pairs = list(zip(objects, objects[1:], strict=False)) if isinstance(objects, list) else []
+        matching_events = [
+            [event for event in timeline if set(event.get("objects") or []) == set(pair)]
+            for pair in pairs
+        ]
+        if len(matching_events) == 2 and all(matching_events):
+            second_event = matching_events[1][0]
+            first_episode = [
+                event
+                for event in matching_events[0]
+                if int(event["frame_index"]) < int(second_event["frame_index"])
+            ]
+            if first_episode:
+                support_end = first_episode[-1]
+                support_start_index = int(first_episode[0]["frame_index"])
+                support_end_index = int(support_end["frame_index"])
+                new_contact_index = int(second_event["frame_index"])
+                midpoint_index = (support_end_index + new_contact_index) // 2
+                if support_start_index < support_end_index:
+                    supported_motion_index = (support_start_index + support_end_index) // 2
+                    supported_motion_event = min(
+                        first_episode,
+                        key=lambda event: abs(int(event["frame_index"]) - supported_motion_index),
+                    )
+                    return _event_selection(
+                        frames,
+                        [supported_motion_index, support_end_index, midpoint_index, new_contact_index],
+                        strategy="event_sequence_transition",
+                        reason=f"anchored to verification assertion {assertion.get('id') or 'event_sequence'}",
+                        labels=("supported_motion", "support_end", "unsupported_midpoint", "new_contact"),
+                        event_refs=(
+                            str(supported_motion_event["event_id"]),
+                            str(support_end["event_id"]),
+                            "",
+                            str(second_event["event_id"]),
+                        ),
+                    )
+                return _event_selection(
+                    frames,
+                    [support_end_index, midpoint_index, new_contact_index],
+                    strategy="event_sequence_transition",
+                    reason=f"anchored to verification assertion {assertion.get('id') or 'event_sequence'}",
+                    labels=("support_end", "unsupported_midpoint", "new_contact"),
+                    event_refs=(str(support_end["event_id"]), "", str(second_event["event_id"])),
+                )
+        matched = [events[0] if events else None for events in matching_events]
+        if not matched or any(event is None for event in matched):
             continue
-        target = set(objects)
-        selected_events = [event for event in timeline if set(event.get("objects") or []) == target]
-        if selected_events:
-            selected_assertion_id = str(assertion.get("id") or "event_exists")
-            break
+        sequence = [event for event in matched if event is not None]
+        indices = [int(event["frame_index"]) for event in sequence]
+        if any(before >= after for before, after in zip(indices, indices[1:], strict=False)):
+            continue
+        middle_event = sequence[(len(sequence) - 1) // 2]
+        point_indices = [
+            max(0, indices[0] - 1),
+            int(middle_event["frame_index"]),
+            min(len(frames) - 1, indices[-1] + 1),
+        ]
+        return _event_selection(
+            frames,
+            point_indices,
+            strategy="event_anchored",
+            reason=f"anchored to verification assertion {assertion.get('id') or 'event_sequence'}",
+            event_ref=str(middle_event["event_id"]),
+        )
 
-    if selected_events:
-        selected_events.sort(key=lambda event: int(event["frame_index"]))
-        episode = [selected_events[0]]
-        last_index = int(selected_events[0]["frame_index"])
-        for event in selected_events[1:]:
-            frame_index = int(event["frame_index"])
-            if frame_index > last_index + 1:
-                break
-            episode.append(event)
-            last_index = max(last_index, frame_index)
-        start_index = int(episode[0]["frame_index"])
-        during = (start_index + last_index) // 2
-        during_event = min(episode, key=lambda event: abs(int(event["frame_index"]) - during))
-        indices = [max(0, start_index - 1), during, min(len(frames) - 1, last_index + 1)]
-        event_ref = str(during_event["event_id"])
-        strategy = "event_anchored"
-        reason = f"anchored to verification assertion {selected_assertion_id}"
-    else:
-        indices = [0, (len(frames) - 1) // 2, len(frames) - 1]
-        event_ref = ""
-        strategy = "start_mid_end"
-        reason = "no contact event matched a declared verification assertion; deterministic start/mid/end selection"
-    labels = ("before", "during", "after")
+    point_count = min(len(frames), _MAX_EVIDENCE_IMAGES // _MAX_EVIDENCE_VIEWS)
+    indices = sorted(
+        {
+            round(slot * (len(frames) - 1) / max(1, point_count - 1))
+            for slot in range(point_count)
+        }
+    )
+    return _event_selection(
+        frames,
+        indices,
+        strategy="uniform_interval",
+        reason="no event_sequence transition was selected; deterministic uniform sampling",
+        labels=tuple(f"sample_{index:02d}" for index in range(len(indices))),
+        event_refs=tuple("" for _ in indices),
+    )
+
+
+def _event_selection(
+    frames: list[dict[str, Any]],
+    indices: list[int],
+    *,
+    strategy: str,
+    reason: str,
+    event_ref: str = "",
+    labels: Sequence[str] | None = None,
+    event_refs: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    point_labels = tuple(labels or ("before", "during", "after"))
+    point_event_refs = tuple(event_refs or ("", event_ref, ""))
     return {
         "strategy": strategy,
         "reason": reason,
@@ -648,9 +775,9 @@ def _select_event_points(
                 "label": label,
                 "time_s": float(_frame_time(frames[index]) or 0.0),
                 "frame_index": index,
-                "event_refs": [event_ref] if event_ref and label == "during" else [],
+                "event_refs": [point_event_refs[offset]] if point_event_refs[offset] else [],
             }
-            for label, index in zip(labels, indices)
+            for offset, (label, index) in enumerate(zip(point_labels, indices))
         ],
     }
 
@@ -689,14 +816,30 @@ def _constraint_state_summary(
     }
 
 
-def _canonical_views(run_dir: Path) -> list[str]:
+def _canonical_views(run_dir: Path, case_spec: Mapping[str, Any]) -> list[str]:
     quality = read_json(run_dir / "quality_report.json")
     media_views = ((quality.get("media") or {}).get("views") or {}) if isinstance(quality, Mapping) else {}
     candidates = sorted(str(value) for value in media_views) if isinstance(media_views, Mapping) else []
     if not candidates:
         views_root = run_dir / "views"
         candidates = sorted(path.name for path in views_root.iterdir() if path.is_dir()) if views_root.is_dir() else []
-    return [view for view in candidates if (run_dir / "views" / view / "rgb.mp4").is_file()]
+    available = [view for view in candidates if (run_dir / "views" / view / "rgb.mp4").is_file()]
+    observation = case_spec.get("observation_requirements")
+    cameras = observation.get("cameras") if isinstance(observation, Mapping) else []
+    declared = {
+        str(camera.get("role") or camera.get("camera_id") or "")
+        for camera in cameras or []
+        if isinstance(camera, Mapping)
+    }
+    if declared:
+        available = [view for view in available if view in declared]
+
+    def information_score(view_id: str) -> tuple[int, str]:
+        row = media_views.get(view_id) if isinstance(media_views, Mapping) else {}
+        rgb = row.get("rgb") if isinstance(row, Mapping) else {}
+        return (-int((rgb or {}).get("bitrate_bps") or 0), view_id)
+
+    return sorted(available, key=information_score)[:_MAX_EVIDENCE_VIEWS]
 
 
 def _trajectory_summary(
@@ -1106,25 +1249,6 @@ def _extract_frame(ffmpeg: str, video: Path, time_s: float, destination: Path, r
     completed = runner(command)
     if completed.returncode != 0 or not _is_png(temporary):
         raise EvidenceBundleError("evidence_keyframe_extraction_failed", f"ffmpeg failed to extract {destination.name}: {completed.stderr[-1000:]}")
-    temporary.replace(destination)
-
-
-def _render_montage(ffmpeg: str, images: list[Path], destination: Path, runner: CommandRunner) -> None:
-    if not images:
-        raise EvidenceBundleError("evidence_montage_input_missing", "Multi-view montage has no input frames")
-    temporary = destination.with_name(f".{destination.name}.tmp.png")
-    command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
-    for image in images:
-        command.extend(("-i", str(image)))
-    filters = [
-        f"[{index}:v]scale=480:270:force_original_aspect_ratio=decrease,pad=480:270:(ow-iw)/2:(oh-ih)/2:black[v{index}]"
-        for index in range(len(images))
-    ]
-    filters.append("".join(f"[v{index}]" for index in range(len(images))) + f"hstack=inputs={len(images)}[out]")
-    command.extend(("-filter_complex", ";".join(filters), "-map", "[out]", "-frames:v", "1", str(temporary)))
-    completed = runner(command)
-    if completed.returncode != 0 or not _is_png(temporary):
-        raise EvidenceBundleError("evidence_montage_failed", f"ffmpeg failed to create {destination.name}: {completed.stderr[-1000:]}")
     temporary.replace(destination)
 
 

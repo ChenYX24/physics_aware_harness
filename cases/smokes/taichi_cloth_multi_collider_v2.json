@@ -1,0 +1,123 @@
+{
+  "schema_version": "harness_case_spec_v2",
+  "identity": {
+    "case_id": "smoke_taichi_cloth_multi_collider_v2",
+    "title": "Cloth drapes over a box, two cylinders, and a floor",
+    "source_request": "Verify one cloth solve against multiple distinct static analytic colliders without penetration."
+  },
+  "capabilities": {"primary": "deformable_body_dynamics", "required": ["deformable_body_dynamics"]},
+  "scene": {
+    "environment_intent": "minimal controlled multi-collider cloth stage",
+    "coordinate_system": "z_up",
+    "duration_s": 3.0,
+    "bounds_hint_m": [4.0, 4.0, 2.5]
+  },
+  "timebase": {"physics_hz": 2400, "observation_fps": 24, "deterministic_seed": 20260906},
+  "backend_constraints": {
+    "required_solver_capabilities": ["soft_body", "cloth", "mesh_cache", "trajectory"],
+    "allowed_solvers": ["taichi_cloth"],
+    "render_backend": "ue",
+    "allow_multi_backend": true
+  },
+  "asset_policy": {
+    "allow_local": true,
+    "allow_external": false,
+    "allow_generation": false,
+    "allow_analytic_proxy": true,
+    "required_license_tier": "local_preview"
+  },
+  "objects": [
+    {
+      "id": "cloth",
+      "role": "deformable_cloth",
+      "geometry": {"shape_hint": "cloth_grid", "approx_size_m": [1.8, 1.4, 0.01]},
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.48,
+        "collision_required": false,
+        "material_model": "cloth",
+        "material": {
+          "structural_stiffness_n_m": 95.0,
+          "shear_stiffness_n_m": 58.0,
+          "bending_stiffness_n_m": 9.0,
+          "spring_damping_kg_s": 0.008,
+          "air_damping_1_s": 1.1
+        }
+      },
+      "initial_state": {"position_m": [0.0, 0.0, 1.45], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "visual_representation": {"source": "solver_generated", "visible": true},
+      "solver": {
+        "type": "mass_spring_cloth",
+        "grid_resolution": 25,
+        "initial_orientation": "horizontal_xy",
+        "pinned_boundary": "none",
+        "substeps_per_frame": 100,
+        "collision_thickness_m": 0.012
+      },
+      "behavior": {}
+    },
+    {
+      "id": "table_box",
+      "role": "rigid_collider",
+      "geometry": {"shape_hint": "box", "approx_size_m": [1.2, 0.8, 0.15]},
+      "physics": {"body_type": "static", "mass_kg": 20.0, "collision_required": false, "material": {"dynamic_friction": 0.25, "restitution": 0.0}},
+      "initial_state": {"position_m": [0.0, 0.0, 0.55], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "visual_representation": {"source": "none", "visible": true},
+      "behavior": {}
+    },
+    {
+      "id": "left_cylinder",
+      "role": "rigid_collider",
+      "geometry": {"shape_hint": "cylinder", "approx_size_m": [0.25, 0.25, 0.4]},
+      "physics": {"body_type": "static", "mass_kg": 2.0, "collision_required": false, "material": {"dynamic_friction": 0.18, "restitution": 0.0}},
+      "initial_state": {"position_m": [-0.28, 0.0, 0.825], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "visual_representation": {"source": "none", "visible": true},
+      "behavior": {}
+    },
+    {
+      "id": "right_sphere",
+      "role": "rigid_collider",
+      "geometry": {"shape_hint": "sphere", "approx_size_m": [0.3, 0.3, 0.3]},
+      "physics": {"body_type": "static", "mass_kg": 2.0, "collision_required": false, "material": {"dynamic_friction": 0.12, "restitution": 0.0}},
+      "initial_state": {"position_m": [0.3, 0.02, 0.775], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "visual_representation": {"source": "none", "visible": true},
+      "behavior": {}
+    },
+    {
+      "id": "floor",
+      "role": "support_surface",
+      "geometry": {"shape_hint": "box", "approx_size_m": [4.0, 4.0, 0.05]},
+      "physics": {"body_type": "static", "mass_kg": 1.0, "collision_required": false, "material": {"dynamic_friction": 0.2, "restitution": 0.0}},
+      "initial_state": {"position_m": [0.0, 0.0, 0.0], "rotation_deg": [0.0, 0.0, 0.0], "linear_velocity_m_s": [0.0, 0.0, 0.0]},
+      "visual_representation": {"source": "none", "visible": true},
+      "behavior": {}
+    }
+  ],
+  "relations": [],
+  "events": [],
+  "forces": [],
+  "constraints": [],
+  "expected_behavior": {
+    "minimum_mean_downward_displacement_m": 0.45,
+    "minimum_contact_frames_by_collider": {"table_box": 5, "left_cylinder": 5, "right_sphere": 5},
+    "maximum_structural_edge_stretch_ratio": 1.3,
+    "penetration_tolerance_m": 0.003
+  },
+  "observation_requirements": {
+    "cameras": [{
+      "role": "event_closeup",
+      "coordinate_frame": "world",
+      "position_m": [-2.2, -2.2, 1.65],
+      "look_at_m": [0.0, 0.0, 0.75],
+      "fov_deg": 52.0,
+      "framing": "scene",
+      "target_objects": ["cloth", "table_box", "left_cylinder", "right_sphere"]
+    }],
+    "modalities": ["rgb"],
+    "signals": ["mesh_cache", "trajectory"]
+  },
+  "verification_requirements": {"assertions": [{"id": "trajectory_integrity", "type": "trajectory_integrity"}], "thresholds": {}},
+  "variant": {"should_pass": true},
+  "provenance": {"purpose": "capability_first_isolated_smoke"},
+  "notes": "One-way analytic sphere, box, and cylinder collision; no rigid back-reaction."
+}

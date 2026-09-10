@@ -168,6 +168,19 @@ cases/
 │   ├── negative_no_deceleration.json
 │   ├── negative_static_threshold_violation.json
 │   └── static_threshold_hold.json
+├── smokes/
+│   ├── aerodynamic_wind_rigid_v1.json
+│   ├── angular_drive_v1.json
+│   ├── fracture_above_threshold_v1.json
+│   ├── fracture_below_threshold_v1.json
+│   ├── gasp_character_attachment_v1.json
+│   ├── gasp_character_head_tracking_v1.json
+│   ├── gasp_character_look_moving_turn_v1.json
+│   ├── gasp_character_movement_v1.json
+│   ├── kinematic_support_motion_v1.json
+│   ├── radial_field_force_v1.json
+│   ├── taichi_cloth_drape_v2.json
+│   └── taichi_cloth_wind_v2.json
 ├── soft_body/
 │   ├── cloth_drape/
 │   │   └── v001_taichi_cloth_over_sphere.json
@@ -250,6 +263,7 @@ cases/
 | `rigid_motion/ramp_roll_slide/v001_friction_regime_ofat/` | 历史目录名；仅用于定位声明式 CaseSpec，不参与规划、求解或验证分派。 | 运行时只读取对象、状态域、约束、求解器要求与通用断言。 |
 | `rolling/` | 历史目录名；仅用于定位声明式 CaseSpec，不参与规划、求解或验证分派。 | 运行时只读取对象、状态域、约束、求解器要求与通用断言。 |
 | `sliding/` | 历史目录名；仅用于定位声明式 CaseSpec，不参与规划、求解或验证分派。 | 运行时只读取对象、状态域、约束、求解器要求与通用断言。 |
+| `smokes/` | 历史目录名；仅用于定位声明式 CaseSpec，不参与规划、求解或验证分派。 | 运行时只读取对象、状态域、约束、求解器要求与通用断言。 |
 | `soft_body/cloth_drape/` | 历史目录名；仅用于定位声明式 CaseSpec，不参与规划、求解或验证分派。 | 运行时只读取对象、状态域、约束、求解器要求与通用断言。 |
 | `soft_body/elastic_collision/v001_youngs_modulus_ofat/` | 历史目录名；仅用于定位声明式 CaseSpec，不参与规划、求解或验证分派。 | 运行时只读取对象、状态域、约束、求解器要求与通用断言。 |
 | `soft_body/flag_wind/` | 历史目录名；仅用于定位声明式 CaseSpec，不参与规划、求解或验证分派。 | 运行时只读取对象、状态域、约束、求解器要求与通用断言。 |
@@ -380,6 +394,18 @@ cases/
 | [`sliding/negative_no_deceleration.json`](sliding/negative_no_deceleration.json) | 负向/边界 | `sliding_crate_friction` | A crate slides on a frictional floor but the runtime trace incorrectly shows almost no deceleration. | trajectory, contact_events, initial_velocity, material_friction_label |
 | [`sliding/negative_static_threshold_violation.json`](sliding/negative_static_threshold_violation.json) | 负向/边界 | `sliding_crate_friction` | A crate is pushed below static-friction threshold, but the runtime trace incorrectly shows it sliding. | trajectory, contact_events, applied_force_label, material_friction_label |
 | [`sliding/static_threshold_hold.json`](sliding/static_threshold_hold.json) | 正向 | `sliding_crate_friction` | A crate is pushed on a flat floor with a force below static-friction threshold, so it should remain nearly stationary. | trajectory, contact_events, applied_force_label, material_friction_label |
+| [`smokes/aerodynamic_wind_rigid_v1.json`](smokes/aerodynamic_wind_rigid_v1.json) | 负向/边界 | `-` | The wind declaration is backend-independent; this rigid target is integrated by UE/Chaos. | 运行时只读取对象、状态域、约束、求解器要求与通用断言。 |
+| [`smokes/angular_drive_v1.json`](smokes/angular_drive_v1.json) | 负向/边界 | `-` | One generic scene exercises both registered angular-drive modes without selecting behavior by Case ID. | 运行时只读取对象、状态域、约束、求解器要求与通用断言。 |
+| [`smokes/fracture_above_threshold_v1.json`](smokes/fracture_above_threshold_v1.json) | 负向/边界 | `-` | The local board Geometry Collection is physics evidence only; formal glass, wood-board, and crate appearances remain separate asset choices. | 运行时只读取对象、状态域、约束、求解器要求与通用断言。 |
+| [`smokes/fracture_below_threshold_v1.json`](smokes/fracture_below_threshold_v1.json) | 负向/边界 | `-` | The same runtime path and Geometry Collection are used as the above-threshold smoke; only declared striker speed and expected fracture outcome differ. | 运行时只读取对象、状态域、约束、求解器要求与通用断言。 |
+| [`smokes/gasp_character_attachment_v1.json`](smokes/gasp_character_attachment_v1.json) | 负向/边界 | `-` | Generic GASP movement plus articulated attachment only; the held prop is non-colliding while attached and the authored support top is aligned to the Home Interior geometry floor near world z=10 cm. | 运行时只读取对象、状态域、约束、求解器要求与通用断言。 |
+| [`smokes/gasp_character_head_tracking_v1.json`](smokes/gasp_character_head_tracking_v1.json) | 负向/边界 | `-` | Generic world-space head-look target with fixed body facing; no action phases, body-turn choreography, clips, or bone writes. | 运行时只读取对象、状态域、约束、求解器要求与通用断言。 |
+| [`smokes/gasp_character_look_moving_turn_v1.json`](smokes/gasp_character_look_moving_turn_v1.json) | 负向/边界 | `-` | Generic world-target gaze overlaps a genuine low-speed movement turn; CharacterMovement owns body orientation and GASP Motion Matching owns the feet and pose. | 运行时只读取对象、状态域、约束、求解器要求与通用断言。 |
+| [`smokes/gasp_character_movement_v1.json`](smokes/gasp_character_movement_v1.json) | 负向/边界 | `-` | Uses only the generic movement_control contract; no animation clip IDs or case-specific runtime routing. | 运行时只读取对象、状态域、约束、求解器要求与通用断言。 |
+| [`smokes/kinematic_support_motion_v1.json`](smokes/kinematic_support_motion_v1.json) | 负向/边界 | `-` | One general world-position keyframe primitive exercises accelerating and stopping translating supports without Case-ID routing. | 运行时只读取对象、状态域、约束、求解器要求与通用断言。 |
+| [`smokes/radial_field_force_v1.json`](smokes/radial_field_force_v1.json) | 负向/边界 | `-` | The runtime sees only a signed generic radial point-field law; magnetic interpretation is Case-level semantics. | 运行时只读取对象、状态域、约束、求解器要求与通用断言。 |
+| [`smokes/taichi_cloth_drape_v2.json`](smokes/taichi_cloth_drape_v2.json) | 负向/边界 | `-` | Canonical state is a fixed-topology Taichi mass-spring cache. Tearing and self-collision are outside this capability. | 运行时只读取对象、状态域、约束、求解器要求与通用断言。 |
+| [`smokes/taichi_cloth_wind_v2.json`](smokes/taichi_cloth_wind_v2.json) | 负向/边界 | `-` | The wind declaration is backend-independent; this cloth target is integrated per triangle by Taichi. Tearing and self-collision remain out of scope. | 运行时只读取对象、状态域、约束、求解器要求与通用断言。 |
 | [`soft_body/cloth_drape/v001_taichi_cloth_over_sphere.json`](soft_body/cloth_drape/v001_taichi_cloth_over_sphere.json) | 正向 | `soft_body_deformation` | A square fabric sheet falls under gravity onto an off-centre rigid sphere, wraps around it, and settles against the floor without stretching excessively or passing through the collider. | vertex_positions, vertex_velocities, triangle_topology, solver_timebase, surface_mesh_sequence, rgb, … |
 | [`soft_body/elastic_collision/v001_youngs_modulus_ofat/high_e200k.json`](soft_body/elastic_collision/v001_youngs_modulus_ofat/high_e200k.json) | 正向 | `soft_body_deformation` | A deformable rubber sphere is released from rest above a rigid floor, compresses on impact, rebounds under its own FEM dynamics, and settles without being driven by scripted trajectories. | vertex_positions, vertex_velocities, tetrahedral_topology, surface_triangle_topology, solver_timebase, floor_contact, … |
 | [`soft_body/elastic_collision/v001_youngs_modulus_ofat/low_e50k.json`](soft_body/elastic_collision/v001_youngs_modulus_ofat/low_e50k.json) | 正向 | `soft_body_deformation` | A deformable rubber sphere is released from rest above a rigid floor, compresses on impact, rebounds under its own FEM dynamics, and settles without being driven by scripted trajectories. | vertex_positions, vertex_velocities, tetrahedral_topology, surface_triangle_topology, solver_timebase, floor_contact, … |

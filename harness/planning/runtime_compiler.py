@@ -12,7 +12,12 @@ from typing import Any, Mapping
 
 from harness.assets.asset_intent_compiler import CompiledAssetIntent, compile_v2_asset_intents
 from harness.assets.asset_registry import AssetRegistry
-from harness.assets.asset_resolver import requested_map_reference, resolve_asset_intents
+from harness.assets.asset_resolver import (
+    candidate_ue_object_path,
+    canonical_ue_map_object_path,
+    requested_map_reference,
+    resolve_asset_intents,
+)
 from harness.assets.providers.orchestrator import AssetProviderOrchestrator
 from harness.core.artifact_schema import read_json, write_json
 from harness.core.stage_result import (
@@ -294,6 +299,7 @@ def _compile_runtime_case_impl(
         attempt_id=attempt_id,
         requested_map_package=effective_compile_config["map_package"],
     )
+    _bind_resolved_scene_map(runtime_case.data, asset_resolution)
     solver_contract_error = bind_resolved_solver_assets(runtime_case.data, asset_resolution)
     scene_layout = build_static_scene_layout(
         runtime_case.data,
@@ -393,6 +399,23 @@ def _compile_runtime_case_impl(
         report=report,
         provider_receipts=provider_orchestration.receipts,
     )
+
+
+def _bind_resolved_scene_map(
+    runtime_case: dict[str, Any],
+    asset_resolution: Mapping[str, Any],
+) -> None:
+    scene_map = asset_resolution.get("scene_map")
+    if not isinstance(scene_map, Mapping):
+        return
+    selected = scene_map.get("selected_asset")
+    if not isinstance(selected, dict):
+        return
+    object_path = canonical_ue_map_object_path(candidate_ue_object_path(selected))
+    if not object_path.startswith("/Game/"):
+        raise ValueError("resolved scene Map has no qualified UE object path")
+    scene = runtime_case.setdefault("scene", {})
+    scene["map_preference"] = object_path
 
 
 def _is_particle_surface_handoff(value: Any) -> bool:
@@ -754,7 +777,7 @@ def bind_resolved_solver_assets(
         bbox_m = selected.get("bbox_size_m") or selected.get("effective_size_m") or selected.get("authored_size_m")
         obj["asset"] = {
             "ue_path": ue_path,
-            "material_path": str(selected.get("material_path") or ""),
+            "material_path": str(obj.get("visual_material_path") or selected.get("material_path") or ""),
             "sha256": str(selected.get("sha256") or ""),
             "proxy": bool(selected.get("proxy", False)),
             "catalog_source": str(selected.get("source_kind") or selected.get("source_uri") or "catalog"),
@@ -852,6 +875,13 @@ def register_solver_to_visual_frames(
         selected = selected_by_object.get(object_id)
         selected = selected if isinstance(selected, Mapping) else {}
         instance_scale = resolve_instance_geometry(obj, dict(selected))["instance_scale"]
+        transform = solver.get("transform") if isinstance(solver.get("transform"), dict) else None
+        if transform is not None:
+            transform["scale"] = (
+                copy.deepcopy(instance_scale)
+                if str(collision.get("type") or "") == "asset"
+                else [1.0, 1.0, 1.0]
+            )
         catalog_registration = selected.get("geometry_registration")
         if (
             isinstance(catalog_registration, Mapping)

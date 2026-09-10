@@ -31,7 +31,7 @@ class ExecutionProfileTests(unittest.TestCase):
         publish = execution_profile("publish")
 
         self.assertEqual(smoke.render_fps, 24)
-        self.assertEqual((smoke.width, smoke.height), (1280, 720))
+        self.assertEqual((smoke.width, smoke.height), (640, 360))
         self.assertEqual((candidate.width, candidate.height), (1920, 1080))
         self.assertEqual((publish.width, publish.height), (3840, 2160))
         self.assertEqual(smoke.physics_hz, 120)

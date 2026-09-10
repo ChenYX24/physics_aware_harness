@@ -19,6 +19,49 @@ class RuntimeActorPlacementTests(unittest.TestCase):
     def load_case(self, relative_path: str) -> dict:
         return json.loads((ROOT / relative_path).read_text(encoding="utf-8"))
 
+    def test_declared_physics_rate_is_not_lowered_by_execution_profile(self) -> None:
+        from scripts.harness_local_ue_runner import timebase_for_case
+
+        with patch.dict(
+            os.environ,
+            {"SIM_STUDIO_UE_FPS": "24", "SIM_STUDIO_UE_PHYSICS_HZ": "120"},
+            clear=False,
+        ):
+            timebase = timebase_for_case({
+                "scene": {"duration_s": 1.0},
+                "timebase": {"physics_hz": 360},
+            })
+
+        self.assertEqual(timebase["physics_hz"], 360)
+        self.assertEqual(timebase["substeps_per_render"], 15)
+
+    def test_required_segmentation_visibility_excludes_compiled_hidden_proxies(self) -> None:
+        from scripts.harness_local_ue_runner import required_visible_segmentation_object_ids
+
+        required = required_visible_segmentation_object_ids(
+            {
+                "views": [
+                    {
+                        "camera_id": "event_closeup",
+                        "target_object_ids": ["barrel", "table", "ground", "unresolved_target"],
+                    }
+                ]
+            },
+            {
+                "actor_bindings": [
+                    {"object_id": "barrel", "visual_representation": {"visible": True}},
+                    {"object_id": "table", "visual_representation": {"visible": True}},
+                    {"object_id": "ground", "visual_representation": {"visible": False}},
+                ]
+            },
+            live_fracture_ids={"fragment"},
+        )
+
+        self.assertEqual(
+            required,
+            {"event_closeup": {"barrel", "table", "unresolved_target", "fragment"}},
+        )
+
     def test_generic_constraint_binding_reuses_compiled_actor_ids(self) -> None:
         from harness.runtime.actor_placement import constraint_bindings_from_case
 
@@ -76,6 +119,34 @@ class RuntimeActorPlacementTests(unittest.TestCase):
             actor_placement={"actor_bindings": [], "constraint_bindings": bindings},
         )
         self.assertEqual(scene["constraints"], bindings)
+
+    def test_unilateral_distance_spring_is_preserved_in_runtime_binding(self) -> None:
+        from harness.runtime.actor_placement import constraint_bindings_from_case
+
+        declaration = {
+            "id": "elastic_limit",
+            "body_a": "payload",
+            "body_b": "anchor",
+            "frame_a": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+            "frame_b": {"position_m": [0.0, 0.0, 0.0], "primary_axis": [1.0, 0.0, 0.0], "secondary_axis": [0.0, 1.0, 0.0]},
+            "linear_motion": {"x": "free", "y": "free", "z": "free"},
+            "unilateral_distance_spring": {"rest_length_m": 1.0, "stiffness_n_m": 45.0, "damping_n_s_m": 3.0},
+            "angular_motion": {"x": "free", "y": "free", "z": "free"},
+            "angular_limits_deg": {},
+            "collision_enabled": False,
+        }
+        bindings = constraint_bindings_from_case(
+            [declaration],
+            [{"object_id": "payload", "runtime_actor_id": "actor_payload"}],
+            [
+                {"id": "payload", "body_type": "dynamic", "visual_representation": {"source": "asset", "visible": True}},
+                {"id": "anchor", "body_type": "static", "initial_position_m": [0.0, 0.0, 2.0], "initial_rotation_deg": [0.0, 0.0, 0.0], "visual_representation": {"source": "none", "visible": False}},
+            ],
+            target_backend="ue",
+        )
+
+        self.assertNotIn("linear_limit_m", bindings[0])
+        self.assertEqual(bindings[0]["unilateral_distance_spring"], declaration["unilateral_distance_spring"])
 
     def test_hidden_static_constraint_endpoint_compiles_to_world_anchor(self) -> None:
         from harness.runtime.actor_placement import compile_runtime_actor_placement
@@ -791,6 +862,38 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual(static[0]["params"]["color_rgb"], [0.82, 0.02, 0.01])
         self.assertTrue(static[0]["params"]["generate_solid_material"])
         self.assertEqual(static[0]["params"]["metallic"], 0.65)
+
+    def test_explicit_fixed_color_overrides_asset_material(self) -> None:
+        from scripts.harness_local_ue_runner import runtime_objects_from_actor_placement
+
+        binding = {
+            "object_id": "magnet",
+            "runtime_actor_id": "actor_magnet",
+            "role": "magnetic_source",
+            "asset": {
+                "binding_source": "ue_asset",
+                "runtime_usage": "collision_and_visual",
+                "ue_path": "/Game/Props/SM_Magnet.SM_Magnet",
+                "asset_kind": "static_mesh",
+            },
+            "transform": {"position_m": [0.0, 0.0, 0.2]},
+            "bounds": {"extents_m": [0.2, 0.1, 0.2]},
+            "physics": {"simulate_physics": False, "kinematic": True, "collider": "box"},
+        }
+        case_object = {
+            "id": "magnet",
+            "fixed_material_color": True,
+            "color_rgb": [0.82, 0.03, 0.02],
+        }
+
+        _, static = runtime_objects_from_actor_placement(
+            {"actor_bindings": [binding]},
+            {"objects": [case_object]},
+        )
+
+        self.assertTrue(static[0]["params"]["generate_solid_material"])
+        self.assertFalse(static[0]["params"]["preserve_material"])
+        self.assertEqual(static[0]["params"]["color_rgb"], [0.82, 0.03, 0.02])
 
     def test_constraint_case_does_not_inject_tether_visuals(self) -> None:
         from harness.assets.asset_resolver import resolve_asset_intents
@@ -1578,6 +1681,39 @@ class RuntimeActorPlacementTests(unittest.TestCase):
             )
 
         self.assertEqual(runner.call_args.kwargs["env"]["CHAOS_SIMULATION_ENABLED"], "0")
+        self.assertEqual(runner.call_args.kwargs["env"]["RENDER_DEPTH_PASSES"], "0")
+        self.assertEqual(runner.call_args.kwargs["env"]["RENDER_SEGMENTATION_PASSES"], "0")
+        self.assertEqual(runner.call_args.kwargs["env"]["RENDER_DATA_SAMPLE_COUNT"], "0")
+        self.assertEqual((runner.call_args.kwargs["env"]["WIDTH"], runner.call_args.kwargs["env"]["HEIGHT"]), ("640", "360"))
+
+    def test_live_gasp_native_pass_keeps_scene_capture_and_chaos_enabled(self) -> None:
+        from scripts.harness_local_ue_runner import run_native_pass
+
+        runtime_scene = {
+            "simulation": {"duration_s": 1.0},
+            "physics_controls": {"runtime_driver_backend": "ue_world_simulation"},
+            "map_lighting_controls": {"capture_backend": "scene_capture"},
+        }
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "scripts.harness_local_ue_runner.run_ue_until_artifacts",
+            return_value={"status": "ok"},
+        ) as runner:
+            run_native_pass(
+                ["UnrealEditor-Cmd"],
+                args=Namespace(passes="rgb,segmentation"),
+                case_spec={"case_id": "gasp_case"},
+                runtime_scene=runtime_scene,
+                studio_scene_path=Path(tmp) / "scene.json",
+                runtime_scene_path=Path(tmp) / "runtime.json",
+                native_output=Path(tmp) / "native",
+                pass_mode="combined",
+            )
+
+        environment = runner.call_args.kwargs["env"]
+        self.assertEqual(environment["SIM_STUDIO_UE_CAPTURE_BACKEND"], "scene_capture")
+        self.assertEqual(environment["CHAOS_SIMULATION_ENABLED"], "1")
+        self.assertEqual(environment["RENDER_SEGMENTATION_PASSES"], "1")
+        self.assertEqual(environment["RENDER_DATA_SAMPLE_COUNT"], "0")
 
     def test_constraint_case_does_not_add_nonphysical_tether_visual(self) -> None:
         from harness.assets.asset_resolver import resolve_asset_intents
@@ -1737,6 +1873,51 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertTrue(scene["physics_controls"]["simulate_physics"])
         self.assertEqual(scene["map_lighting_controls"]["capture_backend"], "highres_viewport")
 
+    def test_explicit_rgb_capture_backend_is_not_overridden_by_live_physics(self) -> None:
+        from scripts.harness_local_ue_runner import build_runtime_scene
+
+        with patch.dict(os.environ, {"SIM_STUDIO_UE_RGB_CAPTURE_BACKEND": "scene_capture"}, clear=False):
+            scene = build_runtime_scene(
+                {
+                    "case_id": "fracture_case",
+                    "objects": [
+                        {
+                            "id": "panel",
+                            "fracture_response": {"mode": "contact_external_strain"},
+                        }
+                    ],
+                },
+                {"views": []},
+                Namespace(map=""),
+                pass_mode="rgb",
+                simulation_trajectory=None,
+            )
+
+        self.assertTrue(scene["physics_controls"]["simulate_physics"])
+        self.assertEqual(scene["map_lighting_controls"]["capture_backend"], "scene_capture")
+
+    def test_gasp_rgb_defaults_to_scene_capture_without_ambient_override(self) -> None:
+        from scripts.harness_local_ue_runner import default_lighting_controls, runtime_capture_backend
+
+        case_spec = {
+            "objects": [
+                {
+                    "solver": {
+                        "type": "articulated_body",
+                        "movement_control": {"type": "character_movement"},
+                    }
+                }
+            ]
+        }
+        with patch.dict(os.environ, {}, clear=True):
+            controls = default_lighting_controls("rgb", case_spec)
+
+        self.assertEqual(controls["capture_backend"], "scene_capture")
+        self.assertEqual(
+            runtime_capture_backend({"map_lighting_controls": controls}, "combined"),
+            "scene_capture",
+        )
+
     def test_map_report_projects_lighting_from_the_actual_rgb_pass(self) -> None:
         from scripts.harness_local_ue_runner import build_map_report
 
@@ -1823,6 +2004,27 @@ class RuntimeActorPlacementTests(unittest.TestCase):
         self.assertEqual(scene["physics_controls"]["simulation_driver"], "ue_chaos_output_replay")
         self.assertEqual(scene["physics_controls"]["trajectory_source"], "adp_cpp_runtime_driver")
 
+    def test_runtime_scene_preserves_declared_compliant_contacts(self) -> None:
+        from scripts.harness_local_ue_runner import build_runtime_scene
+
+        contacts = [{
+            "id": "ball_pair",
+            "body_a": "a",
+            "body_b": "b",
+            "activation_distance_m": 0.18,
+            "stiffness_n_m": 200000.0,
+            "damping_n_s_m": 5.0,
+        }]
+        scene = build_runtime_scene(
+            {"case_id": "contact_case", "compliant_contacts": contacts},
+            {"views": []},
+            Namespace(map=""),
+            pass_mode="data",
+            simulation_trajectory=None,
+        )
+
+        self.assertEqual(scene["compliant_contacts"], contacts)
+
     def test_camera_runtime_uses_compiled_plan_pose_and_fov(self) -> None:
         from scripts.harness_local_ue_runner import camera_intrinsics, camera_runtime_from_plan
 
@@ -1880,6 +2082,31 @@ class RuntimeActorPlacementTests(unittest.TestCase):
                 ("trajectory.json", [{"frame": 0, "objects": {}}]),
                 ("camera_trajectories.json", {"views": []}),
                 ("render_pass_manifest.json", {"passes": {"rgb": {"views": views}}}),
+            ):
+                (native / name).write_text(json.dumps(payload), encoding="utf-8")
+
+            self.assertTrue(native_output_ready(native))
+
+    def test_native_output_ready_accepts_streamed_data_video_without_rgb_preview(self) -> None:
+        from scripts.harness_local_ue_runner import native_output_ready
+
+        with tempfile.TemporaryDirectory() as tmp:
+            native = Path(tmp)
+            depth_video = native / "depth_preview.mp4"
+            depth_video.write_bytes(b"\x00\x00\x00\x18ftypisom")
+            for name, payload in (
+                ("summary.json", {"frames": 2, "fps": 24}),
+                ("trajectory.json", [{"frame": 0, "objects": {}}]),
+                ("camera_trajectories.json", {"views": []}),
+                (
+                    "render_pass_manifest.json",
+                    {
+                        "passes": {
+                            "rgb": {"views": []},
+                            "depth": {"views": [{"view_id": "front", "video_path": str(depth_video)}]},
+                        }
+                    },
+                ),
             ):
                 (native / name).write_text(json.dumps(payload), encoding="utf-8")
 
@@ -2128,6 +2355,19 @@ class RuntimeActorPlacementTests(unittest.TestCase):
 
         self.assertEqual(canonical_game_package("/Game/Maps/Day.Day"), "/Game/Maps/Day")
         self.assertEqual(canonical_game_package("/Game/Maps/Day"), "/Game/Maps/Day")
+
+    def test_analytic_proxy_uses_declared_full_size_as_ue_scale(self) -> None:
+        from scripts.harness_local_ue_runner import scale_for_binding
+
+        binding = {
+            "asset": {
+                "runtime_usage": "analytic_proxy",
+                "target_size_m": [1.8, 0.025, 0.025],
+            },
+            "bounds": {"extents_m": [0.9, 0.0125, 0.0125]},
+        }
+
+        self.assertEqual(scale_for_binding(binding), [1.8, 0.025, 0.025])
 
     def test_actor_placement_cli_writes_contract_and_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

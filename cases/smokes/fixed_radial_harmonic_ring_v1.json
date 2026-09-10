@@ -1,0 +1,1457 @@
+{
+  "schema_version": "harness_case_spec_v2",
+  "identity": {
+    "case_id": "smoke_fixed_radial_harmonic_ring_v1",
+    "title": "Phase-shifted spring sliders form a circle inside fixed star guides",
+    "source_request": "Place one slider on each of six fixed diameter guides. Connect every slider to one common anchor below the guide center and initialize equal-frequency oscillations with phase offsets so center crossings are staggered and the six positions form a circle moving inside the guide-tip circle."
+  },
+  "capabilities": {
+    "primary": "rigid_body_dynamics",
+    "required": [
+      "rigid_body_dynamics"
+    ]
+  },
+  "scene": {
+    "environment_intent": "minimal controlled fixed radial guide stage",
+    "coordinate_system": "z_up",
+    "duration_s": 6.0,
+    "bounds_hint_m": [
+      2.8,
+      2.8,
+      1.8
+    ]
+  },
+  "timebase": {
+    "physics_hz": 120,
+    "observation_fps": 24,
+    "deterministic_seed": 850185
+  },
+  "backend_constraints": {
+    "required_solver_capabilities": [
+      "rigid_body",
+      "rigid_constraints",
+      "trajectory"
+    ],
+    "allowed_solvers": [
+      "ue"
+    ],
+    "render_backend": "ue",
+    "allow_multi_backend": false
+  },
+  "asset_policy": {
+    "allow_local": true,
+    "allow_external": false,
+    "allow_generation": false,
+    "allow_analytic_proxy": true,
+    "required_license_tier": "local_preview"
+  },
+  "objects": [
+    {
+      "id": "guide_anchor",
+      "role": "fixed_guide_hub",
+      "geometry": {
+        "shape_hint": "box",
+        "approx_size_m": [
+          0.04,
+          0.04,
+          0.04
+        ]
+      },
+      "physics": {
+        "body_type": "static",
+        "mass_kg": 1.0,
+        "collision_required": true,
+        "collision_geometry": {
+          "shape": "box",
+          "size_m": [
+            0.02,
+            0.02,
+            0.02
+          ],
+          "local_center_offset_m": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "initial_state": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.75
+        ],
+        "rotation_deg": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "visual_representation": {
+        "source": "none",
+        "visible": true
+      },
+      "color_rgb": [
+        0.12,
+        0.13,
+        0.15
+      ],
+      "fixed_material_color": true,
+      "behavior": {}
+    },
+    {
+      "id": "spring_anchor",
+      "role": "common_lower_spring_anchor",
+      "geometry": {
+        "shape_hint": "sphere",
+        "approx_size_m": [
+          0.08,
+          0.08,
+          0.08
+        ]
+      },
+      "physics": {
+        "body_type": "static",
+        "mass_kg": 1.0,
+        "collision_required": true,
+        "collision_geometry": {
+          "shape": "sphere",
+          "size_m": [
+            0.05,
+            0.05,
+            0.05
+          ],
+          "local_center_offset_m": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "initial_state": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.45
+        ],
+        "rotation_deg": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "color_rgb": [
+        0.12,
+        0.13,
+        0.15
+      ],
+      "fixed_material_color": true,
+      "behavior": {}
+    },
+    {
+      "id": "rail_0",
+      "role": "fixed_diameter_guide",
+      "geometry": {
+        "shape_hint": "box",
+        "approx_size_m": [
+          1.8,
+          0.025,
+          0.025
+        ]
+      },
+      "physics": {
+        "body_type": "static",
+        "mass_kg": 1.0,
+        "collision_required": false
+      },
+      "initial_state": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.69
+        ],
+        "rotation_deg": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "color_rgb": [
+        0.25,
+        0.27,
+        0.31
+      ],
+      "fixed_material_color": true,
+      "behavior": {}
+    },
+    {
+      "id": "rail_1",
+      "role": "fixed_diameter_guide",
+      "geometry": {
+        "shape_hint": "box",
+        "approx_size_m": [
+          1.8,
+          0.025,
+          0.025
+        ]
+      },
+      "physics": {
+        "body_type": "static",
+        "mass_kg": 1.0,
+        "collision_required": false
+      },
+      "initial_state": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.69
+        ],
+        "rotation_deg": [
+          0.0,
+          30.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "color_rgb": [
+        0.25,
+        0.27,
+        0.31
+      ],
+      "fixed_material_color": true,
+      "behavior": {}
+    },
+    {
+      "id": "rail_2",
+      "role": "fixed_diameter_guide",
+      "geometry": {
+        "shape_hint": "box",
+        "approx_size_m": [
+          1.8,
+          0.025,
+          0.025
+        ]
+      },
+      "physics": {
+        "body_type": "static",
+        "mass_kg": 1.0,
+        "collision_required": false
+      },
+      "initial_state": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.69
+        ],
+        "rotation_deg": [
+          0.0,
+          60.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "color_rgb": [
+        0.25,
+        0.27,
+        0.31
+      ],
+      "fixed_material_color": true,
+      "behavior": {}
+    },
+    {
+      "id": "rail_3",
+      "role": "fixed_diameter_guide",
+      "geometry": {
+        "shape_hint": "box",
+        "approx_size_m": [
+          1.8,
+          0.025,
+          0.025
+        ]
+      },
+      "physics": {
+        "body_type": "static",
+        "mass_kg": 1.0,
+        "collision_required": false
+      },
+      "initial_state": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.69
+        ],
+        "rotation_deg": [
+          0.0,
+          90.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "color_rgb": [
+        0.25,
+        0.27,
+        0.31
+      ],
+      "fixed_material_color": true,
+      "behavior": {}
+    },
+    {
+      "id": "rail_4",
+      "role": "fixed_diameter_guide",
+      "geometry": {
+        "shape_hint": "box",
+        "approx_size_m": [
+          1.8,
+          0.025,
+          0.025
+        ]
+      },
+      "physics": {
+        "body_type": "static",
+        "mass_kg": 1.0,
+        "collision_required": false
+      },
+      "initial_state": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.69
+        ],
+        "rotation_deg": [
+          0.0,
+          120.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "color_rgb": [
+        0.25,
+        0.27,
+        0.31
+      ],
+      "fixed_material_color": true,
+      "behavior": {}
+    },
+    {
+      "id": "rail_5",
+      "role": "fixed_diameter_guide",
+      "geometry": {
+        "shape_hint": "box",
+        "approx_size_m": [
+          1.8,
+          0.025,
+          0.025
+        ]
+      },
+      "physics": {
+        "body_type": "static",
+        "mass_kg": 1.0,
+        "collision_required": false
+      },
+      "initial_state": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.69
+        ],
+        "rotation_deg": [
+          0.0,
+          150.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "color_rgb": [
+        0.25,
+        0.27,
+        0.31
+      ],
+      "fixed_material_color": true,
+      "behavior": {}
+    },
+    {
+      "id": "slider_0",
+      "role": "phase_shifted_radial_slider",
+      "geometry": {
+        "shape_hint": "sphere",
+        "approx_size_m": [
+          0.1,
+          0.1,
+          0.1
+        ]
+      },
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.35,
+        "collision_required": true,
+        "enable_gravity": false,
+        "linear_damping": 0.0,
+        "angular_damping": 0.05,
+        "material": {
+          "dynamic_friction": 0.02,
+          "restitution": 0.0
+        }
+      },
+      "initial_state": {
+        "position_m": [
+          0.837087,
+          0.0,
+          0.75
+        ],
+        "rotation_deg": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          -0.295202,
+          0.0,
+          0.0
+        ]
+      },
+      "color_rgb": [
+        0.88,
+        0.16,
+        0.12
+      ],
+      "fixed_material_color": true,
+      "behavior": {}
+    },
+    {
+      "id": "slider_1",
+      "role": "phase_shifted_radial_slider",
+      "geometry": {
+        "shape_hint": "sphere",
+        "approx_size_m": [
+          0.1,
+          0.1,
+          0.1
+        ]
+      },
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.35,
+        "collision_required": true,
+        "enable_gravity": false,
+        "linear_damping": 0.0,
+        "angular_damping": 0.05,
+        "material": {
+          "dynamic_friction": 0.02,
+          "restitution": 0.0
+        }
+      },
+      "initial_state": {
+        "position_m": [
+          0.691899,
+          0.399369,
+          0.75
+        ],
+        "rotation_deg": [
+          0.0,
+          30.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          0.503047,
+          0.290435,
+          0.0
+        ]
+      },
+      "color_rgb": [
+        0.94,
+        0.48,
+        0.08
+      ],
+      "fixed_material_color": true,
+      "behavior": {}
+    },
+    {
+      "id": "slider_2",
+      "role": "phase_shifted_radial_slider",
+      "geometry": {
+        "shape_hint": "sphere",
+        "approx_size_m": [
+          0.1,
+          0.1,
+          0.1
+        ]
+      },
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.35,
+        "collision_required": true,
+        "enable_gravity": false,
+        "linear_damping": 0.0,
+        "angular_damping": 0.05,
+        "material": {
+          "dynamic_friction": 0.02,
+          "restitution": 0.0
+        }
+      },
+      "initial_state": {
+        "position_m": [
+          0.273185,
+          0.47317,
+          0.75
+        ],
+        "rotation_deg": [
+          0.0,
+          60.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          0.651172,
+          1.127904,
+          0.0
+        ]
+      },
+      "color_rgb": [
+        0.78,
+        0.76,
+        0.08
+      ],
+      "fixed_material_color": true,
+      "behavior": {}
+    },
+    {
+      "id": "slider_3",
+      "role": "phase_shifted_radial_slider",
+      "geometry": {
+        "shape_hint": "sphere",
+        "approx_size_m": [
+          0.1,
+          0.1,
+          0.1
+        ]
+      },
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.35,
+        "collision_required": true,
+        "enable_gravity": false,
+        "linear_damping": 0.0,
+        "angular_damping": 0.05,
+        "material": {
+          "dynamic_friction": 0.02,
+          "restitution": 0.0
+        }
+      },
+      "initial_state": {
+        "position_m": [
+          0.0,
+          0.147601,
+          0.75
+        ],
+        "rotation_deg": [
+          0.0,
+          90.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          0.0,
+          1.674173,
+          0.0
+        ]
+      },
+      "color_rgb": [
+        0.12,
+        0.7,
+        0.34
+      ],
+      "fixed_material_color": true,
+      "behavior": {}
+    },
+    {
+      "id": "slider_4",
+      "role": "phase_shifted_radial_slider",
+      "geometry": {
+        "shape_hint": "sphere",
+        "approx_size_m": [
+          0.1,
+          0.1,
+          0.1
+        ]
+      },
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.35,
+        "collision_required": true,
+        "enable_gravity": false,
+        "linear_damping": 0.0,
+        "angular_damping": 0.05,
+        "material": {
+          "dynamic_friction": 0.02,
+          "restitution": 0.0
+        }
+      },
+      "initial_state": {
+        "position_m": [
+          0.145359,
+          -0.25177,
+          0.75
+        ],
+        "rotation_deg": [
+          0.0,
+          120.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          -0.798738,
+          1.383455,
+          0.0
+        ]
+      },
+      "color_rgb": [
+        0.1,
+        0.5,
+        0.84
+      ],
+      "fixed_material_color": true,
+      "behavior": {}
+    },
+    {
+      "id": "slider_5",
+      "role": "phase_shifted_radial_slider",
+      "geometry": {
+        "shape_hint": "sphere",
+        "approx_size_m": [
+          0.1,
+          0.1,
+          0.1
+        ]
+      },
+      "physics": {
+        "body_type": "dynamic",
+        "mass_kg": 0.35,
+        "collision_required": true,
+        "enable_gravity": false,
+        "linear_damping": 0.0,
+        "angular_damping": 0.05,
+        "material": {
+          "dynamic_friction": 0.02,
+          "restitution": 0.0
+        }
+      },
+      "initial_state": {
+        "position_m": [
+          0.563866,
+          -0.325548,
+          0.75
+        ],
+        "rotation_deg": [
+          0.0,
+          150.0,
+          0.0
+        ],
+        "linear_velocity_m_s": [
+          -0.946299,
+          0.546346,
+          0.0
+        ]
+      },
+      "color_rgb": [
+        0.5,
+        0.22,
+        0.78
+      ],
+      "fixed_material_color": true,
+      "behavior": {}
+    }
+  ],
+  "relations": [],
+  "events": [],
+  "forces": [],
+  "constraints": [
+    {
+      "id": "guide_0",
+      "body_a": "guide_anchor",
+      "body_b": "slider_0",
+      "frame_a": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "primary_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "secondary_axis": [
+          0.0,
+          1.0,
+          0.0
+        ]
+      },
+      "frame_b": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "primary_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "secondary_axis": [
+          0.0,
+          1.0,
+          0.0
+        ]
+      },
+      "linear_motion": {
+        "x": "free",
+        "y": "locked",
+        "z": "locked"
+      },
+      "angular_motion": {
+        "x": "locked",
+        "y": "locked",
+        "z": "locked"
+      },
+      "angular_limits_deg": {},
+      "collision_enabled": false
+    },
+    {
+      "id": "guide_1",
+      "body_a": "guide_anchor",
+      "body_b": "slider_1",
+      "frame_a": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "primary_axis": [
+          0.8660254,
+          0.5,
+          0.0
+        ],
+        "secondary_axis": [
+          -0.5,
+          0.8660254,
+          0.0
+        ]
+      },
+      "frame_b": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "primary_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "secondary_axis": [
+          0.0,
+          1.0,
+          0.0
+        ]
+      },
+      "linear_motion": {
+        "x": "free",
+        "y": "locked",
+        "z": "locked"
+      },
+      "angular_motion": {
+        "x": "locked",
+        "y": "locked",
+        "z": "locked"
+      },
+      "angular_limits_deg": {},
+      "collision_enabled": false
+    },
+    {
+      "id": "guide_2",
+      "body_a": "guide_anchor",
+      "body_b": "slider_2",
+      "frame_a": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "primary_axis": [
+          0.5,
+          0.8660254,
+          0.0
+        ],
+        "secondary_axis": [
+          -0.8660254,
+          0.5,
+          0.0
+        ]
+      },
+      "frame_b": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "primary_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "secondary_axis": [
+          0.0,
+          1.0,
+          0.0
+        ]
+      },
+      "linear_motion": {
+        "x": "free",
+        "y": "locked",
+        "z": "locked"
+      },
+      "angular_motion": {
+        "x": "locked",
+        "y": "locked",
+        "z": "locked"
+      },
+      "angular_limits_deg": {},
+      "collision_enabled": false
+    },
+    {
+      "id": "guide_3",
+      "body_a": "guide_anchor",
+      "body_b": "slider_3",
+      "frame_a": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "primary_axis": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "secondary_axis": [
+          -1.0,
+          0.0,
+          0.0
+        ]
+      },
+      "frame_b": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "primary_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "secondary_axis": [
+          0.0,
+          1.0,
+          0.0
+        ]
+      },
+      "linear_motion": {
+        "x": "free",
+        "y": "locked",
+        "z": "locked"
+      },
+      "angular_motion": {
+        "x": "locked",
+        "y": "locked",
+        "z": "locked"
+      },
+      "angular_limits_deg": {},
+      "collision_enabled": false
+    },
+    {
+      "id": "guide_4",
+      "body_a": "guide_anchor",
+      "body_b": "slider_4",
+      "frame_a": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "primary_axis": [
+          -0.5,
+          0.8660254,
+          0.0
+        ],
+        "secondary_axis": [
+          -0.8660254,
+          -0.5,
+          0.0
+        ]
+      },
+      "frame_b": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "primary_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "secondary_axis": [
+          0.0,
+          1.0,
+          0.0
+        ]
+      },
+      "linear_motion": {
+        "x": "free",
+        "y": "locked",
+        "z": "locked"
+      },
+      "angular_motion": {
+        "x": "locked",
+        "y": "locked",
+        "z": "locked"
+      },
+      "angular_limits_deg": {},
+      "collision_enabled": false
+    },
+    {
+      "id": "guide_5",
+      "body_a": "guide_anchor",
+      "body_b": "slider_5",
+      "frame_a": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "primary_axis": [
+          -0.8660254,
+          0.5,
+          0.0
+        ],
+        "secondary_axis": [
+          -0.5,
+          -0.8660254,
+          0.0
+        ]
+      },
+      "frame_b": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "primary_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "secondary_axis": [
+          0.0,
+          1.0,
+          0.0
+        ]
+      },
+      "linear_motion": {
+        "x": "free",
+        "y": "locked",
+        "z": "locked"
+      },
+      "angular_motion": {
+        "x": "locked",
+        "y": "locked",
+        "z": "locked"
+      },
+      "angular_limits_deg": {},
+      "collision_enabled": false
+    },
+    {
+      "id": "spring_0",
+      "body_a": "spring_anchor",
+      "body_b": "slider_0",
+      "frame_a": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "primary_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "secondary_axis": [
+          0.0,
+          1.0,
+          0.0
+        ]
+      },
+      "frame_b": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "primary_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "secondary_axis": [
+          0.0,
+          1.0,
+          0.0
+        ]
+      },
+      "linear_motion": {
+        "x": "free",
+        "y": "free",
+        "z": "free"
+      },
+      "angular_motion": {
+        "x": "free",
+        "y": "free",
+        "z": "free"
+      },
+      "angular_limits_deg": {},
+      "unilateral_distance_spring": {
+        "rest_length_m": 0.01,
+        "stiffness_n_m": 1.4,
+        "damping_n_s_m": 0.01
+      },
+      "collision_enabled": false
+    },
+    {
+      "id": "spring_1",
+      "body_a": "spring_anchor",
+      "body_b": "slider_1",
+      "frame_a": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "primary_axis": [
+          0.8660254,
+          0.5,
+          0.0
+        ],
+        "secondary_axis": [
+          -0.5,
+          0.8660254,
+          0.0
+        ]
+      },
+      "frame_b": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "primary_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "secondary_axis": [
+          0.0,
+          1.0,
+          0.0
+        ]
+      },
+      "linear_motion": {
+        "x": "free",
+        "y": "free",
+        "z": "free"
+      },
+      "angular_motion": {
+        "x": "free",
+        "y": "free",
+        "z": "free"
+      },
+      "angular_limits_deg": {},
+      "unilateral_distance_spring": {
+        "rest_length_m": 0.01,
+        "stiffness_n_m": 1.4,
+        "damping_n_s_m": 0.01
+      },
+      "collision_enabled": false
+    },
+    {
+      "id": "spring_2",
+      "body_a": "spring_anchor",
+      "body_b": "slider_2",
+      "frame_a": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "primary_axis": [
+          0.5,
+          0.8660254,
+          0.0
+        ],
+        "secondary_axis": [
+          -0.8660254,
+          0.5,
+          0.0
+        ]
+      },
+      "frame_b": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "primary_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "secondary_axis": [
+          0.0,
+          1.0,
+          0.0
+        ]
+      },
+      "linear_motion": {
+        "x": "free",
+        "y": "free",
+        "z": "free"
+      },
+      "angular_motion": {
+        "x": "free",
+        "y": "free",
+        "z": "free"
+      },
+      "angular_limits_deg": {},
+      "unilateral_distance_spring": {
+        "rest_length_m": 0.01,
+        "stiffness_n_m": 1.4,
+        "damping_n_s_m": 0.01
+      },
+      "collision_enabled": false
+    },
+    {
+      "id": "spring_3",
+      "body_a": "spring_anchor",
+      "body_b": "slider_3",
+      "frame_a": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "primary_axis": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "secondary_axis": [
+          -1.0,
+          0.0,
+          0.0
+        ]
+      },
+      "frame_b": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "primary_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "secondary_axis": [
+          0.0,
+          1.0,
+          0.0
+        ]
+      },
+      "linear_motion": {
+        "x": "free",
+        "y": "free",
+        "z": "free"
+      },
+      "angular_motion": {
+        "x": "free",
+        "y": "free",
+        "z": "free"
+      },
+      "angular_limits_deg": {},
+      "unilateral_distance_spring": {
+        "rest_length_m": 0.01,
+        "stiffness_n_m": 1.4,
+        "damping_n_s_m": 0.01
+      },
+      "collision_enabled": false
+    },
+    {
+      "id": "spring_4",
+      "body_a": "spring_anchor",
+      "body_b": "slider_4",
+      "frame_a": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "primary_axis": [
+          -0.5,
+          0.8660254,
+          0.0
+        ],
+        "secondary_axis": [
+          -0.8660254,
+          -0.5,
+          0.0
+        ]
+      },
+      "frame_b": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "primary_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "secondary_axis": [
+          0.0,
+          1.0,
+          0.0
+        ]
+      },
+      "linear_motion": {
+        "x": "free",
+        "y": "free",
+        "z": "free"
+      },
+      "angular_motion": {
+        "x": "free",
+        "y": "free",
+        "z": "free"
+      },
+      "angular_limits_deg": {},
+      "unilateral_distance_spring": {
+        "rest_length_m": 0.01,
+        "stiffness_n_m": 1.4,
+        "damping_n_s_m": 0.01
+      },
+      "collision_enabled": false
+    },
+    {
+      "id": "spring_5",
+      "body_a": "spring_anchor",
+      "body_b": "slider_5",
+      "frame_a": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "primary_axis": [
+          -0.8660254,
+          0.5,
+          0.0
+        ],
+        "secondary_axis": [
+          -0.5,
+          -0.8660254,
+          0.0
+        ]
+      },
+      "frame_b": {
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "primary_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "secondary_axis": [
+          0.0,
+          1.0,
+          0.0
+        ]
+      },
+      "linear_motion": {
+        "x": "free",
+        "y": "free",
+        "z": "free"
+      },
+      "angular_motion": {
+        "x": "free",
+        "y": "free",
+        "z": "free"
+      },
+      "angular_limits_deg": {},
+      "unilateral_distance_spring": {
+        "rest_length_m": 0.01,
+        "stiffness_n_m": 1.4,
+        "damping_n_s_m": 0.01
+      },
+      "collision_enabled": false
+    }
+  ],
+  "expected_behavior": {
+    "native_constraint_trace_required": true,
+    "fixed_guides_required": true,
+    "staggered_center_crossings_required": true,
+    "phase_circle_amplitude_m": 0.85,
+    "common_lower_anchor_required": true
+  },
+  "observation_requirements": {
+    "cameras": [
+      {
+        "role": "top",
+        "coordinate_frame": "world",
+        "position_m": [
+          0.0,
+          0.0,
+          3.4
+        ],
+        "look_at_m": [
+          0.0,
+          0.0,
+          0.7
+        ],
+        "fov_deg": 42.0,
+        "framing": "scene",
+        "target_objects": [
+          "rail_0",
+          "rail_1",
+          "rail_2",
+          "rail_3",
+          "rail_4",
+          "rail_5",
+          "slider_0",
+          "slider_1",
+          "slider_2",
+          "slider_3",
+          "slider_4",
+          "slider_5"
+        ]
+      },
+      {
+        "role": "overview",
+        "coordinate_frame": "world",
+        "position_m": [
+          2.35,
+          -2.75,
+          2.25
+        ],
+        "look_at_m": [
+          0.0,
+          0.0,
+          0.68
+        ],
+        "fov_deg": 48.0,
+        "framing": "scene",
+        "target_objects": [
+          "rail_0",
+          "rail_1",
+          "rail_2",
+          "rail_3",
+          "rail_4",
+          "rail_5",
+          "slider_0",
+          "slider_1",
+          "slider_2",
+          "slider_3",
+          "slider_4",
+          "slider_5"
+        ]
+      }
+    ],
+    "modalities": [
+      "rgb"
+    ],
+    "signals": [
+      "trajectory"
+    ]
+  },
+  "verification_requirements": {
+    "assertions": [
+      {
+        "id": "trajectory_integrity",
+        "type": "trajectory_integrity"
+      },
+      {
+        "id": "slider_0_crosses_negative_side",
+        "type": "state_value",
+        "object_id": "slider_0",
+        "field": "position_m.x",
+        "reduction": "min",
+        "operator": "<=",
+        "value": -0.35
+      },
+      {
+        "id": "slider_3_crosses_negative_side",
+        "type": "state_value",
+        "object_id": "slider_3",
+        "field": "position_m.y",
+        "reduction": "min",
+        "operator": "<=",
+        "value": -0.35
+      }
+    ],
+    "thresholds": {}
+  },
+  "variant": {
+    "should_pass": true
+  },
+  "provenance": {
+    "purpose": "capability_first_compound_smoke",
+    "core80_cases": [
+      "R085"
+    ]
+  },
+  "notes": "The six fixed line angles theta_i and signed coordinates s_i use s_i=A*cos(phi-theta_i), with matched phase velocities. Their world positions therefore lie on a radius A/2 circle whose center moves on a radius A/2 circle. Springs are generic one-way distance springs to one lower anchor; fixed guide constraints project motion onto each diameter."
+}
