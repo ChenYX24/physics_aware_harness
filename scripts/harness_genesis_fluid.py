@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -486,10 +487,13 @@ def write_fluid_cache(cache: dict[str, Any], output_dir: Path) -> dict[str, Any]
     cache_path.write_text(json.dumps(cache, indent=2, ensure_ascii=False), encoding="utf-8")
     report = verify_particle_cache(cache, root=output_dir)
     video = output_dir / "video.mp4"
-    subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(cache["timebase"]["fps"]), "-i", str(preview_dir / "frame_%04d.png"), "-c:v", "libx264", "-pix_fmt", "yuv420p", str(video)],
-        check=True,
-    )
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(cache["timebase"]["fps"]), "-i", str(preview_dir / "frame_%04d.png"), "-c:v", "libx264", "-pix_fmt", "yuv420p", str(video)],
+            check=True,
+        )
+    finally:
+        shutil.rmtree(preview_dir, ignore_errors=True)
     report["video"] = str(video)
     (output_dir / "fluid_report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     return report
