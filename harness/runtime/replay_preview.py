@@ -10,7 +10,7 @@ from harness.core.harness_config import EffectiveHarnessConfig
 from scripts.harness_local_ue_runner import run_precompiled_ue_scene
 
 
-REPLAY_PREVIEW_SCHEMA_VERSION = "harness_replay_preview_v5"
+REPLAY_PREVIEW_SCHEMA_VERSION = "harness_replay_preview_v7"
 
 
 def _digest(value: Mapping[str, Any]) -> str:
@@ -90,6 +90,18 @@ def apply_runtime_transform_overrides(
                         "color_rgb": [0.0, 0.45, 1.0],
                         "roughness": 0.25,
                         "metallic": 0.0,
+                    }
+                )
+            elif object_id in offsets or object_id in rotations:
+                params.update(
+                    {
+                        "generate_translucent_fluid_material": True,
+                        "generate_solid_material": False,
+                        "preserve_material": False,
+                        "color_rgb": [1.0, 0.16, 0.02],
+                        "roughness": 0.38,
+                        "opacity": 0.32,
+                        "refraction": 1.0,
                     }
                 )
             if object_id in offsets:

@@ -112,6 +112,10 @@ class LayoutPreviewTest(unittest.TestCase):
         self.assertEqual(state["position"], [1.0, 1.98, 3.01])
         self.assertEqual(state["rotation_degrees"], [0.0, 10.0, 180.0])
         self.assertEqual(runtime_scene["dynamic_objects"][0]["initial_position_m"], [1.0, 2.0, 3.0])
+        vessel_params = preview["dynamic_objects"][0]["params"]
+        self.assertTrue(vessel_params["generate_translucent_fluid_material"])
+        self.assertFalse(vessel_params["generate_solid_material"])
+        self.assertFalse(vessel_params["preserve_material"])
         surface_params = preview["dynamic_objects"][1]["params"]
         self.assertTrue(surface_params["generate_solid_material"])
         self.assertFalse(surface_params["generate_translucent_fluid_material"])
