@@ -979,6 +979,33 @@ class CaseSpecV2Tests(unittest.TestCase):
             case_spec_v2_from_dict(no_clearance)
         self.assertIn("insufficient_initial_fluid_clearance", {issue.code for issue in context.exception.issues})
 
+        visual_scene = deepcopy(data)
+        visual = deepcopy(data["objects"][1])
+        visual["id"] = "presentation_shell"
+        visual["role"] = "visual_asset"
+        visual.pop("solver", None)
+        visual["physics"] = {"body_type": "static", "collision_required": False}
+        visual["behavior"] = {"follow_rigid_body_id": "target_ball"}
+        visual["initial_state"] = {"position_m": [0.0, 0.0, 0.1], "rotation_deg": [0.0, 0.0, 0.0]}
+        visual_scene["objects"].append(visual)
+
+        projected_visual_scene = compile_case_spec_v2_runtime(case_spec_v2_from_dict(visual_scene)).data
+        projected_visual = next(
+            obj for obj in projected_visual_scene["objects"] if obj["id"] == "presentation_shell"
+        )
+        self.assertEqual(projected_visual["role"], "visual_asset")
+        self.assertFalse(projected_visual["collision_required"])
+        self.assertEqual(projected_visual["behavior"]["follow_rigid_body_id"], "target_ball")
+
+        invalid_visual = deepcopy(visual_scene)
+        invalid_visual["objects"][-1]["physics"]["collision_required"] = True
+        with self.assertRaises(CaseSpecV2ValidationError) as context:
+            case_spec_v2_from_dict(invalid_visual)
+        self.assertIn(
+            "rigid_sph_visual_asset_collision_forbidden",
+            {issue.code for issue in context.exception.issues},
+        )
+
     def test_invalid_rigid_sph_nested_contract_is_rejected_before_projection(self) -> None:
         data = case_spec_v2_fixture()
         data["capabilities"] = {

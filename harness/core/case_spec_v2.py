@@ -1265,6 +1265,10 @@ def _project_object(
             "visible": visual_representation_visible(obj),
         },
     }
+    if behavior.get("follow_rigid_body_id") is not None:
+        projected["behavior"] = {
+            "follow_rigid_body_id": str(behavior["follow_rigid_body_id"]),
+        }
     for appearance_field in ("color_rgb", "fixed_material_color", "visual_material_path"):
         if obj.get(appearance_field) is not None:
             projected[appearance_field] = copy.deepcopy(obj[appearance_field])
@@ -2073,7 +2077,17 @@ def _validate_rigid_sph_declarations(
         )
     entries = [(index, obj) for index, obj in enumerate(objects) if isinstance(obj, Mapping)]
     fluids = [(index, obj) for index, obj in entries if str(obj.get("role") or "") in {"fluid", "fluid_volume"}]
-    rigid_candidates = [(index, obj) for index, obj in entries if (index, obj) not in fluids]
+    non_fluid_candidates = [(index, obj) for index, obj in entries if (index, obj) not in fluids]
+    visual_assets = [
+        (index, obj)
+        for index, obj in non_fluid_candidates
+        if str(obj.get("role") or "") == "visual_asset"
+    ]
+    rigid_candidates = [
+        (index, obj)
+        for index, obj in non_fluid_candidates
+        if str(obj.get("role") or "") != "visual_asset"
+    ]
 
     if len(fluids) != 1:
         _issue(
@@ -2089,6 +2103,31 @@ def _validate_rigid_sph_declarations(
             "rigid_sph_rigid_body_missing",
             "rigid_sph requires at least one rigid_body",
         )
+
+    for index, visual in visual_assets:
+        path = f"/objects/{index}"
+        physics = _mapping(visual.get("physics"), f"{path}/physics", issues)
+        if physics.get("body_type") != "static":
+            _issue(
+                issues,
+                f"{path}/physics/body_type",
+                "rigid_sph_visual_asset_must_be_static",
+                "visual_asset objects in rigid_sph scenes must use body_type=static",
+            )
+        if physics.get("collision_required") is not False:
+            _issue(
+                issues,
+                f"{path}/physics/collision_required",
+                "rigid_sph_visual_asset_collision_forbidden",
+                "visual_asset objects in rigid_sph scenes must use collision_required=false",
+            )
+        if visual.get("solver") is not None:
+            _issue(
+                issues,
+                f"{path}/solver",
+                "rigid_sph_visual_asset_solver_forbidden",
+                "visual_asset objects are excluded from the solver and must omit solver",
+            )
 
     rigid_ids: set[str] = set()
     collision_types: dict[str, str] = {}
@@ -2289,6 +2328,16 @@ def _validate_rigid_sph_declarations(
                     "rigid_sph_rotation_mapping_mismatch",
                     "must equal [-solver_y, -solver_z, solver_x]",
                 )
+
+    for index, visual in visual_assets:
+        follow_body_id = str((visual.get("behavior") or {}).get("follow_rigid_body_id") or "")
+        if follow_body_id and follow_body_id not in rigid_ids:
+            _issue(
+                issues,
+                f"/objects/{index}/behavior/follow_rigid_body_id",
+                "unknown_rigid_sph_visual_follow_body",
+                "must reference a declared rigid_body",
+            )
 
     for index, fluid in fluids:
         path = f"/objects/{index}/solver"

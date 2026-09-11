@@ -188,6 +188,17 @@ def main() -> int:
         if rigid_scene_mode
         else ([], [])
     )
+    declared_visual_runtime = visual_asset_runtime_objects(
+        case_spec,
+        runtime_actor_placement,
+        render_z_offset_m=args.scene_z_offset_m,
+    )
+    declared_visual_dynamic = [
+        item for item in declared_visual_runtime if item["params"].get("follow_rigid_body_id")
+    ]
+    declared_visual_static = [
+        item for item in declared_visual_runtime if not item["params"].get("follow_rigid_body_id")
+    ]
     precomputed_trajectory = [
         {
             "frame": index,
@@ -219,6 +230,11 @@ def main() -> int:
                 **rigid_body_trajectory_objects(
                     particle_cache["frames"][index],
                     declared_rigid_bodies,
+                    render_z_offset_m=args.scene_z_offset_m,
+                ),
+                **visual_asset_trajectory_objects(
+                    particle_cache["frames"][index],
+                    case_spec,
                     render_z_offset_m=args.scene_z_offset_m,
                 ),
             },
@@ -293,10 +309,11 @@ def main() -> int:
                 },
             ),
             *declared_dynamic_runtime,
+            *declared_visual_dynamic,
             *rigid_runtime_objects,
         ],
         "static_objects": (
-            declared_static_runtime
+            [*declared_static_runtime, *declared_visual_static]
             if rigid_scene_mode
             else basin_runtime_objects(
                 particle_cache,
@@ -320,6 +337,7 @@ def main() -> int:
         "particle_cache": str(Path(args.particle_cache).resolve()),
         "render_assets": {
             "rigid_bodies": [str((item.get("asset") or {}).get("ue_path")) for item in rendered_rigid_bodies],
+            "visual_assets": [item["ue5_path"] for item in declared_visual_runtime],
             "basin": None if rigid_scene_mode else args.basin_asset,
             "rigid_objects": [item["ue5_path"] for item in rigid_runtime_objects],
         },
@@ -382,12 +400,28 @@ def main() -> int:
                         "provenance": "mounted AgenticDataPlatform UE asset catalog",
                     },
                 }
+                for item in declared_visual_runtime
+            ],
+            *[
+                {
+                    "object_id": item["id"],
+                    "selected_asset": {
+                        "asset_id": item["ue5_path"].rsplit(".", 1)[0],
+                        "ue5_path": item["ue5_path"],
+                        "proxy": False,
+                        "provenance": "mounted AgenticDataPlatform UE asset catalog",
+                    },
+                }
                 for item in rigid_runtime_objects
             ],
         ],
         "quality_gate": {
             "reference_assets_ready": False,
-            "local_preview_count": (len(declared_rigid_bodies) if rigid_scene_mode else 1) + len(rigid_runtime_objects),
+            "local_preview_count": (
+                (len(declared_rigid_bodies) if rigid_scene_mode else 1)
+                + len(declared_visual_runtime)
+                + len(rigid_runtime_objects)
+            ),
             "geometry_match": asset_geometry_match,
             "reason": "real UE scene assets with a derived fluid surface; particle cache remains state truth",
         },
@@ -937,6 +971,86 @@ def rigid_body_runtime_objects(
         )
         (dynamic_objects if body.get("mobility") in {"kinematic", "dynamic"} else static_objects).append(runtime)
     return dynamic_objects, static_objects
+
+
+def visual_asset_runtime_objects(
+    case_spec: dict,
+    runtime_actor_placement: dict,
+    *,
+    render_z_offset_m: float,
+) -> list[dict]:
+    """Project non-colliding static presentation shells into a fluid replay."""
+    placement_by_id = runtime_placement_by_object_id(runtime_actor_placement)
+    result: list[dict] = []
+    for obj in case_spec.get("objects") or []:
+        if not isinstance(obj, dict) or obj.get("role") != "visual_asset":
+            continue
+        visual = obj.get("visual_representation") if isinstance(obj.get("visual_representation"), dict) else {}
+        if visual.get("visible") is False:
+            continue
+        object_id = str(obj.get("id") or "")
+        binding = placement_by_id.get(object_id)
+        if not isinstance(binding, dict):
+            raise ValueError(f"visual_asset has no runtime placement binding: {object_id}")
+        asset = binding.get("asset") if isinstance(binding.get("asset"), dict) else {}
+        transform = (
+            binding.get("declared_object_transform")
+            if isinstance(binding.get("declared_object_transform"), dict)
+            else {}
+        )
+        position = transform.get("position_m") or obj.get("initial_position_m") or [0.0, 0.0, 0.0]
+        rotation = transform.get("rotation_deg") or obj.get("initial_rotation_deg") or [0.0, 0.0, 0.0]
+        ue_path = str(asset.get("ue_path") or "")
+        if not ue_path.startswith("/Game/"):
+            raise ValueError(f"visual_asset has no resolved UE asset: {object_id}")
+        result.append(
+            runtime_object(
+                object_id,
+                ue_path,
+                offset_z(ue_position_m(position), render_z_offset_m),
+                placement_visual_scale(binding),
+                {
+                    "base_rotation_degrees": [-float(rotation[1]), -float(rotation[2]), float(rotation[0])],
+                    "preserve_authored_scale": True,
+                    "preserve_material": True,
+                    "visual_material_path": str(obj.get("visual_material_path") or ""),
+                    "segmentation_identity": object_id,
+                    "presentation_only": True,
+                    "follow_rigid_body_id": str((obj.get("behavior") or {}).get("follow_rigid_body_id") or ""),
+                },
+            )
+        )
+    return result
+
+
+def visual_asset_trajectory_objects(
+    frame: dict,
+    case_spec: dict,
+    *,
+    render_z_offset_m: float,
+) -> dict[str, dict]:
+    states = frame.get("rigid_objects") if isinstance(frame.get("rigid_objects"), dict) else {}
+    result: dict[str, dict] = {}
+    for obj in case_spec.get("objects") or []:
+        if not isinstance(obj, dict) or obj.get("role") != "visual_asset":
+            continue
+        body_id = str((obj.get("behavior") or {}).get("follow_rigid_body_id") or "")
+        if not body_id:
+            continue
+        state = states.get(body_id) if isinstance(states.get(body_id), dict) else {}
+        if len(state.get("position_m") or []) != 3 or len(state.get("ue_rotation_pyr_deg") or []) != 3:
+            raise ValueError(f"visual_asset follow target has no complete solver state: {body_id}")
+        result[str(obj.get("id") or "visual_asset")] = {
+            "position": offset_z(ue_position_m(state["position_m"]), render_z_offset_m),
+            "rotation_degrees": list(state["ue_rotation_pyr_deg"]),
+            "velocity": (
+                ue_position_m(state["linear_velocity_m_s"])
+                if len(state.get("linear_velocity_m_s") or []) == 3
+                else [0.0, 0.0, 0.0]
+            ),
+            "source": "genesis_rigid_body_visual_follow",
+        }
+    return result
 
 
 def valid_solver_to_visual(value: object) -> bool:

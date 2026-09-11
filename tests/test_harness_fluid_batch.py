@@ -280,6 +280,8 @@ class FluidBatchVerifierTests(unittest.TestCase):
             rigid_body_runtime_objects,
             rigid_body_trajectory_objects,
             runtime_pose_registration_report,
+            visual_asset_runtime_objects,
+            visual_asset_trajectory_objects,
         )
 
         bodies = [
@@ -413,6 +415,66 @@ class FluidBatchVerifierTests(unittest.TestCase):
         missing_registration = runtime_pose_registration_report({}, ["moving_body"])
         self.assertEqual(missing_registration["status"], "fail")
         self.assertEqual(missing_registration["failures"][0]["code"], "pose_registration_missing")
+
+        visual_runtime = visual_asset_runtime_objects(
+            {
+                "objects": [
+                    {
+                        "id": "bowl_shell",
+                        "role": "visual_asset",
+                        "visual_material_path": "/Game/Materials/M_Ceramic.M_Ceramic",
+                        "behavior": {"follow_rigid_body_id": "moving_body"},
+                        "visual_representation": {"source": "asset", "visible": True},
+                    }
+                ]
+            },
+            {
+                "actor_bindings": [
+                    {
+                        "object_id": "bowl_shell",
+                        "asset": {
+                            "ue_path": "/Game/Props/Bowl.Bowl",
+                            "instance_scale": [0.5, 0.5, 0.5],
+                        },
+                        "declared_object_transform": {
+                            "position_m": [0.1, 0.2, 0.3],
+                            "rotation_deg": [10.0, 20.0, 30.0],
+                        },
+                    }
+                ]
+            },
+            render_z_offset_m=0.025,
+        )
+        self.assertEqual(len(visual_runtime), 1)
+        self.assertEqual(visual_runtime[0]["initial_position_m"], [0.1, -0.2, 0.325])
+        self.assertEqual(visual_runtime[0]["params"]["base_rotation_degrees"], [-20.0, -30.0, 10.0])
+        self.assertTrue(visual_runtime[0]["params"]["presentation_only"])
+        self.assertEqual(visual_runtime[0]["params"]["follow_rigid_body_id"], "moving_body")
+
+        visual_trajectory = visual_asset_trajectory_objects(
+            {
+                "rigid_objects": {
+                    "moving_body": {
+                        "position_m": [0.2, 0.3, 0.4],
+                        "ue_rotation_pyr_deg": [1.0, 2.0, 3.0],
+                        "linear_velocity_m_s": [0.4, 0.5, 0.6],
+                    }
+                }
+            },
+            {
+                "objects": [
+                    {
+                        "id": "bowl_shell",
+                        "role": "visual_asset",
+                        "behavior": {"follow_rigid_body_id": "moving_body"},
+                    }
+                ]
+            },
+            render_z_offset_m=0.025,
+        )
+        for actual, expected in zip(visual_trajectory["bowl_shell"]["position"], [0.2, -0.3, 0.425]):
+            self.assertAlmostEqual(actual, expected)
+        self.assertEqual(visual_trajectory["bowl_shell"]["rotation_degrees"], [1.0, 2.0, 3.0])
 
 
 def particle_cache() -> dict:
