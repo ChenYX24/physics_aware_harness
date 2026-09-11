@@ -125,13 +125,25 @@ class ParticleCacheVerifierTests(unittest.TestCase):
         cache = particle_cache()
         cache["frames"][1]["surface"] = {
             **cache["frames"][1]["surface"],
-            "bounds_m": {"min_m": [-1.01, -0.2, 0.0], "max_m": [0.2, 0.2, 1.0]},
+            "bounds_m": {"min_m": [-1.02, -0.2, 0.0], "max_m": [0.2, 0.2, 1.0]},
         }
 
         report = verify_particle_cache(cache)
 
         self.assertEqual(report["status"], "fail")
         self.assertIn("surface_container_penetration", report["failure_codes"])
+
+    def test_reconstructed_surface_uses_declared_penetration_tolerance(self) -> None:
+        cache = particle_cache()
+        cache["particles"]["radius_m"] = 0.0025
+        cache["frames"][1]["surface"] = {
+            **cache["frames"][1]["surface"],
+            "bounds_m": {"min_m": [-1.012, -0.2, 0.0], "max_m": [0.2, 0.2, 1.0]},
+        }
+
+        report = verify_particle_cache(cache)
+
+        self.assertEqual(report["status"], "pass")
 
     def test_reconstructed_surface_inside_rigid_body_fails(self) -> None:
         cache = particle_cache()

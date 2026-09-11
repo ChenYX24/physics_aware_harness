@@ -75,7 +75,11 @@ def verify_particle_cache(
         if surface.get("topology_consistent") is False:
             failures.append(failure("surface_topology_invalid", frame_id, surface.get("topology_issue")))
         bounds = surface.get("bounds_m") if isinstance(surface.get("bounds_m"), dict) else None
-        if bounds is not None and surface_bounds_outside_basin(bounds, environment):
+        if bounds is not None and surface_bounds_outside_basin(
+            bounds,
+            environment,
+            particle_radius_m=float(particles.get("radius_m") or 0.0),
+        ):
             failures.append(failure("surface_container_penetration", frame_id, bounds))
         surface_intersection_metric_applied = environment.get("surface_container_intersection_metric") != "not_applied_for_boundary_contacting_fluid"
         if surface_intersection_metric_applied and int(surface.get("rigid_intersection_vertex_count") or 0) > 0:
@@ -352,7 +356,12 @@ def particle_bounds(rows: list[Any]) -> dict[str, list[float]]:
     }
 
 
-def surface_bounds_outside_basin(bounds: dict[str, Any], environment: dict[str, Any]) -> bool:
+def surface_bounds_outside_basin(
+    bounds: dict[str, Any],
+    environment: dict[str, Any],
+    *,
+    particle_radius_m: float = 0.0,
+) -> bool:
     workspace = environment.get("workspace_bounds_m") if isinstance(environment.get("workspace_bounds_m"), dict) else {}
     allowed_minimum = workspace.get("min_m") if isinstance(workspace.get("min_m"), list) else []
     allowed_maximum = workspace.get("max_m") if isinstance(workspace.get("max_m"), list) else []
@@ -360,7 +369,9 @@ def surface_bounds_outside_basin(bounds: dict[str, Any], environment: dict[str, 
     maximum = bounds.get("max_m") if isinstance(bounds.get("max_m"), list) else []
     if any(len(value) != 3 for value in (allowed_minimum, allowed_maximum, minimum, maximum)):
         return True
-    tolerance = 1e-6
+    # Reconstructed surfaces enclose particle centers, so their valid support
+    # extends by one particle radius beyond the center-position tolerance.
+    tolerance = float(environment.get("penetration_tolerance_m") or 0.0) + max(0.0, particle_radius_m)
     return any(
         float(minimum[axis]) < float(allowed_minimum[axis]) - tolerance
         or float(maximum[axis]) > float(allowed_maximum[axis]) + tolerance
