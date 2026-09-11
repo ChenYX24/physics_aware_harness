@@ -988,6 +988,7 @@ class CaseSpecV2Tests(unittest.TestCase):
         visual["behavior"] = {
             "follow_rigid_body_id": "target_ball",
             "follow_local_position_m": [0.0, 0.0, -0.04],
+            "follow_local_rotation_xyz_deg": [0.0, 90.0, 0.0],
         }
         visual["initial_state"] = {"position_m": [0.0, 0.0, 0.1], "rotation_deg": [0.0, 0.0, 0.0]}
         visual_scene["objects"].append(visual)
@@ -1000,6 +1001,7 @@ class CaseSpecV2Tests(unittest.TestCase):
         self.assertFalse(projected_visual["collision_required"])
         self.assertEqual(projected_visual["behavior"]["follow_rigid_body_id"], "target_ball")
         self.assertEqual(projected_visual["behavior"]["follow_local_position_m"], [0.0, 0.0, -0.04])
+        self.assertEqual(projected_visual["behavior"]["follow_local_rotation_xyz_deg"], [0.0, 90.0, 0.0])
 
         invalid_visual = deepcopy(visual_scene)
         invalid_visual["objects"][-1]["physics"]["collision_required"] = True

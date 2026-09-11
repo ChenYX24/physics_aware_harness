@@ -1273,6 +1273,10 @@ def _project_object(
             projected["behavior"]["follow_local_position_m"] = copy.deepcopy(
                 behavior["follow_local_position_m"]
             )
+        if behavior.get("follow_local_rotation_xyz_deg") is not None:
+            projected["behavior"]["follow_local_rotation_xyz_deg"] = copy.deepcopy(
+                behavior["follow_local_rotation_xyz_deg"]
+            )
     for appearance_field in ("color_rgb", "fixed_material_color", "visual_material_path"):
         if obj.get(appearance_field) is not None:
             projected[appearance_field] = copy.deepcopy(obj[appearance_field])
@@ -2347,6 +2351,12 @@ def _validate_rigid_sph_declarations(
             _finite_vec3(
                 behavior.get("follow_local_position_m"),
                 f"/objects/{index}/behavior/follow_local_position_m",
+                issues,
+            )
+        if behavior.get("follow_local_rotation_xyz_deg") is not None:
+            _finite_vec3(
+                behavior.get("follow_local_rotation_xyz_deg"),
+                f"/objects/{index}/behavior/follow_local_rotation_xyz_deg",
                 issues,
             )
 

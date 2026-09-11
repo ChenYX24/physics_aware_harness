@@ -1043,6 +1043,12 @@ def visual_asset_trajectory_objects(
             raise ValueError(f"visual_asset follow target has no complete solver state: {body_id}")
         behavior = obj.get("behavior") if isinstance(obj.get("behavior"), dict) else {}
         local_offset = ue_position_m(behavior.get("follow_local_position_m") or [0.0, 0.0, 0.0])
+        local_rotation_xyz = behavior.get("follow_local_rotation_xyz_deg") or [0.0, 0.0, 0.0]
+        local_rotation_pyr = [
+            -float(local_rotation_xyz[1]),
+            -float(local_rotation_xyz[2]),
+            float(local_rotation_xyz[0]),
+        ]
         rotated_offset = rotate_local_vector_ue(local_offset, state["ue_rotation_pyr_deg"])
         body_position = ue_position_m(state["position_m"])
         result[str(obj.get("id") or "visual_asset")] = {
@@ -1050,7 +1056,10 @@ def visual_asset_trajectory_objects(
                 [body_position[index] + rotated_offset[index] for index in range(3)],
                 render_z_offset_m,
             ),
-            "rotation_degrees": list(state["ue_rotation_pyr_deg"]),
+            "rotation_degrees": [
+                float(state["ue_rotation_pyr_deg"][index]) + local_rotation_pyr[index]
+                for index in range(3)
+            ],
             "velocity": (
                 ue_position_m(state["linear_velocity_m_s"])
                 if len(state.get("linear_velocity_m_s") or []) == 3

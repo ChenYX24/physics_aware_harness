@@ -1677,6 +1677,9 @@ FIELD-BY-FIELD INSTRUCTIONS
    Every object also declares visual_representation.source as exactly asset, solver_generated, or none.
    visual_representation.visible is a boolean that defaults to true and controls rendering only; it never
    enables or disables collision. Set it false for an intentionally hidden collision-proxy object.
+   A collision-disabled visual_asset may follow one rigid-SPH body with behavior.follow_rigid_body_id;
+   optional follow_local_position_m and follow_local_rotation_xyz_deg are fixed offsets in that body's
+   local frame. Use them for mesh-pivot and authored-axis registration, not for object-specific animation.
    Use asset when Asset Resolve must supply a visual resource. Use solver_generated when the selected solver
    produces the renderable geometry or field consumed by a later render stage; omit object.asset in that case.
    Use none only for an intentionally invisible logical/helper object, and omit object.asset. Never invent a

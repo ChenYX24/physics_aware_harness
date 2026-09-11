@@ -426,6 +426,7 @@ class FluidBatchVerifierTests(unittest.TestCase):
                         "behavior": {
                             "follow_rigid_body_id": "moving_body",
                             "follow_local_position_m": [0.0, 0.0, -0.04],
+                            "follow_local_rotation_xyz_deg": [10.0, 20.0, 30.0],
                         },
                         "visual_representation": {"source": "asset", "visible": True},
                     }
@@ -472,6 +473,7 @@ class FluidBatchVerifierTests(unittest.TestCase):
                         "behavior": {
                             "follow_rigid_body_id": "moving_body",
                             "follow_local_position_m": [0.0, 0.0, -0.04],
+                            "follow_local_rotation_xyz_deg": [10.0, 20.0, 30.0],
                         },
                     }
                 ]
@@ -483,7 +485,7 @@ class FluidBatchVerifierTests(unittest.TestCase):
             [0.2007697748035532, -0.30206783316459235, 0.38506090245442165],
         ):
             self.assertAlmostEqual(actual, expected)
-        self.assertEqual(visual_trajectory["bowl_shell"]["rotation_degrees"], [1.0, 2.0, 3.0])
+        self.assertEqual(visual_trajectory["bowl_shell"]["rotation_degrees"], [-19.0, -28.0, 13.0])
 
 
 def particle_cache() -> dict:
