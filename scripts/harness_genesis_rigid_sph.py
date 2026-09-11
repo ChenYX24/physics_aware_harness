@@ -38,6 +38,10 @@ from scripts.harness_genesis_fluid import (
 )
 
 
+def skip_genesis_visualizer_build() -> None:
+    pass
+
+
 def simulate_rigid_sph_scene(
     case_spec: dict[str, Any],
     solver_configuration: dict[str, Any] | None = None,
@@ -85,6 +89,9 @@ def simulate_rigid_sph_scene(
         profiling_options=gs.options.ProfilingOptions(show_FPS=False),
         show_viewer=False,
     )
+    # This backend exports solver state for UE replay and never renders through Genesis.
+    # Avoid creating an unused Cocoa/OpenGL context in genuinely headless workers.
+    scene._visualizer.build = skip_genesis_visualizer_build
     rigid_material = gs.materials.Rigid(
         needs_coup=True,
         coup_friction=0.08,
@@ -161,7 +168,7 @@ def simulate_rigid_sph_scene(
                 set_rigid_body_pose(kinematic_entities[body["id"]], body, 0.0)
             elif body["id"] in dynamic_entities:
                 set_dynamic_body_initial_state(dynamic_entities[body["id"]], body, hold=True)
-        scene.step()
+        scene.step(update_visualizer=False)
     for body in compiled["rigid_bodies"]:
         if body["id"] in kinematic_entities:
             set_rigid_body_pose(kinematic_entities[body["id"]], body, 0.0)
@@ -276,7 +283,7 @@ def simulate_rigid_sph_scene(
                         set_rigid_body_pose(kinematic_entities[body["id"]], body, current_time, next_time_s=next_time)
                 if emitter is not None and current_time < float(fluid_spec["emitter"]["end_time_s"]):
                     emit_fluid(emitter, fluid_spec["emitter"])
-                scene.step()
+                scene.step(update_visualizer=False)
 
     particle_count = max((max(frame["active_particle_ids"], default=-1) for frame in frames), default=-1) + 1
     initial_volume = (

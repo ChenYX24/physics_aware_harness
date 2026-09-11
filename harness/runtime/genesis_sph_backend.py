@@ -110,10 +110,13 @@ class GenesisSPHBackend:
 def genesis_child_environment(run_dir: str | Path) -> dict[str, str]:
     """Keep Genesis imports headless without changing the controller process."""
     config_dir = Path(run_dir) / ".matplotlib"
+    cache_dir = workspace_root() / "cache" / "runtime"
     config_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir.mkdir(parents=True, exist_ok=True)
     environment = os.environ.copy()
     environment["MPLBACKEND"] = "Agg"
     environment["MPLCONFIGDIR"] = str(config_dir.resolve())
+    environment["XDG_CACHE_HOME"] = str(cache_dir.resolve())
     return environment
 
 

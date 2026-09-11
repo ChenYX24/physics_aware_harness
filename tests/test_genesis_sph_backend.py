@@ -46,6 +46,20 @@ class GenesisSPHBackendTests(unittest.TestCase):
             else:
                 sys.modules["tkinter"] = prior_tkinter
 
+    def test_headless_import_supplies_non_physical_cpu_label_when_host_hides_it(self) -> None:
+        prior_cpuinfo = sys.modules.get("cpuinfo", ...)
+        fake_cpuinfo = SimpleNamespace(get_cpu_info=lambda: {})
+        sys.modules["cpuinfo"] = fake_cpuinfo
+        try:
+            with patch("harness.runtime.genesis_headless.importlib.import_module", return_value=object()):
+                import_headless_genesis()
+            self.assertEqual(fake_cpuinfo.get_cpu_info()["brand_raw"], "CPU")
+        finally:
+            if prior_cpuinfo is ...:
+                sys.modules.pop("cpuinfo", None)
+            else:
+                sys.modules["cpuinfo"] = prior_cpuinfo
+
     def test_genesis_child_environment_is_headless_and_run_local(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
             os.environ,
@@ -56,6 +70,8 @@ class GenesisSPHBackendTests(unittest.TestCase):
             environment = genesis_child_environment(run_dir)
             self.assertEqual(environment["MPLBACKEND"], "Agg")
             self.assertEqual(environment["MPLCONFIGDIR"], str((run_dir / ".matplotlib").resolve()))
+            self.assertEqual(Path(environment["XDG_CACHE_HOME"]).parts[-2:], ("cache", "runtime"))
+            self.assertTrue(Path(environment["XDG_CACHE_HOME"]).is_dir())
             self.assertTrue((run_dir / ".matplotlib").is_dir())
             self.assertEqual(os.environ["MPLBACKEND"], "TkAgg")
             self.assertEqual(os.environ["MPLCONFIGDIR"], "/unwritable/matplotlib")
