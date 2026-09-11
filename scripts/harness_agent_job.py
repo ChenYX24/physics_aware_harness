@@ -164,7 +164,15 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     signal.signal(signal.SIGTERM, _interrupt)
-    sink = (lambda event: print(json.dumps(event, ensure_ascii=False), flush=True)) if args.jsonl else None
+    def jsonl_sink(event: dict[str, object]) -> None:
+        try:
+            print(json.dumps(event, ensure_ascii=False), flush=True)
+        except BrokenPipeError:
+            # A detached TUI stream must not turn an already committed stage
+            # checkpoint into a failed physics Job.
+            pass
+
+    sink = jsonl_sink if args.jsonl else None
     config = load_harness_config(
         config_path=args.config,
         cli_overrides={
