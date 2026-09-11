@@ -16,6 +16,12 @@ preparation baseline commit: 1a9330d prepare ICLR Core100 experiment
 - Hard prohibition: never submit `require_escalated` for an unapproved executable or command prefix during continuous work, including compound process-inspection commands such as `ps | rg`. Use the active Controller session and Job manifest for status. If a genuinely necessary new command class ever appears, first implement one narrow fixed-purpose wrapper and request its prefix once only at a user-designated authorization boundary; never make progress depend on that approval during an ordinary batch.
 - Pending Smoke review has no batch-size ceiling. Do not pause for accumulated review items, ordinary CaseSpec revisions, failures within already-qualified capabilities, or routine visual corrections; continue until all Core80 Smokes are complete. Pause only for a major Harness capability change, an unavoidable new privileged command class not covered by an approved wrapper, or a genuine production blocker that prevents useful forward progress.
 
+## Fluid10 current handoff (2026-09-12)
+
+- Human acceptance is final for F001, F007 and F009; queue only high-resolution Candidate for these three and do not repeat Smoke. F002/F006 require only a small camera-facing visual-shell registration shift. F003/F004/F005 require visual vessel registration against the accepted cached SPH trajectory; F004 also requires the pitcher spout to face and tilt toward the receiving glass. F008 remains the sustained-fountain revision. F010 rigid-SPH buoyancy stays on hold.
+- Generic Controller `replay-preview` is implemented for any completed backend cache. It reuses the exact immutable runtime trajectory at a requested time, accepts explicit diagnostic object translation/rotation deltas, invokes real UE only, writes a few 640x360 RGB stills, retains no EXR or frame sequence, consumes one diagnostic UE launch, and leaves the production stage unchanged. It is layout/registration evidence only, never physics qualification. Related Controller/runtime/native tests pass 95/95.
+- The sole UE worker is currently producing F001 Candidate and must next process F009. F007's accepted s12 Smoke is the selected source; preserve Controller ownership and do not hand-edit its failed obsolete splash assertion or Job manifest.
+
 ## Milestone A — asset intake
 
 State: `completed`

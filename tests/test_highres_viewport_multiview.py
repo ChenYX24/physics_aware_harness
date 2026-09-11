@@ -25,6 +25,16 @@ class Vector:
 
 
 class HighresViewportMultiviewTests(unittest.TestCase):
+    def test_layout_preview_warms_surface_material_before_frame_swap(self) -> None:
+        source = (ROOT / "scripts" / "native_ue_scene.py").read_text(encoding="utf-8")
+        start = source.index("def render_layout_preview(")
+        end = source.index("\ndef main():", start)
+        body = source[start:end]
+        self.assertLess(
+            body.index("warm_up_surface_replay_materials(runtime_scene)"),
+            body.index("apply_surface_mesh_sequence_replay(actors, runtime_scene, frame_index"),
+        )
+
     def test_streamed_data_manifest_keeps_full_timeline_and_bounded_samples(self) -> None:
         source = ROOT / "scripts" / "native_ue_scene.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))

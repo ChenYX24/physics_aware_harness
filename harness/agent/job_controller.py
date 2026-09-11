@@ -13,7 +13,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from harness.agent.job_schema import (
     ATTEMPT_MANIFEST_SCHEMA_VERSION,
@@ -122,6 +122,10 @@ from harness.runtime.layout_preview import (
     layout_preview_request_digest,
     validate_frozen_compilation,
 )
+from harness.runtime.replay_preview import (
+    execute_replay_preview,
+    replay_preview_request_digest,
+)
 from harness.runtime.observation_planner import camera_ids_from_observation_plan, render_passes_from_observation_plan
 from harness.runtime.stage_executor import execute_runtime_plan
 from harness.verification.physics_verifier import PhysicsVerifier
@@ -159,6 +163,7 @@ class ControllerHooks:
     evidence: Callable[..., Mapping[str, Any]] = build_evidence_bundle
     semantic_review: Callable[..., Mapping[str, Any]] = lambda **kwargs: CodexAppServerReviewer().review(**kwargs)
     layout_preview: Callable[..., Mapping[str, Any]] = execute_layout_preview
+    replay_preview: Callable[..., Mapping[str, Any]] = execute_replay_preview
     monotonic: Callable[[], float] = time.monotonic
 
 
@@ -534,6 +539,77 @@ class AgentJobController:
                             output_dir=output_dir,
                             config=self.config,
                             time_s=time_s,
+                        )
+                    )
+                receipt = {
+                    **report,
+                    "job_id": job_id,
+                    "attempt_id": attempt_id,
+                    "request_digest": digest,
+                    "mode": "executed",
+                    "elapsed_seconds": round(max(0.0, self.hooks.monotonic() - started), 3),
+                    "controller_stage_unchanged": manifest["current_stage"],
+                }
+                write_json(receipt_path, receipt)
+                return receipt
+            finally:
+                self._reconcile_ue_launch_usage(self.store.load_manifest(job_id))
+
+    def run_replay_preview(
+        self,
+        job_id: str,
+        *,
+        time_s: float = 0.0,
+        offsets_m: Mapping[str, Sequence[float]] | None = None,
+        rotations_deg: Mapping[str, Sequence[float]] | None = None,
+    ) -> dict[str, Any]:
+        """Render a diagnostic still from an existing cached runtime trajectory."""
+        if not math.isfinite(time_s) or time_s < 0.0:
+            raise ValueError("replay preview time must be a finite non-negative number")
+        with self.store.lock(job_id):
+            manifest = self.store.load_manifest(job_id)
+            attempt_id = manifest.get("current_attempt_id")
+            if not attempt_id:
+                raise JobStoreError("replay preview requires a current attempt")
+            attempt_dir = self.store.attempt_dir(job_id, str(attempt_id))
+            candidates = [
+                path.parent.parent
+                for stage in ("candidate", "smoke")
+                for path in sorted((attempt_dir / "runs" / stage).glob("*/logs/studio_runtime_scene_combined.json"))
+            ]
+            if not candidates:
+                raise JobStoreError("replay preview requires a completed cached runtime run")
+            source_run = candidates[0]
+            offsets = dict(offsets_m or {})
+            rotations = dict(rotations_deg or {})
+            digest = replay_preview_request_digest(
+                source_run=source_run,
+                time_s=time_s,
+                offsets_m=offsets,
+                rotations_deg=rotations,
+            )
+            output_dir = attempt_dir / "replay_preview" / digest[:16]
+            receipt_path = output_dir / "replay_preview_receipt.json"
+            if receipt_path.is_file():
+                receipt = read_json(receipt_path)
+                images = [Path(str(row.get("path") or "")) for row in receipt.get("images") or []]
+                if receipt.get("status") == "pass" and images and all(path.is_file() for path in images):
+                    return {**receipt, "mode": "reused"}
+            manifest = self._reconcile_ue_launch_usage(manifest)
+            if int(manifest["usage"]["ue_launches"]) >= int(manifest["budget"]["max_ue_launches"]):
+                raise JobStoreError("UE launch budget is exhausted before replay preview")
+            self._record_controller_ue_launch(manifest, kind="replay_preview", stage="diagnostic")
+            started = self.hooks.monotonic()
+            try:
+                with self._effective_environment(manifest):
+                    report = dict(
+                        self.hooks.replay_preview(
+                            source_run=source_run,
+                            output_dir=output_dir,
+                            config=self.config,
+                            time_s=time_s,
+                            offsets_m=offsets,
+                            rotations_deg=rotations,
                         )
                     )
                 receipt = {

@@ -96,6 +96,14 @@ python3 scripts/harness_agent_job.py layout-preview <job_id> --time-s 0
 
 The preview invokes the real UE scene compiler and production cameras, writes only a few low-resolution RGB PNGs under the current attempt, and leaves the Job stage unchanged. It must retain no EXR or per-frame sequence. `--time-s 0` shows the exact compiled initial layout. A later time is only an authored/analytic pose preview; it is not physics evidence and must not be used to judge fluid, cloth, contacts, or dynamics. Use Smoke for those.
 
+After a solver-backed Smoke has produced a cached runtime trajectory, use replay preview to inspect an exact later state while tuning only visible-object registration or camera/layout:
+
+```bash
+python3 scripts/harness_agent_job.py replay-preview <job_id> --time-s 2.0 --offset-m visible_shell:0,-0.02,0
+```
+
+`replay-preview` reuses the immutable cached trajectory, applies only explicitly declared diagnostic transform deltas, invokes no solver, retains only a few low-resolution RGB images, and does not advance the Job. It is backend-neutral: it works for any cached runtime scene, including rigid, fluid, cloth, or articulated replay. It is never new physics evidence. Use it to settle later-time scale, registration, contact appearance, attachment gaps, background alignment, and camera framing before authoring one clean CaseSpec revision and running the required final Smoke.
+
 Make control decisions only from stable structured fields: `status`, `failure_class`, `failure_code`, `retryable`, `checkpoint_ref`, `artifact_refs`, `allowed_next_actions`, and `required_user_action`. Do not classify failures from traceback or message wording, and do not copy the schema, failure-code registry, retry loop, budgets, or checkpoints into this Skill.
 
 ## Choose the next action

@@ -13536,10 +13536,11 @@ def render_layout_preview(actors: dict, runtime_scene: dict, trajectory: list[di
     # At t=0 this is the exact compiled placement.  A later requested time is
     # a cheap authored/analytic pose preview, not evidence of Chaos behavior.
     apply_trajectory_frame(actors, dynamic_ids, frame, scene_origin, runtime_scene)
-    apply_surface_mesh_sequence_replay(actors, runtime_scene, frame_index, {})
-    sync_runtime_visuals(actors)
     material_warmup = warm_up_surface_replay_materials(runtime_scene)
     actors.setdefault("lighting", {})["surface_replay_material_warmup"] = material_warmup
+    preview_replay_status = {}
+    apply_surface_mesh_sequence_replay(actors, runtime_scene, frame_index, preview_replay_status)
+    sync_runtime_visuals(actors)
     warm_up_scene_capture(actors)
 
     images = []
@@ -13574,6 +13575,7 @@ def render_layout_preview(actors: dict, runtime_scene: dict, trajectory: list[di
         "width": WIDTH,
         "height": HEIGHT,
         "physics_qualification": False,
+        "surface_mesh_sequence_replay": preview_replay_status.get("surface_mesh_sequence_replay", {}),
         "images": images,
         "timing_seconds": round(time.perf_counter() - script_started, 2),
     }

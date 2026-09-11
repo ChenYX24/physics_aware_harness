@@ -80,6 +80,15 @@ def parse_args() -> argparse.Namespace:
     layout_preview.add_argument("job_id")
     layout_preview.add_argument("--time-s", type=float, default=0.0)
 
+    replay_preview = commands.add_parser(
+        "replay-preview",
+        help="Render RGB stills from an existing cached runtime trajectory without rerunning its solver.",
+    )
+    replay_preview.add_argument("job_id")
+    replay_preview.add_argument("--time-s", type=float, default=0.0)
+    replay_preview.add_argument("--offset-m", action="append", default=[], metavar="OBJECT:X,Y,Z")
+    replay_preview.add_argument("--rotation-deg", action="append", default=[], metavar="OBJECT:P,Y,R")
+
     retry_failed = commands.add_parser("retry-failed", help="Audit and reopen one terminal transient failure.")
     retry_failed.add_argument("job_id")
     retry_failed.add_argument("--reason", required=True, help="External correction made before retrying the same checkpoint.")
@@ -224,6 +233,13 @@ def main() -> int:
         )
     elif args.command == "layout-preview":
         result = controller.run_layout_preview(args.job_id, time_s=args.time_s)
+    elif args.command == "replay-preview":
+        result = controller.run_replay_preview(
+            args.job_id,
+            time_s=args.time_s,
+            offsets_m=parse_object_vectors(args.offset_m, option="--offset-m"),
+            rotations_deg=parse_object_vectors(args.rotation_deg, option="--rotation-deg"),
+        )
     elif args.command == "recover-interrupted":
         result = controller.recover_interrupted(args.job_id)
     elif args.command == "retry-failed":
@@ -296,6 +312,22 @@ def _json_object(value: str) -> dict[str, Any]:
     if not isinstance(decoded, dict):
         raise ValueError("budget must be a JSON object")
     return decoded
+
+
+def parse_object_vectors(values: list[str], *, option: str) -> dict[str, list[float]]:
+    parsed: dict[str, list[float]] = {}
+    for value in values:
+        object_id, separator, components = value.partition(":")
+        if not separator or not object_id.strip():
+            raise ValueError(f"{option} requires OBJECT:X,Y,Z")
+        try:
+            vector = [float(component) for component in components.split(",")]
+        except ValueError as exc:
+            raise ValueError(f"{option} requires numeric OBJECT:X,Y,Z") from exc
+        if len(vector) != 3:
+            raise ValueError(f"{option} requires exactly three components")
+        parsed[object_id.strip()] = vector
+    return parsed
 
 
 def _interrupt(_signum: int, _frame: Any) -> None:
