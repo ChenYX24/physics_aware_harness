@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 
 from harness.core.artifact_manager import ArtifactManager
 from harness.core.artifact_schema import read_json, write_json
+from harness.core.scene_layout import rotate_local_vector_ue
 from harness.core.runtime_case import load_runtime_case
 from harness.runtime.fluid_surface_adapter import particle_centers_m, ue_position_m
 from harness.runtime.observation_planner import camera_ids_from_observation_plan, render_mode_for_passes, render_passes_from_observation_plan
@@ -1040,8 +1041,15 @@ def visual_asset_trajectory_objects(
         state = states.get(body_id) if isinstance(states.get(body_id), dict) else {}
         if len(state.get("position_m") or []) != 3 or len(state.get("ue_rotation_pyr_deg") or []) != 3:
             raise ValueError(f"visual_asset follow target has no complete solver state: {body_id}")
+        behavior = obj.get("behavior") if isinstance(obj.get("behavior"), dict) else {}
+        local_offset = ue_position_m(behavior.get("follow_local_position_m") or [0.0, 0.0, 0.0])
+        rotated_offset = rotate_local_vector_ue(local_offset, state["ue_rotation_pyr_deg"])
+        body_position = ue_position_m(state["position_m"])
         result[str(obj.get("id") or "visual_asset")] = {
-            "position": offset_z(ue_position_m(state["position_m"]), render_z_offset_m),
+            "position": offset_z(
+                [body_position[index] + rotated_offset[index] for index in range(3)],
+                render_z_offset_m,
+            ),
             "rotation_degrees": list(state["ue_rotation_pyr_deg"]),
             "velocity": (
                 ue_position_m(state["linear_velocity_m_s"])

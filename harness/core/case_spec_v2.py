@@ -1269,6 +1269,10 @@ def _project_object(
         projected["behavior"] = {
             "follow_rigid_body_id": str(behavior["follow_rigid_body_id"]),
         }
+        if behavior.get("follow_local_position_m") is not None:
+            projected["behavior"]["follow_local_position_m"] = copy.deepcopy(
+                behavior["follow_local_position_m"]
+            )
     for appearance_field in ("color_rgb", "fixed_material_color", "visual_material_path"):
         if obj.get(appearance_field) is not None:
             projected[appearance_field] = copy.deepcopy(obj[appearance_field])
@@ -2330,13 +2334,20 @@ def _validate_rigid_sph_declarations(
                 )
 
     for index, visual in visual_assets:
-        follow_body_id = str((visual.get("behavior") or {}).get("follow_rigid_body_id") or "")
+        behavior = visual.get("behavior") if isinstance(visual.get("behavior"), Mapping) else {}
+        follow_body_id = str(behavior.get("follow_rigid_body_id") or "")
         if follow_body_id and follow_body_id not in rigid_ids:
             _issue(
                 issues,
                 f"/objects/{index}/behavior/follow_rigid_body_id",
                 "unknown_rigid_sph_visual_follow_body",
                 "must reference a declared rigid_body",
+            )
+        if behavior.get("follow_local_position_m") is not None:
+            _finite_vec3(
+                behavior.get("follow_local_position_m"),
+                f"/objects/{index}/behavior/follow_local_position_m",
+                issues,
             )
 
     for index, fluid in fluids:

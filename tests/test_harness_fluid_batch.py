@@ -423,7 +423,10 @@ class FluidBatchVerifierTests(unittest.TestCase):
                         "id": "bowl_shell",
                         "role": "visual_asset",
                         "visual_material_path": "/Game/Materials/M_Ceramic.M_Ceramic",
-                        "behavior": {"follow_rigid_body_id": "moving_body"},
+                        "behavior": {
+                            "follow_rigid_body_id": "moving_body",
+                            "follow_local_position_m": [0.0, 0.0, -0.04],
+                        },
                         "visual_representation": {"source": "asset", "visible": True},
                     }
                 ]
@@ -466,13 +469,19 @@ class FluidBatchVerifierTests(unittest.TestCase):
                     {
                         "id": "bowl_shell",
                         "role": "visual_asset",
-                        "behavior": {"follow_rigid_body_id": "moving_body"},
+                        "behavior": {
+                            "follow_rigid_body_id": "moving_body",
+                            "follow_local_position_m": [0.0, 0.0, -0.04],
+                        },
                     }
                 ]
             },
             render_z_offset_m=0.025,
         )
-        for actual, expected in zip(visual_trajectory["bowl_shell"]["position"], [0.2, -0.3, 0.425]):
+        for actual, expected in zip(
+            visual_trajectory["bowl_shell"]["position"],
+            [0.2007697748035532, -0.30206783316459235, 0.38506090245442165],
+        ):
             self.assertAlmostEqual(actual, expected)
         self.assertEqual(visual_trajectory["bowl_shell"]["rotation_degrees"], [1.0, 2.0, 3.0])
 
